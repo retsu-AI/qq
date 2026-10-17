@@ -56,6 +56,17 @@ If no keyring is available (a container, a headless server), pass
 `--allow-file` to store a user-only plaintext file under the data
 directory. Prefer environment variables in CI.
 
+
+Within one running process, credential-store clones coalesce concurrent reads
+of the same keyring entry and reuse successful reads for up to five minutes
+(at most 64 cached entries). QQ credential changes invalidate reuse through
+the durable credential index. Changes made directly in the OS keychain may
+not be observed until that reuse window expires; restart QQ to discard its
+in-process memo immediately. Registration and endpoint binding are checked
+before reuse. File-backed credentials are not memoized, and OAuth refresh
+paths reread the durable value. This reduces repeated keychain reads; it does
+not change macOS signing or Keychain authorization across binary updates.
+
 ### Profiles
 
 `PROVIDER/PROFILE`. `default` is what the built-in providers use unless you
@@ -103,8 +114,8 @@ provider request. Neither is the explicit `none` level (which disables reasoning
 only on models that advertise it). Anthropic uses
 `output_config.effort`, never an OpenAI reasoning field.
 
-The current contracts are protocol 33, capabilities 1, plan descriptor 15,
-and session-store schema 55. Upgrade clients and restart long-running servers
+The current contracts are protocol 35, capabilities 1, plan descriptor 15,
+and session-store schema 58. Upgrade clients and restart long-running servers
 together: clients refuse a different server protocol. Store migration is
 forward-only; older binaries cannot open upgraded stores. Before upgrading,
 stop all QQ processes and back up the database and any adjacent WAL/SHM files

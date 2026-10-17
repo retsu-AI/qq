@@ -454,7 +454,7 @@ async fn skipped_routing_crash_preserves_known_zero_and_paid_pending_stays_unkno
         }).await.unwrap();
         assert!(
             store
-                .record_routing_started(&claim, paid, None)
+                .record_routing_started(&claim, paid, None, (None, None))
                 .await
                 .is_err()
         );
@@ -466,7 +466,7 @@ async fn skipped_routing_crash_preserves_known_zero_and_paid_pending_stays_unkno
             Ok(())
         }).await.unwrap();
         assert!(
-            matches!(store.record_routing_started(&claim,paid,None).await.unwrap().unwrap().unwrap().event,SessionEvent::RoutingStarted {run_id} if run_id==run)
+            matches!(store.record_routing_started(&claim, paid, None, (None, None)).await.unwrap().unwrap().unwrap().event,SessionEvent::RoutingStarted {run_id} if run_id==run)
         );
         store.close().await.unwrap();
         let reopened = Store::open(directory.path().join("sessions.sqlite3"))
@@ -751,11 +751,13 @@ async fn legacy_model_work_repair_rolls_back_on_invalid_turn() {
 
 #[tokio::test]
 async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero() {
+    // Admit the full byte-bounded request so this exercises HTTP retry,
+    // rather than refusing the request before the provider can reject it.
     for goal_origin in [false, true] {
         for (tokens, cost) in [
-            (Some(10_000_u64), None),
+            (Some(100_000_u64), None),
             (None, Some(1_000_000_000_u64)),
-            (Some(10_000), Some(1_000_000_000)),
+            (Some(100_000), Some(1_000_000_000)),
         ] {
             let attempts = Arc::new(AtomicUsize::new(0));
             struct Outage(Arc<AtomicUsize>);
@@ -851,7 +853,8 @@ async fn direct_goal_rejections_with_finite_caps_keep_retry_pause_and_known_zero
                     finished_outcome(&events, run_id),
                     Some(RunOutcome::Paused { pause }) if matches!(pause.as_ref(),qq_protocol::RunPause::ProviderRetry{..})
                 ),
-                "known outage pauses the run"
+                "known outage pauses the run: goal_origin={goal_origin}, tokens={tokens:?}, cost={cost:?}, actual={:?}",
+                finished_outcome(&events, run_id)
             );
             let snapshot = runtime
                 .snapshot(SnapshotRequest::new(
@@ -1904,5 +1907,124 @@ async fn legacy_dispatch_repair_invalid_required_event_rolls_back_schema_and_fla
             .unwrap();
         assert_eq!(version, "54");
         assert!(!pending);
+    }
+}
+
+#[tokio::test]
+async fn twenty_minute_permit_wait_reclamps_unbounded_prompts_and_goal_runs() {
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                usage: Some(provider_usage_of(usage(1, 1))),
+            })]))
+        }
+    }
+    struct Loader(Arc<AtomicUsize>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let calls = Arc::clone(&self.0);
+            Box::pin(async move {
+                Ok(loaded_runtime(
+                    Runtime::new(Model(calls), "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for user_prompt in [false, true] {
+        for expired in [false, true] {
+            let began = now_ms();
+            let epoch = super::goal_driver_soak::Epoch::new(began);
+            let directory = TempDir::new().unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let runtime = SessionRuntime::open(
+                SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+                Arc::new(Loader(Arc::clone(&calls))),
+            )
+            .await
+            .unwrap();
+            let held = Arc::clone(&runtime.inner.permits)
+                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+                .await
+                .unwrap();
+            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+            let created = create_session(&runtime, workspace_id, None).await;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("session")
+            };
+            let mut events = runtime
+                .subscribe(SubscribeRequest {
+                    workspace_id,
+                    after: created.committed_through,
+                })
+                .unwrap();
+            let deadline = began + if expired { 19 } else { 21 } * 60_000;
+            runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id":session_id, "objective":"respect the original deadline after queueing",
+                "budget":{"max_goal_runs":1,"deadline_ms":deadline,"per_run":{"max_duration_ms":120_000}}
+            })).unwrap()).await.unwrap();
+            runtime.inner.store.drive_goals(now_ms()).await.unwrap();
+            let run = if user_prompt {
+                queue_prompt(&runtime, session_id, "unbounded prompt".to_owned()).await
+            } else {
+                runtime
+                    .inner
+                    .store
+                    .call(Priority::Control, move |connection| {
+                        Ok(crate::sessions::goals::load_live(connection, session_id)?
+                            .unwrap()
+                            .pending_run_id
+                            .unwrap())
+                    })
+                    .await
+                    .unwrap()
+            };
+            epoch.advance(began + 20 * 60_000);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "held permits prevent provider work"
+            );
+            drop(held);
+            runtime.inner.schedule.send(()).await.unwrap();
+            let observed = collect_until_run_finished(&mut events, run).await;
+            let snapshot = runtime
+                .snapshot(SnapshotRequest::new(
+                    workspace_id,
+                    Some(session_id),
+                    256,
+                    256,
+                ))
+                .await
+                .unwrap();
+            runtime.shutdown().await.unwrap();
+            if expired {
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "expired queued work never reaches the provider"
+                );
+                assert!(matches!(
+                    finished_outcome(&observed, run),
+                    Some(RunOutcome::BudgetExhausted { .. })
+                ));
+            } else {
+                assert!(calls.load(Ordering::SeqCst) > 0);
+                let focused = snapshot.focused.unwrap();
+                let admitted = focused
+                    .runs
+                    .iter()
+                    .find(|candidate| candidate.id == run)
+                    .unwrap();
+                assert_eq!(
+                    admitted.limits.as_ref().unwrap().max_duration_ms,
+                    Some(60_000),
+                    "the twenty-minute wait cannot restart the goal deadline"
+                );
+            }
+        }
     }
 }

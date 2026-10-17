@@ -11,6 +11,10 @@
 //! through [`HeadlessRecordRef`], which borrows the event envelope so the
 //! streaming path never clones a delta to serialize it; the two encode
 //! identically and a unit test pins that.
+//!
+//! Foreground goals use `goal_run` for each settled direct prompt/check,
+//! interleaved with workspace events, and one final `goal` record. They do
+//! not emit a prompt trial/outcome pair for the overall goal invocation.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,8 +29,14 @@ use crate::{
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HeadlessRecord {
     Trial(Box<HeadlessTrial>),
-    Event { envelope: Box<SessionEventEnvelope> },
+    Event {
+        envelope: Box<SessionEventEnvelope>,
+    },
     Outcome(Box<HeadlessOutcome>),
+    /// One settled direct goal prompt or completion check.
+    GoalRun(Box<HeadlessGoalRun>),
+    /// The foreground goal invocation's final durable state.
+    Goal(Box<HeadlessGoalOutcome>),
 }
 
 /// Borrowing view of [`HeadlessRecord`] for emission. Encodes byte-for-byte
@@ -37,6 +47,8 @@ pub enum HeadlessRecordRef<'a> {
     Trial(&'a HeadlessTrial),
     Event { envelope: &'a SessionEventEnvelope },
     Outcome(&'a HeadlessOutcome),
+    GoalRun(&'a HeadlessGoalRun),
+    Goal(&'a HeadlessGoalOutcome),
 }
 
 /// Invocation metadata: enough to reproduce the run's configuration identity
@@ -386,5 +398,68 @@ mod tests {
             }
             .is_well_formed()
         );
+    }
+}
+
+/// A settled direct goal run. Helpers and paid descendants remain in events;
+/// they do not produce additional goal-run records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadlessGoalRun {
+    pub workspace_id: WorkspaceId,
+    /// Root session that owns the goal.
+    pub session_id: SessionId,
+    /// Immutable binding of this run, independent of subsequent goal edits.
+    pub goal: crate::GoalIdentity,
+    /// Authoritative durable run, including accounting and audit evidence.
+    pub run: Box<crate::RunSnapshot>,
+}
+
+/// The final goal record, including its durable reason and resume identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeadlessGoalOutcome {
+    pub workspace_id: WorkspaceId,
+    pub goal: Box<crate::GoalSnapshot>,
+    pub status: HeadlessGoalStatus,
+    pub exit_code: u8,
+}
+
+/// Foreground goal exits, separate from an individual prompt's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadlessGoalStatus {
+    Achieved,
+    Paused,
+    Blocked,
+    BudgetExhausted,
+    Interrupted,
+    HarnessFailure,
+}
+
+impl HeadlessGoalStatus {
+    /// Active goals continue; every other durable state ends the invocation.
+    #[must_use]
+    pub const fn from_goal(status: &crate::GoalStatus) -> Option<Self> {
+        match status {
+            crate::GoalStatus::Active => None,
+            crate::GoalStatus::Achieved => Some(Self::Achieved),
+            crate::GoalStatus::Paused { .. } => Some(Self::Paused),
+            crate::GoalStatus::Blocked { .. } => Some(Self::Blocked),
+            crate::GoalStatus::BudgetExhausted { .. } => Some(Self::BudgetExhausted),
+        }
+    }
+
+    /// Only achievement exits successfully. Codes 1–5 retain prompt semantics.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Achieved => 0,
+            Self::Paused => 6,
+            Self::Blocked => 7,
+            Self::BudgetExhausted => 8,
+            Self::Interrupted => 130,
+            Self::HarnessFailure => 4,
+        }
     }
 }

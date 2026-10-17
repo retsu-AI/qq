@@ -103,7 +103,17 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
-                    let deadline = human_deadline(inner.approval_timeout);
+                    let goal_deadline = match goal_approval_deadline(&inner, &claimed).await {
+                        Ok(deadline) => deadline,
+                        Err(error) => {
+                            inner.remove_approval(call.id);
+                            return approval_persistence_failure(error);
+                        }
+                    };
+                    let deadline = human_deadline(inner.approval_timeout)
+                        .into_iter()
+                        .chain(goal_deadline)
+                        .min();
                     let timed_out = tokio::select! {
                         biased;
                         changed = cancellation.changed() => {
@@ -194,6 +204,13 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     }
+                    let goal_deadline = match goal_approval_deadline(&inner, &claimed).await {
+                        Ok(deadline) => deadline,
+                        Err(error) => {
+                            inner.remove_approval(call.id);
+                            return approval_persistence_failure(error);
+                        }
+                    };
                     // Who the held call goes to first. The mode is the
                     // ceiling; the delegate setting chooses who decides inside
                     // it: by default the reviewer under Auto (the held bucket
@@ -252,12 +269,16 @@ impl ToolGate for SessionToolGate {
                     // apply); a configured bound starts when the human is
                     // actually asked, which is now without a delegate and at
                     // the escalation with one. A slow delegate never eats
-                    // into the human's time.
+                    // into the human's time. A goal's fixed hold deadline
+                    // bounds both stages without restarting at escalation.
                     let delegate_deadline = tokio::time::Instant::now() + inner.delegate_timeout;
                     let mut deadline = if review.is_some() {
-                        None
+                        goal_deadline
                     } else {
                         human_deadline(inner.approval_timeout)
+                            .into_iter()
+                            .chain(goal_deadline)
+                            .min()
                     };
                     let timed_out = loop {
                         if let Some(pending_review) = review.as_mut() {
@@ -272,6 +293,7 @@ impl ToolGate for SessionToolGate {
                                     };
                                 }
                                 result = &mut resolved => break result.is_err(),
+                                () = sleep_until_or_never(goal_deadline) => break true,
                                 verdict = pending_review => {
                                     review = None;
                                     review_spend = Some(verdict.spend);
@@ -358,7 +380,7 @@ impl ToolGate for SessionToolGate {
                                                     review_spend,
                                                 );
                                             }
-                                            deadline = human_deadline(inner.approval_timeout);
+                                            deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
                                         }
                                         ReviewDecision::Deny { reason } => {
                                             if let Err(error) = inner
@@ -381,7 +403,7 @@ impl ToolGate for SessionToolGate {
                                                     review_spend,
                                                 );
                                             }
-                                            deadline = human_deadline(inner.approval_timeout);
+                                            deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
                                         }
                                     }
                                 }
@@ -403,7 +425,7 @@ impl ToolGate for SessionToolGate {
                                         inner.remove_approval(call.id);
                                         return approval_persistence_failure(error);
                                     }
-                                    deadline = human_deadline(inner.approval_timeout);
+                                    deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
                                 }
                             }
                         } else {
@@ -430,6 +452,24 @@ impl ToolGate for SessionToolGate {
             }
         })
     }
+}
+
+async fn goal_approval_deadline(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+) -> Result<Option<tokio::time::Instant>, SessionRuntimeError> {
+    if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
+        return Ok(None);
+    }
+    let identity = claimed.identity;
+    let at = tokio::time::Instant::now();
+    let timeout = inner
+        .store
+        .call(store::Priority::Output, move |connection| {
+            goal_policy::approval_timeout(connection, identity)
+        })
+        .await?;
+    Ok(timeout.map(|timeout| at + timeout))
 }
 
 /// When the human's wait ends, counted from now. `None` is no server
@@ -465,6 +505,17 @@ async fn conclude(
         Ok(ConcludedApproval::Denied { message }) => {
             reviewed(GateDecision::Deny { message }, review_spend)
         }
+        Ok(ConcludedApproval::GoalStopped { run_ids }) => {
+            for run in run_ids {
+                inner.cancel(run);
+            }
+            reviewed(
+                GateDecision::Deny {
+                    message: approval::TIMEOUT_DENIED_RESULT.to_owned(),
+                },
+                review_spend,
+            )
+        }
         Ok(ConcludedApproval::Answered { result }) => GateDecision::Answered { result },
         Ok(ConcludedApproval::StillWaiting) => GateDecision::Fail {
             kind: RunFailureKind::Server,
@@ -489,6 +540,9 @@ fn approval_persistence_failure(error: SessionRuntimeError) -> GateDecision {
 
 pub(super) enum ConcludedApproval {
     Approved,
+    GoalStopped {
+        run_ids: Vec<RunId>,
+    },
     Denied {
         message: String,
     },
@@ -513,4 +567,44 @@ fn reviewed(decision: GateDecision, spend: Option<ReviewSpend>) -> GateDecision 
         },
         None => decision,
     }
+}
+
+/// The run-duration clock may win the select against a goal hold's deadline.
+/// Settle that still-unanswered hold before terminal goal exhaustion is applied.
+pub(super) async fn expire_goal_hold(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    expired_only: bool,
+) -> Result<(), SessionRuntimeError> {
+    if claimed.goal.is_none() && claimed.goal_spend_owner.is_none() {
+        return Ok(());
+    }
+    // Capture on the executor: Tokio's simulated clock is runtime-local.
+    let expired_owners = inner
+        .goal_deadlines
+        .lock()
+        .map_err(|_| SessionRuntimeError::Unavailable)?
+        .iter()
+        .filter_map(|(run, deadline)| deadline.expired().then_some(*run))
+        .collect::<Vec<_>>();
+    let identity = claimed.identity;
+    let store_id = inner.store.store_id();
+    let concluded = inner.store.call(store::Priority::Output, move |connection| {
+        if expired_only && !goal_policy::expired_approval_owner(connection, identity, &expired_owners)? {
+            return Ok(None);
+        }
+        let call: Option<String> = connection.query_row(
+            "SELECT id FROM tool_calls WHERE run_id=?1 AND state='awaiting_approval' ORDER BY turn_ordinal,call_ordinal LIMIT 1",
+            [identity.run_id.to_string()], |row| row.get(0)).optional()?;
+        match call {
+            Some(call) => tool_calls::conclude_tool_approval(connection, store_id, identity, parse_id(&call)?, true, &expired_owners).map(Some),
+            None => Ok(None),
+        }
+    }).await?;
+    if let Some(ConcludedApproval::GoalStopped { run_ids }) = concluded {
+        for run in run_ids {
+            inner.cancel(run);
+        }
+    }
+    Ok(())
 }

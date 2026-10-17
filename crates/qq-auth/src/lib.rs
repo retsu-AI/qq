@@ -3,7 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap, VecDeque},
     env,
     ffi::OsString,
     fmt,
@@ -52,6 +52,21 @@ const WINDOWS_PROTECTED_MAGIC: &[u8] = b"QQDPAPI\x01";
 const REQUEST_CREDENTIAL_CONCURRENCY: usize = 4;
 const REQUEST_CREDENTIAL_CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_CREDENTIAL_LOAD_TIMEOUT: Duration = Duration::from_secs(65);
+/// Successful stored resolutions are reused briefly to avoid repeated OS
+/// keyring reads during one application refresh. The durable credential epoch
+/// remains the primary invalidation boundary; this TTL bounds changes made
+/// directly in an external keychain that QQ's index cannot observe.
+const STORED_RESOLUTION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MAX_STORED_RESOLUTION_CACHE_ENTRIES: usize = 64;
+
+fn is_resolution_capacity_wait(error: &AuthError) -> bool {
+    matches!(
+        error,
+        AuthError::CredentialCoordinator {
+            operation: "capacity_wait"
+        }
+    )
+}
 
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -311,6 +326,9 @@ pub enum AuthError {
         #[source]
         source: io::Error,
     },
+
+    #[error("credential resolution coordinator failed while attempting to {operation}")]
+    CredentialCoordinator { operation: &'static str },
 }
 
 #[derive(Clone)]
@@ -324,6 +342,133 @@ pub struct CredentialStore {
     xai_client: Arc<dyn xai::XaiTokenClient>,
     xai_refresh: Arc<Mutex<()>>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
+    stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+
+    #[cfg(test)]
+    resolution_time: Arc<Mutex<std::time::Instant>>,
+}
+
+#[derive(Default)]
+struct StoredResolutionCache {
+    entries: VecDeque<StoredResolutionCacheEntry>,
+}
+
+struct StoredResolutionCacheEntry {
+    name: String,
+    endpoint: Option<String>,
+    epoch: CredentialEpoch,
+    expires_at: std::time::Instant,
+    secret: Secret,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StoredResolutionKey {
+    name: String,
+    endpoint: Option<String>,
+    epoch: CredentialEpoch,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestSignal {
+    count: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl TestSignal {
+    fn notify(&self) {
+        *self.count.lock().unwrap() += 1;
+        self.changed.notify_all();
+    }
+
+    fn wait_for(&self, count: usize) {
+        let mut observed = self.count.lock().unwrap();
+        while *observed < count {
+            observed = self.changed.wait(observed).unwrap();
+        }
+    }
+}
+
+#[derive(Default)]
+struct StoredResolutionCoordinator {
+    cache: StoredResolutionCache,
+    flights: HashMap<StoredResolutionKey, Arc<StoredResolutionFlight>>,
+    #[cfg(test)]
+    capacity_waiters: Arc<TestSignal>,
+}
+
+struct StoredResolutionFlight {
+    result: Mutex<Option<Result<Secret, StoredResolutionFailure>>>,
+    ready: std::sync::Condvar,
+    #[cfg(test)]
+    followers: TestSignal,
+}
+
+struct StoredResolutionOwnerGuard {
+    coordinator: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
+    key: StoredResolutionKey,
+    flight: Arc<StoredResolutionFlight>,
+    failure: StoredResolutionFailure,
+    completed: bool,
+}
+
+impl Drop for StoredResolutionOwnerGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = match self.coordinator.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.flights.remove(&self.key);
+        let mut result = match self.flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *result = Some(Err(self.failure.clone()));
+        self.flight.ready.notify_all();
+        self.coordinator.1.notify_all();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StoredResolutionFailure {
+    Missing,
+    Unavailable,
+    Failure,
+    Coordinator(&'static str),
+}
+
+impl StoredResolutionFailure {
+    fn from_auth_error(error: AuthError) -> Self {
+        match error {
+            AuthError::StoredCredentialMissing { .. } => Self::Missing,
+            AuthError::KeyringUnavailable { .. } => Self::Unavailable,
+            AuthError::KeyringFailure { .. } => Self::Failure,
+            AuthError::CredentialCoordinator { operation } => Self::Coordinator(operation),
+            _ => Self::Failure,
+        }
+    }
+
+    fn into_auth_error(self, name: &str) -> AuthError {
+        match self {
+            Self::Missing => AuthError::StoredCredentialMissing {
+                name: name.to_owned(),
+                backend: CredentialBackend::Keyring,
+            },
+            Self::Unavailable => AuthError::KeyringUnavailable {
+                operation: "read",
+                name: name.to_owned(),
+            },
+            Self::Failure => AuthError::KeyringFailure {
+                operation: "read",
+                name: name.to_owned(),
+            },
+            Self::Coordinator(operation) => AuthError::CredentialCoordinator { operation },
+        }
+    }
 }
 
 impl CredentialStore {
@@ -362,13 +507,46 @@ impl CredentialStore {
             SecretRef::Env(variable) => resolve_environment(variable),
             SecretRef::Stored(name) => {
                 validate_credential_name(name)?;
-                let _lock = self.lock_state_shared()?;
-                let index = self.load_index()?;
-                self.resolve_stored_from_index(&index, name, expected_endpoint)
+                loop {
+                    let result = {
+                        let _lock = self.lock_state_shared()?;
+                        let index = self.load_index()?;
+                        let epoch = CredentialEpoch::new(index.revision);
+                        self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                    };
+                    match result {
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
+                        result => return result,
+                    }
+                }
             }
             SecretRef::Value(value) => Ok(Secret::from_secret_bytes(
                 value.expose_secret().as_bytes().to_vec(),
             )),
+        }
+    }
+
+    /// Resolves a stored reference without the successful-read memo. OAuth
+    /// refresh paths use this after their own expiry deadline or refresh lock
+    /// says the durable value must be checked again.
+    pub(crate) fn resolve_with_endpoint_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<Secret, AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                self.resolve_stored_from_index(&index, name, expected_endpoint)
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                self.resolve_with_endpoint(reference, expected_endpoint)
+            }
         }
     }
 
@@ -386,6 +564,38 @@ impl CredentialStore {
         match reference {
             SecretRef::Stored(name) => {
                 validate_credential_name(name)?;
+                loop {
+                    let result = {
+                        let _lock = self.lock_state_shared()?;
+                        let index = self.load_index()?;
+                        let epoch = CredentialEpoch::new(index.revision);
+                        self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                            .map(|secret| (secret, epoch))
+                    };
+                    match result {
+                        Err(error) if is_resolution_capacity_wait(&error) => {
+                            self.wait_for_resolution_capacity()?;
+                            continue;
+                        }
+                        result => return result,
+                    }
+                }
+            }
+            SecretRef::Env(_) | SecretRef::Value(_) => {
+                let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                Ok((secret, self.epoch()?))
+            }
+        }
+    }
+
+    pub(crate) fn resolve_with_epoch_uncached(
+        &self,
+        reference: &SecretRef,
+        expected_endpoint: Option<&str>,
+    ) -> Result<(Secret, CredentialEpoch), AuthError> {
+        match reference {
+            SecretRef::Stored(name) => {
+                validate_credential_name(name)?;
                 let _lock = self.lock_state_shared()?;
                 let index = self.load_index()?;
                 let epoch = CredentialEpoch::new(index.revision);
@@ -393,7 +603,7 @@ impl CredentialStore {
                 Ok((secret, epoch))
             }
             SecretRef::Env(_) | SecretRef::Value(_) => {
-                let secret = self.resolve_with_endpoint(reference, expected_endpoint)?;
+                let secret = self.resolve_with_endpoint_uncached(reference, expected_endpoint)?;
                 Ok((secret, self.epoch()?))
             }
         }
@@ -685,6 +895,23 @@ impl CredentialStore {
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
+            stored_resolution: Arc::new((
+                Mutex::new(StoredResolutionCoordinator::default()),
+                std::sync::Condvar::new(),
+            )),
+            #[cfg(test)]
+            resolution_time: Arc::new(Mutex::new(std::time::Instant::now())),
+        }
+    }
+
+    fn resolution_now(&self) -> std::time::Instant {
+        #[cfg(test)]
+        {
+            *self.resolution_time.lock().unwrap()
+        }
+        #[cfg(not(test))]
+        {
+            std::time::Instant::now()
         }
     }
 
@@ -799,13 +1026,187 @@ impl CredentialStore {
         expected_endpoint: Option<&str>,
     ) -> Result<Option<Secret>, AuthError> {
         validate_credential_name(name)?;
-        let _lock = self.lock_state_shared()?;
-        let index = self.load_index()?;
-        if index.find(name).is_none() {
-            return Ok(None);
+        loop {
+            let result = {
+                let _lock = self.lock_state_shared()?;
+                let index = self.load_index()?;
+                let Some(_) = index.find(name) else {
+                    return Ok(None);
+                };
+                let epoch = CredentialEpoch::new(index.revision);
+                self.resolve_stored_cached(&index, name, expected_endpoint, epoch)
+                    .map(Some)
+            };
+            match result {
+                Err(error) if is_resolution_capacity_wait(&error) => {
+                    self.wait_for_resolution_capacity()?;
+                    continue;
+                }
+                result => return result,
+            }
         }
-        self.resolve_stored_from_index(&index, name, expected_endpoint)
-            .map(Some)
+    }
+
+    fn resolve_stored_cached(
+        &self,
+        index: &IndexState,
+        name: &str,
+        expected_endpoint: Option<&str>,
+        epoch: CredentialEpoch,
+    ) -> Result<Secret, AuthError> {
+        let record = index
+            .find(name)
+            .ok_or_else(|| AuthError::StoredCredentialNotRegistered {
+                name: name.to_owned(),
+            })?;
+        enforce_endpoint_binding(record, expected_endpoint)?;
+        if record.backend != CredentialBackend::Keyring {
+            return self.resolve_stored_from_index(index, name, expected_endpoint);
+        }
+
+        let key = StoredResolutionKey {
+            name: name.to_owned(),
+            endpoint: expected_endpoint.map(str::to_owned),
+            epoch,
+        };
+        let (coordinator, wake) = &*self.stored_resolution;
+        let (flight, owner) = {
+            let mut state = coordinator
+                .lock()
+                .map_err(|_| AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                })?;
+            let now = self.resolution_now();
+            state
+                .cache
+                .entries
+                .retain(|entry| entry.expires_at > now && entry.epoch == epoch);
+            if let Some(position) = state.cache.entries.iter().position(|entry| {
+                entry.name == name && entry.endpoint == key.endpoint && entry.epoch == epoch
+            }) {
+                let entry = state
+                    .cache
+                    .entries
+                    .remove(position)
+                    .expect("cache position exists");
+                let secret = entry.secret.clone();
+                state.cache.entries.push_back(entry);
+                return Ok(secret);
+            }
+            if let Some(flight) = state.flights.get(&key) {
+                (Arc::clone(flight), false)
+            } else {
+                if state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                    return Err(AuthError::CredentialCoordinator {
+                        operation: "capacity_wait",
+                    });
+                }
+                let flight = Arc::new(StoredResolutionFlight {
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    #[cfg(test)]
+                    followers: TestSignal::default(),
+                });
+                state.flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
+            }
+        };
+
+        if !owner {
+            let mut result =
+                flight
+                    .result
+                    .lock()
+                    .map_err(|_| AuthError::CredentialCoordinator {
+                        operation: "lock_poisoned",
+                    })?;
+            #[cfg(test)]
+            flight.followers.notify();
+            while result.is_none() {
+                result =
+                    flight
+                        .ready
+                        .wait(result)
+                        .map_err(|_| AuthError::CredentialCoordinator {
+                            operation: "lock_poisoned",
+                        })?;
+            }
+            return result
+                .as_ref()
+                .expect("flight result exists")
+                .clone()
+                .map_err(|failure| failure.into_auth_error(name));
+        }
+
+        let mut owner_guard = StoredResolutionOwnerGuard {
+            coordinator: Arc::clone(&self.stored_resolution),
+            key: key.clone(),
+            flight: Arc::clone(&flight),
+            failure: StoredResolutionFailure::Coordinator("owner_panic"),
+            completed: false,
+        };
+        let outcome = self
+            .resolve_stored_from_index(index, name, expected_endpoint)
+            .map_err(StoredResolutionFailure::from_auth_error);
+        let mut state = match coordinator.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                owner_guard.failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                return Err(AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                });
+            }
+        };
+        let mut result = match flight.result.lock() {
+            Ok(result) => result,
+            Err(poisoned) => {
+                let mut result = poisoned.into_inner();
+                let failure = StoredResolutionFailure::Coordinator("lock_poisoned");
+                *result = Some(Err(failure.clone()));
+                state.flights.remove(&key);
+                flight.ready.notify_all();
+                wake.notify_all();
+                owner_guard.completed = true;
+                return Err(failure.into_auth_error(name));
+            }
+        };
+        if let Ok(secret) = &outcome {
+            state.cache.entries.push_back(StoredResolutionCacheEntry {
+                name: name.to_owned(),
+                endpoint: key.endpoint.clone(),
+                epoch,
+                expires_at: self.resolution_now() + STORED_RESOLUTION_CACHE_TTL,
+                secret: secret.clone(),
+            });
+            while state.cache.entries.len() > MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+                state.cache.entries.pop_front();
+            }
+        }
+        state.flights.remove(&key);
+        *result = Some(outcome.clone());
+        flight.ready.notify_all();
+        wake.notify_all();
+        owner_guard.completed = true;
+        outcome.map_err(|failure| failure.into_auth_error(name))
+    }
+
+    fn wait_for_resolution_capacity(&self) -> Result<(), AuthError> {
+        let (coordinator, wake) = &*self.stored_resolution;
+        let mut state = coordinator
+            .lock()
+            .map_err(|_| AuthError::CredentialCoordinator {
+                operation: "lock_poisoned",
+            })?;
+        while state.flights.len() >= MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            #[cfg(test)]
+            state.capacity_waiters.notify();
+            state = wake
+                .wait(state)
+                .map_err(|_| AuthError::CredentialCoordinator {
+                    operation: "lock_poisoned",
+                })?;
+        }
+        Ok(())
     }
 
     fn resolve_stored_from_index(

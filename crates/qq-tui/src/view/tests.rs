@@ -29,6 +29,7 @@ fn app_with_messages(count: u8) -> App {
     let summary = fixtures::session_summary(SESSION);
     let mut app = App::new(TuiOptions::default());
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![summary.clone()],
         focused: Some(SessionSnapshot {
             messages: (0..count)
@@ -3092,6 +3093,7 @@ fn app_with_two_sessions(count: u8) -> (App, SessionId, SessionId) {
         })
         .collect();
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         included: vec![SessionSnapshot {
             messages,
             ..fixtures::session_snapshot(summary.clone())
@@ -3239,6 +3241,7 @@ fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
 fn empty_workspace_app(options: TuiOptions) -> App {
     let mut app = App::new(options);
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: Vec::new(),
         focused: None,
         ..fixtures::workspace_snapshot()
@@ -3507,6 +3510,7 @@ fn the_try_these_cell_keeps_the_credential_remedy_above_it() {
         ..TuiOptions::default()
     });
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![summary.clone()],
         focused: Some(fixtures::session_snapshot(summary)),
         ..fixtures::workspace_snapshot()
@@ -4388,6 +4392,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
     };
     // Warm the child through an included body so its calls are known.
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         cursor: fixtures::cursor(1),
         sessions: vec![child.clone()],
         focused: None,
@@ -5769,4 +5774,457 @@ fn side_view_keeps_small_nonzero_costs_visible() {
     // $0.000012 would have rendered as $0.0000 with four float decimals.
     assert!(text.contains("cost $0.000012"), "{text}");
     assert!(text.contains("cost $1.234567"), "{text}");
+}
+
+#[test]
+fn goal_view_names_states_reasons_consent_and_unknown_budgets() {
+    use qq_protocol::{
+        GoalBlockedReason, GoalCheckAuthorization, GoalExhaustion, GoalNeedsUser, GoalPauseReason,
+        GoalStatus,
+    };
+    for (status, label) in [
+        (GoalStatus::Active, "active"),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::User,
+            },
+            "paused by you",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::CheckApproval,
+                },
+            },
+            "check consent required",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::CheckInterrupted,
+                },
+            },
+            "check interrupted",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Authentication {
+                        message: "login again".to_owned(),
+                    },
+                },
+            },
+            "login again",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::CheckFailing,
+            },
+            "three failed checks",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::AuditExhausted,
+            },
+            "verification allowance exhausted",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::TokensUnknown,
+            },
+            "token usage unknown",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::CostUnknown,
+            },
+            "cost unknown",
+        ),
+        (GoalStatus::Achieved, "achieved"),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Approval {
+                        tool_call_id: qq_protocol::ToolCallId::from_bytes([3; 16]),
+                    },
+                },
+            },
+            "tool approval required",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Configuration {
+                        message: "fix configuration".to_owned(),
+                    },
+                },
+            },
+            "fix configuration",
+        ),
+        (
+            GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Credentials {
+                        message: "refresh credentials".to_owned(),
+                    },
+                },
+            },
+            "refresh credentials",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::Model {
+                    reason: "dependency is unavailable".to_owned(),
+                },
+            },
+            "dependency is unavailable",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::NoProgress,
+            },
+            "no progress",
+        ),
+        (
+            GoalStatus::Blocked {
+                reason: GoalBlockedReason::RepeatedFailure,
+            },
+            "repeated failures",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Runs,
+            },
+            "run cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Tokens,
+            },
+            "token cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Cost,
+            },
+            "cost cap",
+        ),
+        (
+            GoalStatus::BudgetExhausted {
+                reason: GoalExhaustion::Deadline,
+            },
+            "deadline",
+        ),
+    ] {
+        let mut app = App::new(TuiOptions::default());
+        let mut snapshot = fixtures::workspace_snapshot();
+        let session = snapshot.focused.as_ref().unwrap().summary.id;
+        let mut goal = fixtures::goal_snapshot(session);
+        goal.status = status;
+        goal.counters.usage = None;
+        goal.counters.estimated_cost_usd_nanos = None;
+        snapshot.focused.as_mut().unwrap().goal = Some(goal);
+        app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+        let rows = super::workspace::goal_body(&app, session, 80);
+        let text = frame_rows(&rows).join("\n");
+        for expected in [
+            label,
+            "Finish the billing migration",
+            "verify invoices",
+            "Backfill verified",
+            "Tokens: unknown / 1000",
+            "Cost: unknown / $1",
+            "UTC",
+            "missing invoice",
+            "check consent required",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+    }
+    for (authorization, label) in [
+        (GoalCheckAuthorization::Once, "one check only"),
+        (
+            GoalCheckAuthorization::ForGoal,
+            "repeated checks for this goal",
+        ),
+        (
+            GoalCheckAuthorization::Consumed,
+            "used; new consent required",
+        ),
+    ] {
+        let mut app = App::new(TuiOptions::default());
+        app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+        let session = app.focused().unwrap();
+        let mut goal = fixtures::goal_snapshot(session);
+        goal.check_authorization = Some(authorization);
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            session,
+            SessionEvent::GoalUpdated { goal },
+        )));
+        assert!(
+            frame_rows(&super::workspace::goal_body(&app, session, 80))
+                .join("\n")
+                .contains(label)
+        );
+    }
+}
+
+#[test]
+fn goal_view_wraps_untrusted_text_and_preserves_failure_tail_and_independent_hold() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.notes = "界 ".repeat(80);
+    goal.check_output = Some(format!("exit 7\n{}preserved-check-tail", "x".repeat(3000)));
+    goal.objective.push_str("\u{1b}\u{202e}");
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    snapshot.check_interruption = Some(qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x72; 16]),
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    for width in [8, 20, 80] {
+        let rows = super::workspace::goal_body(&app, session, width);
+        assert!(rows.iter().all(|row| row.width() <= width));
+        let text = frame_rows(&rows).join("");
+        assert!(text.contains("preserved-check-tail"));
+        assert!(text.contains("Workspace held"));
+        assert!(!text.contains(['\u{1b}', '\u{202e}']));
+    }
+}
+
+#[test]
+fn goal_view_reports_audit_method_without_claiming_unperformed_verification() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check = None;
+    goal.check_authorization = None;
+    goal.audit_pending = false;
+    goal.audit_revision = None;
+    goal.check_output = None;
+    goal.wait = Some(qq_protocol::GoalWait {
+        until_ms: 1_700_000_000_000,
+        reason: "external dependency".to_owned(),
+    });
+    goal.counters.usage = Some(qq_protocol::TokenUsage {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_input_tokens: 3,
+        cache_write_input_tokens: 4,
+        reasoning_tokens: Some(1),
+    });
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    assert!(text.contains("Verification method: independent model audit"));
+    assert!(!text.contains("Completion verified"));
+    assert!(text.contains("Tokens: 10 / 1000"));
+    assert!(text.contains("external dependency"));
+    assert!(text.contains("2023-11-14 22:13:20 UTC"));
+}
+
+#[test]
+fn goal_view_keeps_workspace_holds_visible_after_the_goal_is_cleared() {
+    let mut app = App::new(TuiOptions::default());
+    let mut snapshot = fixtures::workspace_snapshot();
+    let session = snapshot.focused.as_ref().unwrap().summary.id;
+    let goal = fixtures::goal_snapshot(session);
+    let goal_id = goal.goal_id;
+    snapshot.focused.as_mut().unwrap().goal = Some(goal);
+    snapshot.check_interruption = Some(qq_protocol::CheckInterruption {
+        session_id: session,
+        run_id: RunId::from_bytes([0x72; 16]),
+    });
+    app.apply_client_update(ClientUpdate::Snapshot(snapshot));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        session,
+        SessionEvent::GoalCleared {
+            session_id: session,
+            goal_id,
+            revision: 8,
+        },
+    )));
+    let text = frame_rows(&super::workspace::goal_body(&app, session, 80)).join("\n");
+    assert!(text.contains("No goal for this session"));
+    assert!(text.contains("Workspace held"));
+}
+
+#[test]
+fn goal_check_consent_panel_names_workspace_command_and_separate_scopes() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session);
+    goal.check.as_mut().unwrap().command =
+        format!("printf '{}final-command-marker'", "x".repeat(800));
+    let exact = goal.check.as_ref().unwrap().command.clone();
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    app.composer.replace("/goal check".to_owned());
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let rows = super::overlay::goal_check_picker(&app, 80, 20);
+    let text = frame_rows(&rows).join("\n");
+    for label in [
+        "GOAL CHECK",
+        "Workspace:",
+        "printf",
+        "Deny",
+        "Allow once",
+        "Allow repeated checks for this goal",
+    ] {
+        assert!(text.contains(label), "missing {label}: {text}");
+    }
+    for _ in 0..10 {
+        app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+    }
+    let rows = super::overlay::goal_check_picker(&app, 80, 20);
+    assert!(rows.iter().all(|row| row.width() <= 80));
+    assert!(
+        frame_rows(&rows).join("").contains("final-command-marker"),
+        "the complete command must be reachable by scrolling"
+    );
+    let Some(crate::input::Overlay::GoalCheck { target, .. }) = &app.overlay else {
+        panic!("goal check target")
+    };
+    assert_eq!(
+        target.command, exact,
+        "display scrolling cannot alter authority"
+    );
+}
+
+#[test]
+fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
+    use qq_protocol::{GoalPauseReason, GoalStatus};
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    let mut goal = fixtures::goal_snapshot(session_id);
+    goal.counters.runs = 12;
+    goal.budget.max_goal_runs = 200;
+    goal.budget.deadline_ms = 17 * 3_600_000;
+    goal.next_run_at_ms = 240_000;
+    initial.focused.as_mut().unwrap().goal = Some(goal);
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    for expected in ["goal", "run 12/200", "17h left", "next 4m"] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    let session = app.sessions.get_mut(&session_id).unwrap();
+    session.summary.status = SessionStatus::Running;
+    session.activity = Some((
+        qq_protocol::RunId::from_bytes([0x71; 16]),
+        qq_protocol::RunActivity::PreparingToolCall,
+    ));
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 80)]).join("");
+    assert!(
+        text.contains("17h left") && text.contains("next 4m"),
+        "{text}"
+    );
+    let session = app.sessions.get_mut(&session_id).unwrap();
+    session.summary.status = SessionStatus::Idle;
+    let goal = session.goal.as_mut().unwrap();
+    goal.status = GoalStatus::Paused {
+        reason: GoalPauseReason::User,
+    };
+    goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(text.contains("paused by you"), "{text}");
+    assert!(text.contains("cancellation draining"), "{text}");
+    assert!(!text.contains("/goal resume"), "{text}");
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .goal
+        .as_mut()
+        .unwrap()
+        .pending_run_id = None;
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(text.contains("/goal resume"), "{text}");
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .goal
+        .as_mut()
+        .unwrap()
+        .status = GoalStatus::Achieved;
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    assert!(text.contains("goal") && text.contains("achieved"), "{text}");
+    assert!(!text.contains("/goal resume"), "{text}");
+    assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .goal
+        .as_mut()
+        .unwrap()
+        .status = GoalStatus::Blocked {
+        reason: qq_protocol::GoalBlockedReason::Model {
+            reason: "bad\u{1b}[2J\ninput".to_owned(),
+        },
+    };
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(text.contains("blocked"), "{text}");
+    assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text}");
+}
+
+#[test]
+fn active_goal_keeps_countdown_updates_alive_without_a_running_session() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = fixtures::workspace_snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    initial.focused.as_mut().unwrap().goal = Some(fixtures::goal_snapshot(session_id));
+    app.apply_client_update(ClientUpdate::Snapshot(initial));
+    assert!(app.has_activity());
+    assert!((0..10).any(|_| app.advance_animation()));
+    app.sessions
+        .get_mut(&session_id)
+        .unwrap()
+        .goal
+        .as_mut()
+        .unwrap()
+        .status = qq_protocol::GoalStatus::Achieved;
+    assert!(!app.has_activity());
+}
+
+#[test]
+fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
+    use crossterm::event::Event;
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    app.composer
+        .replace("/goal inspect the command before submitting".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    let exact = format!(
+        "{}\x1b[31m\nfinal-command-marker",
+        "printf 'é'; ".repeat(60)
+    );
+    app.handle_terminal_event(Event::Paste(exact.clone()));
+    for (width, height) in [(1, 1), (24, 8), (80, 20), (120, 36)] {
+        let rows = super::overlay::goal_form(&app, width, height);
+        assert_eq!(rows.len(), height);
+        assert!(rows.iter().all(|row| row.width() <= width));
+        assert!(frame_rows(&rows).iter().all(|line| !line.contains('\x1b')));
+    }
+    app.handle_terminal_event(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+    let rows = super::overlay::goal_form(&app, 80, 20);
+    assert!(frame_rows(&rows).join("").contains("final-command-marker"));
+    let Some(crate::input::Overlay::GoalForm(form)) = &app.overlay else {
+        panic!("form")
+    };
+    assert_eq!(form.fields[1].expanded(), exact);
 }

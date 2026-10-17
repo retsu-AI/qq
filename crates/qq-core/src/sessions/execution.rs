@@ -60,6 +60,48 @@ async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
     }
 }
 
+#[cfg(test)]
+struct RoutingAdmissionHook {
+    run_id: RunId,
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static ROUTING_ADMISSION_HOOKS: Mutex<Vec<RoutingAdmissionHook>> = Mutex::new(Vec::new());
+
+/// Holds after policy refresh and cost declaration, before durable paid admission.
+#[cfg(test)]
+pub(super) fn hold_routing_admission(
+    run_id: RunId,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (entered, entered_rx) = oneshot::channel();
+    let (release, release_rx) = oneshot::channel();
+    ROUTING_ADMISSION_HOOKS
+        .lock()
+        .unwrap()
+        .push(RoutingAdmissionHook {
+            run_id,
+            entered,
+            release: release_rx,
+        });
+    (entered_rx, release)
+}
+#[cfg(test)]
+async fn pause_before_routing_admission(run_id: RunId) {
+    let hook = {
+        let mut hooks = ROUTING_ADMISSION_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.run_id == run_id)
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        // A dropped test receiver/sender releases its fixture without blocking cleanup.
+        let _ = hook.entered.send(());
+        let _ = hook.release.await;
+    }
+}
+
 impl ToolGate for CompactionRunGate {
     fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
         Box::pin(std::future::ready(GateDecision::Deny {
@@ -104,7 +146,27 @@ fn session_prompt_prefix_key(
     }
 }
 
+// Kept through child drain; removed on completion, panic or owner abort.
+struct GoalDeadlineRegistration {
+    inner: Arc<SessionRuntimeInner>,
+    run: RunId,
+}
+
+impl Drop for GoalDeadlineRegistration {
+    fn drop(&mut self) {
+        match self.inner.goal_deadlines.lock() {
+            Ok(mut deadlines) => {
+                deadlines.remove(&self.run);
+            }
+            Err(_) => {
+                self.inner.failed.send_replace(true);
+            }
+        }
+    }
+}
+
 struct PreparedExecution {
+    goal_paid: Option<super::GoalPaidInput>,
     events: crate::RuntimeStream,
     audit: PreparedRunAudit,
     tool_cancellation: RunCancellation,
@@ -151,6 +213,10 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 }
 
 impl RunResources {
+    pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
+        self.tools.enter()
+    }
+
     #[cfg(test)]
     pub(super) fn for_test_run(mut self, run_id: RunId) -> Self {
         self.run_id = Some(run_id);
@@ -228,6 +294,17 @@ async fn prepare_execution(
     ));
     claimed.approval_delegate = Some(ApprovalDelegateSelection::from_identity(delegate_identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
+    if let Some(deadline) = deadline
+        && claimed.identity.kind == RunKind::Prompt
+        && (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
+    {
+        match inner.goal_deadlines.lock() {
+            Ok(mut deadlines) => {
+                deadlines.insert(claimed.identity.run_id, deadline);
+            }
+            Err(_) => return Err(internal_failure("goal deadline registry is unavailable")),
+        }
+    }
     if let Some(deadline) = deadline.filter(|deadline| deadline.expired()) {
         return Err(RunOutcome::BudgetExhausted {
             exhaustion: Box::new(deadline.exhaustion()),
@@ -340,8 +417,14 @@ async fn prepare_execution(
             }
         }
     }
+    let goal_paid = super::GoalPaidInput::new(
+        &inner.store,
+        claimed,
+        loaded.resolved_model().pricing.as_ref(),
+    );
     let mut capabilities = if internal {
         RunCapabilities::restricted()
+            .with_goal_paid(goal_paid.clone())
             .with_goal_spend_tracking(claimed.goal_spend_owner.is_some())
             .with_limits(
                 RunLimits {
@@ -457,6 +540,7 @@ async fn prepare_execution(
         }
         let base = base
             .with_limits(claimed.limits, loaded.resolved_model().pricing.clone())
+            .with_goal_paid(goal_paid.clone())
             .with_goal_spend_tracking(claimed.goal_spend_owner.is_some())
             .with_goal(super::goals::GoalRunInput::new(
                 inner.store.clone(),
@@ -498,6 +582,15 @@ async fn prepare_execution(
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
+    if claimed
+        .goal
+        .as_ref()
+        .is_some_and(|goal| goals::is_model_audit(goal, claimed.origin))
+    {
+        capabilities = capabilities.without_tools();
+        capabilities.audit_hook = None;
+        capabilities.spawner = None;
+    }
     if !internal {
         capabilities.routing_spend = loaded.routing_spend;
         if (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
@@ -540,6 +633,7 @@ async fn prepare_execution(
             event = events.next() => event,
         };
         match event {
+            Some(RuntimeEvent::GoalPaidCancelled) => return Err(RunOutcome::Cancelled),
             Some(RuntimeEvent::Started) => {}
             Some(RuntimeEvent::Prepared {
                 turn_ordinal: 1,
@@ -568,6 +662,7 @@ async fn prepare_execution(
                         });
                 }
                 return Ok(PreparedExecution {
+                    goal_paid,
                     events,
                     audit: PreparedRunAudit {
                         prompt_identity,
@@ -686,12 +781,16 @@ async fn route_run(
         if *cancellation.borrow() {
             return Err(RunOutcome::Cancelled);
         }
+        let routing_cost = router.max_cost_usd_nanos();
+        #[cfg(test)]
+        pause_before_routing_admission(claimed.identity.run_id).await;
         match inner
             .store
             .record_routing_started(
                 claimed,
                 !oversized && !task.is_empty(),
-                router.max_cost_usd_nanos(),
+                routing_cost,
+                (router.max_input_tokens(), router.max_output_tokens()),
             )
             .await
         {
@@ -700,8 +799,15 @@ async fn route_run(
                 break (budget, deadline, task, oversized);
             }
             Ok(Ok(None)) => return Err(RunOutcome::Cancelled),
-            Ok(Err(claim::GoalStartRefusal::Reprepare { limits })) => {
+            Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                 claimed.limits = *limits;
+                if let Some(goals::GoalAdmission::Allowed {
+                    final_slot: admitted,
+                    ..
+                }) = &mut claimed.goal_admission
+                {
+                    *admitted = final_slot;
+                }
                 continue;
             }
             Ok(Err(claim::GoalStartRefusal::PerRunDuration)) => {
@@ -709,6 +815,12 @@ async fn route_run(
             }
             Ok(Err(claim::GoalStartRefusal::Exhausted(reason))) => {
                 return Err(goal_admission_exhaustion(reason));
+            }
+            Ok(Err(claim::GoalStartRefusal::RoutingTokens)) => {
+                return Err(RunOutcome::Failed { failure: RunFailure {
+                    kind: RunFailureKind::Configuration,
+                    message: "task routing requires declared token ceilings within the current caller and goal allowance; configure routing bounds or disable task routing".to_owned(),
+                }});
             }
             Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal))) => {
                 let message = match refusal {
@@ -940,14 +1052,47 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+        Ok(true) => {}
+        Ok(false) => {
+            finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
+            return;
+        }
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                persistence_failure("failed to apply current workspace goal policy", &error),
+            )
+            .await;
+            return;
+        }
+    }
+    if claimed.identity.kind == RunKind::GoalCheck {
+        super::goal_check::execute(inner, claimed, cancellation, resources).await;
+        return;
+    }
+
+    let _goal_deadline =
+        (claimed.goal.is_some() || claimed.goal_spend_owner.is_some()).then(|| {
+            GoalDeadlineRegistration {
+                inner: Arc::clone(&inner),
+                run: claimed.identity.run_id,
+            }
+        });
     let execution_started = tokio::time::Instant::now();
     if let Some(admission) = claimed.goal_admission {
         let refusal = match admission {
             goals::GoalAdmission::Cancelled => Some(RunOutcome::Cancelled),
             goals::GoalAdmission::Exhausted(reason) => Some(goal_admission_exhaustion(reason)),
-            goals::GoalAdmission::Allowed { deadline_ms, .. } => {
+            goals::GoalAdmission::Allowed {
+                deadline_ms,
+                final_slot,
+                ..
+            } => {
                 let anchor_ms = now_ms();
                 claimed.goal_admission = Some(goals::GoalAdmission::Allowed {
+                    final_slot,
                     deadline_ms,
                     anchor_ms,
                     execution_started: Some(execution_started),
@@ -1072,6 +1217,25 @@ pub(super) async fn execute_run(
         )
         .await;
         return;
+    }
+    match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+        Ok(true) => {}
+        Ok(false) => {
+            finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
+            return;
+        }
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                persistence_failure(
+                    "failed to refresh goal policy before paid preparation",
+                    &error,
+                ),
+            )
+            .await;
+            return;
+        }
     }
     if let Err(outcome) = route_run(
         &inner,
@@ -1243,6 +1407,32 @@ pub(super) async fn execute_run(
         }
         match plan {
             context::ContextPlan::Send { .. } => {
+                match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        finish_prepared_run(
+                            &inner,
+                            &claimed,
+                            &prepared.audit,
+                            RunOutcome::Cancelled,
+                        )
+                        .await;
+                        return;
+                    }
+                    Err(error) => {
+                        finish_prepared_run(
+                            &inner,
+                            &claimed,
+                            &prepared.audit,
+                            persistence_failure(
+                                "failed to apply current workspace goal policy",
+                                &error,
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                }
                 if *inner.failed.borrow() {
                     finish_prepared_run(
                         &inner,
@@ -1272,11 +1462,18 @@ pub(super) async fn execute_run(
                         .await;
                         return;
                     }
-                    Ok(Err(claim::GoalStartRefusal::Reprepare { limits })) => {
+                    Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                         // The stream has not been polled. Reassemble under the
                         // tighter bounds while retaining resolved input bytes.
                         drop(prepared);
                         claimed.limits = *limits;
+                        if let Some(goals::GoalAdmission::Allowed {
+                            final_slot: admitted,
+                            ..
+                        }) = &mut claimed.goal_admission
+                        {
+                            *admitted = final_slot;
+                        }
                         if summary_only_admission {
                             if !admit_with_summary_only_history(&inner, &mut claimed).await {
                                 return;
@@ -1312,7 +1509,8 @@ pub(super) async fn execute_run(
                             claim::GoalStartRefusal::Reprepare { .. } => {
                                 unreachable!("reprepare handled before terminal refusal")
                             }
-                            claim::GoalStartRefusal::RoutingCost(_) => {
+                            claim::GoalStartRefusal::RoutingCost(_)
+                            | claim::GoalStartRefusal::RoutingTokens => {
                                 unreachable!("main start does not check routing cost")
                             }
                         };
@@ -1693,6 +1891,9 @@ async fn run_auto_compaction(
         }
     };
     candidate.identity.kind = RunKind::Compaction;
+    candidate.origin = Some(qq_protocol::RunOrigin::AutoCompaction {
+        owner_run_id: original.identity.run_id,
+    });
     candidate.user_initiated = false;
     candidate.literal_slash = false;
     candidate.messages = summarizer.messages;
@@ -1781,6 +1982,18 @@ async fn run_auto_compaction(
             return false;
         }
     };
+    if let Some(paid) = prepared.goal_paid.as_ref()
+        && let Err(error) = paid.bind_run(compaction.identity)
+    {
+        let Ok(teardown) = resources.stop(&mut prepared.events).await else {
+            inner.failed.send_replace(true);
+            return false;
+        };
+        let outcome = persistence_failure("failed to bind paid compaction identity", &error);
+        finish_run(inner, &compaction, outcome.clone(), teardown).await;
+        finish_prepared_run(inner, original, &original_audit, outcome).await;
+        return false;
+    }
     let (compaction_cancel, compaction_cancellation) = watch::channel(false);
     if let Ok(mut cancellations) = inner.cancellations.lock() {
         cancellations.insert(compaction.identity.run_id, compaction_cancel);
@@ -1997,6 +2210,7 @@ async fn execute_started_run(
     checkpoint_enforced: bool,
 ) {
     let PreparedExecution {
+        goal_paid: _,
         mut events,
         tool_cancellation,
         audit,
@@ -2273,6 +2487,14 @@ async fn execute_started_run(
                 flush_at = None;
             }
             stopped @ (RunInput::Cancelled | RunInput::Interrupted) => {
+                if matches!(stopped, RunInput::Cancelled)
+                    && approvals::expire_goal_hold(&inner, &claimed, true)
+                        .await
+                        .is_err()
+                {
+                    inner.failed.send_replace(true);
+                    return;
+                }
                 tool_cancellation.cancel();
                 if let Err(error) = flush_pending_reasoning(
                     &inner,
@@ -2543,6 +2765,10 @@ async fn execute_started_run(
                 static_prefix,
                 weight,
             })) => {
+                // A preceding rejection was durably settled before this preparation.
+                // Do not let it clear a new pending admission if cancellation wins
+                // before GoalRequestAdmitted is consumed.
+                accounting.goal_request_rejected = false;
                 if let Some(identity) = identity
                     && let Err(error) = inner.store.record_prompt_identity(&claimed, identity).await
                 {
@@ -2610,6 +2836,27 @@ async fn execute_started_run(
                 // sent. The empty-truncation recovery raises it mid-run, so
                 // the claim-time value would misstate the retried turn.
                 claimed.model.max_output_tokens = Some(weight.max_output_tokens);
+            }
+            RunInput::Event(Some(RuntimeEvent::GoalRequestAdmitted { cursor })) => {
+                if let Some(cursor) = cursor {
+                    inner.notify(cursor);
+                }
+                accounting.goal_request_rejected = false;
+            }
+            RunInput::Event(Some(RuntimeEvent::GoalPaidCancelled)) => {
+                let Ok(teardown) = resources.stop(&mut events).await else {
+                    inner.failed.send_replace(true);
+                    return;
+                };
+                finish_run_accounted(
+                    &inner,
+                    &claimed,
+                    RunOutcome::Cancelled,
+                    Some(accounting.snapshot()),
+                    teardown,
+                )
+                .await;
+                return;
             }
             RunInput::Event(Some(RuntimeEvent::GoalRequestRejected)) => {
                 accounting.goal_request_rejected = true;
@@ -4162,6 +4409,15 @@ async fn finish_run_accounted(
     accounting: Option<RunAccounting>,
     teardown: TeardownComplete,
 ) {
+    if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
+        if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+        && approvals::expire_goal_hold(inner, claimed, false)
+            .await
+            .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
+    }
     match inner
         .store
         .finish_run(claimed, outcome, accounting, teardown)

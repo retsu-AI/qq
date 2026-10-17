@@ -1,6 +1,147 @@
 use super::*;
 
 #[tokio::test]
+async fn managed_goal_prompt_limits_are_clamped_at_claim_and_start() {
+    for explicit in [false, true] {
+        let (_directory, store, initial) = super::goals::model_goal_claim(true).await;
+        let session = initial.identity.session_id;
+        store
+            .finish_run(
+                &initial,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        let caps = RunLimits {
+            max_duration_ms: Some(30_000),
+            max_model_turns: Some(3),
+            max_tool_calls: Some(4),
+            max_total_tokens: Some(50_000),
+            max_cost_usd_nanos: Some(60_000),
+            max_input_tokens: Some(40_000),
+            max_output_tokens: Some(10_000),
+            max_tool_output_bytes: Some(2048),
+            max_children: Some(2),
+            max_concurrent_children: Some(1),
+        };
+        store
+            .call(Priority::Control, move |connection| {
+                let goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+                goal_policy::save(
+                    connection,
+                    goal.goal_id,
+                    GoalPolicy {
+                        per_run: caps,
+                        ..GoalPolicy::default()
+                    },
+                    at,
+                )
+            })
+            .await
+            .unwrap();
+        let mut requested = RunLimits::default();
+        if explicit {
+            requested = caps;
+            requested.max_model_turns = Some(100);
+            requested.max_output_tokens = Some(2); // A stricter caller limit survives.
+        }
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: session,
+                    input: vec![InputPart::text("manual goal work")],
+                    limits: requested,
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut claim = store.reserve_next_run(false).await.unwrap().unwrap();
+        let mut expected = caps;
+        if explicit {
+            expected.max_output_tokens = Some(2);
+        }
+        assert_eq!(claim.limits, expected, "explicit={explicit}");
+        let mut tightened = caps;
+        tightened.max_model_turns = Some(2);
+        tightened.max_tool_calls = Some(3);
+        tightened.max_output_tokens = Some(8_000);
+        store
+            .call(Priority::Control, move |connection| {
+                let goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+                goal_policy::save(
+                    connection,
+                    goal.goal_id,
+                    GoalPolicy {
+                        per_run: tightened,
+                        ..GoalPolicy::default()
+                    },
+                    at,
+                )
+            })
+            .await
+            .unwrap();
+        if explicit {
+            tightened.max_output_tokens = Some(2);
+        }
+        let refused = store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap();
+        let Err(claim::GoalStartRefusal::Reprepare { limits, final_slot }) = refused else {
+            panic!("a tighter policy must require reassembly before start: {refused:?}");
+        };
+        assert_eq!(*limits, tightened);
+        claim.limits = *limits;
+        if let Some(crate::sessions::goals::GoalAdmission::Allowed {
+            final_slot: admitted,
+            ..
+        }) = &mut claim.goal_admission
+        {
+            *admitted = final_slot;
+        }
+        store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let durable = store
+            .snapshot(SnapshotRequest::new(
+                claim.identity.workspace_id,
+                Some(session),
+                1,
+                16,
+            ))
+            .await
+            .unwrap();
+        let focused = durable.focused.unwrap();
+        let run = focused
+            .runs
+            .iter()
+            .find(|run| run.id == claim.identity.run_id)
+            .unwrap();
+        assert_eq!(run.limits.as_deref(), Some(&tightened));
+        store
+            .finish_run(
+                &claim,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn neutral_goal_stops_preserve_retry_streaks() {
     for outcome in [RunOutcome::Interrupted, RunOutcome::Cancelled] {
         let (_directory, store, claim) = super::goals::model_goal_claim(true).await;
@@ -255,7 +396,7 @@ async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_un
         };
         if routing != "none" {
             store
-                .record_routing_started(&claim, true, None)
+                .record_routing_started(&claim, true, None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()
@@ -349,9 +490,11 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
     for (boundary, own_goal) in [
         ("claim", false),
         ("routing", false),
+        ("routing_tokens", false),
         ("start", false),
         ("claim", true),
         ("routing", true),
+        ("routing_tokens", true),
         ("start", true),
     ] {
         let (_directory, store, parent) = super::goals::model_goal_claim(true).await;
@@ -387,7 +530,12 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
         store
             .call(Priority::Control, move |connection| {
                 let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
-                goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                if boundary == "routing_tokens" {
+                    goal.budget.max_total_tokens = Some(20_000);
+                    goal.counters.usage = Some(usage(15_000, 0));
+                } else {
+                    goal.budget.deadline_ms = now_ms().saturating_sub(1);
+                }
                 crate::sessions::goals::save(connection, &goal)
             })
             .await
@@ -415,10 +563,20 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
                 ),
                 "queued sponsor deadline must not restart"
             ),
+            "routing_tokens" => assert!(
+                matches!(
+                    store
+                        .record_routing_started(&claim, true, Some(0), (Some(10_000), Some(0)))
+                        .await
+                        .unwrap(),
+                    Err(claim::GoalStartRefusal::RoutingTokens)
+                ),
+                "a child cannot spend past its sponsor's fresh token remainder"
+            ),
             "routing" => assert!(
                 matches!(
                     store
-                        .record_routing_started(&claim, true, Some(0))
+                        .record_routing_started(&claim, true, Some(0), (None, None))
                         .await
                         .unwrap(),
                     Err(claim::GoalStartRefusal::Exhausted(
@@ -605,8 +763,15 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
         .acquire_many_owned(harness.runtime.inner.permits.available_permits() as u32)
         .await
         .unwrap();
-    harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100}})).unwrap()).await.unwrap();
-    let run = submit_child_budget_prompt(&harness, RunLimits::default()).await;
+    harness.runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":harness.session_id,"objective":"delegate bounded research","budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":100_000}})).unwrap()).await.unwrap();
+    let run = submit_child_budget_prompt(
+        &harness,
+        RunLimits {
+            max_output_tokens: Some(70),
+            ..RunLimits::default()
+        },
+    )
+    .await;
     drop(held);
     harness.runtime.inner.schedule.send(()).await.unwrap();
     let events = collect_until_run_finished(&mut harness.events, run).await;
@@ -622,7 +787,11 @@ async fn sponsored_child_requests_respect_positive_inherited_token_allowance() {
             _ => None,
         })
         .expect("positive remainder admits child");
-    assert_eq!(child.limits.as_ref().unwrap().max_total_tokens, Some(60));
+    assert_eq!(
+        child.limits.as_ref().unwrap().max_total_tokens,
+        Some(99_960)
+    );
+    assert_eq!(child.limits.as_ref().unwrap().max_output_tokens, Some(60));
     assert_eq!(
         *requests.lock().unwrap(),
         vec![60],

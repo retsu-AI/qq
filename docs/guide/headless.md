@@ -26,6 +26,42 @@ Runs one task to completion in the current directory (or `--workspace
 PATH`) through a durable session. Progress goes to stderr, the final answer
 to stdout.
 
+### Foreground goals
+
+```sh
+qq run --goal "Finish the migration" --check 'cargo test' --format jsonl
+qq run --goal --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --goal-check-approval once --format jsonl
+```
+
+Without separate check consent the first command returns a paused goal (exit6)
+without running the model or check. Review the check before authorizing it.
+`once` permits one check; `for-goal` permits reuse for the current goal check.
+An ordinary shell allowlist never authorizes a goal check. Forbidden or
+policy-refused explicit check consent exits2 and grants no new authorization;
+a newly created goal remains paused for check approval.
+
+`--goal-deadline 24h`, `--goal-max-runs 20` and `--max-cost-usd 5` bound the
+goal; workspace defaults apply when omitted. Timeout and turn flags constrain
+each run. With a new objective, unspecified limits/check fields survive an
+edit; `--replace` explicitly starts a replacement. Bare `--goal --session ID`
+continues the stored specification. It leaves a missing-consent pause intact.
+
+The foreground client uses the same durable runtime driver as the server.
+It stops on a non-active state, including an unanswered question, without
+inventing an answer. Goal exits are achieved0, paused6, blocked7, exhausted8,
+interrupted130; setup and harness failures retain2/4. JSONL includes workspace
+events, `goal_run` records for settled direct runs, then a final `goal` snapshot
+with the state/reason and exit code. A stopped goal drains its remaining work
+before that final record, bounded by the shutdown grace period; unrelated runs
+stay running. After the final goal record, the process retains ownership until
+other accepted runs settle naturally before closing. A further Ctrl-C cancels
+and drains that remaining work; it preserves the selected goal's final record
+and exit status. A failure to close is reported on stderr and preserves that
+selected exit status. Helpers remain event records. Refused verification attempts also
+have run records; the audit counter and check result distinguish them from
+executed checks. A paused goal persists for subsequent resume. Goal mode has no steering pipe or typed
+answer schema; those flags apply to ordinary prompt runs.
+
 ### Approval without a human
 
 | `--approval` | Meaning |
@@ -159,6 +195,25 @@ The wire protocol is HTTP + SSE with resumable event cursors; see
 [`../design/protocol.md`](../design/protocol.md). The server binds only to
 loopback; there is no remote client or remote authentication yet.
 
+## Managing server goals from scripts
+
+Start `qq serve`, then use the session ID from the TUI or server API:
+
+```sh
+qq goal set "Finish the migration" --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --goal-deadline 24h --goal-max-runs 20
+qq goal show --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --json
+qq goal approve-check once --command 'cargo test' --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012
+qq goal pause --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012
+```
+
+Review the check before authorizing it. `once` grants one execution;
+`for-goal` grants reuse for that goal's current check. Editing a goal preserves
+unspecified budget and check fields. `--replace` starts a replacement with
+workspace defaults. `resume` and `clear` are also available. These commands
+use authenticated local server discovery and leave store ownership with the
+server. They return the goal snapshot (`show`) or command receipt (mutations),
+without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal).
+
 ## In CI
 
 ```yaml
@@ -174,3 +229,13 @@ Or skip the store entirely: QQ reads `ANTHROPIC_API_KEY` from the
 environment when nothing is stored. `QQ_CONFIG_CONTENT='(version: 1, model:
 "…")'` supplies configuration without a file. If the repository ships
 `.qq/config.ron` with sensitive sections, run `qq trust` first.
+
+If a foreground goal encounters a harness failure after accepting a goal, its
+final JSONL goal record uses `harness_failure` and exit code `4` when output is
+still writable and no final write has been attempted. A final write is never
+retried, because an output error can leave a partial record. Once the final
+stdout record is flushed, later trace or runtime-close failures are reported
+on stderr and preserve that record's exit code. The record includes the current snapshot of that same goal when
+available, otherwise its last observed snapshot. This fallback supplies context;
+it does not assert that the goal is still current or reached a terminal state.
+Clearing or replacing the goal never substitutes the replacement in this record.

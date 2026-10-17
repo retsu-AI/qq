@@ -46,17 +46,24 @@ pub(super) async fn schedule_runs(
         if *shutdown.borrow() || *inner.failed.borrow() {
             break;
         }
+        // Serialize the last autonomous admission with the host's drain
+        // boundary. Already accepted work and its children remain claimable.
         next_goal_wake = if inner.store.has_goals() {
-            match inner.store.drive_goals(now_ms()).await {
-                Ok(pass) => {
-                    for cursor in pass.cursors {
-                        inner.notify(cursor);
+            let _lifecycle = inner.lifecycle.read().await;
+            if inner.draining.load(Ordering::Acquire) {
+                None
+            } else {
+                match inner.store.drive_goals(now_ms()).await {
+                    Ok(pass) => {
+                        for cursor in pass.cursors {
+                            inner.notify(cursor);
+                        }
+                        pass.next_wake
                     }
-                    pass.next_wake
-                }
-                Err(_) => {
-                    inner.failed.send_replace(true);
-                    break;
+                    Err(_) => {
+                        inner.failed.send_replace(true);
+                        break;
+                    }
                 }
             }
         } else {
@@ -120,6 +127,7 @@ pub(super) async fn schedule_runs(
     }
 }
 
+#[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
 async fn supervise_reserved_run(
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,

@@ -133,6 +133,7 @@ pub struct ProviderRemedy {
 /// See [`RuntimeFactory::tui_model_state`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TuiModelState {
+    pub goals: qq_config::GoalsConfig,
     /// The configured route as a selection, or the default when none.
     pub configured_model: ModelSelection,
     /// `configured_model` when the catalog lists it, so bare `qq` can create
@@ -405,6 +406,7 @@ impl RuntimeFactory {
             None => ModelSelection::default(),
         };
         TuiModelState {
+            goals: snapshot.goals().clone(),
             configured_model,
             model,
             tui_model,
@@ -2623,6 +2625,68 @@ impl RuntimeLoader for RuntimeFactory {
 }
 
 impl WorkspaceGrantAuthority for RuntimeFactory {
+    fn goal_policy(&self, workspace: &Path) -> qq_core::GoalPolicyFuture {
+        let factory = self.clone();
+        let workspace = workspace.to_owned();
+        Box::pin(async move {
+            let slots = factory
+                .inner
+                .check_policy_slots
+                .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
+            let permit = match Arc::clone(slots).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => return Err(qq_core::GoalPolicyError::Overloaded),
+            };
+            match tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                let load = match factory.request_for_workspace(&workspace, None) {
+                    Ok(load) => load,
+                    Err(error) => {
+                        return Err(qq_core::GoalPolicyError::Configuration(RuntimeLoadError {
+                            kind: error.failure_kind(),
+                            message: error.to_string(),
+                        }));
+                    }
+                };
+                let snapshot = match factory.load_for_client(&load) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Err(qq_core::GoalPolicyError::Configuration(RuntimeLoadError {
+                            kind: error.failure_kind(),
+                            message: error.to_string(),
+                        }));
+                    }
+                };
+                let goals = snapshot.goals();
+                let ceilings = snapshot.policy().goal_ceilings();
+                Ok(qq_core::GoalPolicy {
+                    max_duration_ms: goals.max_deadline_seconds * 1000,
+                    max_goal_runs: goals.max_runs,
+                    per_run: qq_protocol::RunLimits {
+                        max_duration_ms: ceilings.per_run.max_duration_ms,
+                        max_model_turns: ceilings.per_run.max_model_turns,
+                        max_tool_calls: ceilings.per_run.max_tool_calls,
+                        max_total_tokens: ceilings.per_run.max_total_tokens,
+                        max_cost_usd_nanos: ceilings.per_run.max_cost_usd_nanos,
+                        max_input_tokens: ceilings.per_run.max_input_tokens,
+                        max_output_tokens: ceilings.per_run.max_output_tokens,
+                        max_tool_output_bytes: ceilings.per_run.max_tool_output_bytes,
+                        max_children: ceilings.per_run.max_children,
+                        max_concurrent_children: ceilings.per_run.max_concurrent_children,
+                    },
+                    max_backoff_ms: goals.max_backoff_seconds * 1000,
+                    max_check_timeout_ms: ceilings.max_check_timeout_seconds.unwrap_or(3600) * 1000,
+                    approval_wait_ms: goals.approval_wait_seconds * 1000,
+                })
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(qq_core::GoalPolicyError::Unavailable),
+            }
+        })
+    }
+
     fn validate_goal_check(
         &self,
         workspace: &Path,
@@ -2641,7 +2705,7 @@ impl WorkspaceGrantAuthority for RuntimeFactory {
                 .inner
                 .check_policy_slots
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
-            let permit = match Arc::clone(slots).try_acquire_owned() {
+            let permit = match Arc::clone(slots).acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => return Err(qq_core::GoalCheckPolicyError::Overloaded),
             };
@@ -3390,12 +3454,17 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::GoalNotFound
         | SessionRuntimeError::GoalImmutable
         | SessionRuntimeError::GoalCancellationPending
+        | SessionRuntimeError::CheckInterruptionMismatch
         | SessionRuntimeError::GoalCheckApprovalRequired
+        | SessionRuntimeError::GoalInputNotPending
         | SessionRuntimeError::GoalCheckMissing
         | SessionRuntimeError::GoalCheckCommandMismatch
         | SessionRuntimeError::GoalCheckForbidden
         | SessionRuntimeError::GoalBudgetSpent
         | SessionRuntimeError::InvalidGoal(_)
+        | SessionRuntimeError::GoalPolicy(
+            qq_core::GoalPolicyError::Configuration(_) | qq_core::GoalPolicyError::Invalid,
+        )
         | SessionRuntimeError::GoalCheckPolicy(
             qq_core::GoalCheckPolicyError::ManagedDenied
             | qq_core::GoalCheckPolicyError::Configuration(_),
@@ -3404,6 +3473,9 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
             ServerHandlerError::InvalidRequest(error.to_string())
         }
         SessionRuntimeError::SideQuestionBusy
+        | SessionRuntimeError::GoalPolicy(
+            qq_core::GoalPolicyError::Unavailable | qq_core::GoalPolicyError::Overloaded,
+        )
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
         | SessionRuntimeError::QueueFull
@@ -6666,6 +6738,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_goal_policy_maps_current_limits_without_model_loading() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        let workspace = fixture.path("work");
+        assert!(factory.inner.check_policy_slots.get().is_none());
+        let policy = WorkspaceGrantAuthority::goal_policy(&factory, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(policy, qq_core::GoalPolicy::default());
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1,
+            goals: (max_backoff_seconds: 90, approval_wait_seconds: 40),
+            policy: (goals: (max_runs: 20, max_deadline_seconds: 3600,
+                max_check_timeout_seconds: 30, per_run: (max_model_turns: 8)))
+        )"#,
+        )
+        .unwrap();
+        let policy = WorkspaceGrantAuthority::goal_policy(&factory, &workspace)
+            .await
+            .unwrap();
+        assert_eq!(policy.max_goal_runs, 20);
+        assert_eq!(policy.max_duration_ms, 3_600_000);
+        assert_eq!(policy.per_run.max_model_turns, Some(8));
+        assert_eq!(policy.max_backoff_ms, 90_000);
+        assert_eq!(policy.max_check_timeout_ms, 30_000);
+        assert_eq!(policy.approval_wait_ms, 40_000);
+        let slots = factory.inner.check_policy_slots.get().unwrap();
+        let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
+        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        // Dropping a waiter must not leak a pool slot.
+        drop(waiting);
+        let mut waiting = WorkspaceGrantAuthority::goal_policy(&factory, &workspace);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        drop(held);
+        assert_eq!(waiting.await.unwrap(), policy);
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            "(version: 1, policy: (goals: (max_runs: 0)))",
+        )
+        .unwrap();
+        assert!(matches!(
+            WorkspaceGrantAuthority::goal_policy(&factory, &workspace).await,
+            Err(qq_core::GoalPolicyError::Configuration(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn goal_check_policy_validation_has_a_bounded_lazy_blocking_pool() {
         let fixture = RuntimeFixture::new();
         fs::write(
@@ -6687,15 +6808,16 @@ mod tests {
             .check_policy_slots
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)));
         let held = Arc::clone(slots).acquire_many_owned(4).await.unwrap();
-        assert_eq!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
-            Err(qq_core::GoalCheckPolicyError::Overloaded)
-        );
+        let mut waiting =
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        let mut waiting =
+            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true");
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
         drop(held);
-        assert_eq!(
-            WorkspaceGrantAuthority::validate_goal_check(&factory, &workspace, "true").await,
-            Ok(())
-        );
+        assert_eq!(waiting.await, Ok(()));
+        assert_eq!(slots.available_permits(), 4);
     }
 
     #[tokio::test]
@@ -9048,6 +9170,19 @@ mod tests {
             qq_core::RuntimeLoadStage::CompilingProvider
         );
         assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
+        let (_, lookup) = factory
+            .plan_with_lookup(&request, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled);
+        assert_eq!(keyring.reads.load(Ordering::Relaxed), 1);
+
+        // Credential reuse does not publish a cancelled plan. A durable
+        // rotation must still force both a fresh read and a fresh compilation.
+        factory
+            .inner
+            .credentials
+            .set("bench-0", "sk-rotated-secret", false)
+            .unwrap();
         let (_, lookup) = factory
             .plan_with_lookup(&request, &AgentProfileId::default())
             .unwrap();

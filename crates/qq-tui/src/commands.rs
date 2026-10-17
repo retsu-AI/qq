@@ -61,6 +61,8 @@ pub(crate) enum Command {
     ShowAttention,
     ShowChanges,
     ShowSideQuestions,
+    /// View the focused session's authoritative durable goal and progress.
+    ShowGoal,
     /// Leave `/btw-new ` in the composer: the question starts a new side
     /// thread, so the command never runs without one.
     NewSideThread,
@@ -154,7 +156,7 @@ macro_rules! spec {
 
 /// Presentation order is invocation frequency within a category, and the
 /// palette shows categories in this order too.
-pub(crate) const COMMANDS: [CommandSpec; 44] = [
+pub(crate) const COMMANDS: [CommandSpec; 45] = [
     spec!(
         OpenHelp,
         "show every command and key",
@@ -404,6 +406,13 @@ pub(crate) const COMMANDS: [CommandSpec; 44] = [
         ["Ctrl-R"]
     ),
     spec!(Quit, "exit QQ", System, ["/quit", "/exit"], ["Ctrl-C"]),
+    spec!(
+        ShowGoal,
+        "view session goal and progress",
+        View,
+        ["/goal"],
+        []
+    ),
     spec!(
         ShowSideQuestions,
         "ask or view side questions",

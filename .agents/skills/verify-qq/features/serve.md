@@ -56,3 +56,22 @@ sleep 3; rg -o '"type":"(session_created|text_appended|run_finished)"' $QQ_HOME/
 - `GET …/events` without `Last-Event-ID` gets 400 `Last-Event-ID is required`.
 - The server binds only to loopback. Keep-alive comments arrive every 15 s.
 - `qq run` exits 4 while this home's server is running. Stop the server first.
+
+## Server goal scripting
+
+With the isolated server running and a root session ID from its API, drive
+`qq goal set OBJECTIVE --session ID --check 'printf checked' --json`, then
+`qq goal show --session ID --json`. Confirm the check awaits separate consent.
+Drive `pause`, edit with `set UPDATED`, and confirm the paused state and
+unspecified budget/check survive. Authorize only after inspecting the command:
+`qq goal approve-check once --command 'printf checked' --session ID --json`.
+Drive `resume` and `clear`; capture each receipt and the resulting snapshot.
+Confirm that these clients leave server store ownership intact. For a revision
+race, capture an observed identity and change it through a second client;
+commands using that stale identity must conflict, without automatic retries.
+
+Also stop the server and run `qq goal show --session ID --json` in a fresh
+isolated runtime/data/config directory. Expect exit 1 with `start qq serve`,
+no session database creation, and no provider requests. Capture CLI help for
+all goal operations. If socket binding is denied, record that limitation;
+the no-server check and core command tests do not prove live HTTP success.

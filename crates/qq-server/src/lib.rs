@@ -811,7 +811,8 @@ async fn session_command(
         | SessionCommand::CompactSession { .. }
         | SessionCommand::RollbackCompaction { .. }
         | SessionCommand::SetGoal { .. }
-        | SessionCommand::GoalControl { .. } => None,
+        | SessionCommand::GoalControl { .. }
+        | SessionCommand::AcknowledgeCheckInterruption { .. } => None,
     };
     if let Some(input) = input
         && let Err(error) = validate_input(input)
@@ -2208,6 +2209,12 @@ mod tests {
         let run_id = qq_protocol::RunId::from_bytes([4; 16]);
         let workspace_id = WorkspaceId::from_bytes([5; 16]);
         match kind {
+            SessionCommandKind::AcknowledgeCheckInterruption => {
+                SessionCommand::AcknowledgeCheckInterruption {
+                    workspace_id,
+                    run_id,
+                }
+            }
             SessionCommandKind::SetGoal => SessionCommand::SetGoal {
                 session_id,
                 objective: "finish the task".to_owned(),

@@ -713,7 +713,7 @@ impl TaskRouter for PreparationRouter {
 struct CooperativePreparationLoader {
     routing: bool,
     requests: Arc<AtomicUsize>,
-    entered: Arc<tokio::sync::Notify>,
+    entered: tokio::sync::mpsc::Sender<bool>,
     drained: Arc<tokio::sync::Notify>,
     signalled: Arc<AtomicUsize>,
 }
@@ -739,12 +739,12 @@ impl RuntimeLoader for CooperativePreparationLoader {
                 Ok(loaded)
             });
         }
-        let entered = Arc::clone(&self.entered);
+        let entered = self.entered.clone();
         let drained = Arc::clone(&self.drained);
         let signalled = Arc::clone(&self.signalled);
         Box::pin(async move {
             progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
-            entered.notify_one();
+            entered.send(!progress.is_cancelled()).await.unwrap();
             progress.cancelled().await;
             signalled.fetch_add(1, Ordering::SeqCst);
             progress.set(RuntimeLoadStage::Complete);
@@ -761,14 +761,14 @@ impl RuntimeLoader for CooperativePreparationLoader {
 async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
     for (cancel, routing) in [(false, false), (true, false), (false, true), (true, true)] {
         let requests = Arc::new(AtomicUsize::new(0));
-        let entered = Arc::new(tokio::sync::Notify::new());
+        let (entered, mut entered_rx) = tokio::sync::mpsc::channel(1);
         let drained = Arc::new(tokio::sync::Notify::new());
         let signalled = Arc::new(AtomicUsize::new(0));
         let mut harness = DeadlineSession::open(
             Arc::new(CooperativePreparationLoader {
                 routing,
                 requests: Arc::clone(&requests),
-                entered: Arc::clone(&entered),
+                entered,
                 drained: Arc::clone(&drained),
                 signalled: Arc::clone(&signalled),
             }),
@@ -792,10 +792,14 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
                 .await
                 .unwrap();
         }
-        let run_id = harness
-            .submit("prepare", if cancel { 10_000 } else { 100 })
-            .await;
-        entered.notified().await;
+        // Let real Store I/O establish the stage before crossing the deadline.
+        let duration_ms = if cancel { 10_000 } else { 3_600_000 };
+        let run_id = harness.submit("prepare", duration_ms).await;
+        assert_eq!(
+            entered_rx.recv().await,
+            Some(true),
+            "preparation must enter before cancellation, not during drain"
+        );
         if !cancel {
             tokio::time::pause();
         }
@@ -809,7 +813,7 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
                 .await
                 .unwrap();
         } else {
-            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::time::advance(Duration::from_millis(duration_ms)).await;
         }
         drained.notified().await;
         if !cancel {
@@ -835,7 +839,9 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
         } else {
             assert!(
                 matches!(finished_outcome(&observed, run_id), Some(RunOutcome::BudgetExhausted { exhaustion })
-                if exhaustion.message.contains("resolving checkpoint reviewer credentials"))
+                if exhaustion.message.contains("resolving checkpoint reviewer credentials")),
+                "cancel={cancel}, routing={routing}, outcome={:?}",
+                finished_outcome(&observed, run_id)
             );
         }
     }

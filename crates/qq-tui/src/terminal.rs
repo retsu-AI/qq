@@ -201,6 +201,7 @@ where
 
     loop {
         if redraw == Some(Redraw::Immediate) {
+            app.refresh_goal_clock();
             let bytes = renderer.draw(&mut app, terminal_size)?;
             output.write_all(&bytes).await?;
             output.flush().await?;
@@ -256,6 +257,7 @@ where
                 Effects::changed(app.advance_animation())
             }
             _ = frame_tick.tick(), if redraw.is_some() => {
+                app.refresh_goal_clock();
                 let bytes = renderer.draw(&mut app, terminal_size)?;
                 output.write_all(&bytes).await?;
                 output.flush().await?;

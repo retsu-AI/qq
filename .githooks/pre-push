@@ -21,4 +21,10 @@ if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
     echo 'pre-push: commit or stash staged, unstaged and untracked changes before validating the pushed tree' >&2
     exit 1
 fi
+# Git exports repository selection for hooks; fixture Git commands must discover
+# their own repositories rather than alter this worktree's HEAD or index.
+git_local_env=$(git rev-parse --local-env-vars)
+for git_env_name in $git_local_env; do
+    unset "$git_env_name"
+done
 exec cargo xtask check --profile quick

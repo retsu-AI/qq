@@ -24,7 +24,9 @@ pub(super) struct AppliedCommand {
 pub(super) struct CommandAdmission {
     pub(super) seed: WorkspaceGrantSeed,
     pub(super) goal_work_present: bool,
+    pub(super) pause_goal_only_if_active: bool,
     pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
+    pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
 }
 
 pub(super) struct CreatedChildRun {
@@ -358,6 +360,7 @@ pub(super) fn execute_command(
                 SessionCommand::SetGoal { .. }
                     | SessionCommand::GoalControl { .. }
                     | SessionCommand::CancelRun { .. }
+                    | SessionCommand::AcknowledgeCheckInterruption { .. }
             ),
             replayed: true,
             side_launch: None,
@@ -451,6 +454,10 @@ pub(super) fn execute_command(
                 expected,
                 replace,
                 now,
+                match &admission.goal_policy {
+                    Some(result) => result.clone()?,
+                    None => GoalPolicy::default(),
+                },
             )?;
             if let Some(previous) = previous {
                 cascade_cancels.extend(cancel_goal_work(
@@ -458,7 +465,7 @@ pub(super) fn execute_command(
                     store_id,
                     session_id,
                     previous.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     replace || goal.status != qq_protocol::GoalStatus::Active,
                 )?);
@@ -495,26 +502,127 @@ pub(super) fn execute_command(
                 true,
             )
         }
+        SessionCommand::AcknowledgeCheckInterruption {
+            workspace_id,
+            run_id,
+        } => {
+            ensure_workspace(&transaction, workspace_id)?;
+            let session: Option<String> = transaction.query_row(
+                "SELECT r.session_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE s.workspace_id=?1 AND r.id=?2 AND r.check_acknowledgment_pending=1 AND r.status='interrupted'",
+                params![workspace_id.to_string(),run_id.to_string()],|row|row.get(0),
+            ).optional()?;
+            let Some(session) = session else {
+                return Err(SessionRuntimeError::CheckInterruptionMismatch);
+            };
+            let session_id = parse_id(&session)?;
+            transaction.execute(
+                "UPDATE runs SET check_acknowledgment_pending=0 WHERE id=?1",
+                [run_id.to_string()],
+            )?;
+            if let Some(goal) = goals::load_live(&transaction, session_id)?
+                && matches!(
+                    goal.status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+                        }
+                    }
+                )
+            {
+                let captured: (Option<String>, Option<u32>) = transaction.query_row(
+                    "SELECT goal_id,goal_revision FROM runs WHERE id=?1",
+                    [run_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                if captured.0.as_deref() == Some(goal.goal_id.to_string().as_str())
+                    && captured.1 == Some(goal.revision)
+                {
+                    let (goal, _) = goals::control(
+                        &transaction,
+                        session_id,
+                        qq_protocol::GoalIdentity {
+                            goal_id: goal.goal_id,
+                            revision: goal.revision,
+                        },
+                        qq_protocol::GoalControl::Pause,
+                        now,
+                        None,
+                        None,
+                    )?;
+                    append_event(
+                        &transaction,
+                        EventContext::for_session(
+                            store_id,
+                            workspace_id,
+                            session_id,
+                            Some(command_id),
+                            now,
+                        ),
+                        SessionEvent::GoalUpdated {
+                            goal: Box::new(goal),
+                        },
+                    )?;
+                }
+            }
+            let event = append_event(
+                &transaction,
+                EventContext::for_session(
+                    store_id,
+                    workspace_id,
+                    session_id,
+                    Some(command_id),
+                    now,
+                ),
+                SessionEvent::CheckInterruptionChanged {
+                    interruption: super::goal_check::interruption(&transaction, workspace_id)?,
+                },
+            )?;
+            (
+                CommandReceipt {
+                    command_id,
+                    committed_through: event.cursor,
+                    outcome: CommandOutcome::CheckInterruptionAcknowledged {
+                        workspace_id,
+                        run_id,
+                    },
+                },
+                true,
+            )
+        }
         SessionCommand::GoalControl {
             session_id,
             expected,
             action,
         } => {
-            let (mut goal, clear) = goals::control(
-                &transaction,
-                session_id,
-                expected,
-                action,
-                now,
-                admission.goal_check_policy.as_ref(),
-            )?;
-            if clear || goal.status != qq_protocol::GoalStatus::Active {
+            let stopped = if admission.pause_goal_only_if_active {
+                goals::load_live(&transaction, session_id)?.filter(|goal| {
+                    goal.goal_id == expected.goal_id
+                        && goal.revision == expected.revision
+                        && goal.status != qq_protocol::GoalStatus::Active
+                })
+            } else {
+                None
+            };
+            let already_stopped = stopped.is_some();
+            let (mut goal, clear) = match stopped {
+                Some(goal) => (goal, false),
+                None => goals::control(
+                    &transaction,
+                    session_id,
+                    expected,
+                    action,
+                    now,
+                    admission.goal_check_policy.as_ref(),
+                    admission.goal_policy.as_ref(),
+                )?,
+            };
+            if !already_stopped && (clear || goal.status != qq_protocol::GoalStatus::Active) {
                 cascade_cancels.extend(cancel_goal_work(
                     &transaction,
                     store_id,
                     session_id,
                     goal.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     true,
                 )?);
@@ -1166,13 +1274,14 @@ pub(super) fn execute_command(
                     qq_protocol::GoalControl::Pause,
                     now,
                     None,
+                    None,
                 )?;
                 cascade_cancels.extend(cancel_goal_work(
                     &transaction,
                     store_id,
                     session_id,
                     goal.goal_id,
-                    command_id,
+                    Some(command_id),
                     now,
                     true,
                 )?);
@@ -2168,7 +2277,7 @@ pub(super) fn delete_idle_session(
                     EXISTS(
                         SELECT 1 FROM runs
                         WHERE session_id = sessions.id
-                          AND status IN ('queued', 'running')
+                          AND (status IN ('queued', 'running') OR check_acknowledgment_pending=1)
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
@@ -2415,12 +2524,12 @@ fn session_grant_recordable(
 }
 
 /// Cancellation preserves reservations until their executor has drained.
-fn cancel_goal_work(
+pub(super) fn cancel_goal_work(
     transaction: &Connection,
     store_id: StoreId,
     session: SessionId,
     goal: qq_protocol::GoalId,
-    command: CommandId,
+    command: Option<CommandId>,
     now: u64,
     drain: bool,
 ) -> Result<Vec<RunId>, SessionRuntimeError> {
@@ -2446,7 +2555,7 @@ fn cancel_goal_work(
                 obligation.workspace,
                 obligation.session,
                 run,
-                Some(command),
+                command,
                 now,
             ),
             SessionEvent::CancellationRequested {

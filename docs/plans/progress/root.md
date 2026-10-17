@@ -966,3 +966,19 @@ Root reserves store schema49 for nullable runs.goal_paid_owner_run_id on initial
 ### 2026-10-15 — PR308 release-preparation main update
 
 - Current main advanced to9df32a5 (#316) during qualification. Import its exact remote tree and signed commit through read-only Git data, validating both object SHA values. Integrate docs-only changes: preserve published/open status corrections and all dated G0 evidence; keep goal branch protocol33/schema51 together with the release backup procedure; record strict projection and goal-capable catalog accurately. Legacy76sites retain feature-line locations. No Rust/runtime change; run docs/compatibility checks rather than repeating the unchanged runtime suite.
+
+
+### 2026-10-16 — ENG-1063/1064/1065 goal-delivery stack ownership
+
+- Root alone owns `/tmp/qq-goal-delivery-20261015/g3`, branch feat/eng-1063-goal-completion on main3d58b3d3. Owned scope: remaining G2 paid/final-slot/soak behavior; G3 check runner, authorization, no-check audit, interrupted-check quarantine and acceptance; forced protocol/client/server consumers; required configuration/policy foundations. G4 TUI/forms/CLI/foreground surfaces and G5 live evidence remain separate stacked PRs.
+- Reserve schema56 for GoalCheck rows,57 for durable interrupted-check workspace holds and58 for configured goal-policy limits. Protocol34 names the interrupted-check acknowledgment/event extension; descriptor15 remains unchanged. Amend the Proposed ADR0049 and goals plan with the crash-derived exception to the original one-bump assumption before publishing. Protocol35 foreground records belong to G4, not this PR. No PR319 provenance restored.
+- Source, manifests, guide/design, protocol fixtures, migration matrix and existing per-site legacy sleep locations are forced consumers. Do not resurrect consolidated plans or append new work to historical autonomous-core records. Final integrated check/smoke, independent review and candidate diagnostic follow the captured baseline.
+
+### 2026-10-16 — ENG-1063 pre-push environment repair
+
+- Required first push exposed inherited Git-local hook environment reaching temporary-repository tests: a linked worktree fixture changed the owned branch/index. The push failed closed. All physical source blobs independently matched ae835237; preserve the synthetic init commit under rescue/g3-prepush-corruption-20261016 and restore only the owned branch/index by compare-and-swap/read-tree.
+- Root owns the necessary `.githooks/pre-push`, `xtask/src/check.rs`, `.github/scripts/test-pre-push.sh` and AGENTS enforcer row. Clear Git-local variables after original-tip/clean-tree validation, before Cargo. Actual local-push regression covers regular and linked worktrees, unchanged HEAD/index, fixture-local commits and remote tip. Hook changes select the full gate; no gate is skipped.
+
+### 2026-10-16 — ENG-1064 surface ownership
+
+- Root alone owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Own TUI/forms/CLI/foreground, protocol35 fixtures, guide/design and verify feature copies. Preserve descriptor15/schema58 and G3 crash holds. G5 will use a separate isolated workspace and subscription-only openai-codex/gpt-6.1-sol, with no paid API fallback.

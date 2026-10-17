@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod document;
+mod goals;
 mod loader;
 mod managed;
 mod models;
@@ -23,6 +24,7 @@ mod remote;
 mod theme;
 mod tui;
 
+pub use goals::{GoalCeilings, GoalRunLimits, GoalsConfig};
 pub use loader::canonical_working_directory;
 pub use pack::{
     AgentPack, MAX_PACK_MANIFEST_BYTES, MAX_PACK_PROMPT_BYTES, MAX_PACKS, PACK_MANIFEST_FILE,
@@ -1242,6 +1244,7 @@ impl ModelRoute {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectivePolicy {
+    goal_ceilings: GoalCeilings,
     allowed_providers: Option<Vec<String>>,
     exposed_tools: Option<Vec<String>>,
     denied_providers: Vec<String>,
@@ -1262,6 +1265,7 @@ pub struct EffectivePolicy {
 impl Default for EffectivePolicy {
     fn default() -> Self {
         Self {
+            goal_ceilings: GoalCeilings::default(),
             allowed_providers: None,
             exposed_tools: None,
             denied_providers: Vec::new(),
@@ -1293,6 +1297,11 @@ pub enum BuiltinPreference {
 }
 
 impl EffectivePolicy {
+    #[must_use]
+    pub const fn goal_ceilings(&self) -> &GoalCeilings {
+        &self.goal_ceilings
+    }
+
     /// Exact catalog exposure, intersected across layers. Absence preserves
     /// the existing catalog; an empty list exposes nothing. This grants no
     /// execution authority.
@@ -1563,6 +1572,7 @@ pub enum ConfigKey {
     ReviewerModel,
     Delegation,
     Audit,
+    Goals,
     JevReview,
     JevRouting,
     JevApproval,
@@ -1615,6 +1625,7 @@ impl SourceReport {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConfigProvenance {
+    goals: BTreeMap<String, SourceIdentity>,
     organization: Option<SourceIdentity>,
     model: Option<SourceIdentity>,
     worker_model: Option<SourceIdentity>,
@@ -1638,6 +1649,12 @@ pub struct ConfigProvenance {
 }
 
 impl ConfigProvenance {
+    /// Sources of chosen goal defaults and monotonic managed ceilings.
+    #[must_use]
+    pub const fn goals(&self) -> &BTreeMap<String, SourceIdentity> {
+        &self.goals
+    }
+
     #[must_use]
     pub const fn reasoning_effort(&self) -> Option<&SourceIdentity> {
         self.reasoning_effort.as_ref()
@@ -1903,6 +1920,7 @@ pub struct ConfigSnapshot {
     reviewer_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
+    goals: GoalsConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
     jev_approval: bool,
@@ -1934,6 +1952,7 @@ pub struct ClientSnapshot {
     reviewer_model: Option<ModelRoute>,
     delegation: DelegationConfig,
     audit: AuditConfig,
+    goals: GoalsConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
     jev_approval: bool,
@@ -1953,6 +1972,11 @@ pub struct ClientSnapshot {
 }
 
 impl ClientSnapshot {
+    #[must_use]
+    pub const fn goals(&self) -> &GoalsConfig {
+        &self.goals
+    }
+
     /// Effective MCP declarations, available for inspection without a model.
     #[must_use]
     pub const fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
@@ -2425,6 +2449,11 @@ impl AgentProfileConfig {
 
 impl ConfigSnapshot {
     #[must_use]
+    pub const fn goals(&self) -> &GoalsConfig {
+        &self.goals
+    }
+
+    #[must_use]
     pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
         self.reasoning_effort
     }
@@ -2749,6 +2778,11 @@ pub enum ConfigError {
     InvalidDelegation(String),
     #[error("audit settings are invalid: {0}")]
     InvalidAudit(String),
+    #[error("goal setting {field} is invalid: {reason}")]
+    InvalidGoals {
+        field: &'static str,
+        reason: &'static str,
+    },
     #[error("approval timeout is invalid: {0}")]
     InvalidApprovalTimeout(String),
     #[error("managed policy {rule} was violated: {message}")]

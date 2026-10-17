@@ -263,6 +263,7 @@ fn pause_after_committed_command(command_id: CommandId) {
 pub(super) struct Store {
     inner: Arc<StoreInner>,
     store_id: StoreId,
+    startup_goal_event_rowid: Option<i64>,
 }
 
 pub(super) struct FeedAttachment {
@@ -313,7 +314,7 @@ impl Store {
             .ready
             .await
             .map_err(|_| SessionRuntimeError::Unavailable)??;
-        let store = Self {
+        let mut store = Self {
             inner: Arc::new(StoreInner {
                 control: started.control,
                 control_slots: Arc::new(Semaphore::new(CONTROL_QUEUE_CAPACITY)),
@@ -330,9 +331,10 @@ impl Store {
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
+            startup_goal_event_rowid: None,
         };
         let present = Arc::clone(&store.inner.goals_present);
-        store
+        store.startup_goal_event_rowid = store
             .call(Priority::Control, move |connection| {
                 let enabled: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
@@ -340,10 +342,39 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 present.store(enabled, Ordering::Release);
-                Ok(())
+                if enabled {
+                    // Capture before recovery or scheduling can append events.
+                    connection
+                        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |row| {
+                            row.get(0)
+                        })
+                        .map(Some)
+                        .map_err(Into::into)
+                } else {
+                    Ok(None)
+                }
             })
             .await?;
         Ok(store)
+    }
+
+    pub(super) async fn startup_goal_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<EventCursor>, SessionRuntimeError> {
+        let Some(boundary) = self.startup_goal_event_rowid else {
+            return Ok(None);
+        };
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            ensure_workspace(connection, workspace_id)?;
+            let sequence = connection.query_row(
+                "SELECT sequence FROM events WHERE workspace_id=?1 AND rowid<=?2 ORDER BY sequence DESC LIMIT 1",
+                rusqlite::params![workspace_id.to_string(), boundary],
+                |row| row.get(0),
+            ).optional()?.unwrap_or(0);
+            Ok(Some(EventCursor { store_id, workspace_id, sequence }))
+        }).await
     }
 
     pub(super) const fn store_id(&self) -> StoreId {
@@ -674,6 +705,17 @@ impl Store {
         .await
     }
 
+    pub(super) async fn has_preempting_goal_work(
+        &self,
+        session: SessionId,
+        goal: qq_protocol::GoalId,
+    ) -> Result<bool, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            connection.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE session_id=?1 AND kind='prompt' AND status IN ('queued','running') AND (json_extract(origin_json,'$.type') NOT IN ('goal','goal_check') OR origin_json IS NULL OR json_extract(origin_json,'$.goal_id') != ?2))",
+                [session.to_string(), goal.to_string()], |row| row.get(0)).map_err(Into::into)
+        }).await
+    }
+
     pub(super) async fn unfinished_run_ids(&self) -> Result<Vec<RunId>, SessionRuntimeError> {
         self.call(Priority::Control, |connection| {
             let mut statement = connection.prepare(
@@ -702,6 +744,30 @@ impl Store {
     ) -> Result<AppliedCommand, SessionRuntimeError> {
         self.command_with_admission(command_id, command, CommandAdmission::default(), None)
             .await
+    }
+
+    /// Goal command replay must not wait on configuration resolution.
+    pub(super) async fn command_is_recorded(
+        &self,
+        command_id: CommandId,
+        command: &SessionCommand,
+    ) -> Result<bool, SessionRuntimeError> {
+        let expected = serde_json::to_string(command)?;
+        self.call(Priority::Control, move |connection| {
+            let stored: Option<String> = connection
+                .query_row(
+                    "SELECT request_json FROM commands WHERE id=?1",
+                    [command_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match stored {
+                Some(stored) if stored == expected => Ok(true),
+                Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
+                None => Ok(false),
+            }
+        })
+        .await
     }
 
     pub(super) async fn command_with_admission(
@@ -926,6 +992,77 @@ impl Store {
         let store_id = self.store_id;
         self.call(Priority::Control, move |connection| {
             load_snapshot(connection, store_id, request)
+        })
+        .await
+    }
+
+    pub(super) async fn goal_pending_runs(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            let current = goals::load_live(connection, session_id)?
+                .ok_or(SessionRuntimeError::GoalNotFound)?;
+            if current.goal_id != expected.goal_id || current.revision != expected.revision {
+                return Err(SessionRuntimeError::GoalConflict {
+                    current: Some(qq_protocol::GoalIdentity {
+                        goal_id: current.goal_id,
+                        revision: current.revision,
+                    }),
+                });
+            }
+            Ok(
+                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
+                    .into_iter()
+                    .map(|work| work.run)
+                    .collect(),
+            )
+        })
+        .await
+    }
+
+    pub(super) async fn goal_owns_run(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+        run_id: RunId,
+    ) -> Result<bool, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            let current = goals::load_live(connection, session_id)?
+                .ok_or(SessionRuntimeError::GoalNotFound)?;
+            if current.goal_id != expected.goal_id || current.revision != expected.revision {
+                return Err(SessionRuntimeError::GoalConflict {
+                    current: Some(qq_protocol::GoalIdentity {
+                        goal_id: current.goal_id,
+                        revision: current.revision,
+                    }),
+                });
+            }
+            Ok(
+                goals::paid_obligations(connection, session_id, Some(expected.goal_id))?
+                    .iter()
+                    .any(|work| work.run == run_id && !work.cancelled),
+            )
+        })
+        .await
+    }
+
+    pub(super) async fn run_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<qq_protocol::RunSnapshot, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            if session_workspace(connection, session_id)? != workspace_id {
+                return Err(SessionRuntimeError::SessionNotFound);
+            }
+            let run = claim::load_run(connection, run_id)?;
+            if run.session_id != session_id {
+                return Err(SessionRuntimeError::RunNotFound);
+            }
+            Ok(run)
         })
         .await
     }
@@ -1845,7 +1982,7 @@ impl Store {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out)
+            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out, &[])
         })
         .await
     }
@@ -1917,6 +2054,7 @@ impl Store {
         claimed: &ClaimedRun,
         paid: bool,
         maximum_cost: Option<u64>,
+        maximum_tokens: (Option<u64>, Option<u64>),
     ) -> Result<claim::RunStart, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1925,7 +2063,6 @@ impl Store {
         let limits = claimed.limits;
         let admission = claimed.goal_admission;
         let goal_spend_owner = claimed.goal_spend_owner;
-        let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
             streaming::record_routing_started(
@@ -1941,8 +2078,8 @@ impl Store {
                     admission,
                 },
                 paid,
-                tracked,
                 maximum_cost,
+                maximum_tokens,
             )
         })
         .await

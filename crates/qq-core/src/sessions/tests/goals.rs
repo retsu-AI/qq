@@ -524,11 +524,13 @@ async fn failed_turn_notice_commit_rolls_back_the_atom_events_and_capacity() {
 #[tokio::test]
 async fn client_revision_notice_reopens_as_the_exact_model_window() {
     struct Loader {
+        repair: bool,
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     }
     struct Model {
+        repair: bool,
         requests: Arc<StdMutex<Vec<ModelRequest>>>,
         entered: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
@@ -538,6 +540,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
         fn stream(&self, request: ModelRequest) -> ProviderStream {
             self.requests.lock().unwrap().push(request);
             let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+            let repair = self.repair;
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
             Box::pin(async_stream::stream! {
@@ -545,7 +548,11 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
                     entered.notify_one();
                     release.notified().await;
                 }
-                if turn < 2 {
+                if repair {
+                    yield Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: if turn == 0 { "invalid JSON" } else { r#"{"done":true}"# }.to_owned(),
+                    });
+                } else if turn < 2 {
                     let id = format!("read-{turn}");
                     yield Ok(qq_provider::ProviderEvent::ToolCallStarted { id: id.clone(), name: "tree".to_owned() });
                     yield Ok(qq_provider::ProviderEvent::ToolCallArgumentsDelta { id: id.clone(), json: r#"{"path":"."}"#.to_owned() });
@@ -560,6 +567,7 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
     impl RuntimeLoader for Loader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
             let model = Model {
+                repair: self.repair,
                 requests: Arc::clone(&self.requests),
                 entered: Arc::clone(&self.entered),
                 release: Arc::clone(&self.release),
@@ -571,104 +579,119 @@ async fn client_revision_notice_reopens_as_the_exact_model_window() {
             })
         }
     }
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(path.clone()),
-        Arc::new(Loader {
-            requests: Arc::clone(&requests),
-            entered: Arc::clone(&entered),
-            release: Arc::clone(&release),
-        }),
-    )
-    .await
-    .unwrap();
-    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session");
-    };
-    let receipt = runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"original objective",
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
+    for repair in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("sessions.sqlite3");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(Loader {
+                repair,
+                requests: Arc::clone(&requests),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
         )
         .await
         .unwrap();
-    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
-        panic!("goal");
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: workspace,
-            after: receipt.committed_through,
-        })
-        .unwrap();
-    queue_prompt(&runtime, session_id, "work".to_owned()).await;
-    entered.notified().await;
-    runtime
-        .command(
-            CommandId::generate().unwrap(),
-            serde_json::from_value(serde_json::json!({
-                "type":"set_goal", "session_id":session_id, "objective":"revised objective",
-                "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
-                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
-            }))
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-    release.notify_one();
-    let finished = collect_through_finished_generously(&mut events).await;
-    assert!(finished.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    )));
-    let expected = {
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created =
+            create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session");
+        };
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal", "session_id":session_id, "objective":"original objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal");
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        runtime.command(CommandId::generate().unwrap(), SessionCommand::SubmitPrompt {
+        session_id, input: vec![InputPart::text("work")], limits: RunLimits::default(),
+        correlation: Correlation::default(),
+        output: repair.then(|| Box::new(qq_protocol::OutputContract {
+            schema: serde_json::json!({"type":"object","properties":{"done":{"type":"boolean"}},"required":["done"],"additionalProperties":false}),
+            repair_turns: 1,
+        })),
+    }).await.unwrap();
+        entered.notified().await;
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal", "session_id":session_id, "objective":"revised objective",
+                    "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        release.notify_one();
+        let finished = collect_through_finished_generously(&mut events).await;
+        assert!(finished.iter().any(|event| matches!(
+            event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )));
+        let expected = {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), if repair { 2 } else { 3 });
+            assert!(
+                request_texts(&requests[1])
+                    .iter()
+                    .any(|text| text.contains("revised objective"))
+            );
+            let mut messages = requests.last().unwrap().messages().to_vec();
+            messages.push(Message::assistant(if repair {
+                r#"{"done":true}"#
+            } else {
+                "done"
+            }));
+            messages
+        };
+        runtime.close().await.unwrap();
+        drop(runtime);
+        let reopened = Store::open(path).await.unwrap();
+        let replayed = reopened
+            .call(Priority::Control, move |connection| {
+                let transaction = connection.transaction()?;
+                load_model_context(&transaction, session_id, u64::MAX)
+            })
+            .await
+            .unwrap();
         assert!(
-            request_texts(&requests[1])
-                .iter()
-                .any(|text| text.contains("revised objective"))
-        );
-        let mut messages = requests[2].messages().to_vec();
-        messages.push(Message::assistant("done"));
-        messages
-    };
-    runtime.close().await.unwrap();
-    drop(runtime);
-    let reopened = Store::open(path).await.unwrap();
-    let replayed = reopened
-        .call(Priority::Control, move |connection| {
-            let transaction = connection.transaction()?;
-            load_model_context(&transaction, session_id, u64::MAX)
-        })
-        .await
-        .unwrap();
-    assert!(
-        replayed
-            .iter()
-            .any(|message| message.content().iter().any(|block| {
+            replayed.iter().any(|message| {
+                message.content().iter().any(|block| {
                 matches!(block, ContentBlock::Text { text } if text.contains("revised objective"))
-            })),
-        "reopened context must retain the client revision notice"
-    );
-    assert_eq!(
-        replayed, expected,
-        "stored revision notice must replay in the actual request position"
-    );
-    reopened.close().await.unwrap();
+            })
+            }),
+            "reopened context must retain the client revision notice"
+        );
+        assert_eq!(
+            replayed, expected,
+            "stored revision notice must replay in the actual request position"
+        );
+        reopened.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1320,6 +1343,10 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         checks: AtomicUsize,
     }
     impl WorkspaceGrantAuthority for Authority {
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
             Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
         }
@@ -2448,7 +2475,7 @@ async fn paid_preparation_freezes_the_optional_goal_before_main_start() {
             if routed {
                 assert!(
                     store
-                        .record_routing_started(&claim, true, None)
+                        .record_routing_started(&claim, true, None, (None, None))
                         .await
                         .unwrap()
                         .unwrap()
@@ -3925,7 +3952,7 @@ async fn routing_before_main_charges_historical_goal_spend_on_reserved_settlemen
             let goal = claim.goal.as_ref().unwrap();
             let id = goal.goal_id;
             store
-                .record_routing_started(&claim, paid, None)
+                .record_routing_started(&claim, paid, None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()
@@ -4769,7 +4796,7 @@ async fn real_between_run_compactor_records_goal_dispatch_and_known_rejection() 
         );
         runtime.command(CommandId::generate().unwrap(),serde_json::from_value(serde_json::json!({
             "type":"set_goal","session_id":session,"objective":"survive automatic compaction outage",
-            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000,"max_cost_usd_nanos":(!transport && !cancel && !prefix).then_some(1_000_000_u64)}
         })).unwrap()).await.unwrap();
         let owner = queue_prompt(&runtime, session, "continue".to_owned()).await;
         let cancelled_helper = if cancel {
@@ -7480,7 +7507,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
             .unwrap();
         runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
             "type":"set_goal","session_id":session_id,"objective":"refresh allowance after loading",
-            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {10_000}}
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,"max_total_tokens":if raised {500} else {200_000}}
         })).unwrap()).await.unwrap();
         runtime.inner.store.drive_goals(now_ms()).await.unwrap();
         let run = if user_prompt {
@@ -7491,7 +7518,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                         session_id,
                         input: vec![InputPart::text("explicit work under the same budget")],
                         limits: RunLimits {
-                            max_total_tokens: strict.then_some(2000),
+                            max_total_tokens: strict.then_some(200_000),
                             ..RunLimits::default()
                         },
                         correlation: Correlation::default(),
@@ -7534,10 +7561,10 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 });
                 let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                 if raised {
-                    goal.budget.max_total_tokens = Some(3000);
+                    goal.budget.max_total_tokens = Some(300_000);
                     goal.budget.deadline_ms = now_ms() + 120_000;
                 } else {
-                    goal.counters.usage = Some(usage(8000, 1000));
+                    goal.counters.usage = Some(usage(80_000, 10_000));
                 }
                 crate::sessions::goals::save(connection, &goal)
             })
@@ -7551,19 +7578,32 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
                 finished_outcome(&finished, run),
                 Some(RunOutcome::Completed)
             ),
-            "positive remainder permits bounded work"
+            "positive remainder permits bounded work: user_prompt={user_prompt}, raised={raised}, strict={strict}, outcome={:?}, stored={:?}",
+            finished_outcome(&finished, run),
+            Connection::open(directory.path().join("sessions.sqlite3"))
+                .unwrap()
+                .query_row(
+                    "SELECT limits_json FROM runs WHERE id=?1",
+                    [run.to_string()],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap()
         );
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests.len(),
+            2,
+            "one work response and the final-slot handoff"
+        );
         let expected = if strict {
-            2000
+            200_000
         } else if raised {
-            3000
+            300_000
         } else {
-            1000
+            110_000
         };
         assert!(
-            requests[0] == expected.min(1024),
+            requests.iter().all(|cap| *cap == expected.min(1024)),
             "remaining goal allowance must shape the actual request: {:?}",
             *requests
         );
@@ -7597,9 +7637,9 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
         assert_eq!(
             goal.counters.usage,
             Some(if raised {
-                usage(1, 1)
+                usage(2, 2)
             } else {
-                usage(8001, 1001)
+                usage(80_002, 10_002)
             })
         );
     }
@@ -7607,7 +7647,7 @@ async fn goal_main_start_refreshes_and_persists_positive_remaining_allowance() {
 
 #[tokio::test]
 async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() {
-    struct Router(Arc<AtomicUsize>, bool, Arc<tokio::sync::Notify>);
+    struct Router(Arc<AtomicUsize>, bool, (Option<u64>, Option<u64>));
     impl TaskRouter for Router {
         fn identity(&self) -> &'static str {
             "fixture/goal-expiry"
@@ -7616,8 +7656,13 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             "fixture/goal-expiry"
         }
         fn max_cost_usd_nanos(&self) -> Option<u64> {
-            self.2.notify_one();
             if self.1 { None } else { Some(37) }
+        }
+        fn max_input_tokens(&self) -> Option<u64> {
+            self.2.0
+        }
+        fn max_output_tokens(&self) -> Option<u64> {
+            self.2.1
         }
         fn route(&self, _: String) -> TaskRoutingFuture {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -7648,7 +7693,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         routing: Arc<AtomicUsize>,
         main: Arc<AtomicUsize>,
         unknown_cost: bool,
-        admitting: Arc<tokio::sync::Notify>,
+        token_bounds: (Option<u64>, Option<u64>),
     }
     impl RuntimeLoader for Loader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
@@ -7657,26 +7702,35 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             let routing = Arc::clone(&self.routing);
             let main = Arc::clone(&self.main);
             let unknown_cost = self.unknown_cost;
-            let admitting = Arc::clone(&self.admitting);
+            let token_bounds = self.token_bounds;
             Box::pin(async move {
                 entered.notify_one();
                 release.notified().await;
                 Ok(loaded_runtime(
                     Runtime::new(Model(main), "test-model", 256)
                         .unwrap()
-                        .with_task_router(Arc::new(Router(routing, unknown_cost, admitting))),
+                        .with_task_router(Arc::new(Router(routing, unknown_cost, token_bounds))),
                     &request.workspace,
                     None,
                 ))
             })
         }
     }
-    for condition in ["expired", "over_cost", "unknown_cost", "per_run_duration"] {
+    for condition in [
+        "expired",
+        "over_cost",
+        "unknown_cost",
+        "over_tokens",
+        "unknown_tokens",
+        "over_input",
+        "over_output",
+        "overflow_tokens",
+        "per_run_duration",
+    ] {
         for user_prompt in [true, false] {
             let directory = TempDir::new().unwrap();
             let entered = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
-            let admitting = Arc::new(tokio::sync::Notify::new());
             let routing = Arc::new(AtomicUsize::new(0));
             let main = Arc::new(AtomicUsize::new(0));
             let runtime = SessionRuntime::open(
@@ -7687,7 +7741,11 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                     routing: Arc::clone(&routing),
                     main: Arc::clone(&main),
                     unknown_cost: condition == "unknown_cost",
-                    admitting: Arc::clone(&admitting),
+                    token_bounds: match condition {
+                        "unknown_tokens" => (None, Some(0)),
+                        "overflow_tokens" => (Some(u64::MAX), Some(1)),
+                        _ => (Some(7), Some(2)),
+                    },
                 }),
             )
             .await
@@ -7713,7 +7771,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
         })).unwrap()).await.unwrap();
             runtime.inner.store.drive_goals(now_ms()).await.unwrap();
             let run = if user_prompt {
-                if condition == "per_run_duration" {
+                if matches!(condition, "per_run_duration" | "over_input" | "over_output") {
                     let receipt = runtime
                         .command(
                             CommandId::generate().unwrap(),
@@ -7721,7 +7779,10 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                                 session_id,
                                 input: vec![InputPart::text("explicit task")],
                                 limits: RunLimits {
-                                    max_duration_ms: Some(1000),
+                                    max_duration_ms: (condition == "per_run_duration")
+                                        .then_some(1000),
+                                    max_input_tokens: (condition == "over_input").then_some(1),
+                                    max_output_tokens: (condition == "over_output").then_some(1),
                                     ..RunLimits::default()
                                 },
                                 correlation: Correlation::default(),
@@ -7773,6 +7834,15 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                         if !user_prompt {
                             goal.budget.per_run.max_duration_ms = Some(1);
                         }
+                    } else if matches!(
+                        condition,
+                        "over_tokens" | "unknown_tokens" | "overflow_tokens"
+                    ) {
+                        goal.budget.max_total_tokens = Some(1);
+                    } else if condition == "over_input" {
+                        goal.budget.per_run.max_input_tokens = Some(1);
+                    } else if condition == "over_output" {
+                        goal.budget.per_run.max_output_tokens = Some(1);
                     } else {
                         goal.budget.max_cost_usd_nanos = Some(30);
                     }
@@ -7781,34 +7851,15 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
                 .await
                 .unwrap();
             if condition == "per_run_duration" && user_prompt {
-                let store = runtime.inner.store.clone();
-                let held_writer = Arc::new(tokio::sync::Notify::new());
-                let writer_entered = Arc::clone(&held_writer);
-                let (unblock, blocked) = std::sync::mpsc::channel();
-                let holding = tokio::spawn(async move {
-                    store
-                        .call(Priority::Control, move |_| {
-                            writer_entered.notify_one();
-                            blocked
-                                .recv_timeout(Duration::from_secs(3))
-                                .expect("bounded admission hold");
-                            Ok(())
-                        })
-                        .await
-                });
-                tokio::time::timeout(Duration::from_secs(3), held_writer.notified())
-                    .await
-                    .unwrap();
+                let (admitting, unblock) = execution::hold_routing_admission(run);
                 release.notify_one();
-                // The router's declared-cost query proves loading has finished
-                // and paid admission is waiting behind the held store worker.
-                tokio::time::timeout(Duration::from_secs(3), admitting.notified())
+                tokio::time::timeout(Duration::from_secs(3), admitting)
                     .await
+                    .unwrap()
                     .unwrap();
                 // lint: allow(sleep) Store worker checks real elapsed time outside Tokio's virtual clock.
                 tokio::time::sleep(Duration::from_millis(1005)).await;
                 unblock.send(()).unwrap();
-                holding.await.unwrap().unwrap();
             } else {
                 if condition == "per_run_duration" {
                     // lint: allow(sleep) Refreshed goal duration is checked on the real store worker clock.
@@ -7832,7 +7883,7 @@ async fn paid_routing_refuses_expired_and_unaffordable_goals_without_dispatch() 
             assert_eq!(
                 routing.load(Ordering::SeqCst),
                 0,
-                "user_prompt={user_prompt}: expired work must not spend on routing"
+                "condition={condition}, user_prompt={user_prompt}: refused work must not spend on routing"
             );
             assert_eq!(main.load(Ordering::SeqCst), 0);
             if condition == "expired" || condition == "per_run_duration" {
@@ -7882,6 +7933,12 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
         fn max_cost_usd_nanos(&self) -> Option<u64> {
             Some(37)
         }
+        fn max_input_tokens(&self) -> Option<u64> {
+            Some(1_000_000)
+        }
+        fn max_output_tokens(&self) -> Option<u64> {
+            Some(0)
+        }
         fn route(&self, _: String) -> TaskRoutingFuture {
             let tokens = self.0;
             Box::pin(async move {
@@ -7923,7 +7980,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
             let routing_tokens = self.1;
             Box::pin(async move {
                 Ok(loaded_runtime(
-                    Runtime::new(Model(requests), "test-model", 1024)
+                    Runtime::new(Model(requests), "test-model", 200_000)
                         .unwrap()
                         .with_task_router(Arc::new(Router(routing_tokens))),
                     &request.workspace,
@@ -7932,7 +7989,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
             })
         }
     }
-    for routing_tokens in [Some(1000), Some(900), None] {
+    for routing_tokens in [Some(1_000_000), Some(999_999), Some(900_000), None] {
         for user_prompt in [false, true] {
             for strict_output in [false, true] {
                 let directory = TempDir::new().unwrap();
@@ -7960,7 +8017,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                     .unwrap();
                 runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
                 "type":"set_goal", "session_id":session_id, "objective":"one bounded work slice",
-                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000, "max_total_tokens":1000,
+                "budget":{"max_goal_runs":1, "deadline_ms":now_ms()+60_000, "max_total_tokens":1_000_000,
                     "per_run":{"max_output_tokens":strict_output.then_some(80)}}
             })).unwrap()).await.unwrap();
                 runtime.inner.store.drive_goals(now_ms()).await.unwrap();
@@ -8002,7 +8059,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 runtime.inner.schedule.send(()).await.unwrap();
                 let finished = collect_until_run_finished(&mut events, run).await;
                 runtime.shutdown().await.unwrap();
-                if routing_tokens == Some(900) {
+                if routing_tokens == Some(900_000) {
                     assert!(matches!(
                         finished_outcome(&finished, run),
                         Some(RunOutcome::Completed)
@@ -8025,7 +8082,7 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                 } else {
                     matches!(stored.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
                 });
-                if routing_tokens == Some(900) {
+                if routing_tokens == Some(900_000) {
                     let encoded: String = connection
                         .query_row(
                             "SELECT limits_json FROM runs WHERE id=?1",
@@ -8036,32 +8093,43 @@ async fn goal_main_output_uses_post_routing_remainder_without_double_charging() 
                     let limits: RunLimits = serde_json::from_str(&encoded).unwrap();
                     assert_eq!(
                         limits.max_total_tokens,
-                        Some(1000),
+                        Some(1_000_000),
                         "the meter charges routing within the inclusive allowance"
                     );
                 }
                 let goal = crate::sessions::goals::load_live(&connection, session_id)
                     .unwrap()
                     .unwrap();
-                assert_eq!(goal.counters.runs, u32::from(routing_tokens == Some(900)));
+                assert_eq!(
+                    goal.counters.runs,
+                    u32::from(routing_tokens == Some(900_000))
+                );
                 assert_eq!(
                     goal.counters.usage,
-                    routing_tokens.map(|tokens| if tokens == 900 {
-                        usage(901, 1)
+                    routing_tokens.map(|tokens| if tokens == 900_000 {
+                        usage(900_002, 2)
                     } else {
                         usage(tokens, 0)
                     }),
                     "routing is charged exactly once"
                 );
-                assert_eq!(
-                    *requests.lock().unwrap(),
-                    if routing_tokens == Some(900) {
-                        vec![if strict_output { 80 } else { 100 }]
+                let requests = requests.lock().unwrap();
+                if routing_tokens == Some(900_000) {
+                    assert_eq!(requests.len(), 2, "work plus final-slot handoff");
+                    if strict_output {
+                        assert_eq!(*requests, vec![80, 79]);
                     } else {
-                        Vec::new()
-                    },
-                    "user_prompt={user_prompt}, strict_output={strict_output}: routing_tokens={routing_tokens:?}: no main work outside post-routing allowance"
-                );
+                        assert!(
+                            requests.iter().all(|cap| *cap > 0 && *cap < 100_000),
+                            "the request reserves input inside the post-routing remainder: {requests:?}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        requests.is_empty(),
+                        "user_prompt={user_prompt}, strict_output={strict_output}: routing_tokens={routing_tokens:?}: no main work outside post-routing allowance"
+                    );
+                }
             }
         }
     }
@@ -8240,6 +8308,55 @@ async fn paused_goal_fences_preparing_user_prompt_until_cancelled() {
 }
 
 #[tokio::test]
+async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
+    for command in [Some("true"), Some("false"), None] {
+        let (directory, runtime) = test_runtime().await;
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace, None).await.outcome
+        else {
+            panic!("session");
+        };
+        let receipt = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"checked work", "check":{"command":"true"},
+            "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000}
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal");
+        };
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session_id)?.unwrap();
+                goal.counters.check_failures = 2;
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        let edited = runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "expected":{"goal_id":goal.goal_id,"revision":goal.revision},
+            "objective":"edited objective", "check":command.map(|command|serde_json::json!({"command":command})),
+            "budget":goal.budget
+        })).unwrap()).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal: edited, .. } = edited.outcome else {
+            panic!("edit");
+        };
+        assert_eq!(
+            edited.counters.check_failures,
+            if command == Some("true") { 2 } else { 0 }
+        );
+        assert_eq!(edited.counters.runs, goal.counters.runs);
+        assert_eq!(edited.counters.audits, goal.counters.audits);
+        assert_eq!(
+            edited.check_authorization,
+            command.map(|_| qq_protocol::GoalCheckAuthorization::Pending)
+        );
+        runtime.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn goal_check_edits_preserve_unrelated_stop_states() {
     use qq_protocol::{
         GoalBlockedReason, GoalCheckAuthorization, GoalNeedsUser, GoalPauseReason, GoalStatus,
@@ -8282,6 +8399,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
                         crate::sessions::goals::load_live(connection, session_id)?.unwrap();
                     goal.status = setup_status;
                     goal.counters.failure_streak = 3;
+                    goal.counters.check_failures = 2;
                     crate::sessions::goals::save(connection, &goal)
                 })
                 .await
@@ -8321,6 +8439,7 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
                 "remove={remove}, original={status:?}"
             );
             assert_eq!(goal.counters.failure_streak, 3);
+            assert_eq!(goal.counters.check_failures, if remove { 0 } else { 2 });
             assert_eq!(
                 goal.check_authorization,
                 if remove {
@@ -8555,4 +8674,810 @@ async fn recovered_user_prompt_survives_an_active_goal_edit() {
         .await
         .unwrap();
     reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn detached_child_refreshes_ancestor_budget_after_parent_settlement() {
+    for budget in [10_000_u64, 100] {
+        struct Model(Arc<StdMutex<Vec<ModelRequest>>>);
+        impl Provider for Model {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.lock().unwrap().push(request);
+                Box::pin(stream::iter([
+                    Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                        text: "child work".to_owned(),
+                    }),
+                    Ok(qq_provider::ProviderEvent::Completed {
+                        usage: Some(qq_provider::ProviderUsage {
+                            input_tokens: 1,
+                            output_tokens: 1,
+                            cache_read_input_tokens: 0,
+                            cache_write_input_tokens: 0,
+                            reasoning_tokens: None,
+                        }),
+                    }),
+                ]))
+            }
+        }
+        struct Loader {
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        }
+        impl RuntimeLoader for Loader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let entered = Arc::clone(&self.entered);
+                let release = Arc::clone(&self.release);
+                let requests = Arc::clone(&self.requests);
+                Box::pin(async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    Ok(loaded_runtime(
+                        Runtime::new(Model(requests), "test-model", 16_384).unwrap(),
+                        &request.workspace,
+                        None,
+                    ))
+                })
+            }
+        }
+        let directory = TempDir::new().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                requests: Arc::clone(&requests),
+            }),
+        )
+        .await
+        .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let child_held = Arc::clone(&runtime.inner.child_permits[0])
+            .acquire_many_owned(runtime.inner.child_permits[0].available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace_id, None).await;
+        let CommandOutcome::SessionCreated {
+            session_id: parent_session,
+        } = created.outcome
+        else {
+            panic!("session")
+        };
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "type":"set_goal","session_id":parent_session,"objective":"original objective",
+                    "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+86_400_000}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let parent_run = queue_prompt(&runtime, parent_session, "parent work".to_owned()).await;
+        let store = runtime.inner.store.clone();
+        let parent = store.reserve_next_run(false).await.unwrap().unwrap();
+        assert_eq!(parent.identity.run_id, parent_run);
+        store
+            .start_reserved_run(&parent, test_prepared_audit(&parent), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let captured = parent.goal.as_ref().unwrap().clone();
+        let child = store
+            .create_child_run(
+                &parent,
+                ToolCallId::generate().unwrap(),
+                ChildAdmission {
+                    reasoning_effort: None,
+                    profile: AgentProfileId::default(),
+                    model: parent.model.clone(),
+                    task: "detached bounded child".to_owned(),
+                    limits: RunLimits::default(),
+                    approval_mode: ApprovalMode::ReadOnly,
+                    purpose: SessionPurpose::Task,
+                    detached: true,
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                &parent,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store
+            .call(Priority::Control, move |connection| {
+                let mut goal =
+                    crate::sessions::goals::load_live(connection, parent_session)?.unwrap();
+                goal.next_run_at_ms = now_ms() + 60_000;
+                crate::sessions::goals::save(connection, &goal)
+            })
+            .await
+            .unwrap();
+        drop(child_held);
+        runtime.inner.schedule.send(()).await.unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: parent.identity.workspace_id,
+                after: EventCursor {
+                    store_id: runtime.store_id(),
+                    workspace_id: parent.identity.workspace_id,
+                    sequence: 0,
+                },
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered.notified())
+            .await
+            .unwrap();
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let claim: Option<String> = connection.query_row(
+                    "SELECT preparing_run_id FROM sessions WHERE id=?1",
+                    [child.session_id.to_string()],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(claim.as_deref(), Some(child.run_id.to_string().as_str()));
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal","session_id":parent_session,"objective":"original objective",
+                "expected":{"goal_id":captured.goal_id,"revision":captured.revision},
+                "budget":{"max_goal_runs":200,"deadline_ms":now_ms()+60_000,"max_total_tokens":budget}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+            panic!("goal")
+        };
+        assert_eq!(goal.goal_id, captured.goal_id);
+        runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let cancelled: bool = connection.query_row(
+                "SELECT cancel_requested FROM runs WHERE id=?1",
+                [child.run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            assert!(
+                !cancelled,
+                "editing the active ancestor budget must not confound admission with cancellation"
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+        release.notify_one();
+        let finished = collect_until_run_finished(&mut events, child.run_id).await;
+        let shutdown = runtime.shutdown();
+        tokio::pin!(shutdown);
+        let first = futures_util::poll!(&mut shutdown);
+        drop(held);
+        match first {
+            std::task::Poll::Ready(result) => result.unwrap(),
+            std::task::Poll::Pending => shutdown.await.unwrap(),
+        };
+        let outcome = finished_outcome(&finished, child.run_id).unwrap();
+        if budget == 100 {
+            assert!(
+                matches!(outcome, RunOutcome::BudgetExhausted { .. }),
+                "{outcome:?}"
+            );
+        } else {
+            assert_eq!(outcome, RunOutcome::Completed);
+        }
+        let connection =
+            rusqlite::Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let (ancestor, authority, origin): (Option<String>, Option<String>, String) = connection
+            .query_row(
+                "SELECT goal_paid_owner_run_id,goal_id,origin_json FROM runs WHERE id=?1",
+                [child.run_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(ancestor, Some(parent.identity.run_id.to_string()));
+        assert!(authority.is_none());
+        assert!(
+            matches!(serde_json::from_str::<qq_protocol::RunOrigin>(&origin).unwrap(),qq_protocol::RunOrigin::Delegated {owner_run_id,..} if owner_run_id==parent.identity.run_id)
+        );
+        let goal = crate::sessions::goals::load_live(&connection, parent_session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            goal.counters.runs, 0,
+            "a sponsored child does not consume another ancestor run slot"
+        );
+        let requests = requests.lock().unwrap();
+        if budget == 100 {
+            assert_eq!(goal.counters.usage, Some(TokenUsage::default()));
+            assert!(requests.is_empty(), "unaffordable input must not dispatch");
+            continue;
+        }
+        assert_eq!(goal.counters.usage, Some(usage(1, 1)));
+        assert_eq!(requests.len(), 1);
+        assert!(
+            !requests[0]
+                .tools()
+                .iter()
+                .any(|tool| tool.name() == "update_goal")
+        );
+        assert!(
+            u64::from(requests[0].max_output_tokens()) <= budget,
+            "the settled parent's current ancestor allowance must shape child dispatch: {}",
+            requests[0].max_output_tokens()
+        );
+    }
+}
+
+#[tokio::test]
+async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_stops() {
+    struct Authority {
+        limits: StdMutex<HashMap<PathBuf, GoalPolicy>>,
+        unavailable: AtomicBool,
+        pending: AtomicBool,
+    }
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("goal policy cannot promote tool authority")
+        }
+        fn goal_policy(&self, workspace: &Path) -> GoalPolicyFuture {
+            if self.pending.load(Ordering::SeqCst) {
+                return Box::pin(std::future::pending());
+            }
+            let result = if self.unavailable.load(Ordering::SeqCst) {
+                Err(GoalPolicyError::Unavailable)
+            } else {
+                Ok(self.limits.lock().unwrap()[workspace])
+            };
+            Box::pin(std::future::ready(result))
+        }
+    }
+    let directory = TempDir::new().unwrap();
+    let other = directory.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    let authority = Arc::new(Authority {
+        limits: StdMutex::new(HashMap::from([
+            (
+                directory.path().to_owned(),
+                GoalPolicy {
+                    max_goal_runs: 20,
+                    ..GoalPolicy::default()
+                },
+            ),
+            (
+                other.clone(),
+                GoalPolicy {
+                    max_goal_runs: 100,
+                    ..GoalPolicy::default()
+                },
+            ),
+        ])),
+        unavailable: AtomicBool::new(false),
+        pending: AtomicBool::new(false),
+    });
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.grant_authority = Some(authority.clone());
+    let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
+        .await
+        .unwrap();
+    let _held = Arc::clone(&runtime.inner.permits)
+        .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+        .await
+        .unwrap();
+    for (path, ceiling) in [(directory.path(), 20_u32), (other.as_path(), 100)] {
+        let (workspace, _) = resolve_workspace(&runtime, path).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let deadline = now_ms() + 60_000;
+        let set = |runs| {
+            serde_json::from_value::<SessionCommand>(serde_json::json!({
+                "type":"set_goal", "session_id":session_id, "objective":"workspace-bound",
+                "budget":{"max_goal_runs":runs,"deadline_ms":deadline}
+            }))
+            .unwrap()
+        };
+        assert!(matches!(
+            runtime
+                .command(CommandId::generate().unwrap(), set(ceiling + 1))
+                .await,
+            Err(SessionRuntimeError::InvalidGoal(
+                GoalValidationError::Budget
+            ))
+        ));
+        let command = CommandId::generate().unwrap();
+        let accepted = runtime.command(command, set(ceiling)).await.unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = &accepted.outcome else {
+            panic!("goal")
+        };
+        let identity = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
+        authority.unavailable.store(true, Ordering::SeqCst);
+        authority.pending.store(true, Ordering::SeqCst);
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                runtime.command(command, set(ceiling))
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            accepted
+        );
+        authority.pending.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            runtime
+                .command(CommandId::generate().unwrap(), set(ceiling))
+                .await,
+            Err(SessionRuntimeError::GoalPolicy(
+                GoalPolicyError::Unavailable
+            ))
+        ));
+        let paused = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected: identity,
+                    action: qq_protocol::GoalControl::Pause,
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::GoalUpdated { goal, .. } = paused.outcome else {
+            panic!("paused")
+        };
+        let expected = qq_protocol::GoalIdentity {
+            goal_id: goal.goal_id,
+            revision: goal.revision,
+        };
+        authority.unavailable.store(false, Ordering::SeqCst);
+        authority
+            .limits
+            .lock()
+            .unwrap()
+            .get_mut(path)
+            .unwrap()
+            .max_goal_runs = ceiling - 1;
+        assert!(matches!(
+            runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::GoalControl {
+                        session_id,
+                        expected,
+                        action: qq_protocol::GoalControl::Resume
+                    }
+                )
+                .await,
+            Err(SessionRuntimeError::InvalidGoal(
+                GoalValidationError::Budget
+            ))
+        ));
+        authority.unavailable.store(true, Ordering::SeqCst);
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected,
+                    action: qq_protocol::GoalControl::Clear,
+                },
+            )
+            .await
+            .unwrap();
+        authority.unavailable.store(false, Ordering::SeqCst);
+    }
+    drop(_held);
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_policy_migration_retains_legacy_unknown_and_rolls_back_bad_shapes() {
+    let (directory, store, claim) = model_goal_claim(true).await;
+    let goal = claim.goal.as_ref().unwrap().clone();
+    store.close().await.unwrap();
+    drop(store);
+    let path = directory.path().join("sessions.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
+        ALTER TABLE session_goals DROP COLUMN policy_json;
+        UPDATE metadata SET value='57' WHERE key='schema_version';",
+        )
+        .unwrap();
+    drop(connection);
+    let (connection, _) = open_database(&path).unwrap();
+    assert_eq!(
+        crate::sessions::goals::load_live(&connection, goal.session_id)
+            .unwrap()
+            .unwrap(),
+        *goal
+    );
+    let (policy, at) = goal_policy::load(&connection, goal.goal_id).unwrap();
+    assert_eq!(policy, GoalPolicy::default());
+    assert_eq!(at, None);
+    policy
+        .validate_specification(&goal.budget, goal.check.as_ref(), at)
+        .unwrap();
+    assert!(matches!(
+        GoalPolicy {
+            max_duration_ms: 86_400_000,
+            ..policy
+        }
+        .validate_specification(&goal.budget, goal.check.as_ref(), at),
+        Err(SessionRuntimeError::InvalidGoal(
+            GoalValidationError::Budget
+        ))
+    ));
+    drop(connection);
+    for previous in [57, STORE_SCHEMA_VERSION] {
+        for definition in ["INTEGER", "TEXT"] {
+            let directory = TempDir::new().unwrap();
+            let path = directory.path().join("sessions.sqlite3");
+            let (connection, _) = open_database(&path).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE session_goals DROP COLUMN specification_at_ms;
+                ALTER TABLE session_goals DROP COLUMN policy_json;
+                ALTER TABLE session_goals ADD COLUMN policy_json {definition};
+                UPDATE metadata SET value='{previous}' WHERE key='schema_version';"
+                ))
+                .unwrap();
+            drop(connection);
+            assert!(matches!(
+                open_database(&path),
+                Err(SessionRuntimeError::CONSTRAINT)
+            ));
+            let connection = Connection::open(&path).unwrap();
+            let version: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(version, previous.to_string());
+            let columns: u32 = connection.query_row(
+                "SELECT count(*) FROM pragma_table_info('session_goals') WHERE name='specification_at_ms'",
+                [], |row| row.get(0)
+            ).unwrap();
+            assert_eq!(
+                columns, 0,
+                "a failed migration must roll back the new anchor column"
+            );
+        }
+    }
+}
+
+#[test]
+fn goal_policy_checks_each_budget_dimension_against_its_fixed_anchor() {
+    let budget = qq_protocol::GoalBudget {
+        max_goal_runs: 5,
+        deadline_ms: 5000,
+        max_total_tokens: None,
+        max_cost_usd_nanos: None,
+        per_run: RunLimits {
+            max_model_turns: Some(4),
+            ..RunLimits::default()
+        },
+    };
+    let check = qq_protocol::GoalCheck {
+        command: "true".to_owned(),
+        timeout_ms: 100,
+    };
+    let policy = GoalPolicy {
+        max_duration_ms: 4000,
+        max_goal_runs: 5,
+        max_check_timeout_ms: 100,
+        per_run: RunLimits {
+            max_model_turns: Some(4),
+            ..RunLimits::default()
+        },
+        ..GoalPolicy::default()
+    };
+    policy
+        .validate_specification(&budget, Some(&check), Some(1000))
+        .unwrap();
+    assert!(matches!(
+        policy.validate_specification(&budget, Some(&check), Some(999)),
+        Err(SessionRuntimeError::InvalidGoal(
+            GoalValidationError::Budget
+        ))
+    ));
+    let mut changed = budget.clone();
+    changed.per_run.max_model_turns = Some(5);
+    assert!(matches!(
+        policy.validate_specification(&changed, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidRunLimits)
+    ));
+    changed.per_run.max_model_turns = None;
+    assert!(matches!(
+        policy.validate_specification(&changed, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidRunLimits)
+    ));
+    let check = qq_protocol::GoalCheck {
+        timeout_ms: 101,
+        ..check
+    };
+    assert!(matches!(
+        policy.validate_specification(&budget, Some(&check), Some(1000)),
+        Err(SessionRuntimeError::InvalidGoal(GoalValidationError::Check))
+    ));
+}
+
+#[tokio::test]
+async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work() {
+    struct Authority(Arc<AtomicUsize>);
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("policy checks cannot promote grants")
+        }
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            let max = self.0.load(Ordering::SeqCst);
+            Box::pin(std::future::ready(if max == 0 {
+                Err(GoalPolicyError::Unavailable)
+            } else {
+                Ok(GoalPolicy {
+                    max_goal_runs: max as u32,
+                    ..GoalPolicy::default()
+                })
+            }))
+        }
+    }
+    struct Model(Arc<AtomicUsize>);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(stream::iter([Ok(qq_provider::ProviderEvent::Completed {
+                usage: None,
+            })]))
+        }
+    }
+    struct Loader {
+        loads: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        hold: bool,
+    }
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            let requests = Arc::clone(&self.requests);
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            let hold = self.hold;
+            Box::pin(async move {
+                entered.notify_one();
+                if hold {
+                    release.notified().await;
+                }
+                Ok(loaded_runtime(
+                    Runtime::new(Model(requests), "test-model", 256).unwrap(),
+                    &request.workspace,
+                    None,
+                ))
+            })
+        }
+    }
+    for (during_loading, lowered) in [(false, 19), (true, 19), (false, 0), (true, 0)] {
+        let directory = TempDir::new().unwrap();
+        let ceiling = Arc::new(AtomicUsize::new(20));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        options.grant_authority = Some(Arc::new(Authority(Arc::clone(&ceiling))));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(Loader {
+                loads: Arc::clone(&loads),
+                requests: Arc::clone(&requests),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+                hold: during_loading,
+            }),
+        )
+        .await
+        .unwrap();
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let command = serde_json::from_value(serde_json::json!({
+            "type":"set_goal","session_id":session_id,"objective":"honor current policy",
+            "budget":{"max_goal_runs":20,"deadline_ms":now_ms()+60_000}
+        }))
+        .unwrap();
+        runtime
+            .command(CommandId::generate().unwrap(), command)
+            .await
+            .unwrap();
+        if during_loading {
+            drop(held);
+            tokio::time::timeout(Duration::from_secs(2), entered.notified())
+                .await
+                .unwrap();
+            ceiling.store(lowered, Ordering::SeqCst);
+            release.notify_one();
+        } else {
+            ceiling.store(lowered, Ordering::SeqCst);
+            drop(held);
+        }
+        let _ = collect_through_finished(&mut events).await;
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no provider request after policy changed"
+        );
+        assert_eq!(loads.load(Ordering::SeqCst), usize::from(during_loading));
+        let snapshot = runtime
+            .snapshot(SnapshotRequest::new(workspace, Some(session_id), 1, 1))
+            .await
+            .unwrap();
+        assert!(matches!(
+            snapshot.focused.unwrap().goal.unwrap().status,
+            qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::Configuration { .. }
+                }
+            }
+        ));
+        runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn goal_provider_backoff_uses_durable_policy_without_shortening_model_wait() {
+    for wait_ms in [0, 60_000] {
+        let (directory, store, claim) = model_goal_claim(true).await;
+        let session = claim.identity.session_id;
+        let id = claim.goal.as_ref().unwrap().goal_id;
+        store
+            .call(Priority::Control, move |connection| {
+                let (_, at) = goal_policy::load(connection, id)?;
+                goal_policy::save(
+                    connection,
+                    id,
+                    GoalPolicy {
+                        max_backoff_ms: 1000,
+                        ..GoalPolicy::default()
+                    },
+                    at,
+                )?;
+                if wait_ms > 0 {
+                    let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                    goal.wait = Some(qq_protocol::GoalWait {
+                        until_ms: now_ms() + wait_ms,
+                        reason: "model wait".to_owned(),
+                    });
+                    crate::sessions::goals::save(connection, &goal)?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let before = now_ms();
+        store
+            .finish_run(
+                &claim,
+                RunOutcome::Paused {
+                    pause: Box::new(qq_protocol::RunPause::ProviderRetry {
+                        kind: RunFailureKind::ProviderUnavailable,
+                        message: "offline".to_owned(),
+                        turn_ordinal: 1,
+                        attempts: 1,
+                    }),
+                },
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        let goal = store
+            .call(Priority::Control, move |connection| {
+                Ok(crate::sessions::goals::load_live(connection, session)?.unwrap())
+            })
+            .await
+            .unwrap();
+        assert!(goal.next_run_at_ms >= before + 1000);
+        if wait_ms == 0 {
+            assert!(goal.next_run_at_ms <= now_ms() + 1000);
+        } else {
+            assert_eq!(goal.next_run_at_ms, goal.wait.as_ref().unwrap().until_ms);
+        }
+        store.close().await.unwrap();
+        let (connection, _) = open_database(&directory.path().join("sessions.sqlite3")).unwrap();
+        assert_eq!(
+            goal_policy::load(&connection, id).unwrap().0.max_backoff_ms,
+            1000
+        );
+        assert_eq!(
+            crate::sessions::goals::load_live(&connection, session)
+                .unwrap()
+                .unwrap(),
+            goal
+        );
+    }
+}
+
+#[tokio::test]
+async fn goal_adoption_ignores_owned_compaction_but_detects_preempting_prompts() {
+    for goal_origin in [false, true] {
+        let (_directory, store, owner) = model_goal_claim(goal_origin).await;
+        let goal = owner.goal.as_ref().unwrap();
+        let audit = test_prepared_audit(&owner);
+        let (helper, _) = store
+            .start_in_run_compaction(&owner, &audit.resolved_model, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .has_preempting_goal_work(owner.identity.session_id, goal.goal_id)
+                .await
+                .unwrap(),
+            !goal_origin,
+            "owned summary must not turn a goal prompt into preempting work"
+        );
+        store
+            .finish_in_run_compaction_failed(&helper, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                &owner,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
 }

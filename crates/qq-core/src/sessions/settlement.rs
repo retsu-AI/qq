@@ -574,6 +574,21 @@ pub(super) fn finish_queued_run_with_outcome(
     let summary = load_session_summary(transaction, session_id)?;
     let context = EventContext::for_run_ids(store_id, workspace_id, session_id, run_id, None, now);
     let mut events = Vec::new();
+    if let Some(qq_protocol::RunOrigin::GoalCheck { goal_id, .. }) = &origin
+        && let Some(mut goal) = goals::load_live(transaction, session_id)?
+        && goal.goal_id == *goal_id
+        && goal.pending_run_id == Some(run_id)
+    {
+        goal.pending_run_id = None;
+        goals::save(transaction, &goal)?;
+        events.push(append_event(
+            transaction,
+            context,
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
+    }
     for goal in goals::finalize_spend(transaction, session_id, run_id)? {
         let goal_context = if goal.session_id == session_id {
             context
@@ -803,6 +818,7 @@ pub(super) fn settle_panicked_execution(
                 goal: None,
                 goal_initial_notice: None,
                 goal_admission: None,
+                check_deadline: None,
                 origin: None,
                 checkpoint: None,
                 routing: None,
@@ -1178,7 +1194,8 @@ pub(super) fn recover_interrupted_runs(
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let mut cursors = Vec::with_capacity(routed.len());
+    let mut cursors = super::goal_check::recover(&transaction, store_id)?;
+    cursors.reserve(routed.len());
     for (run, session, workspace) in routed {
         if let Some(event) = finish_queued_run_with_outcome(
             &transaction,
@@ -1240,7 +1257,7 @@ pub(super) fn recover_interrupted_runs(
         cursors.extend(event.into_iter().map(|event| event.cursor));
     }
     let mut statement = transaction.prepare(
-        "SELECT r.id, r.session_id, s.workspace_id
+        "SELECT r.id, r.session_id, s.workspace_id, r.kind
              FROM runs r JOIN sessions s ON s.id = r.session_id
              WHERE r.status = 'running'",
     )?;
@@ -1250,12 +1267,13 @@ pub(super) fn recover_interrupted_runs(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
     cursors.reserve(rows.len());
-    for (run, session, workspace) in rows {
+    for (run, session, workspace, kind) in rows {
         let run_id = parse_id(&run)?;
         let session_id = parse_id(&session)?;
         let workspace_id = parse_id(&workspace)?;
@@ -1264,6 +1282,7 @@ pub(super) fn recover_interrupted_runs(
             goal: None,
             goal_initial_notice: None,
             goal_admission: None,
+            check_deadline: None,
             origin: None,
             checkpoint: None,
             routing: None,
@@ -1273,7 +1292,11 @@ pub(super) fn recover_interrupted_runs(
                 session_id,
                 run_id,
                 command_id: CommandId::from_bytes([0; 16]),
-                kind: RunKind::Prompt,
+                kind: if kind == "goal_check" {
+                    RunKind::GoalCheck
+                } else {
+                    RunKind::Prompt
+                },
                 child: false,
             },
             workspace: String::new(),

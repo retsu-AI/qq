@@ -86,8 +86,16 @@ pub enum Command {
     /// server. Exit status: 0 success, 1 task or model failure, 2 invalid
     /// configuration, 3 timeout or budget exhaustion, 4 harness or
     /// persistence failure, 5 needs input (the model asked a question no
-    /// client could answer), 130 interrupted by Ctrl-C.
-    Run(RunArgs),
+    /// client could answer), 130 interrupted by Ctrl-C. With --goal: 0 achieved,
+    /// 6 paused, 7 blocked, 8 goal-budget exhaustion; 2, 4 and 130 retain
+    /// their configuration, harness-failure and interrupt meanings.
+    Run(Box<RunArgs>),
+
+    /// Inspect or control a session goal on an already running qq serve.
+    Goal {
+        #[command(subcommand)]
+        command: GoalCommand,
+    },
 
     /// Run the user-scoped QQ server in the foreground.
     Serve {
@@ -182,8 +190,39 @@ pub struct InitArgs {
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Task prompt for the agent.
-    pub prompt: String,
+    /// Task prompt for an ordinary run.
+    #[arg(required_unless_present = "goal", conflicts_with = "goal")]
+    pub prompt: Option<String>,
+
+    /// Run an objective to a goal state; omit OBJECTIVE with --session to resume.
+    #[arg(long, num_args = 0..=1, value_name = "OBJECTIVE",
+        conflicts_with_all = ["steer_stdin", "output_schema"])]
+    pub goal: Option<Option<String>>,
+
+    /// Optional goal completion check; separate consent is required.
+    #[arg(
+        long,
+        requires = "goal",
+        conflicts_with = "prompt",
+        value_name = "COMMAND"
+    )]
+    pub check: Option<String>,
+
+    /// Authorize only this goal's exact check, independently of tool approvals.
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_enum)]
+    pub goal_check_approval: Option<GoalCheckApproval>,
+
+    /// Relative goal deadline, such as 24h (at most seven days).
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_parser = parse_goal_duration)]
+    pub goal_deadline: Option<std::time::Duration>,
+
+    /// Maximum direct goal runs (1–2000).
+    #[arg(long, requires = "goal", conflicts_with = "prompt", value_parser = clap::value_parser!(u32).range(1..=2000))]
+    pub goal_max_runs: Option<u32>,
+
+    /// Replace an existing goal explicitly, using workspace defaults.
+    #[arg(long, requires = "goal", conflicts_with = "prompt")]
+    pub replace: bool,
 
     /// Workspace directory. Defaults to the current directory.
     #[arg(long, value_name = "PATH")]
@@ -250,7 +289,7 @@ pub struct RunArgs {
     /// when the selected model has no pricing, so the limit is never
     /// silently unenforced.
     #[arg(long, value_name = "VALUE")]
-    pub max_cost_usd: Option<f64>,
+    pub max_cost_usd: Option<String>,
 
     /// Require the final answer to be one JSON document satisfying the JSON
     /// Schema at PATH (at most 64 KiB, 32 levels, 4096 values; no `$ref`).
@@ -278,6 +317,153 @@ pub struct RunArgs {
     /// Also write the JSONL trial records to this file.
     #[arg(long, value_name = "PATH")]
     pub trace: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalTarget {
+    #[arg(long, value_name = "ID")]
+    pub session: qq_protocol::SessionId,
+    /// Session workspace; defaults to the current directory.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+    /// Print compact JSON; otherwise JSON is pretty-printed.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GoalCommand {
+    /// Set a new goal, or edit an existing one without resuming it.
+    Set(GoalSetArgs),
+    /// Print the current goal, or null when none is set.
+    Show(GoalTarget),
+    /// Pause the current goal and cancel its owned work.
+    Pause(GoalTarget),
+    /// Resume after configuration, budget and cancellation checks.
+    Resume(GoalTarget),
+    /// Clear the current goal and cancel its owned work.
+    Clear(GoalTarget),
+    /// Explicitly authorize this exact check once or repeatedly for this goal.
+    ApproveCheck(GoalApproveArgs),
+}
+
+impl GoalCommand {
+    pub fn target(&self) -> &GoalTarget {
+        match self {
+            Self::Set(args) => &args.target,
+            Self::Show(target)
+            | Self::Pause(target)
+            | Self::Resume(target)
+            | Self::Clear(target) => target,
+            Self::ApproveCheck(args) => &args.target,
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct GoalSetArgs {
+    #[command(flatten)]
+    pub target: GoalTarget,
+    /// Objective (up to 2048 bytes). Existing goals are edited unless --replace.
+    pub objective: String,
+    /// Replace the goal, resetting progress and requiring fresh check consent.
+    #[arg(long)]
+    pub replace: bool,
+    /// New exact check command; omitted retains the check when editing.
+    #[arg(long, value_name = "COMMAND", conflicts_with = "clear_check")]
+    pub check: Option<String>,
+    /// Remove an existing completion check when editing.
+    #[arg(long)]
+    pub clear_check: bool,
+    /// Duration from this submission: positive integer followed by s, m, h or d.
+    #[arg(long, value_name = "DURATION", value_parser = parse_goal_duration)]
+    pub goal_deadline: Option<std::time::Duration>,
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=2000))]
+    pub goal_max_runs: Option<u32>,
+    /// Total goal cost ceiling in dollars (up to nine decimal places).
+    #[arg(long = "max-cost-usd", value_name = "USD", value_parser = parse_goal_cost)]
+    pub max_cost_usd_nanos: Option<u64>,
+}
+
+#[derive(Debug, Args)]
+pub struct GoalApproveArgs {
+    #[command(flatten)]
+    pub target: GoalTarget,
+    #[arg(value_enum)]
+    pub scope: GoalCheckApproval,
+    /// Exact command reviewed by the operator; must match the current check.
+    #[arg(long, value_name = "COMMAND")]
+    pub command: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum GoalCheckApproval {
+    Once,
+    ForGoal,
+}
+
+impl From<GoalCheckApproval> for qq_protocol::GoalCheckScope {
+    fn from(scope: GoalCheckApproval) -> Self {
+        match scope {
+            GoalCheckApproval::Once => Self::Once,
+            GoalCheckApproval::ForGoal => Self::ForGoal,
+        }
+    }
+}
+
+pub fn parse_goal_duration(value: &str) -> Result<std::time::Duration, String> {
+    let (number, multiplier) = match value.as_bytes().last().copied() {
+        Some(b's') => (&value[..value.len() - 1], 1),
+        Some(b'm') => (&value[..value.len() - 1], 60),
+        Some(b'h') => (&value[..value.len() - 1], 3600),
+        Some(b'd') => (&value[..value.len() - 1], 86400),
+        _ => {
+            return Err(
+                "use a positive integer followed by s, m, h or d (for example 24h)".to_owned(),
+            );
+        }
+    };
+    let seconds = number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier));
+    match seconds {
+        Some(seconds @ 1..=604800) => Ok(std::time::Duration::from_secs(seconds)),
+        _ => Err("goal duration must be positive and at most seven days".to_owned()),
+    }
+}
+
+pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
+    let invalid = || {
+        "cost must be a positive decimal dollar amount with at most nine fractional digits"
+            .to_owned()
+    };
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if value.len() > 30
+        || whole.is_empty() && fraction.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction.len() > 9
+    {
+        return Err(invalid());
+    }
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().map_err(|_| invalid())?
+    };
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u64>().map_err(|_| invalid())? * 10_u64.pow(9 - fraction.len() as u32)
+    };
+    match whole
+        .checked_mul(1_000_000_000)
+        .and_then(|whole| whole.checked_add(fraction))
+    {
+        Some(cost) if cost > 0 => Ok(cost),
+        _ => Err(invalid()),
+    }
 }
 
 /// Headless approval policies. Deliberately excludes interactive `ask`:
@@ -615,6 +801,16 @@ mod tests {
     }
 
     #[test]
+    fn run_help_documents_goal_exit_codes() {
+        let help = Cli::try_parse_from(["qq", "run", "--help"])
+            .unwrap_err()
+            .to_string();
+        for expected in ["6 paused", "7 blocked", "8 goal-budget exhaustion"] {
+            assert!(help.contains(expected), "missing {expected}: {help}");
+        }
+    }
+
+    #[test]
     fn version_names_the_crate_version_and_the_source_revision() {
         let error = Cli::try_parse_from(["qq", "--version"]).unwrap_err();
         let rendered = error.to_string();
@@ -700,12 +896,12 @@ mod tests {
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected a run command");
         };
-        assert_eq!(args.prompt, "fix the failing test");
+        assert_eq!(args.prompt.as_deref(), Some("fix the failing test"));
         assert_eq!(args.workspace.as_deref(), Some(Path::new("/tmp/task")));
         assert_eq!(args.approval, RunApproval::Auto);
         assert_eq!(args.timeout_seconds, Some(900));
         assert_eq!(args.max_turns, Some(40));
-        assert_eq!(args.max_cost_usd, Some(2.5));
+        assert_eq!(args.max_cost_usd.as_deref(), Some("2.5"));
         assert_eq!(args.format, RunFormat::Jsonl);
         assert_eq!(args.trace.as_deref(), Some(Path::new("/tmp/trace.jsonl")));
         assert_eq!(
@@ -1018,5 +1214,148 @@ mod tests {
                 command: OrgCommand::Enroll { name, manifest_url }
             }) if name == "acme" && manifest_url == "https://config.example.test/acme.ron"
         ));
+    }
+}
+
+#[cfg(test)]
+mod goal_cli_tests {
+    use super::*;
+    const SESSION: &str = "019df100000070008000000000000001";
+
+    #[test]
+    fn goal_cli_accepts_server_operations_without_an_ordinary_run_prompt() {
+        for operation in [
+            vec![
+                "set",
+                "finish migration",
+                "--goal-deadline",
+                "24h",
+                "--goal-max-runs",
+                "20",
+            ],
+            vec!["show"],
+            vec!["pause"],
+            vec!["resume"],
+            vec!["clear"],
+            vec![
+                "approve-check",
+                "once",
+                "--command",
+                "cargo test --workspace",
+            ],
+            vec![
+                "approve-check",
+                "for-goal",
+                "--command",
+                "cargo test --workspace",
+            ],
+        ] {
+            let mut argv = vec!["qq", "goal"];
+            argv.extend(operation);
+            argv.extend(["--session", SESSION, "--workspace", "/tmp/work", "--json"]);
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn goal_cli_requires_a_session_explicit_check_scope_and_unambiguous_edits() {
+        for operation in [
+            vec!["show"],
+            vec!["set", "objective"],
+            vec![
+                "approve-check",
+                "--session",
+                SESSION,
+                "--command",
+                "cargo test",
+            ],
+            vec!["approve-check", "once", "--session", SESSION],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--check",
+                "cargo test",
+                "--clear-check",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-deadline",
+                "0h",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-deadline",
+                "8d",
+            ],
+            vec![
+                "set",
+                "objective",
+                "--session",
+                SESSION,
+                "--goal-max-runs",
+                "0",
+            ],
+        ] {
+            let mut argv = vec!["qq", "goal"];
+            argv.extend(operation);
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod foreground_goal_cli_tests {
+    use super::*;
+    #[test]
+    fn foreground_goal_cli_accepts_objectives_and_bare_stored_goal_resume() {
+        for args in [
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "finish",
+                "--check",
+                "cargo test",
+                "--goal-check-approval",
+                "once",
+                "--goal-deadline",
+                "24h",
+                "--goal-max-runs",
+                "20",
+            ],
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "--session",
+                "019df100000070008000000000000001",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["qq", "run"],
+            vec!["qq", "run", "prompt", "--goal", "finish"],
+            vec!["qq", "run", "prompt", "--check", "cargo test"],
+            vec!["qq", "run", "--goal", "finish", "--steer-stdin"],
+            vec![
+                "qq",
+                "run",
+                "--goal",
+                "finish",
+                "--output-schema",
+                "out.json",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
     }
 }

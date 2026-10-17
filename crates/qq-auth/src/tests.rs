@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Barrier, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -18,6 +18,20 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::Digest as _;
 
 static TEST_DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn active_resolution_flight(store: &CredentialStore) -> Arc<StoredResolutionFlight> {
+    Arc::clone(
+        store
+            .stored_resolution
+            .0
+            .lock()
+            .unwrap()
+            .flights
+            .values()
+            .next()
+            .expect("the backend gate holds an active flight"),
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FakeMode {
@@ -34,6 +48,20 @@ struct FakeKeyring {
     values: Mutex<BTreeMap<String, Vec<u8>>>,
     reads: Mutex<BTreeMap<String, usize>>,
     break_index_after_set: Mutex<Option<PathBuf>>,
+    read_gate: Mutex<Option<Arc<ReadGate>>>,
+    entry_gate: Mutex<Option<(Arc<BackendEntryGate>, usize)>>,
+}
+
+#[derive(Default)]
+struct ReadGate {
+    entered: TestSignal,
+    release: TestSignal,
+}
+
+#[derive(Default)]
+struct BackendEntryGate {
+    entered: TestSignal,
+    release: TestSignal,
 }
 
 impl FakeKeyring {
@@ -61,6 +89,14 @@ impl FakeKeyring {
         *self.max_secret_len.lock().unwrap() = Some(limit);
     }
 
+    fn gate_next_read(&self, gate: Arc<ReadGate>) {
+        *self.read_gate.lock().unwrap() = Some(gate);
+    }
+
+    fn gate_reads_until_released(&self, gate: Arc<BackendEntryGate>, count: usize) {
+        *self.entry_gate.lock().unwrap() = Some((gate, count));
+    }
+
     fn check_mode(&self) -> Result<(), KeyringError> {
         match *self.mode.lock().unwrap() {
             FakeMode::Available => Ok(()),
@@ -72,13 +108,31 @@ impl FakeKeyring {
 
 impl KeyringBackend for FakeKeyring {
     fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
-        self.check_mode()?;
+        let read_gate = self.read_gate.lock().unwrap().take();
+        if let Some(gate) = read_gate {
+            gate.entered.notify();
+            gate.release.wait_for(1);
+        }
+        let entry_gate = {
+            let mut gate = self.entry_gate.lock().unwrap();
+            gate.as_mut().and_then(|(entry, remaining)| {
+                (*remaining > 0).then(|| {
+                    *remaining -= 1;
+                    Arc::clone(entry)
+                })
+            })
+        };
+        if let Some(gate) = entry_gate {
+            gate.entered.notify();
+            gate.release.wait_for(1);
+        }
         *self
             .reads
             .lock()
             .unwrap()
             .entry(name.to_owned())
             .or_default() += 1;
+        self.check_mode()?;
         self.value(name).ok_or(KeyringError::Missing)
     }
 
@@ -793,6 +847,106 @@ fn keyring_success_records_and_resolves_the_backend() {
         store.status("openai").unwrap().unwrap().backend,
         CredentialBackend::Keyring
     );
+}
+
+#[test]
+fn stored_resolution_reuses_success_and_invalidates_on_epoch_change() {
+    let (store, keyring, _directory) = test_store();
+    store.set("openai", "first", false).unwrap();
+
+    let first = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    let second = store
+        .resolve_with_epoch(&SecretRef::Stored("openai".to_owned()), None)
+        .unwrap();
+    assert_eq!(first.expose_secret_str().unwrap(), "first");
+    assert_eq!(second.0.expose_secret_str().unwrap(), "first");
+    assert_eq!(keyring.read_count("openai"), 1);
+
+    store.set("openai", "rotated", false).unwrap();
+    let rotated = store
+        .resolve(&SecretRef::Stored("openai".to_owned()))
+        .unwrap();
+    assert_eq!(rotated.expose_secret_str().unwrap(), "rotated");
+    assert_eq!(keyring.read_count("openai"), 2);
+}
+
+#[test]
+fn stored_keyring_cache_expiry_rechecks_external_changes() {
+    let (store, keyring, _directory) = test_store();
+    store.set("openai", "first", false).unwrap();
+    let reference = SecretRef::Stored("openai".to_owned());
+    store.resolve(&reference).unwrap();
+    keyring.set("openai", b"external rotation").unwrap();
+    assert_eq!(
+        store.resolve(&reference).unwrap().expose_secret_bytes(),
+        b"first"
+    );
+    *store.resolution_time.lock().unwrap() += Duration::from_secs(299);
+    assert_eq!(
+        store.resolve(&reference).unwrap().expose_secret_bytes(),
+        b"first"
+    );
+    *store.resolution_time.lock().unwrap() += Duration::from_secs(1);
+    assert_eq!(
+        store.resolve(&reference).unwrap().expose_secret_bytes(),
+        b"external rotation"
+    );
+    keyring.remove("openai").unwrap();
+    *store.resolution_time.lock().unwrap() += Duration::from_secs(299);
+    assert_eq!(
+        store.resolve(&reference).unwrap().expose_secret_bytes(),
+        b"external rotation"
+    );
+    *store.resolution_time.lock().unwrap() += Duration::from_secs(1);
+    assert!(matches!(
+        store.resolve(&reference),
+        Err(AuthError::StoredCredentialMissing { .. })
+    ));
+    assert_eq!(keyring.read_count("openai"), 3);
+}
+
+#[test]
+fn stored_keyring_cache_revalidates_registration_endpoint_and_index() {
+    let (store, keyring, _directory) = test_store();
+    let other = CredentialStore::with_backend(store.paths().clone(), keyring.clone());
+    let reference = SecretRef::Stored("provider/work".to_owned());
+    let endpoint = Some("https://provider.example");
+    store
+        .set_with_metadata("provider/work", b"first", false, None, endpoint)
+        .unwrap();
+    store.resolve_with_endpoint(&reference, endpoint).unwrap();
+    assert!(matches!(
+        store.resolve(&reference),
+        Err(AuthError::EndpointRequired { .. })
+    ));
+    assert!(matches!(
+        store.resolve_with_endpoint(&reference, Some("https://other.example")),
+        Err(AuthError::EndpointMismatch { .. })
+    ));
+    other
+        .set_with_metadata("provider/work", b"rotated", false, None, endpoint)
+        .unwrap();
+    assert_eq!(
+        store
+            .resolve_with_endpoint(&reference, endpoint)
+            .unwrap()
+            .expose_secret_bytes(),
+        b"rotated"
+    );
+    other.remove("provider/work").unwrap();
+    assert!(matches!(
+        store.resolve_with_endpoint(&reference, endpoint),
+        Err(AuthError::StoredCredentialNotRegistered { .. })
+    ));
+    store
+        .set_with_metadata("provider/work", b"third", false, None, endpoint)
+        .unwrap();
+    store.resolve_with_endpoint(&reference, endpoint).unwrap();
+    write_private(store.paths().index_file(), "corrupt index");
+    assert!(store.resolve_with_endpoint(&reference, endpoint).is_err());
+    assert_eq!(keyring.read_count("provider/work"), 3);
 }
 
 #[test]
@@ -2549,6 +2703,33 @@ async fn codex_request_cache_rechecks_store_at_its_refresh_deadline() {
     assert_eq!(keyring.read_count("openai-codex/work"), 2);
 }
 
+#[tokio::test]
+async fn xai_valid_oauth_requests_reuse_the_keyring_read() {
+    let (store, keyring, _directory) = test_store();
+    let expires_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600;
+    store.set_with_metadata("xai/work", serde_json::to_vec(&serde_json::json!({
+        "version": 1, "access_token": "valid-access-token", "refresh_token": "refresh", "expires_at": expires_at
+    })).unwrap(), false, Some("xai-oauth"), Some("https://api.x.ai")).unwrap();
+    let provider = store.xai_request_credentials("work", None);
+    for _ in 0..3 {
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_xai_oauth("work")
+                .unwrap()
+                .expose_secret_bytes(),
+            b"valid-access-token"
+        );
+    }
+    assert_eq!(keyring.read_count("xai/work"), 1);
+}
+
 #[test]
 fn xai_resolution_refreshes_once_and_persists_the_rotated_token() {
     let (mut store, keyring, _directory) = test_store();
@@ -2797,6 +2978,37 @@ fn insecure_existing_state_permissions_are_rejected() {
 
 #[cfg(unix)]
 #[test]
+fn file_resolution_rechecks_private_permissions_after_a_warm_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (store, keyring, _directory) = test_store();
+    keyring.set_mode(FakeMode::Unavailable);
+    assert_eq!(
+        store.set("openai", "file secret", true).unwrap(),
+        CredentialBackend::File
+    );
+    assert_eq!(
+        store
+            .resolve(&SecretRef::Stored("openai".to_owned()))
+            .unwrap()
+            .expose_secret_str()
+            .unwrap(),
+        "file secret"
+    );
+
+    fs::set_permissions(
+        store.paths().fallback_file(),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(matches!(
+        store.resolve(&SecretRef::Stored("openai".to_owned())),
+        Err(AuthError::InsecurePermissions { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
 fn file_lock_serializes_concurrent_updates() {
     let (store, keyring, _directory) = test_store();
     keyring.set_mode(FakeMode::Unavailable);
@@ -2833,4 +3045,463 @@ fn file_lock_serializes_concurrent_updates() {
             format!("secret-{index}")
         );
     }
+}
+
+#[test]
+fn stored_keyring_resolution_coalesces_cold_same_key_reads() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+    let mut workers = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store
+                .resolve_with_endpoint(
+                    &SecretRef::Stored("provider/work".to_owned()),
+                    Some("https://provider.example"),
+                )
+                .unwrap()
+                .expose_secret_bytes()
+                .to_vec()
+        }));
+    }
+    gate.entered.wait_for(1);
+    active_resolution_flight(&store).followers.wait_for(7);
+    gate.release.notify();
+    for worker in workers {
+        assert_eq!(worker.join().unwrap(), b"secret");
+    }
+
+    assert_eq!(keyring.read_count("provider/work"), 1);
+}
+
+#[test]
+fn stored_keyring_resolution_failure_is_shared_and_retryable() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    keyring.set_mode(FakeMode::Failure);
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        }));
+    }
+    gate.entered.wait_for(1);
+    active_resolution_flight(&store).followers.wait_for(3);
+    gate.release.notify();
+    for worker in workers {
+        assert!(matches!(
+            worker.join().unwrap(),
+            Err(AuthError::KeyringFailure { .. })
+        ));
+    }
+
+    keyring.set_mode(FakeMode::Available);
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/work"), 2);
+}
+
+#[derive(Default)]
+struct PanicOnceKeyring {
+    panic_next: AtomicBool,
+    gate: ReadGate,
+    values: Mutex<BTreeMap<String, Vec<u8>>>,
+}
+
+impl KeyringBackend for PanicOnceKeyring {
+    fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
+        if self.panic_next.swap(false, Ordering::SeqCst) {
+            self.gate.entered.notify();
+            self.gate.release.wait_for(1);
+            panic!("test owner panic");
+        }
+        self.values
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or(KeyringError::Missing)
+    }
+
+    fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
+        self.values
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), secret.to_vec());
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<(), KeyringError> {
+        self.values.lock().unwrap().remove(name);
+        Ok(())
+    }
+}
+
+#[test]
+fn stored_keyring_owner_panic_releases_followers_and_allows_retry() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(PanicOnceKeyring::default());
+    keyring.panic_next.store(true, Ordering::SeqCst);
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let store = CredentialStore::with_backends(paths, keyring.clone(), protected);
+    store
+        .set_with_metadata(
+            "provider/work",
+            b"secret",
+            false,
+            Some("provider"),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+
+    let owner = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    keyring.gate.entered.wait_for(1);
+    let follower = {
+        let store = store.clone();
+        thread::spawn(move || {
+            store.resolve_with_endpoint(
+                &SecretRef::Stored("provider/work".to_owned()),
+                Some("https://provider.example"),
+            )
+        })
+    };
+    active_resolution_flight(&store).followers.wait_for(1);
+    keyring.gate.release.notify();
+    assert!(owner.join().is_err());
+    assert!(matches!(
+        follower.join().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "owner_panic"
+        })
+    ));
+
+    let secret = store
+        .resolve_with_endpoint(
+            &SecretRef::Stored("provider/work".to_owned()),
+            Some("https://provider.example"),
+        )
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+}
+
+#[test]
+fn stored_keyring_resolution_keeps_distinct_keys_independent() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/one", "one", false).unwrap();
+    store.set("provider/two", "two", false).unwrap();
+    let gate = Arc::new(BackendEntryGate::default());
+    keyring.gate_reads_until_released(Arc::clone(&gate), 2);
+    let mut workers = Vec::new();
+    for name in ["provider/one", "provider/two"] {
+        let store = store.clone();
+        workers.push(thread::spawn(move || {
+            store
+                .resolve(&SecretRef::Stored(name.to_owned()))
+                .unwrap()
+                .expose_secret_str()
+                .unwrap()
+                .to_owned()
+        }));
+    }
+    gate.entered.wait_for(2);
+    assert_eq!(keyring.read_count("provider/one"), 0);
+    assert_eq!(keyring.read_count("provider/two"), 0);
+    gate.release.notify();
+    let mut values = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect::<Vec<_>>();
+    values.sort();
+    assert_eq!(values, ["one", "two"]);
+    assert_eq!(keyring.read_count("provider/one"), 1);
+    assert_eq!(keyring.read_count("provider/two"), 1);
+}
+
+#[test]
+fn stored_keyring_resolution_fails_closed_when_coordinator_is_poisoned() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/work", "secret", false).unwrap();
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("poison coordinator for test");
+        })
+        .join()
+        .is_err()
+    );
+
+    let result = store.resolve(&SecretRef::Stored("provider/work".to_owned()));
+    assert!(matches!(
+        result,
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert_eq!(keyring.read_count("provider/work"), 0);
+}
+
+#[test]
+fn stored_keyring_resolution_revalidates_after_capacity_wait() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/target", "target", false).unwrap();
+    let epoch = store.epoch().unwrap();
+    let target = StoredResolutionKey {
+        name: "provider/target".to_owned(),
+        endpoint: None,
+        epoch,
+    };
+    let coordinator = Arc::clone(&store.stored_resolution);
+    let mut held = Vec::new();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES {
+            let key = StoredResolutionKey {
+                name: format!("held/{index}"),
+                endpoint: None,
+                epoch,
+            };
+            let flight = Arc::new(StoredResolutionFlight {
+                result: Mutex::new(None),
+                ready: std::sync::Condvar::new(),
+                followers: TestSignal::default(),
+            });
+            state.flights.insert(key.clone(), Arc::clone(&flight));
+            held.push((key, flight));
+        }
+    }
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_store = store.clone();
+    let worker = thread::spawn(move || {
+        let result = worker_store.resolve_with_epoch(&SecretRef::Stored(target.name.clone()), None);
+        done_tx.send(result).unwrap();
+    });
+    let capacity_waiters = Arc::clone(&coordinator.0.lock().unwrap().capacity_waiters);
+    capacity_waiters.wait_for(1);
+    assert_eq!(keyring.read_count("provider/target"), 0);
+
+    // Rotate the index while the request is waiting. Releasing one flight must
+    // cause the public call to reload the current epoch before reading.
+    store.set("provider/target", "rotated", false).unwrap();
+    let (key, flight) = held.pop().unwrap();
+    {
+        let mut state = coordinator.0.lock().unwrap();
+        state.flights.remove(&key);
+    }
+    flight.ready.notify_all();
+    coordinator.1.notify_all();
+
+    let result = done_rx
+        .recv()
+        .expect("capacity wait must recover after a flight is released")
+        .unwrap();
+    worker.join().unwrap();
+    assert_eq!(result.0.expose_secret_bytes(), b"rotated");
+    assert!(result.1 > epoch);
+    assert_eq!(keyring.read_count("provider/target"), 1);
+}
+
+#[test]
+fn stored_keyring_active_coordinator_poison_wakes_joined_follower() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/active", "secret", false).unwrap();
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    gate.entered.wait_for(1);
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/active".to_owned())))
+            .unwrap();
+    });
+    active_resolution_flight(&store).followers.wait_for(1);
+    let coordinator = Arc::clone(&store.stored_resolution);
+    assert!(
+        thread::spawn(move || {
+            let _guard = coordinator.0.lock().unwrap();
+            panic!("active coordinator poison");
+        })
+        .join()
+        .is_err()
+    );
+    gate.release.notify();
+    assert!(matches!(
+        owner_rx.recv().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    owner.join().unwrap();
+    follower.join().unwrap();
+    assert!(store.stored_resolution.0.lock().is_err());
+}
+
+#[test]
+fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
+    let (store, keyring, _directory) = test_store();
+    store.set("provider/result", "secret", false).unwrap();
+    store
+        .set("provider/capacity", "capacity-secret", false)
+        .unwrap();
+    let epoch = store.epoch().unwrap();
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let owner_store = store.clone();
+    let (owner_tx, owner_rx) = std::sync::mpsc::channel();
+    let owner = thread::spawn(move || {
+        owner_tx
+            .send(owner_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    gate.entered.wait_for(1);
+    let follower_store = store.clone();
+    let (follower_tx, follower_rx) = std::sync::mpsc::channel();
+    let follower = thread::spawn(move || {
+        follower_tx
+            .send(follower_store.resolve(&SecretRef::Stored("provider/result".to_owned())))
+            .unwrap();
+    });
+    let flight = active_resolution_flight(&store);
+    flight.followers.wait_for(1);
+    // The active owner is the 64th reserved flight. A distinct request must
+    // reach the actual capacity condvar before the owner's poisoned result
+    // frees its slot. No test-side notification releases this waiter.
+    {
+        let mut state = store.stored_resolution.0.lock().unwrap();
+        for index in 0..MAX_STORED_RESOLUTION_CACHE_ENTRIES - 1 {
+            state.flights.insert(
+                StoredResolutionKey {
+                    name: format!("held/{index}"),
+                    endpoint: None,
+                    epoch,
+                },
+                Arc::new(StoredResolutionFlight {
+                    result: Mutex::new(None),
+                    ready: std::sync::Condvar::new(),
+                    followers: TestSignal::default(),
+                }),
+            );
+        }
+        assert_eq!(state.flights.len(), MAX_STORED_RESOLUTION_CACHE_ENTRIES);
+    }
+    let capacity_store = store.clone();
+    let (capacity_tx, capacity_rx) = std::sync::mpsc::channel();
+    let capacity_worker = thread::spawn(move || {
+        capacity_tx
+            .send(capacity_store.resolve(&SecretRef::Stored("provider/capacity".to_owned())))
+            .unwrap();
+    });
+    let capacity_waiters = Arc::clone(&store.stored_resolution.0.lock().unwrap().capacity_waiters);
+    capacity_waiters.wait_for(1);
+    assert_eq!(keyring.read_count("provider/capacity"), 0);
+    let poisoned_result = Arc::clone(&flight);
+    assert!(
+        thread::spawn(move || {
+            let _guard = poisoned_result.result.lock().unwrap();
+            panic!("active result poison");
+        })
+        .join()
+        .is_err()
+    );
+    gate.release.notify();
+    assert!(matches!(
+        owner_rx.recv().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    assert!(matches!(
+        follower_rx.recv().unwrap(),
+        Err(AuthError::CredentialCoordinator {
+            operation: "lock_poisoned"
+        })
+    ));
+    owner.join().unwrap();
+    follower.join().unwrap();
+    let capacity_secret = capacity_rx
+        .recv()
+        .expect("poison cleanup must wake the saturated capacity waiter")
+        .unwrap();
+    assert_eq!(capacity_secret.expose_secret_bytes(), b"capacity-secret");
+    capacity_worker.join().unwrap();
+    assert_eq!(keyring.read_count("provider/capacity"), 1);
+    {
+        let state = store.stored_resolution.0.lock().unwrap();
+        assert!(
+            state
+                .flights
+                .keys()
+                .all(|key| key.name != "provider/result")
+        );
+        assert!(
+            state
+                .cache
+                .entries
+                .iter()
+                .all(|entry| entry.name != "provider/result")
+        );
+    }
+    let secret = store
+        .resolve(&SecretRef::Stored("provider/result".to_owned()))
+        .unwrap();
+    assert_eq!(secret.expose_secret_bytes(), b"secret");
+    assert_eq!(keyring.read_count("provider/result"), 2);
 }

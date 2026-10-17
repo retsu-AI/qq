@@ -12,13 +12,15 @@ use serde::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::goals::GoalsPatch;
+
 use super::{
     AgentProfileConfig, ApprovalDelegateSetting, AuditConfig, AuditMode, AwsAuth, BedrockAuth,
     BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
     ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, HttpAccess, HttpCredential, InputModality, JevReviewMode,
-    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, HttpCredential, InputModality,
+    JevReviewMode, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
     MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
     MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
     ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
@@ -450,7 +452,7 @@ impl GrantEntry {
 /// order. The user guide must name each; the docs-truth test in the root
 /// crate reads this list, and a unit test here holds it equal to the field
 /// list the `Deserialize` derive reports.
-pub const POLICY_FIELD_NAMES: [&str; 15] = [
+pub const POLICY_FIELD_NAMES: [&str; 16] = [
     "allowed_providers",
     "exposed_tools",
     "denied_providers",
@@ -466,12 +468,13 @@ pub const POLICY_FIELD_NAMES: [&str; 15] = [
     "deny_tools",
     "deny_shell_prefixes",
     "deny_hosts",
+    "goals",
 ];
 
 /// The `policy` keys only managed and MDM sources may set; anywhere else is
 /// [`ConfigError::PolicyOutsideManaged`](crate::ConfigError). The user guide
 /// marks exactly these as administrator-only.
-pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
+pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 10] = [
     "allowed_providers",
     "denied_providers",
     "max_output_tokens",
@@ -481,6 +484,7 @@ pub const MANAGED_ONLY_POLICY_FIELD_NAMES: [&str; 9] = [
     "deny_tools",
     "deny_shell_prefixes",
     "deny_hosts",
+    "goals",
 ];
 
 /// The `policy` approval grants an organization manifest may not set;
@@ -495,7 +499,7 @@ pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 4] = [
 
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
-pub const DOCUMENT_FIELD_NAMES: [&str; 19] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 20] = [
     "version",
     "organization",
     "model",
@@ -503,6 +507,7 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 19] = [
     "reviewer_model",
     "delegation",
     "audit",
+    "goals",
     "jev_review",
     "jev_routing",
     "jev_approval",
@@ -553,6 +558,7 @@ pub(super) struct PolicyPatch {
     /// Managed-only: hosts `fetch` is refused under every approval mode;
     /// also filters matching lower-layer host grants. Same host grammar.
     deny_hosts: Option<Vec<String>>,
+    goals: Option<GoalCeilings>,
 }
 
 impl PolicyPatch {
@@ -569,6 +575,7 @@ impl PolicyPatch {
             || self.deny_tools.is_some()
             || self.deny_shell_prefixes.is_some()
             || self.deny_hosts.is_some()
+            || self.goals.is_some()
     }
 
     /// Approval grants any source may declare, gated by workspace trust.
@@ -599,6 +606,8 @@ pub(super) struct Document {
     /// Final-answer audit settings. Replaces the whole section when set.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     audit: Field<AuditPatch>,
+    #[serde(default, skip_serializing_if = "Field::is_missing")]
+    goals: Field<GoalsPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     jev_review: Field<JevReviewMode>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
@@ -772,6 +781,9 @@ impl Document {
         }
         if let Some(policy) = &self.policy {
             validate_policy_names(policy, origin)?;
+            if let Some(goals) = policy.goals {
+                goals.validate()?;
+            }
         }
         Ok(())
     }
@@ -783,6 +795,7 @@ impl Document {
             || self.reviewer_model.is_present()
             || self.delegation.is_present()
             || self.audit.is_present()
+            || self.goals.is_present()
             || self.jev_review.is_present()
             || self.jev_routing.is_present()
             || self.jev_approval.is_present()
@@ -816,6 +829,9 @@ impl Document {
         }
         if self.audit.is_present() {
             sections.push("audit");
+        }
+        if self.goals.is_present() {
+            sections.push("goals");
         }
         if self.jev_review.is_present() {
             sections.push("jev_review");
@@ -884,6 +900,9 @@ impl Document {
         }
         if self.audit.is_present() {
             declarations.push(TrustDeclaration::Other("audit"));
+        }
+        if self.goals.is_present() {
+            declarations.push(TrustDeclaration::Other("goals"));
         }
         if self.jev_review.is_present() {
             declarations.push(TrustDeclaration::Other("jev_review"));
@@ -1014,6 +1033,8 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             audit: Option<&'a Field<AuditPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            goals: Option<&'a Field<GoalsPatch>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             jev_review: Option<&'a Field<JevReviewMode>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             jev_routing: Option<&'a Field<bool>>,
@@ -1049,6 +1070,7 @@ impl Document {
                 .then_some(&self.reviewer_model),
             delegation: present(&self.delegation),
             audit: present(&self.audit),
+            goals: present(&self.goals),
             jev_review: present(&self.jev_review),
             jev_routing: present(&self.jev_routing),
             jev_approval: present(&self.jev_approval),
@@ -1116,6 +1138,9 @@ impl Document {
         }
         if self.audit.is_present() {
             touched.push(ConfigKey::Audit);
+        }
+        if self.goals.is_present() {
+            touched.push(ConfigKey::Goals);
         }
         if self.max_output_tokens.is_present() {
             touched.push(ConfigKey::MaxOutputTokens);
@@ -1673,6 +1698,7 @@ pub(super) struct MergeState {
     reviewer_model: Option<String>,
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
+    goals: GoalsConfig,
     jev_review: JevReviewMode,
     jev_routing: bool,
     jev_approval: bool,
@@ -1752,6 +1778,7 @@ impl MergeState {
                 reviewer_model: None,
                 delegation: None,
                 audit: None,
+                goals: GoalsConfig::default(),
                 jev_review: JevReviewMode::Off,
                 jev_routing: false,
                 jev_approval: false,
@@ -1841,6 +1868,16 @@ impl MergeState {
         }
         if apply_optional_string(&document.reviewer_model, &mut self.reviewer_model) {
             self.provenance.reviewer_model = Some(source.clone());
+        }
+        match &document.goals {
+            Field::Missing => {}
+            Field::Set(patch) => self.goals.apply(patch, source, &mut self.provenance.goals),
+            Field::Clear => {
+                self.goals = GoalsConfig::default();
+                self.provenance
+                    .goals
+                    .retain(|key, _| key.starts_with("policy."));
+            }
         }
         match &document.delegation {
             Field::Missing => {}
@@ -2245,6 +2282,11 @@ impl MergeState {
     }
 
     fn compose_policy(&mut self, patch: &PolicyPatch, source: &SourceIdentity) {
+        if let Some(goals) = patch.goals {
+            self.policy
+                .goal_ceilings
+                .compose(goals, source, &mut self.provenance.goals);
+        }
         if let Some(incoming) = &patch.allowed_providers {
             let incoming: BTreeSet<_> = incoming.iter().cloned().collect();
             let combined = match &self.policy.allowed_providers {
@@ -2590,8 +2632,10 @@ impl MergeState {
             }
             Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
         };
+        let goals = self.goals.finish(self.policy.goal_ceilings)?;
         Ok(ClientSnapshot {
             organization: self.organization,
+            goals,
             model,
             worker_model,
             reviewer_model,
@@ -2633,6 +2677,7 @@ impl ClientSnapshot {
             reviewer_model: self.reviewer_model,
             delegation: self.delegation,
             audit: self.audit,
+            goals: self.goals,
             jev_review: self.jev_review,
             jev_routing: self.jev_routing,
             jev_approval: self.jev_approval,

@@ -33,7 +33,7 @@ struct Snapshot {
     cursor: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct Composer {
     pub(crate) text: String,
     /// UTF-8 byte offset. `None` means the end, which also lets tests and state

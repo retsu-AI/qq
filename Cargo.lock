@@ -3046,6 +3046,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.19",
+ "time",
  "tokio",
  "tree-sitter",
  "tree-sitter-bash",

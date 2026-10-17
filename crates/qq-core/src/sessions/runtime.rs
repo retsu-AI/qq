@@ -4,7 +4,7 @@ use super::*;
 use crate::plan::{
     AgentProfile, CompiledAgentPlan, HostSnapshot, PlanCompileError, ProviderDescriptor,
 };
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 pub type RuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<LoadedRuntime, RuntimeLoadError>> + Send + 'static>>;
@@ -31,6 +31,14 @@ pub trait TaskRouter: Send + Sync + 'static {
     fn configuration_identity(&self) -> &str;
     fn route(&self, task: String) -> TaskRoutingFuture;
     fn max_cost_usd_nanos(&self) -> Option<u64>;
+    /// Conservative billed input ceiling, including cached input.
+    fn max_input_tokens(&self) -> Option<u64> {
+        None
+    }
+    /// Conservative billed output ceiling, including hidden reasoning.
+    fn max_output_tokens(&self) -> Option<u64> {
+        None
+    }
 }
 
 impl LoadedRuntime {
@@ -441,6 +449,11 @@ pub trait WorkspaceGrantAuthority: Send + Sync + 'static {
     /// session creation must not depend on a loadable configuration.
     fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture;
 
+    /// Resolve current goal settings. Failure must reject new activation.
+    fn goal_policy(&self, _workspace: &Path) -> GoalPolicyFuture {
+        Box::pin(std::future::ready(Err(GoalPolicyError::Unavailable)))
+    }
+
     /// Durably promotes one approval grant into the workspace configuration.
     /// Failures are data ([`WorkspaceGrantOutcome::Failed`]), never errors:
     /// a promotion must not fail the approval that requested it.
@@ -719,6 +732,8 @@ pub(super) struct SessionRuntimeInner {
     pub(super) max_active_runs: usize,
     pub(super) schedule: mpsc::Sender<()>,
     pub(super) cancellations: Mutex<HashMap<RunId, watch::Sender<bool>>>,
+    // Only executing paid prompt runs; their scoped registration removes entries after drain.
+    pub(super) goal_deadlines: Mutex<HashMap<RunId, crate::runtime::RunDeadline>>,
     /// Live steering channels for executing prompt runs, registered when the
     /// run loop starts and removed when it settles.
     pub(super) steering: Mutex<HashMap<RunId, crate::runtime::SteeringSender>>,
@@ -733,6 +748,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) grant_promotions: mpsc::Sender<()>,
     grant_promotion_stopped: watch::Sender<bool>,
     pub(super) lifecycle: RwLock<()>,
+    pub(super) draining: AtomicBool,
 }
 
 struct PendingApproval {
@@ -891,6 +907,7 @@ impl SessionRuntime {
             max_active_runs: options.max_active_runs,
             schedule,
             cancellations: Mutex::new(HashMap::new()),
+            goal_deadlines: Mutex::new(HashMap::new()),
             steering: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             approval_timeout: options.approval_timeout,
@@ -903,6 +920,7 @@ impl SessionRuntime {
             grant_promotions,
             grant_promotion_stopped,
             lifecycle: RwLock::new(()),
+            draining: AtomicBool::new(false),
         });
         for cursor in recovered {
             inner.notify(cursor);
@@ -932,10 +950,49 @@ impl SessionRuntime {
         self.inner.store.store_id()
     }
 
+    /// Replay boundary captured before startup recovery and goal scheduling.
+    /// Absent when the opened store had no live goals.
+    pub async fn startup_goal_cursor(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Option<EventCursor>, SessionRuntimeError> {
+        self.inner.store.startup_goal_cursor(workspace_id).await
+    }
+
     pub async fn command(
         &self,
         command_id: CommandId,
         command: SessionCommand,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        self.command_with_pause_condition(command_id, command, false)
+            .await
+    }
+
+    /// Stops an accepted active goal without overwriting a stopped reason.
+    /// The status and identity predicate is checked in the command transaction.
+    pub async fn pause_goal_if_active(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<CommandReceipt, SessionRuntimeError> {
+        let id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
+        self.command_with_pause_condition(
+            id,
+            SessionCommand::GoalControl {
+                session_id,
+                expected,
+                action: qq_protocol::GoalControl::Pause,
+            },
+            true,
+        )
+        .await
+    }
+
+    async fn command_with_pause_condition(
+        &self,
+        command_id: CommandId,
+        command: SessionCommand,
+        pause_goal_only_if_active: bool,
     ) -> Result<CommandReceipt, SessionRuntimeError> {
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
             return Err(SessionRuntimeError::Unavailable);
@@ -978,39 +1035,70 @@ impl SessionRuntime {
             }
             _ => WorkspaceGrantSeed::default(),
         };
-        let goal_check_policy = match (&command, &self.inner.grant_authority) {
-            (
-                SessionCommand::GoalControl {
-                    session_id,
-                    action: qq_protocol::GoalControl::ApproveCheck { command, .. },
-                    ..
-                },
-                Some(authority),
-            ) => {
-                let session = *session_id;
-                let path = self
-                    .inner
-                    .store
-                    .call(store::Priority::Control, move |connection| {
-                        Ok(connection.query_row(
-                        "SELECT w.path FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
-                         WHERE s.id = ?1",
-                        [session.to_string()], |row| row.get::<_, String>(0),
-                    )?)
-                    })
-                    .await;
-                // Carry failures past journal lookup: committed approvals
-                // replay even when current policy or the workspace is gone.
-                Some(match path {
-                    Ok(path) => {
-                        authority
-                            .validate_goal_check(Path::new(&path), command)
-                            .await
-                    }
-                    Err(_) => Err(GoalCheckPolicyError::Unavailable),
-                })
-            }
+        let goal_session = match &command {
+            SessionCommand::SetGoal { session_id, .. }
+            | SessionCommand::GoalControl {
+                session_id,
+                action:
+                    qq_protocol::GoalControl::Resume | qq_protocol::GoalControl::ApproveCheck { .. },
+                ..
+            } => Some(*session_id),
             _ => None,
+        };
+        let replayed_goal = goal_session.is_some()
+            && self.inner.grant_authority.is_some()
+            && self
+                .inner
+                .store
+                .command_is_recorded(command_id, &command)
+                .await?;
+        let goal_session = if replayed_goal { None } else { goal_session };
+        let goal_path = if let Some(session) = goal_session
+            && self.inner.grant_authority.is_some()
+        {
+            Some(self.inner.store.call(store::Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT w.path FROM sessions s JOIN workspaces w ON w.id=s.workspace_id WHERE s.id=?1",
+                    [session.to_string()], |row| row.get::<_, String>(0),
+                )?)
+            }).await)
+        } else {
+            None
+        };
+        // Carry failures through journal lookup so committed commands replay.
+        let goal_policy = goal_session.map(|_| &goal_path);
+        let goal_policy = match goal_policy {
+            Some(Some(Ok(path))) => Some(self.inner.resolve_goal_policy(Path::new(path)).await),
+            Some(Some(Err(_))) => Some(Err(GoalPolicyError::Unavailable)),
+            Some(None) => Some(Ok(GoalPolicy::default())),
+            None => None,
+        };
+        let goal_check_policy = if replayed_goal {
+            None
+        } else {
+            match (&command, &self.inner.grant_authority) {
+                (
+                    SessionCommand::GoalControl {
+                        action: qq_protocol::GoalControl::ApproveCheck { command, .. },
+                        ..
+                    },
+                    Some(authority),
+                ) => Some(match &goal_path {
+                    Some(Ok(path)) => {
+                        match tokio::time::timeout(
+                            Duration::from_secs(10),
+                            authority.validate_goal_check(Path::new(path), command),
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(GoalCheckPolicyError::Unavailable),
+                        }
+                    }
+                    _ => Err(GoalCheckPolicyError::Unavailable),
+                }),
+                _ => None,
+            }
         };
         let lifecycle = self.inner.lifecycle.read().await;
         if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
@@ -1024,8 +1112,10 @@ impl SessionRuntime {
                 command,
                 CommandAdmission {
                     goal_work_present: false,
+                    pause_goal_only_if_active,
                     seed,
                     goal_check_policy,
+                    goal_policy,
                 },
                 Some(self.inner.grant_promotions.clone()),
             )
@@ -1121,6 +1211,55 @@ impl SessionRuntime {
             return Err(SessionRuntimeError::InvalidPageLimit);
         }
         self.inner.store.snapshot(request).await
+    }
+
+    /// Unsettled runs sponsored by this exact live goal, including cancellations
+    /// that still need to drain. Historical roots retain paid-child ownership.
+    pub async fn goal_pending_runs(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .goal_pending_runs(session_id, expected)
+            .await
+    }
+
+    /// Whether an unsettled run is sponsored by this exact live goal.
+    pub async fn goal_owns_run(
+        &self,
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+        run_id: RunId,
+    ) -> Result<bool, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .goal_owns_run(session_id, expected, run_id)
+            .await
+    }
+
+    /// Reads an exact durable run, independently of transcript pagination.
+    /// Workspace and session fences prevent accidentally reading another lane.
+    pub async fn run_snapshot(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<qq_protocol::RunSnapshot, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .run_snapshot(workspace_id, session_id, run_id)
+            .await
     }
 
     /// Committed events after `request.after`, as parsed envelopes.
@@ -1314,6 +1453,59 @@ impl SessionRuntime {
         self.inner.store.close().await
     }
 
+    /// Whether unfinished work in this session is outside the selected goal.
+    pub async fn has_preempting_goal_work(
+        &self,
+        session_id: SessionId,
+        goal: qq_protocol::GoalId,
+    ) -> Result<bool, SessionRuntimeError> {
+        self.inner
+            .store
+            .has_preempting_goal_work(session_id, goal)
+            .await
+    }
+
+    /// Retains accepted runs until they settle naturally. An explicit interrupt
+    /// requests ordinary shutdown, cancelling and draining the remaining work.
+    pub async fn close_when_idle(
+        &self,
+        interrupt: impl std::future::Future<Output = ()>,
+    ) -> Result<(), SessionRuntimeError> {
+        tokio::pin!(interrupt);
+        {
+            let _lifecycle = self.inner.lifecycle.write().await;
+            self.inner.draining.store(true, Ordering::Release);
+        }
+        let mut settlements = self.inner.settlements.subscribe();
+        loop {
+            let lifecycle = self.inner.lifecycle.write().await;
+            if *self.inner.failed.borrow() {
+                return Err(SessionRuntimeError::Unavailable);
+            }
+            let unfinished = tokio::select! {
+                biased;
+                () = interrupt.as_mut() => {
+                    drop(lifecycle);
+                    return self.close().await;
+                }
+                result = self.inner.store.unfinished_run_ids() => result?,
+            };
+            if unfinished.is_empty() {
+                self.inner.shutdown.send_replace(true);
+                drop(lifecycle);
+                return self.close().await;
+            }
+            drop(lifecycle);
+            tokio::select! {
+                biased;
+                () = interrupt.as_mut() => return self.close().await,
+                changed = settlements.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+            }
+        }
+    }
+
     /// Abandons the store without settling anything: the worker thread is
     /// stopped and joined, every later store call fails as unavailable, and
     /// runs still executing are left exactly as a crashed process would leave
@@ -1348,6 +1540,28 @@ impl SessionRuntime {
 }
 
 impl SessionRuntimeInner {
+    pub(super) async fn resolve_goal_policy(
+        &self,
+        workspace: &Path,
+    ) -> Result<GoalPolicy, GoalPolicyError> {
+        let policy = match &self.grant_authority {
+            Some(authority) => {
+                let mut shutdown = self.shutdown.subscribe();
+                let mut failed = self.failed.subscribe();
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait_for(|stopped| *stopped) => Err(GoalPolicyError::Unavailable),
+                    _ = failed.wait_for(|stopped| *stopped) => Err(GoalPolicyError::Unavailable),
+                    result = tokio::time::timeout(Duration::from_secs(10), authority.goal_policy(workspace)) => {
+                        result.unwrap_or(Err(GoalPolicyError::Unavailable))
+                    }
+                }
+            }
+            None => Ok(GoalPolicy::default()),
+        };
+        policy.and_then(GoalPolicy::validate)
+    }
+
     /// Wakes in-process waiters on a workspace after a run settled. Client
     /// delivery is the feed's job (published by the store worker after
     /// commit); this watch exists only so a parent awaiting a child in
@@ -1512,6 +1726,10 @@ pub enum SessionRuntimeError {
     GoalImmutable,
     #[error("goal cancellation is still draining")]
     GoalCancellationPending,
+    #[error("the interrupted check does not match an unacknowledged workspace hold")]
+    CheckInterruptionMismatch,
+    #[error("the named question is not pending in this goal's active paid family")]
+    GoalInputNotPending,
     #[error("goal check authorization is required")]
     GoalCheckApprovalRequired,
     #[error("goal has no check to authorize")]
@@ -1522,6 +1740,8 @@ pub enum SessionRuntimeError {
     GoalCheckForbidden,
     #[error(transparent)]
     GoalCheckPolicy(#[from] GoalCheckPolicyError),
+    #[error(transparent)]
+    GoalPolicy(#[from] GoalPolicyError),
     #[error("goal budget or deadline has been spent")]
     GoalBudgetSpent,
     #[error("invalid goal: {0}")]
