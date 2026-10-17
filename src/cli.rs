@@ -97,6 +97,12 @@ pub enum Command {
         command: GoalCommand,
     },
 
+    /// Pull request readiness for goals and agents.
+    Pr {
+        #[command(subcommand)]
+        command: PrCommand,
+    },
+
     /// Run the user-scoped QQ server in the foreground.
     Serve {
         /// Loopback address to bind. Port 0 selects an available port.
@@ -155,6 +161,27 @@ pub enum Command {
 
     /// Print the version with the compatibility contracts this build speaks.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PrCommand {
+    /// Report whether the current branch's PR is ready to merge.
+    ///
+    /// Checks the PR state, local HEAD, mergeability, CI on the head commit,
+    /// unresolved review threads and the reviewers configured in pr.ron.
+    /// Read-only. Exit status: 0 ready, 1 waiting on CI or a reviewer, 2 the
+    /// agent has something to fix, 3 the status could not be determined.
+    Status(PrStatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PrStatusArgs {
+    /// Print one JSON object instead of text.
+    #[arg(long)]
+    pub json: bool,
+    /// GitHub CLI executable to run; tests substitute a fake.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub gh: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

@@ -26,6 +26,7 @@ mod init;
 mod mcp;
 mod output;
 mod plan;
+mod pr_status;
 mod runtime;
 
 #[tokio::main]
@@ -67,6 +68,17 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
                 eprintln!("error: {error}");
                 return Ok(error.exit_code());
             }
+        }
+        Some(cli::Command::Pr {
+            command: cli::PrCommand::Status(args),
+        }) => {
+            return Ok(match pr_status::run(args).await {
+                Ok(code) => code,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    ExitCode::from(3)
+                }
+            });
         }
         Some(cli::Command::Serve {
             bind,

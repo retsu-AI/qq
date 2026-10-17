@@ -11,8 +11,18 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
 | G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
 | G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Ninth qualifies final runtime `e84e3552`: 145.7 minutes, four compactions, 14 retained checklist identities, terminal usage reconciled; subscription only, no paid API fallback |
+| G6.1 | `qq pr status`: provider-neutral merge readiness | In review | | stacked on [#328](https://github.com/retsu-AI/qq/pull/328) | No runtime, wire or schema change; usable by hand and as a goal check |
+| G6.2 | Watches and condition waits | Planned | | | Own protocol/descriptor bump |
+| G6.3 | `pr` preset and live gate | Planned | | | One real PR from one prompt |
 
 ## Entries
+
+### 2026-10-17 — G6.1 `qq pr status`
+
+- The design (#328) was rebased onto merged #330–#332. G6.1 is stacked on it in `.worktrees/pr-status`, branch `feat/goal-pr-status`.
+- `src/pr_status.rs` evaluates readiness as a pure function of one `gh api graphql` response plus `git rev-parse HEAD`. Rules come from `pr.ron` (`crates/qq-config/src/pr.rs`), loaded like `tui.ron`, with no trust needed. Exit codes: 0 ready, 1 waiting, 2 action, 3 undetermined.
+- One deviation from the first design: every failing check needs action, required or not. Optional jobs still report real defects. Only required checks that are still running count as waiting.
+- Live runs (real `gh` 2.102, 2026-10-17): on #328, `action: the PR is a draft`, exit 2. On #313, with a Codex rule configured, it reported the conflict with main and that Codex had not reviewed `9137b94` (requested with `@codex review`), exit 2. Both match the PRs' real state.
 
 ### 2026-10-14 — G2 terminal accounting test-first
 

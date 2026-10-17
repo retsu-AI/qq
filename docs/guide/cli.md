@@ -106,6 +106,58 @@ limits remain authoritative. An achieved goal requires `--replace`.
 Concurrent changes cause a revision conflict; inspect `show` before retrying.
 A successful control exits 0 even when the resulting goal is paused.
 
+## `qq pr status [--json]`
+
+Reports whether the current branch's pull request is ready to merge. It is
+read-only, and it calls the GitHub CLI, so install `gh` and run
+`gh auth login` first. It works with any CI system that reports check runs or
+commit statuses to GitHub, and with any reviewer, person or bot.
+
+| Exit | State | Meaning |
+| --- | --- | --- |
+| 0 | `ready` | Nothing is left to fix or wait for |
+| 1 | `waiting` | CI, mergeability or a configured reviewer is still pending |
+| 2 | `action` | Something to fix: failed CI, conflicts, unresolved threads, unpushed commits, a draft |
+| 3 | error | The status could not be determined, for example no PR for this branch |
+
+The first line is the overall state. Each following line is one finding,
+actions first, for example `action: CI failed: smoke`. `--json` prints one
+object with `state`, `number`, `head` and `findings`. Missing or unknown data
+is reported as `waiting` or `action`, never as `ready`. Every failing check
+needs action, required or not; only required checks that are still running
+count as waiting.
+
+Reviewer and CI rules come from `pr.ron` in the global configuration
+directory and from `.qq/pr.ron` in the project. A later file replaces each
+list it sets. A reviewer is done with the head commit when any `done_when`
+rule holds: `review` (it submitted a review of that commit), `check("NAME")`
+(that check completed on it) or `comment("TEXT")` (it posted a comment
+containing `TEXT`, with `{sha}` and `{sha10}` replaced by the head commit).
+
+```ron pr.ron
+(
+    version: 1,
+    required_checks: ["e2e"],
+    reviewers: [
+        (
+            login: "chatgpt-codex-connector",
+            done_when: [review, comment("Reviewed commit:** `{sha10}`")],
+            start_within_seconds: 600,
+            request: "@codex review",
+            skips_drafts: true,
+        ),
+        (login: "coderabbitai", done_when: [check("CodeRabbit")]),
+    ],
+)
+```
+
+`required_checks` adds check names on top of branch protection's required
+checks. A reviewer that has not finished is `waiting` until
+`start_within_seconds` after the head commit, then `action`; `request` is
+shown as the text to post. `skips_drafts` notes that the reviewer ignores
+drafts. Logins omit the `[bot]` suffix. With no file, a PR is ready once CI
+passes, it is mergeable and no review thread is unresolved.
+
 ## `qq config …`
 
 | Subcommand | Prints |

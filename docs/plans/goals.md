@@ -9,7 +9,7 @@
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
-| External waits | G6 ([§ Waiting on external work](#waiting-on-external-work)) is design only: no slice is in progress |
+| External waits | G6 ([§ Waiting on external work](#waiting-on-external-work)): G6.1 `qq pr status` in review; G6.2–G6.3 design only |
 
 ## Delivery stack
 
@@ -306,11 +306,11 @@ It finds the PR from the current branch and evaluates these, in order:
 
 | Signal | `action` (exit 2) | `waiting` (exit 1) |
 | --- | --- | --- |
-| Local branch | Unpushed commits, or the PR is a draft that the rules require to be ready | — |
+| Local branch | Unpushed commits, the PR is closed, or it is a draft | — |
 | Mergeability | Conflicts; behind the base when branch protection requires being current | GitHub is still computing it |
-| CI | A required check or commit status failed on the head | A required check is queued or running |
+| CI | Any check or commit status failed on the head, required or not | A required check is queued or running, or the head's checks are not reported yet |
 | Review threads | An unresolved thread, from anyone | — |
-| Each configured reviewer | It has not started on the head after `start_within`; the output says how to ask for one | It has not finished with the head |
+| Each configured reviewer | It has not finished with the head after `start_within_seconds`; the output names its `request` text | It has not finished with the head |
 
 The result is `ready` (exit 0) when no row reports anything. `action` beats
 `waiting`, because fixing a failure now is better than waiting on a review
@@ -319,8 +319,8 @@ of code that is about to change.
 **CI is provider-neutral as it is.** Every CI system that reports to the
 forge does so as check runs or commit statuses: GitHub Actions, Buildkite,
 CircleCI, Jenkins, and AI reviewers that run as checks. Branch protection's
-required checks decide what counts. `ci.require` adds names on repositories
-without branch protection.
+required checks decide what counts. `required_checks` adds names on
+repositories without branch protection.
 
 **Reviewers are configuration, not code.** Branch protection can say that
 an approval is needed, but not that a particular reviewer has *finished*
@@ -336,23 +336,26 @@ reviewer gets a rule. A reviewer counts as done on the head when any of its
   and `{sha10}` are replaced by the head commit. This covers reviewers that
   report "no findings" as a comment rather than a review.
 
-```ron
-// .qq/config.ron
-pr: (
-    ci: (require: []),                 // branch protection's required checks apply anyway
-    reviewers: [
-        (login: "chatgpt-codex-connector[bot]",
-         done_when: [review, comment("Reviewed commit: `{sha10}`")],
-         start_within: "10m", request: "@codex review", skips_drafts: true),
-        (login: "coderabbitai[bot]", done_when: [check("CodeRabbit")]),
-    ],
-),
+These rules live in `pr.ron` (global, then project `.qq/pr.ron`), loaded
+like `tui.ron`. It names accounts and checks only and grants no authority,
+so it needs no workspace trust and does not widen the main configuration
+document. A later file replaces each list it sets.
+
+```text
+(version: 1,
+ required_checks: [],                 // branch protection's required checks apply anyway
+ reviewers: [
+    (login: "chatgpt-codex-connector",
+     done_when: [review, comment("Reviewed commit:** `{sha10}`")],
+     start_within_seconds: 600, request: "@codex review", skips_drafts: true),
+    (login: "coderabbitai", done_when: [check("CodeRabbit")]),
+ ])
 ```
 
 With no reviewers configured, a PR is ready once CI passes, it is
-mergeable, and no thread is unresolved. `skips_drafts` makes a draft PR
-report `action: mark ready for review`, because that reviewer will never
-start on a draft. `request` is only shown in the output. `qq pr status` is
+mergeable, and no thread is unresolved. A draft always needs action;
+`skips_drafts` names the reviewers that will never start on one. `request`
+is only shown in the output. `qq pr status` is
 read-only, so it never posts. The agent posts the request through ordinary
 tool approvals. There is no quiet window anywhere: every rule is exact, and
 unknown or malformed data is reported as `waiting` or `action`, never as

@@ -18,6 +18,7 @@ mod loader;
 mod managed;
 mod models;
 pub mod pack;
+mod pr;
 mod promote;
 mod providers;
 mod remote;
@@ -30,6 +31,7 @@ pub use pack::{
     AgentPack, MAX_PACK_MANIFEST_BYTES, MAX_PACK_PROMPT_BYTES, MAX_PACKS, PACK_MANIFEST_FILE,
     PACK_SCHEMA_VERSION, PackProfile, PackRequirements, PackToolPolicy,
 };
+pub use pr::{MAX_PR_REVIEWERS, MAX_PR_RULE_ITEMS, PrReviewer, PrReviewerDone, PrStatusConfig};
 pub use qq_provider::{SecretLiteral, SecretRef, XAI_CREDENTIAL_ENDPOINT};
 pub use theme::{
     AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, TERMINAL_THEME,
@@ -517,6 +519,12 @@ impl ConfigLoader {
         ValidationError: fmt::Display,
     {
         tui::load(self, cwd, defaults, &validate_binding)
+    }
+
+    /// Rules for `qq pr status` from global `pr.ron` and project
+    /// `.qq/pr.ron` files; empty when none exist.
+    pub fn load_pr_status(&self, cwd: &Path) -> Result<PrStatusConfig, ConfigError> {
+        pr::load(self, cwd)
     }
 
     /// Resolve one TUI theme by name from the compiled set, the global
