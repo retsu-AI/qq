@@ -1,15 +1,35 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Brain, ChevronRight, CircleCheck, CircleX, CornerDownRight, OctagonX } from "lucide-react";
-import { cost, duration, outcomeDetail, outcomeLabel, tokens } from "../lib/format";
-import type { Item, ProjectState, Transcript as TranscriptData } from "../lib/types";
+import {
+  Brain,
+  ChevronRight,
+  CircleCheck,
+  CircleX,
+  CornerDownRight,
+  OctagonX,
+} from "lucide-react";
+import {
+  cost,
+  duration,
+  outcomeDetail,
+  outcomeLabel,
+  tokens,
+} from "../lib/format";
+import type {
+  Item,
+  ProjectState,
+  Transcript as TranscriptData,
+} from "../lib/types";
 import { ToolGroup } from "./ToolCall";
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
-type Block = { kind: "item"; item: Item } | { kind: "tools"; id: string; tools: ToolItem[] };
+type Block =
+  | { kind: "item"; item: Item }
+  | { kind: "tools"; id: string; tools: ToolItem[] };
 
 /** Consecutive tool calls render as one group. */
 function blocks(items: Item[]): Block[] {
@@ -17,7 +37,8 @@ function blocks(items: Item[]): Block[] {
   for (const item of items) {
     const last = out[out.length - 1];
     if (item.kind === "tool") {
-      if (last?.kind === "tools") last.tools.push(item);
+      if (last?.kind === "tools" && last.tools.length < 32)
+        last.tools.push(item);
       else out.push({ kind: "tools", id: `tools-${item.id}`, tools: [item] });
     } else {
       out.push({ kind: "item", item });
@@ -29,27 +50,74 @@ function blocks(items: Item[]): Block[] {
 export function Transcript({
   project,
   transcript,
+  scrollElement,
 }: {
   project: ProjectState;
   transcript: TranscriptData;
+  scrollElement: HTMLDivElement | null;
 }) {
+  const rows = useMemo(() => blocks(transcript.items), [transcript.items]);
+  const [focusedKey, setFocusedKey] = useState<string | number | null>(null);
+  const keyFor = (index: number) => rows[index].kind === "tools" ? rows[index].id : rows[index].item.id;
+  const focusedRow = focusedKey === null ? -1 : rows.findIndex((_, index) => keyFor(index) === focusedKey);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollElement,
+    estimateSize: () => 180,
+    overscan: 6,
+    getItemKey: keyFor,
+    rangeExtractor: (range) => {
+      const visible = defaultRangeExtractor(range);
+      return focusedRow >= 0 &&
+        focusedRow < rows.length &&
+        !visible.includes(focusedRow)
+        ? [...visible, focusedRow].sort((a, b) => a - b)
+        : visible;
+    },
+  });
   if (transcript.items.length === 0) {
-    return <p className="pt-8 text-center text-muted">Send a message to start.</p>;
+    return (
+      <p className="pt-8 text-center text-muted">Send a message to start.</p>
+    );
   }
   return (
-    <div className="space-y-5">
-      {blocks(transcript.items).map((block) =>
-        block.kind === "tools" ? (
-          <ToolGroup
-            key={block.id}
-            tools={block.tools}
-            projectId={project.project_id}
-            sessionId={transcript.session_id}
-          />
-        ) : (
-          <ItemView key={block.item.id} item={block.item} />
-        ),
-      )}
+    <div
+      role="list"
+      aria-label="Transcript"
+      className="relative w-full"
+      style={{ height: virtualizer.getTotalSize() }}
+    >
+      {virtualizer.getVirtualItems().map((row) => {
+        const block = rows[row.index];
+        return (
+          <div
+            key={row.key}
+            ref={virtualizer.measureElement}
+            data-index={row.index}
+            role="listitem"
+            aria-setsize={rows.length}
+            aria-posinset={row.index + 1}
+            onFocusCapture={() => setFocusedKey(keyFor(row.index))}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget))
+                setFocusedKey(null);
+            }}
+            className="absolute left-0 top-0 w-full pb-5"
+            style={{ transform: `translateY(${row.start}px)` }}
+          >
+            {block.kind === "tools" ? (
+              <ToolGroup
+                key={block.id}
+                tools={block.tools}
+                projectId={project.project_id}
+                sessionId={transcript.session_id}
+              />
+            ) : (
+              <ItemView key={block.item.id} item={block.item} />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -87,7 +155,9 @@ function ItemView({ item }: { item: Item }) {
             </p>
           )}
           {item.truncated && (
-            <p className="mt-1 text-[12px] text-faint">Output reached the model's length limit.</p>
+            <p className="mt-1 text-[12px] text-faint">
+              Output reached the model's length limit.
+            </p>
           )}
         </div>
       );
@@ -100,7 +170,13 @@ function ItemView({ item }: { item: Item }) {
   }
 }
 
-const Markdown = memo(function Markdown({ text, streaming }: { text: string; streaming: boolean }) {
+const Markdown = memo(function Markdown({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
   if (!text && streaming) {
     return <span className="streaming-caret text-muted" />;
   }
@@ -136,9 +212,19 @@ function Reasoning({ text, streaming }: { text: string; streaming: boolean }) {
         onClick={() => setOpen((v) => !v)}
         className="flex items-center gap-1.5 text-muted hover:text-fg"
       >
-        <Brain className={clsx("h-3.5 w-3.5", streaming && "animate-qq-pulse text-accent")} />
+        <Brain
+          className={clsx(
+            "h-3.5 w-3.5",
+            streaming && "animate-qq-pulse text-accent",
+          )}
+        />
         {streaming ? "Thinking…" : "Thought process"}
-        <ChevronRight className={clsx("h-3.5 w-3.5 transition-transform", open && "rotate-90")} />
+        <ChevronRight
+          className={clsx(
+            "h-3.5 w-3.5 transition-transform",
+            open && "rotate-90",
+          )}
+        />
       </button>
       {(open || streaming) && (
         <div
@@ -158,11 +244,17 @@ function RunEnd({ item }: { item: Extract<Item, { kind: "run_end" }> }) {
   const label = outcomeLabel(item.outcome);
   const detail = outcomeDetail(item.outcome);
   const ok = item.outcome?.type === "completed";
-  const failed = item.outcome?.type === "failed" || item.outcome?.type === "budget_exhausted";
+  const failed =
+    item.outcome?.type === "failed" ||
+    item.outcome?.type === "budget_exhausted";
   const parts = [
     duration(item.duration_ms),
-    item.tool_calls > 0 ? `${item.tool_calls} tool call${item.tool_calls === 1 ? "" : "s"}` : "",
-    item.usage ? `${tokens(item.usage.input_tokens + item.usage.cache_read_input_tokens)} in · ${tokens(item.usage.output_tokens)} out` : "",
+    item.tool_calls > 0
+      ? `${item.tool_calls} tool call${item.tool_calls === 1 ? "" : "s"}`
+      : "",
+    item.usage
+      ? `${tokens(item.usage.input_tokens + item.usage.cache_read_input_tokens)} in · ${tokens(item.usage.output_tokens)} out`
+      : "",
     cost(item.cost_usd_nanos),
   ].filter(Boolean);
 

@@ -1,10 +1,20 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import clsx from "clsx";
 import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
 import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
 import { activityLabel, cost, modelShort, tokens } from "../lib/format";
-import type { PendingFile, ProjectState, Transcript as TranscriptData } from "../lib/types";
+import type {
+  PendingFile,
+  ProjectState,
+  Transcript as TranscriptData,
+} from "../lib/types";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
@@ -26,12 +36,20 @@ export function SessionPane({
     return (
       <div className="flex flex-1 items-center justify-center p-10">
         <div className="max-w-md text-center">
-          <h2 className="text-[16px] font-semibold">The QQ engine is unavailable</h2>
+          <h2 className="text-[16px] font-semibold">
+            QQ could not load this project
+          </h2>
           <p className="mt-2 text-muted selectable">{project.error}</p>
-          <button className="mt-3 rounded border border-line-strong px-3 py-2" onClick={() => void api.refresh(project.project_id)}>Retry connection</button>
+          <button
+            className="mt-3 rounded border border-line-strong px-3 py-2"
+            onClick={() => void api.refresh(project.project_id)}
+          >
+            Retry connection
+          </button>
           <p className="mt-4 text-[12.5px] text-faint">
-            Install qq on PATH, build it with <code className="font-mono">cargo build</code>, or set
-            <code className="mx-1 font-mono">QQ_DESKTOP_ENGINE</code> to its path, then reopen the project.
+            Check the error above and connection details in Settings, then
+            retry. If the engine was updated, restart its local server before
+            reconnecting.
           </p>
         </div>
       </div>
@@ -44,7 +62,16 @@ export function SessionPane({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {project.connection !== "live" && <div role="status" className="border-b border-line bg-warn-soft px-5 py-2 text-warn">{project.connection === "replaying" ? "Catching up with saved history…" : "Disconnected. Sending is paused while QQ reconnects."}</div>}
+      {project.connection !== "live" && (
+        <div
+          role="status"
+          className="border-b border-line bg-warn-soft px-5 py-2 text-warn"
+        >
+          {project.connection === "replaying"
+            ? "Catching up with saved history…"
+            : "Disconnected. Sending is paused while QQ reconnects."}
+        </div>
+      )}
       <Header project={project} transcript={transcript} />
       <TranscriptScroller project={project} transcript={transcript} />
       <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
@@ -56,8 +83,10 @@ export function SessionPane({
 }
 
 function Landing({ project }: { project: ProjectState }) {
-  const connecting = project.connection !== "live" && project.sessions.length === 0;
-  const signedOut = project.connection === "live" && project.models.length === 0;
+  const connecting =
+    project.connection !== "live" && project.sessions.length === 0;
+  const signedOut =
+    project.connection === "live" && project.models.length === 0;
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="h-12 shrink-0" />
@@ -70,9 +99,18 @@ function Landing({ project }: { project: ProjectState }) {
             in <span className="font-medium text-fg">{project.name}</span>
           </p>
           {connecting ? (
-            <><NoticeLine project={project} /><div role="status" className="flex items-center justify-center gap-2 text-muted">
-              <Loader2 className="h-4 w-4 animate-spin" /> {project.connection === "offline" ? "Offline, reconnecting to the engine…" : "Connecting to the engine…"}
-            </div></>
+            <>
+              <NoticeLine project={project} />
+              <div
+                role="status"
+                className="flex items-center justify-center gap-2 text-muted"
+              >
+                <Loader2 className="h-4 w-4 animate-spin" />{" "}
+                {project.connection === "offline"
+                  ? "Offline, reconnecting to the engine…"
+                  : "Connecting to the engine…"}
+              </div>
+            </>
           ) : signedOut ? (
             <ConnectProvider />
           ) : (
@@ -93,7 +131,8 @@ function ConnectProvider() {
       <KeyRound className="mx-auto mb-3 h-5 w-5 text-accent" />
       <p className="font-medium">Connect a model provider to start</p>
       <p className="mt-1 text-[12.5px] text-muted">
-        Sign in with ChatGPT, or paste an Anthropic, OpenAI, Google, or xAI API key.
+        Sign in with ChatGPT, or paste an Anthropic, OpenAI, Google, or xAI API
+        key.
       </p>
       <button
         onClick={() => showProviders(true)}
@@ -105,16 +144,27 @@ function ConnectProvider() {
   );
 }
 
-function Header({ project, transcript }: { project: ProjectState; transcript: TranscriptData }) {
+function Header({
+  project,
+  transcript,
+}: {
+  project: ProjectState;
+  transcript: TranscriptData;
+}) {
   const running = transcript.status !== "idle";
   const limit = transcript.context_window;
   const used = transcript.context_tokens;
-  const percent = limit && used ? Math.min(100, Math.round((used / limit) * 100)) : null;
-  const runningTool = project.sessions.find((s) => s.id === transcript.session_id)?.active_tool;
+  const percent =
+    limit && used ? Math.min(100, Math.round((used / limit) * 100)) : null;
+  const runningTool = project.sessions.find(
+    (s) => s.id === transcript.session_id,
+  )?.active_tool;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-5">
-      <h2 className="min-w-0 flex-1 truncate text-[14px] font-medium">{transcript.title}</h2>
+      <h2 className="min-w-0 flex-1 truncate text-[14px] font-medium">
+        {transcript.title}
+      </h2>
       {running && (
         <span className="flex items-center gap-1.5 text-[12px] text-accent">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -122,9 +172,14 @@ function Header({ project, transcript }: { project: ProjectState; transcript: Tr
         </span>
       )}
       {transcript.queued_prompts > 0 && (
-        <span className="text-[12px] text-muted">{transcript.queued_prompts} queued</span>
+        <span className="text-[12px] text-muted">
+          {transcript.queued_prompts} queued
+        </span>
       )}
-      <span className="text-[12px] text-faint" title={transcript.model ?? undefined}>
+      <span
+        className="text-[12px] text-faint"
+        title={transcript.model ?? undefined}
+      >
         {modelShort(transcript.model)}
       </span>
       {percent !== null && (
@@ -136,7 +191,11 @@ function Header({ project, transcript }: { project: ProjectState; transcript: Tr
             <span
               className={clsx(
                 "block h-full rounded-full",
-                percent > 85 ? "bg-danger" : percent > 65 ? "bg-warn" : "bg-accent",
+                percent > 85
+                  ? "bg-danger"
+                  : percent > 65
+                    ? "bg-warn"
+                    : "bg-accent",
               )}
               style={{ width: `${percent}%` }}
             />
@@ -145,7 +204,9 @@ function Header({ project, transcript }: { project: ProjectState; transcript: Tr
         </span>
       )}
       {transcript.cost_usd_nanos != null && transcript.cost_usd_nanos > 0 && (
-        <span className="text-[12px] text-faint">{cost(transcript.cost_usd_nanos)}</span>
+        <span className="text-[12px] text-faint">
+          {cost(transcript.cost_usd_nanos)}
+        </span>
       )}
     </header>
   );
@@ -160,12 +221,30 @@ function TranscriptScroller({
   transcript: TranscriptData;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const [scrollElement, setScrollElement] = useState<HTMLDivElement | null>(
+    null,
+  );
+  const scrollRef = useCallback((element: HTMLDivElement | null) => {
+    ref.current = element;
+    setScrollElement(element);
+  }, []);
   const pinned = useRef(true);
   const [showJump, setShowJump] = useState(false);
 
   // A different session always opens at its end.
   useEffect(() => {
     pinned.current = true;
+  }, [transcript.session_id]);
+
+  useEffect(() => {
+    const el = ref.current;
+    const content = el?.firstElementChild;
+    if (!el || !content) return;
+    const observer = new ResizeObserver(() => {
+      if (pinned.current) el.scrollTop = el.scrollHeight;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
   }, [transcript.session_id]);
 
   useLayoutEffect(() => {
@@ -183,14 +262,41 @@ function TranscriptScroller({
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div ref={ref} onScroll={onScroll} className="h-full overflow-y-auto">
+      <div
+        ref={scrollRef}
+        role="region"
+        aria-label="Conversation history"
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (event.ctrlKey && event.key === "Home") {
+            event.preventDefault();
+            pinned.current = false;
+            event.currentTarget.scrollTop = 0;
+          } else if (event.ctrlKey && event.key === "End") {
+            event.preventDefault();
+            pinned.current = true;
+            event.currentTarget.scrollTop = event.currentTarget.scrollHeight;
+          } else if (["PageUp", "ArrowUp", "Home"].includes(event.key))
+            pinned.current = false;
+        }}
+        onWheel={(event) => {
+          if (event.deltaY < 0) pinned.current = false;
+        }}
+        onScroll={onScroll}
+        className="h-full overflow-y-auto"
+      >
         <div className="mx-auto w-full max-w-[860px] px-6 pb-6 pt-6">
           {transcript.loading ? (
             <div className="flex items-center gap-2 text-muted">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading session…
             </div>
           ) : (
-            <Transcript project={project} transcript={transcript} />
+            <Transcript
+              key={transcript.session_id}
+              project={project}
+              transcript={transcript}
+              scrollElement={scrollElement}
+            />
           )}
         </div>
       </div>
@@ -198,7 +304,10 @@ function TranscriptScroller({
         <button
           onClick={() => {
             pinned.current = true;
-            ref.current?.scrollTo({ top: ref.current.scrollHeight, behavior: "smooth" });
+            ref.current?.scrollTo({
+              top: ref.current.scrollHeight,
+              behavior: "smooth",
+            });
           }}
           className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1 rounded-full border border-line-strong bg-raised px-3 py-1 text-[12px] text-muted shadow-lg hover:text-fg"
         >
