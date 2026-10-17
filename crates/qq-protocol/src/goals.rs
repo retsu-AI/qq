@@ -74,6 +74,10 @@ pub enum GoalCheckScope {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalControl {
     Pause,
+    /// Stop for an unanswered held question belonging to this goal's paid family.
+    PauseForInput {
+        tool_call_id: ToolCallId,
+    },
     Resume,
     Clear,
     ApproveCheck {

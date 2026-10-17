@@ -20,6 +20,7 @@ mod cli;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
+mod goals;
 mod headless;
 mod init;
 mod mcp;
@@ -60,7 +61,13 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     match cli.command {
         Some(cli::Command::Ask { prompt }) => ask(prompt, &overrides).await?,
-        Some(cli::Command::Run(args)) => return Ok(headless_run(args, &overrides).await),
+        Some(cli::Command::Run(args)) => return Ok(headless_run(*args, &overrides).await),
+        Some(cli::Command::Goal { command }) => {
+            if let Err(error) = goals::run(command, &overrides).await {
+                eprintln!("error: {error}");
+                return Ok(error.exit_code());
+            }
+        }
         Some(cli::Command::Serve {
             bind,
             allow_origins,
@@ -190,10 +197,45 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
 /// maps every failure to a distinguishable exit code: 0 success, 1 task or
 /// model failure, 2 invalid configuration, 3 timeout or budget exhaustion,
 /// 4 harness or persistence failure, 130 interrupted.
+async fn close_headless(
+    sessions: &qq_core::SessionRuntime,
+    goal: bool,
+    interrupt: impl std::future::Future<Output = ()>,
+) -> Result<(), qq_core::SessionRuntimeError> {
+    if goal {
+        sessions
+            .close_when_idle(async {
+                interrupt.await;
+                eprintln!("goal settled; interrupt cancels remaining accepted work before closing");
+            })
+            .await
+    } else {
+        sessions.close().await
+    }
+}
+
+fn headless_close_exit(
+    code: u8,
+    goal: bool,
+    result: Result<(), qq_core::SessionRuntimeError>,
+) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::from(code),
+        Err(error) => {
+            eprintln!("error: could not close the session runtime: {error}");
+            if goal {
+                ExitCode::from(code)
+            } else {
+                headless::exit_code(headless::HeadlessStatus::HarnessFailure)
+            }
+        }
+    }
+}
+
 async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode {
     let steer_stdin = args.steer_stdin;
     match prepare_headless(args, overrides).await {
-        Ok((sessions, options)) => {
+        Ok((sessions, options, goal)) => {
             let interrupt = async {
                 let _ = tokio::signal::ctrl_c().await;
             };
@@ -217,24 +259,38 @@ async fn headless_run(args: cli::RunArgs, overrides: &CliOverrides) -> ExitCode 
             };
             let mut stdout = io::stdout().lock();
             let mut stderr = io::stderr().lock();
-            let status = headless::run(
-                &sessions,
-                options,
-                interrupt,
-                steering,
-                &mut stdout,
-                &mut stderr,
-            )
-            .await;
+            let is_goal = goal.is_some();
+            let code = match goal {
+                Some(goal) => {
+                    headless::run_goal(
+                        &sessions,
+                        options,
+                        goal,
+                        interrupt,
+                        &mut stdout,
+                        &mut stderr,
+                    )
+                    .await
+                }
+                None => headless::run(
+                    &sessions,
+                    options,
+                    interrupt,
+                    steering,
+                    &mut stdout,
+                    &mut stderr,
+                )
+                .await
+                .code(),
+            };
             drop(stdout);
             drop(stderr);
-            match sessions.close().await {
-                Ok(()) => headless::exit_code(status),
-                Err(error) => {
-                    eprintln!("error: could not close the session runtime: {error}");
-                    headless::exit_code(headless::HeadlessStatus::HarnessFailure)
-                }
-            }
+            let closed = close_headless(&sessions, is_goal, async {
+                // Losing signal control also requests cleanup of this owned runtime.
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await;
+            headless_close_exit(code, is_goal, closed)
         }
         Err((status, message)) => {
             eprintln!("error: {message}");
@@ -250,9 +306,54 @@ type HeadlessSetupError = (headless::HeadlessStatus, String);
 async fn prepare_headless(
     args: cli::RunArgs,
     overrides: &CliOverrides,
-) -> Result<(qq_core::SessionRuntime, headless::HeadlessOptions), HeadlessSetupError> {
+) -> Result<
+    (
+        qq_core::SessionRuntime,
+        headless::HeadlessOptions,
+        Option<headless::GoalInvocation>,
+    ),
+    HeadlessSetupError,
+> {
     let invalid = |message: String| (headless::HeadlessStatus::InvalidConfiguration, message);
     let harness = |message: String| (headless::HeadlessStatus::HarnessFailure, message);
+
+    if args.goal == Some(None) && args.session.is_none() {
+        return Err(invalid("bare --goal requires --session ID".to_owned()));
+    }
+    if args.goal == Some(None)
+        && (args.replace
+            || args.goal_deadline.is_some()
+            || args.goal_max_runs.is_some()
+            || args.max_cost_usd.is_some()
+            || args.timeout_seconds.is_some()
+            || args.max_turns.is_some())
+    {
+        return Err(invalid(
+            "goal budget/replacement changes require an objective; use --goal OBJECTIVE".to_owned(),
+        ));
+    }
+
+    if let Some(Some(objective)) = &args.goal
+        && (objective.trim().is_empty() || objective.len() > 2048)
+    {
+        return Err(invalid(
+            "goal objective must contain 1 to 2048 bytes".to_owned(),
+        ));
+    }
+    if args
+        .check
+        .as_ref()
+        .is_some_and(|check| check.trim().is_empty() || check.len() > 1024 || check.contains('\0'))
+    {
+        return Err(invalid(
+            "goal check must contain 1 to 1024 bytes and no NUL".to_owned(),
+        ));
+    }
+    if args.goal_check_approval.is_some() && args.check.is_none() {
+        return Err(invalid(
+            "--goal-check-approval requires --check with the exact reviewed command".to_owned(),
+        ));
+    }
 
     // Pure argument validation runs before any filesystem or configuration
     // work so a malformed label never costs a config load.
@@ -275,15 +376,21 @@ async fn prepare_headless(
         ))
     })?;
 
-    let max_cost_usd_nanos = match args.max_cost_usd {
+    let max_cost_usd_nanos = match args.max_cost_usd.as_deref() {
         None => None,
-        // The value is validated finite and positive; the saturating cast
-        // cannot lose a sign or wrap.
-        Some(value) if value.is_finite() && value > 0.0 => Some((value * 1e9).round() as u64),
+        Some(value) if args.goal.is_some() => Some(cli::parse_goal_cost(value).map_err(invalid)?),
         Some(value) => {
-            return Err(invalid(format!(
-                "--max-cost-usd must be a positive dollar amount, got {value}"
-            )));
+            let parsed = value.parse::<f64>().map_err(|_| {
+                invalid(format!(
+                    "--max-cost-usd must be a positive dollar amount, got {value}"
+                ))
+            })?;
+            if !parsed.is_finite() || parsed <= 0.0 {
+                return Err(invalid(format!(
+                    "--max-cost-usd must be a positive dollar amount, got {value}"
+                )));
+            }
+            Some((parsed * 1e9).round() as u64)
         }
     };
 
@@ -410,8 +517,17 @@ async fn prepare_headless(
         overrides_jev_approval,
         overrides_approval_delegate,
     );
+    let goal = args.goal.map(|objective| headless::GoalInvocation {
+        objective,
+        check: args.check,
+        check_approval: args.goal_check_approval.map(Into::into),
+        deadline: args.goal_deadline,
+        max_runs: args.goal_max_runs,
+        replace: args.replace,
+        defaults: snapshot.goals().clone(),
+    });
     let options = headless::HeadlessOptions {
-        prompt: args.prompt,
+        prompt: args.prompt.unwrap_or_default(),
         workspace,
         session: args.session,
         model,
@@ -446,7 +562,7 @@ async fn prepare_headless(
             .map(|arm| arm.trim().to_owned())
             .filter(|arm| !arm.is_empty()),
     };
-    Ok((handler.sessions().clone(), options))
+    Ok((handler.sessions().clone(), options, goal))
 }
 
 fn reject_read_approvals_for_existing_server(
@@ -633,6 +749,7 @@ async fn interactive(
         ),
     };
     let runtime::TuiModelState {
+        goals,
         configured_model,
         model,
         tui_model,
@@ -767,6 +884,7 @@ async fn interactive(
                     };
                     match factory.resolve_trust(&request, choice, &reviewed) {
                         Ok(granted) => Ok(qq_tui::TrustResolved {
+                            goals: tui_goal_defaults(&granted.state.goals),
                             trusted: granted.trusted,
                             model: granted.state.tui_model,
                             models: granted.state.models.into_iter().map(Into::into).collect(),
@@ -803,6 +921,7 @@ async fn interactive(
     let result = qq_tui::run(
         qq_tui::LazyPort::new(connect),
         qq_tui::TuiOptions {
+            goals: tui_goal_defaults(&goals),
             settings: tui,
             model: tui_model,
             models,
@@ -824,6 +943,32 @@ async fn interactive(
         eprint!("{}", cli::resume_hint(session_id));
     }
     Ok(())
+}
+
+fn tui_goal_defaults(goals: &config::GoalsConfig) -> qq_tui::GoalDefaults {
+    qq_tui::GoalDefaults {
+        duration_ms: goals.default_deadline_seconds * 1000,
+        max_duration_ms: goals.max_deadline_seconds * 1000,
+        max_runs: goals.max_runs,
+        default_runs: goals.default_max_runs,
+        check_timeout_ms: goals.check_timeout_seconds * 1000,
+        per_run: goal_run_limits(goals.per_run),
+    }
+}
+
+fn goal_run_limits(limits: config::GoalRunLimits) -> qq_protocol::RunLimits {
+    qq_protocol::RunLimits {
+        max_duration_ms: limits.max_duration_ms,
+        max_model_turns: limits.max_model_turns,
+        max_tool_calls: limits.max_tool_calls,
+        max_total_tokens: limits.max_total_tokens,
+        max_cost_usd_nanos: limits.max_cost_usd_nanos,
+        max_input_tokens: limits.max_input_tokens,
+        max_output_tokens: limits.max_output_tokens,
+        max_tool_output_bytes: limits.max_tool_output_bytes,
+        max_children: limits.max_children,
+        max_concurrent_children: limits.max_concurrent_children,
+    }
 }
 
 struct InteractiveEnvironment {
@@ -1927,6 +2072,24 @@ async fn run_blocking_command(
 mod tests {
     use super::*;
 
+    #[test]
+    fn headless_close_failure_preserves_selected_goal_exit() {
+        for code in [0, 4, 6, 7, 8, 130] {
+            assert_eq!(
+                headless_close_exit(code, true, Err(qq_core::SessionRuntimeError::Unavailable)),
+                ExitCode::from(code)
+            );
+            assert_eq!(
+                headless_close_exit(code, false, Err(qq_core::SessionRuntimeError::Unavailable)),
+                ExitCode::from(4)
+            );
+            assert_eq!(
+                headless_close_exit(code, true, Ok(())),
+                ExitCode::from(code)
+            );
+        }
+    }
+
     fn private_tempdir() -> tempfile::TempDir {
         let directory = tempfile::tempdir().unwrap();
         #[cfg(unix)]
@@ -2613,7 +2776,7 @@ mod tests {
         let Some(cli::Command::Run(args)) = parsed.command else {
             panic!("expected a run command");
         };
-        args
+        *args
     }
 
     /// The output schema is read and compiled before any configuration or
@@ -2903,6 +3066,48 @@ mod tests {
             )
             .palette,
             "ink is the shipped document, syntax derived"
+        );
+    }
+}
+
+#[cfg(test)]
+mod goal_form_tests {
+    #[test]
+    fn tui_goal_defaults_translate_effective_configuration_without_widening() {
+        let goals = crate::config::GoalsConfig {
+            default_deadline_seconds: 22,
+            max_deadline_seconds: 45,
+            default_max_runs: 7,
+            max_runs: 12,
+            check_timeout_seconds: 3,
+            per_run: crate::config::GoalRunLimits {
+                max_model_turns: Some(9),
+                max_duration_ms: Some(1000),
+                max_total_tokens: Some(800),
+                max_cost_usd_nanos: Some(100),
+                max_children: Some(2),
+                max_concurrent_children: Some(1),
+                ..crate::config::GoalRunLimits::default()
+            },
+            ..crate::config::GoalsConfig::default()
+        };
+        let defaults = super::tui_goal_defaults(&goals);
+        assert_eq!(defaults.duration_ms, 22_000);
+        assert_eq!(defaults.max_duration_ms, 45_000);
+        assert_eq!(defaults.default_runs, 7);
+        assert_eq!(defaults.max_runs, 12);
+        assert_eq!(defaults.check_timeout_ms, 3000);
+        assert_eq!(
+            defaults.per_run,
+            qq_protocol::RunLimits {
+                max_model_turns: Some(9),
+                max_duration_ms: Some(1000),
+                max_total_tokens: Some(800),
+                max_cost_usd_nanos: Some(100),
+                max_children: Some(2),
+                max_concurrent_children: Some(1),
+                ..qq_protocol::RunLimits::default()
+            }
         );
     }
 }

@@ -222,6 +222,55 @@ the list.
   keeps fitting; `/rollback` undoes the newest compaction. Stale read-only
   tool results are pruned from the model's context automatically.
 
+## Session goals
+
+`/goal` opens the focused session's durable goal. It shows the objective,
+checklist, notes, run/token/cost budgets, UTC deadline, waits, verification state
+and last check output. Unknown usage and cost remain labelled unknown. Check
+consent distinguishes one execution, repeated checks for this goal, and a used
+one-shot grant that needs renewed consent.
+
+The composer status line keeps the goal's run allowance, time left and next
+wake visible while active, and shows the reason when it stops. After a user
+pause, it shows cancellation draining until the pending run settles, then
+`/goal resume`.
+
+The view follows committed snapshots and live updates. Scroll to read long
+check output; `Esc` or `/goal` returns to the transcript. Opening it does not
+start or resume work. An interrupted-check workspace hold stays visible even
+when the original goal is cleared or replaced. Resolve its uncertain effects
+before acknowledging it through the API.
+
+Use `/goal <objective>` to open the creation form, or `/goal edit` to edit the
+current goal. Tab/Shift-Tab or the up/down arrows move between objective,
+optional check command and budget preset. Left/right arrows change the preset:
+configured defaults, focused (up to one hour and 20 runs), or the workspace
+maximum. Editing starts with the existing deadline and limits; changing its
+preset updates deadline/run allowance while keeping its other limits.
+
+Enter submits the form. Replacing an existing goal, including editing an
+achieved one, first shows a confirmation identifying the previous objective;
+only `y` confirms. Enter does not confirm replacement. `n` returns to editing,
+and Esc cancels. PgUp/PgDn scroll long specifications. A check command does
+not grant execution consent. Editing a stopped goal does not resume it.
+
+The form captures the current goal revision. A changed goal must be reopened
+and reviewed. Submission errors retain the draft and refresh authoritative
+state; if the refresh fails, Enter retries the refresh before another explicit
+submission. No conflict silently retries against a newer revision.
+
+Use `/goal pause`, `/goal resume`, or `/goal clear` to control the observed
+goal revision. State changes appear after the server commits them. A conflict
+or failed command is reported without automatically retrying a newer goal.
+If the session body has not loaded, retry after its snapshot arrives.
+
+`/goal check` opens consent for the exact displayed command and workspace.
+Choose **Deny**, **Allow once**, or **Allow repeated checks for this goal**,
+then press Enter. Deny is selected initially; Esc cancels. PgUp/PgDn scroll
+long command details while the choices stay visible. Changing the goal,
+command or workspace invalidates an open panel. Ordinary tool approval settings
+do not grant check consent.
+
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
@@ -274,6 +323,7 @@ searchable palette that runs the highlighted command on `Enter`.
 | toggle mouse capture | `/mouse` |  |
 | show everything that needs you | `/attention` |  |
 | show every file agents changed | `/changes` |  |
+| view session goal and progress | `/goal` |  |
 | ask or view side questions | `/btw`, `/ask` |  |
 | ask in a new side thread | `/btw-new` |  |
 | cancel only the side question | `/btw-cancel` |  |

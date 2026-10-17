@@ -24,6 +24,7 @@ pub(super) struct AppliedCommand {
 pub(super) struct CommandAdmission {
     pub(super) seed: WorkspaceGrantSeed,
     pub(super) goal_work_present: bool,
+    pub(super) pause_goal_only_if_active: bool,
     pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
     pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
 }
@@ -593,16 +594,29 @@ pub(super) fn execute_command(
             expected,
             action,
         } => {
-            let (mut goal, clear) = goals::control(
-                &transaction,
-                session_id,
-                expected,
-                action,
-                now,
-                admission.goal_check_policy.as_ref(),
-                admission.goal_policy.as_ref(),
-            )?;
-            if clear || goal.status != qq_protocol::GoalStatus::Active {
+            let stopped = if admission.pause_goal_only_if_active {
+                goals::load_live(&transaction, session_id)?.filter(|goal| {
+                    goal.goal_id == expected.goal_id
+                        && goal.revision == expected.revision
+                        && goal.status != qq_protocol::GoalStatus::Active
+                })
+            } else {
+                None
+            };
+            let already_stopped = stopped.is_some();
+            let (mut goal, clear) = match stopped {
+                Some(goal) => (goal, false),
+                None => goals::control(
+                    &transaction,
+                    session_id,
+                    expected,
+                    action,
+                    now,
+                    admission.goal_check_policy.as_ref(),
+                    admission.goal_policy.as_ref(),
+                )?,
+            };
+            if !already_stopped && (clear || goal.status != qq_protocol::GoalStatus::Active) {
                 cascade_cancels.extend(cancel_goal_work(
                     &transaction,
                     store_id,

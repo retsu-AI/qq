@@ -1,0 +1,40 @@
+ qq  Session 0                                                                                   openai/gpt-test  $0.00
+ CREATE GOAL review specification                                                           │ IDLE  3
+Tab / ↑↓ fields · ←→ budget preset · Enter submits · Esc cancels                            │ ○ Session 0
+  Objective                                                                                 │ ○ Session 1
+finish the migration and verify the workspace                                               │ ○ Session 2
+                                                                                            │
+> Check command (optional; consent is separate)                                             │
+cargo test --workspace▏                                                                     │
+                                                                                            │
+  Budget: Configured defaults                                                               │
+200 runs; 24h from submission; per-run model turns: 256                                     │
+Check commands require separate /goal check consent. Editing a stopped goal does not resume │
+it.                                                                                         │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ › Ask QQ...
+

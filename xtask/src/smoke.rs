@@ -308,10 +308,10 @@ impl Home {
         FakeProvider::start(self.root.join("provider-requests.txt"), script).await
     }
 
-    fn command(&self, provider: &FakeProvider) -> Command {
+    fn command(&self, base_url: &str) -> Command {
         let config = format!(
             r#"(version: 1, model: "smoke/model", providers: {{"smoke": Custom(connection: (base_url: "{}", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Smoke model")}})}})"#,
-            provider.base_url
+            base_url
         );
         let mut command = Command::new(&self.binary);
         command
@@ -334,8 +334,8 @@ impl Home {
         command
     }
 
-    async fn run(&self, provider: &FakeProvider, args: &[&str]) -> Result<Output, String> {
-        let mut command = self.command(provider);
+    async fn run(&self, base_url: &str, args: &[&str]) -> Result<Output, String> {
+        let mut command = self.command(base_url);
         command.args(args);
         let output = match tokio::time::timeout(COMMAND_TIMEOUT, command.output()).await {
             Ok(Ok(output)) => output,
@@ -422,6 +422,16 @@ const SCENARIOS: &[Scenario] = &[
         run: |home| Box::pin(run_tool_call(home)),
     },
     Scenario {
+        name: "run-goal-check-consent",
+        proves: "goal checks require separate consent across process restart; ordinary tool approval does not authorize them",
+        run: |home| Box::pin(run_goal_check_consent(home)),
+    },
+    Scenario {
+        name: "run-goal-budget",
+        proves: "a one-run goal emits its settled run before a final budget-exhausted record and exits 8",
+        run: |home| Box::pin(run_goal_budget(home)),
+    },
+    Scenario {
         name: "run-provider-401",
         proves: "a provider 401 is a typed task failure with exit 1 and the provider's message, not a hang or crash",
         run: |home| Box::pin(run_provider_401(home)),
@@ -448,7 +458,7 @@ async fn ask_streams_text(home: &Home) -> Result<(), String> {
         .provider(vec![Reply::Text("pong from the fake")])
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
-    let output = home.run(&provider, &["ask", "ping"]).await?;
+    let output = home.run(&provider.base_url, &["ask", "ping"]).await?;
     ensure!(
         output.status == Some(0),
         "exit {:?}; stderr: {}",
@@ -483,7 +493,10 @@ async fn run_tool_call(home: &Home) -> Result<(), String> {
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
     let output = home
-        .run(&provider, &["run", "--format", "jsonl", "where is Widget?"])
+        .run(
+            &provider.base_url,
+            &["run", "--format", "jsonl", "where is Widget?"],
+        )
         .await?;
     ensure!(
         output.status == Some(0),
@@ -535,6 +548,142 @@ async fn run_tool_call(home: &Home) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_goal_check_consent(home: &Home) -> Result<(), String> {
+    // No provider is started: the unapproved goal must stop before any model work.
+    let base_url = "http://127.0.0.1:1/v1";
+    let first = home
+        .run(
+            base_url,
+            &[
+                "run",
+                "--goal",
+                "verify the workspace",
+                "--check",
+                "printf checked > checked",
+                "--approval",
+                "full",
+                "--format",
+                "jsonl",
+            ],
+        )
+        .await?;
+    ensure!(
+        first.status == Some(6),
+        "initial exit {:?}; stderr: {}",
+        first.status,
+        first.stderr
+    );
+    let records = jsonl(&first.stdout)?;
+    let final_record = records.last().ok_or("missing final goal record")?;
+    ensure!(
+        final_record["type"] == "goal"
+            && final_record["exit_code"] == 6
+            && final_record["status"] == "paused"
+            && final_record["goal"]["status"]["reason"]["cause"]["type"] == "check_approval"
+            && final_record["goal"]["check_authorization"] == "pending"
+            && final_record["goal"]["counters"]["runs"] == 0
+            && !records.iter().any(|record| record["type"] == "goal_run"),
+        "unapproved goal ran or lost its check-approval hold: {records:?}"
+    );
+    let session = final_record["goal"]["session_id"]
+        .as_str()
+        .ok_or("missing goal session")?;
+    let resumed = home
+        .run(
+            base_url,
+            &["run", "--goal", "--session", session, "--format", "jsonl"],
+        )
+        .await?;
+    ensure!(
+        resumed.status == Some(6),
+        "resumed exit {:?}; stderr: {}",
+        resumed.status,
+        resumed.stderr
+    );
+    let resumed_records = jsonl(&resumed.stdout)?;
+    ensure!(
+        resumed_records.last() == Some(final_record),
+        "bare resume changed the stopped goal: {resumed_records:?}"
+    );
+    ensure!(
+        !home.workspace.join("checked").exists(),
+        "unapproved check created a file"
+    );
+    Ok(())
+}
+
+async fn run_goal_budget(home: &Home) -> Result<(), String> {
+    let provider = home
+        .provider(vec![Reply::Text("work recorded")])
+        .await
+        .map_err(|error| format!("start fake provider: {error}"))?;
+    let output = home
+        .run(
+            &provider.base_url,
+            &[
+                "run",
+                "--goal",
+                "inspect the workspace",
+                "--goal-max-runs",
+                "1",
+                "--goal-deadline",
+                "1h",
+                "--format",
+                "jsonl",
+            ],
+        )
+        .await?;
+    ensure!(
+        output.status == Some(8),
+        "exit {:?}; stderr: {}",
+        output.status,
+        output.stderr
+    );
+    let records = jsonl(&output.stdout)?;
+    let final_record = records.last().ok_or("missing final goal record")?;
+    ensure!(
+        final_record["type"] == "goal"
+            && final_record["exit_code"] == 8
+            && final_record["status"] == "budget_exhausted"
+            && final_record["goal"]["counters"]["runs"] == 1,
+        "wrong terminal goal: {final_record}"
+    );
+    let runs: Vec<_> = records
+        .iter()
+        .filter(|record| record["type"] == "goal_run")
+        .collect();
+    ensure!(
+        runs.len() == 1
+            && runs[0]["run"]["outcome"].is_object()
+            && runs[0]["run"]["origin"]["type"] == "goal"
+            && runs[0]["goal"]["goal_id"] == final_record["goal"]["goal_id"],
+        "missing settled goal run or incorrect binding: {runs:?}"
+    );
+    let requests = provider.requests()?;
+    ensure!(
+        requests.len() == 2,
+        "expected work and final-slot handoff in the single run, saw {} requests",
+        requests.len()
+    );
+    let handoff: serde_json::Value = serde_json::from_str(
+        requests[1]
+            .split_once("\r\n\r\n")
+            .ok_or("handoff request has no HTTP body")?
+            .1,
+    )
+    .map_err(|error| format!("decode handoff request: {error}"))?;
+    ensure!(
+        handoff["tool_choice"] == "none"
+            && handoff["input"]
+                .as_array()
+                .and_then(|input| input.last())
+                .and_then(|message| message["content"].as_str())
+                .is_some_and(|text| text.contains("Give a concise handoff")),
+        "the final request did not enforce a tool-free handoff"
+    );
+    Ok(())
+}
+
 async fn run_provider_401(home: &Home) -> Result<(), String> {
     let provider = home
         .provider(vec![Reply::Status(
@@ -544,7 +693,7 @@ async fn run_provider_401(home: &Home) -> Result<(), String> {
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
     let output = home
-        .run(&provider, &["run", "--format", "jsonl", "hi"])
+        .run(&provider.base_url, &["run", "--format", "jsonl", "hi"])
         .await?;
     ensure!(
         output.status == Some(1),
@@ -578,7 +727,10 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
     let first = home
-        .run(&provider, &["run", "--format", "jsonl", "remember: blue"])
+        .run(
+            &provider.base_url,
+            &["run", "--format", "jsonl", "remember: blue"],
+        )
         .await?;
     ensure!(
         first.status == Some(0),
@@ -595,7 +747,7 @@ async fn run_resume_session(home: &Home) -> Result<(), String> {
         .to_owned();
     let second = home
         .run(
-            &provider,
+            &provider.base_url,
             &[
                 "run",
                 "--format",
@@ -682,7 +834,7 @@ async fn serve_sse(home: &Home) -> Result<(), String> {
     // Logs go to files: an unread pipe would block `qq serve` once full.
     let stderr = fs::File::create(home.root.join("serve.stderr"))
         .map_err(|error| format!("create serve.stderr: {error}"))?;
-    let mut command = home.command(&provider);
+    let mut command = home.command(&provider.base_url);
     command
         .args(["serve", "--bind", "127.0.0.1:0"])
         .stderr(Stdio::from(stderr));
@@ -803,14 +955,14 @@ async fn doctor_and_config(home: &Home) -> Result<(), String> {
         .provider(vec![Reply::Text("unused")])
         .await
         .map_err(|error| format!("start fake provider: {error}"))?;
-    let check = home.run(&provider, &["config", "check"]).await?;
+    let check = home.run(&provider.base_url, &["config", "check"]).await?;
     ensure!(
         check.status == Some(0),
         "config check exit {:?}; stderr: {}",
         check.status,
         check.stderr
     );
-    let doctor = home.run(&provider, &["doctor", "--json"]).await?;
+    let doctor = home.run(&provider.base_url, &["doctor", "--json"]).await?;
     ensure!(
         doctor.status == Some(0),
         "doctor exit {:?}; stdout: {}",

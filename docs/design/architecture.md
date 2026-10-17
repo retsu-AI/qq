@@ -89,6 +89,13 @@ descriptions; the binary re-exports the first two, and runtime/model loading
 and headless outcome driving live in the root package. Core does not depend on
 harness or application configuration.
 
+Foreground goal hosting shares session preparation and unattended tool approval
+with ordinary headless runs. It observes the core goal driver, rather than
+submitting a parallel prompt loop. Exact-run snapshots and live paid-family
+ownership checks stay behind SessionRuntime; stopping an unanswered question is
+a revision-fenced core goal control that persists the needs-user reason before
+cancelling sponsored work. Server goal scripting remains a SessionClient path.
+
 The workspace is:
 
 ```text
@@ -98,6 +105,7 @@ src/
   cli.rs         argument parsing and command dispatch
   runtime.rs     configuration-to-runtime composition (runtime/approval.rs, runtime/routing.rs)
   headless.rs    `qq run` durable non-interactive execution
+  goals.rs       `qq goal` authenticated server client; no store ownership
   catalog.rs     authenticated model discovery
   advisory.rs    `qq jev observe` post-commit observer
   doctor.rs      `qq doctor`
@@ -1767,6 +1775,34 @@ A persisted model wait is a lower bound on every active automatic retry,
 including provider backoff, ordinary failures, no-progress and per-run exhaustion.
 The absolute goal deadline remains the upper bound and wins exhaustion.
 
+The TUI's `/goal` opens a session-following, scrollable status view over the
+shared client reducer's goal snapshot. It renders lifecycle reasons, scoped
+check consent, progress, budgets, UTC times and bounded check diagnostics,
+including a workspace hold independent of the live goal. It opens at the top
+and preserves the visible position as diagnostics grow. Snapshot refreshes keep
+the view open, deletion closes it, and navigation submits no work.
+The goal creation/edit overlay captures the exact session, workspace and goal
+revision. Bounded cursor-aware objective/check editors and finite budget presets
+use root-translated configuration defaults, refreshed after workspace trust.
+An edit retains the existing budget until a preset is chosen; preset selection
+changes duration and run allowance while retaining other edit limits. Replacement
+identifies the previous objective and requires an explicit yes. A pending request
+owns its form by command ID; either its committed event or receipt closes it.
+Errors retain the draft and refresh state. Failed refreshes can be retried without
+a mutation, and changed identities are never silently rebound. Check consent
+remains a separate command, and stopped-goal edits do not resume work.
+Pause/resume/clear submit the observed goal identity and revision, with no
+optimistic state mutation or conflict retry. Check consent freezes the session,
+workspace, goal identity/revision and exact command in a scrollable panel.
+Its default is denial; explicit one-shot or repeated-goal consent uses existing
+GoalControl commands. A changed target invalidates the panel, and ordinary tool
+approval settings cannot grant check authority. The composer rule prioritizes
+goal state, with run/deadline/wake counters for active goals and exhaustive stop
+reasons otherwise. A user pause shows draining while its run remains pending,
+then the resume command. Idle active goals refresh the countdown once per second;
+the terminal loop supplies current wall time without changing event-based run
+timing or adding clock reads to goal-less frames.
+
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the
 old run's pending guard and keeps the goal active and its allowance unspent.
@@ -1823,6 +1859,11 @@ An OS ownership lock excludes a second store worker before SQLite opens. Store
 clones share the presence cache; a successor reads durable presence after acquiring
 ownership. Replayed goal controls and cancellations retain the scheduler wake
 without changing their original durable receipts.
+When live goals exist at open, the store also captures an immutable event-row
+boundary before recovery and scheduling. Foreground adoption translates that
+boundary into the selected workspace's cursor, so completed startup runs and
+already-held input requests remain replayable. Stores without live goals skip
+this boundary query; ordinary prompt adoption keeps its existing cursor.
 
 After acquiring a scheduler permit, reservation derives paid-work admission
 from the captured goal's current durable budget. Goal-origin runs use current

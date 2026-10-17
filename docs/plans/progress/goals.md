@@ -9,8 +9,8 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
 | G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
-| G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
-| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
+| G4 | TUI, CLI and foreground hosting | In progress | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
+| G5 | Live multi-hour qualification | In progress | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
 
@@ -944,3 +944,135 @@ stat suffix; no process-name UTF-8 assumption remains. Focused nextest
   complete retained lines. Masked durable messages/reopen/context and long-secret
   truncation are covered. Focused completion tests:31/31 pass. Independent review,
   final gate/smoke/restack/publication and thread resolution remain pending.
+### 2026-10-16 — G4 surface integration
+
+- Root owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Integrated `/goal` status, explicit check consent, revision-fenced forms/controls, server `qq goal` and foreground `qq run --goal`, with complete terminal records and binary smoke scenarios.
+- Protocol35 adds foreground goal records and input-pause controls; schema58 and descriptor15 remain unchanged. All forced protocol consumers and guide/design docs move together. Verification feature copies remain identical; the lockfile adds only the existing workspace time dependency to qq-tui.
+- Retained all75 existing counted sleeps and refreshed their source positions, with no new sites or ceiling change. Local integrated gates, binary smoke and independent review remain pending; no PR or live G5 receipt yet.
+
+### 2026-10-16 — G4 local acceptance
+
+- Focused goal/CLI/docs/wire suite107/107 passes. Real-binary smoke8/8 passes, including exact check consent and one charged final-slot run with two requests and tool-free handoff. The earlier smoke assertion incorrectly equated runs with model requests; actual event/request artifacts established the correction, independently reviewed.
+- Isolated real-server CLI drive passes11 commands, once-authorized check marker, one work run and one audit to achieved; no-server command fails with guidance and creates no session store. Six CLI help surfaces captured.
+- Rendering19 scenarios×50 samples: candidate/baseline medians0.9607–1.0162; expanded32-call frame56.0→53.8us, ultra480×120 frame125.1→122.5us. Shared-host diagnostics, no H0/tail claim. Logs and verify homes remain outside Git under /tmp/qq-goal-delivery-20261015/. Independent static surface review approved; final-head gate/hosted platform checks remain.
+
+### 2026-10-16 — G4 rebase and live G5 start
+
+- Rebased #331 onto #330's current-main integration. Preserve all73 remaining sleep sites and main's lowered ceiling; G4 production source is unchanged apart from upstream main auth integration. Final-head gate follows; prior2733-pass report identifies old e72a82cc exactly.
+- G5 started2026-10-16T06:14:26Z on qualified e72a82cc with openai-codex/gpt-6.1-sol subscription only, no paid API fallback:4h deadline,8runs,64turns/250000tokens/30min per run. Private supervisor captures exit/usage and terminal state. Five real recovery tests pass; first run stopped after rejected compaction, next attempt compacted and retained15checklist items. Multi-hour/three-compaction acceptance remains open. No live raw content or credentials are committed.
+
+### 2026-10-16 — G4 rendered guide anchor
+
+- Hosted Linux, Windows and wasm checks pass for #330/#331. #331 website build exposed one bad headless-guide link to #qq-goal-; reproduced locally with the unchanged rendered-site checker and inspected actual CLI heading id #qq-goal. Corrected the guide source only.
+- Full local nub site build now succeeds:15pages and550resolved internal links. Existing check-links gate catches the regression; no gate or generated site output changed. Resulting-head repository/push gate follows.
+
+### 2026-10-16 — G4 external-pause foreground regression
+
+- Subscription-only live concurrency task demonstrated that an external Pause advances goal revision while the foreground event guard accepted only the original exact revision, hanging after paid-family drain. Independently ported tests first: nextest f96d48c8 fails with `pause: held-family acceptance hung` against original production code.
+- Accept newer stopped revisions only for the same goal ID, then settle and clean up using that observed exact identity; direct-run records retain original execution correlation and replacement IDs remain fenced. Repaired foreground suite13/13 passes (4c1fd710). Independent source/test review approved.
+- Seven reachable held-preparation rows prove cancellation/drain retention, child-before-parent finish, unrelated-run isolation and terminal-record ordering. Clear/replace are races during interrupt drain; output/drop prove retained asynchronous cleanup, not terminal output. No new sleep sites:73 remain. Full resulting-head gate and smoke follow.
+
+### 2026-10-16 — G4 review repairs on updated G3
+
+- Rebased owned #331 branch onto localG3review-fix head1763403e. Resolved append-only ledger overlap and refreshed the same73legacy sleep identities; no runtime source conflict or discarded upstream change. Publication awaits completed surface repair gate.
+- Ported test-first pairs for documented goal exit6/7/8, stale TUI refresh leaving its form Pending, and invalid stored-goal arguments arming cancellation cleanup. Focused8cf0c890 passes3/3 on integrated source; independent fixed-snapshot review approves TUI and argument validation.
+- Outer review rejects the initial foreign-work close repair: retained shutdown can wait forever after the sole Ctrl-C listener is dropped. Needs an interruptible close phase plus terminal-goal/held-foreign-work/interrupt regression. Other live task fixes remain in progress; hosted threads remain open.
+
+### 2026-10-16 — G4 interruptible retained runtime close
+
+- Caller-level teardown regression from the live task preserves foreign runs by awaiting natural settlement. Outer review found its original Ctrl-C future was already dropped after run_goal returned. Added a second closing row with a new interrupt; a97c4286 reproduces the uninterruptible wait and cleans up the test-owned runtime even on red.
+- A fresh close-phase listener remains polled at the idle query and settlement wait. On interruption, release the lifecycle admission guard before ordinary bounded shutdown cancels/drains remaining work. Keep the selected goal's already-emitted record and exit status. Focused db87522b passes1/1 with both natural and explicit-interrupt rows; independent review approves lock/wake/cancellation behavior. Guide and contract document the ownership phase. Broader/final gate follows after remaining repairs.
+
+### G4 review integration: owned compaction and harness failure records
+
+The adoption guard now considers queued/running prompt work rather than treating
+an owned compaction as an interactive preemptor. The real Store fixture reproduced
+the rejected goal adoption before the fix; both goal-owned and user-origin prompt
+rows pass afterward. The clear/replace held-family acceptance rows now require
+exactly one final `harness_failure` record for the originally accepted goal after
+its family drains. They retain the no-early-output and replacement-survival checks.
+The guide and headless contract describe the last-observed snapshot fallback.
+
+Focused nextest run `3662fc4e-5e7a-40e5-930a-00ba71739778`: 5/5 passed.
+The remaining changes in runtime/headless are rustfmt of the integrated review
+fixes. Existing sleep identities and the ceiling remain unchanged (73 sites).
+Full-stack gates and publication remain pending; review threads stay open.
+
+### G4 goal command argument exit codes
+
+Fresh review thread PRRT_kwDOTmbEW86tGxYJ identified semantic goal validation
+escaping main through the generic exit-1 path. An isolated real authenticated
+server reproduced `qq goal set '' --session ID` exiting1 with the objective
+validation diagnostic. Argument/target-state variants now map explicitly to2;
+workspace/configuration/server/client/encoding/output failures remain1, with
+exhaustive domain-error matching. The main dispatch preserves the diagnostic.
+
+Regression test failed before the mapping. Goal CLI focused nextest
+`780ec0c0-13df-4db1-94b7-5dff5e93e18c`: 9/9 passed. Real-binary isolated-server
+verification passed three cases (empty objective, resume without a goal, and
+check approval without a goal), each exit2 and its expected diagnostic. The
+server and fake provider were stopped after the drive. Full final-head gates,
+publication and thread resolution remain pending.
+
+### 2026-10-16 — G4 current-head output and startup corrections
+
+- Four review regressions reproduced: cleanup overwrote a held-input reason;
+  trace flush emitted two finals; caller close replaced an emitted exit; startup
+  adoption omitted two completed direct runs. Test-first commits precede fixes.
+- Atomic exact-identity cleanup preserves stopped state/revision. Final writes
+  are attempted once, and flushed stdout selects the immutable exit. Store open
+  captures an optional startup replay boundary before recovery and scheduling.
+- Focused nextest `13655696-1b3b-45a2-85af-ab37452baaae`:21/21 pass,
+  including reopened-store achievement and already-held question. Independent
+  reviewer approves28235006 with no correctness blocker. Full gate, final
+  upstream restack/publication and review-thread resolution remain pending.
+
+### 2026-10-16 — G4 admission, drain and output review corrections
+
+- Active branch ownership moved to `/tmp/qq-goal-delivery-20261015/g4-smoke`;
+  original detached `g4` retains the still-running G5 trial binary untouched.
+- Red regressions reproduce missing replacement errors, rejected resume widening
+  approval, host-close autonomous refill, early/final trace loss, and error
+  return before paid-family drain. Settings validate first; close fences new
+  autonomous admissions while accepted work/children drain naturally.
+- Error cleanup uses the atomic pause receipt and bounded exact-family drain,
+  then replays missing direct-run metadata through the settled cursor. Final
+  stdout precedes optional trace and uncertain stdout writes are never retried.
+  Focused foreground/close tests:23/23 pass; final independent review, stack
+  integration, full gate/smoke/site and publication remain pending.
+
+### 2026-10-16 — G4 active edits, session preflight and text output
+
+- Red tests reproduced Ctrl-C after an observed active edit using a stale
+  revision, invalid new requests creating visible empty sessions, and text
+  mode losing its final result on trace flush failure.
+- Observed same-goal edits update both action and cleanup identities; Ctrl-C
+  and owner-drop cases pause the edited goal. New requests validate before
+  creation; replacement/bounds/empty/missing cases leave no sessions. Text
+  stdout precedes optional trace work, retaining its selected status.
+- Focused foreground/close tests:26/26 pass. Final integration/full gate, smoke,
+  independent review, publication and three-thread resolution remain pending.
+
+
+### 2026-10-16 — G4 edit-event publication failure
+
+- A new row reproduces output failing on the active edit event itself: the
+  foreground exits4, but stale cleanup conflicts and leaves revision2 running.
+- Reconcile the observed same-goal durable identity before fallible publication,
+  so output failure still pauses and drains that revision. Normal interrupt and
+  owner-drop rows remain covered; all26foreground/close tests pass.
+- Exact unchanged legacy sleep locations move; ceiling73 stays fixed. Final
+  full gate, smoke, independent review and published thread resolution follow.
+
+
+### 2026-10-16 — G4 stopped-state interrupt race and refused consent
+
+- Red rows reproduce a same-revision authentication pause overwritten by
+  Ctrl-C (130 instead of6) and refused check consent returning harness4.
+- Interrupt uses the existing conditional pause transaction; an unchanged
+  stopped receipt or non-active snapshot keeps its reason and natural exit.
+  Only this interrupt's committed user pause selects130. Forbidden/managed
+  check consent maps to setup2, with pending authority and zero work retained.
+- Authentication/configuration/achievement race rows and both refusal sources
+  pass; focused foreground/close27/27. Design/guide clarify exits. Unchanged
+  legacy sleep locations move without raising73. Full gate/publication follow.

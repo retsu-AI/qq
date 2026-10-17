@@ -9445,3 +9445,39 @@ async fn goal_provider_backoff_uses_durable_policy_without_shortening_model_wait
         );
     }
 }
+
+#[tokio::test]
+async fn goal_adoption_ignores_owned_compaction_but_detects_preempting_prompts() {
+    for goal_origin in [false, true] {
+        let (_directory, store, owner) = model_goal_claim(goal_origin).await;
+        let goal = owner.goal.as_ref().unwrap();
+        let audit = test_prepared_audit(&owner);
+        let (helper, _) = store
+            .start_in_run_compaction(&owner, &audit.resolved_model, 0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store
+                .has_preempting_goal_work(owner.identity.session_id, goal.goal_id)
+                .await
+                .unwrap(),
+            !goal_origin,
+            "owned summary must not turn a goal prompt into preempting work"
+        );
+        store
+            .finish_in_run_compaction_failed(&helper, RunOutcome::Cancelled)
+            .await
+            .unwrap();
+        store
+            .finish_run(
+                &owner,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
+}
