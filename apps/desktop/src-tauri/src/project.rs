@@ -631,16 +631,19 @@ impl Project {
                 }
                 self.clear_error_notice();
                 if !matches!(mode, SubmitMode::Queue) {
+                    let Some(session_id) = session_id else {
+                        let _ = reply.send(Err("select a session to steer".to_owned()));
+                        return;
+                    };
                     let result = steering_command(
-                        session_id
-                            .and_then(|id| self.sessions.get(&id))
+                        self.sessions
+                            .get(&session_id)
                             .and_then(|session| session.summary.active_run_id),
                         input,
                         mode,
                     );
                     match result {
                         Ok(command) => {
-                            let Some(session_id) = session_id else { return };
                             self.command(
                                 client,
                                 command,
@@ -1161,6 +1164,38 @@ mod submission_tests {
         assert!(project.workspace_id.is_none());
         assert_eq!(project.last_sequence, 0);
         assert!(project.notice.is_none());
+    }
+
+    #[tokio::test]
+    async fn steering_without_a_selected_session_replies_with_an_actionable_error() {
+        for mode in [SubmitMode::Steer, SubmitMode::Interrupt] {
+            let client = Client::default();
+            let mut project = Project::new(
+                None,
+                Arc::new(Engine::default()),
+                Arc::new(AtomicBool::new(true)),
+                "steering".into(),
+                PathBuf::from("."),
+                None,
+            );
+            project.connection = ConnectionDto::Live;
+            let (reply, accepted) = oneshot::channel();
+            project.apply_command(
+                &client,
+                UiCommand::Submit {
+                    session_id: None,
+                    input: vec![InputPart::text("steer")],
+                    reply,
+                    mode,
+                },
+            );
+            assert_eq!(
+                accepted.await.expect("submission waiter receives a reply"),
+                Err("select a session to steer".to_owned())
+            );
+            assert!(client.requests.lock().unwrap().is_empty());
+            assert!(project.pending.is_empty());
+        }
     }
 
     #[test]
