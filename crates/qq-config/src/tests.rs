@@ -4589,6 +4589,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             "exposed_tools" => r#"["read_file"]"#,
             "denied_providers" => r#"["xai"]"#,
             "max_output_tokens" => "1000",
+            "goals" => "(max_runs: 1000)",
             "require_https" => "true",
             "allow_custom_providers" => "true",
             "allow_literal_secrets" => "false",
@@ -4616,6 +4617,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
                     .to_owned()
             }
             "audit" => "(mode: off, max_revisions: 1, role: strong)".to_owned(),
+            "goals" => "(default_max_runs: 40)".to_owned(),
             "jev_review" => "off".to_owned(),
             "jev_routing" | "jev_approval" => "false".to_owned(),
             "approval_delegate" => "on".to_owned(),
@@ -4657,6 +4659,7 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
     for name in POLICY_FIELD_NAMES {
         let value = match name {
             "max_output_tokens" => "1000",
+            "goals" => "(max_runs: 1000)",
             "require_https" | "allow_custom_providers" | "allow_literal_secrets" => "true",
             "builtin_preference" => "hint",
             "exposed_tools" | "allow_tools" | "deny_tools" => r#"["read_file"]"#,
@@ -4756,4 +4759,171 @@ fn provider_credential_variables_cover_every_api_key_preset() {
             "XAI_API_KEY",
         ]
     );
+}
+
+#[test]
+fn goal_defaults_layer_and_clear_without_losing_partial_fields() {
+    let tree = TempTree::new();
+    let base = tree.loader().load(&tree.request()).unwrap();
+    let goals = base.goals();
+    assert_eq!(
+        (goals.default_deadline_seconds, goals.max_deadline_seconds),
+        (86_400, 604_800)
+    );
+    assert_eq!((goals.default_max_runs, goals.max_runs), (200, 2000));
+    assert_eq!(goals.per_run.max_model_turns, Some(256));
+    assert_eq!(
+        (
+            goals.max_backoff_seconds,
+            goals.check_timeout_seconds,
+            goals.approval_wait_seconds
+        ),
+        (1800, 600, 600)
+    );
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, goals: (
+        default_max_runs: 40, per_run: (max_model_turns: 12, max_tool_calls: 80),
+    ))"#,
+    );
+    let request = tree.request().with_explicit_content(
+        r#"(version: 1, goals: (
+        check_timeout_seconds: 120, per_run: (max_total_tokens: 9000),
+    ))"#,
+    );
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.goals().default_max_runs, 40);
+    assert_eq!(snapshot.goals().per_run.max_model_turns, Some(12));
+    assert_eq!(snapshot.goals().per_run.max_tool_calls, Some(80));
+    assert_eq!(snapshot.goals().per_run.max_total_tokens, Some(9000));
+    assert_eq!(snapshot.goals().check_timeout_seconds, 120);
+    assert_eq!(
+        snapshot.provenance().goals()["default_max_runs"].kind(),
+        SourceKind::Global
+    );
+    assert_eq!(
+        snapshot.provenance().goals()["per_run.max_total_tokens"].kind(),
+        SourceKind::Inline
+    );
+    let client = tree.loader().load_for_client(&request).unwrap();
+    assert_eq!(client.goals(), snapshot.goals());
+    let clear = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, goals: Clear)"),
+        )
+        .unwrap();
+    assert_eq!(clear.goals(), base.goals());
+}
+
+#[test]
+fn goal_managed_ceilings_only_tighten_and_clamp_defaults() {
+    let tree = TempTree::new();
+    tree.write(
+        "managed/managed.ron",
+        r#"(version: 1, policy: (goals: (
+        max_runs: 20, max_deadline_seconds: 3600, max_backoff_seconds: 120,
+        max_check_timeout_seconds: 60, max_approval_wait_seconds: 30,
+        per_run: (max_model_turns: 8, max_total_tokens: 4000),
+    )))"#,
+    );
+    tree.write(
+        "managed/managed.d/10-more.ron",
+        r#"(version: 1, policy: (goals: (
+        max_runs: 200, max_backoff_seconds: 60,
+        per_run: (max_model_turns: 80, max_total_tokens: 3000),
+    )))"#,
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    let goals = snapshot.goals();
+    assert_eq!((goals.max_runs, goals.default_max_runs), (20, 20));
+    assert_eq!(
+        (goals.max_deadline_seconds, goals.default_deadline_seconds),
+        (3600, 3600)
+    );
+    assert_eq!(goals.max_backoff_seconds, 60);
+    assert_eq!(goals.check_timeout_seconds, 60);
+    assert_eq!(goals.approval_wait_seconds, 30);
+    assert_eq!(goals.per_run.max_model_turns, Some(8));
+    assert_eq!(goals.per_run.max_total_tokens, Some(3000));
+    assert_eq!(snapshot.policy().goal_ceilings().max_runs, Some(20));
+    // Ordinary configuration cannot restore compiled ceilings after lowering.
+    let clear = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, goals: Clear)"),
+        )
+        .unwrap();
+    assert_eq!(clear.goals(), goals);
+    let error = tree
+        .loader()
+        .load(
+            &tree
+                .request()
+                .with_explicit_content("(version: 1, policy: (goals: (max_runs: 500)))"),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, ConfigError::PolicyOutsideManaged { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn goal_configuration_rejects_invalid_bounds_and_requires_workspace_trust() {
+    for fields in [
+        "default_deadline_seconds: 0",
+        "max_deadline_seconds: 604801",
+        "default_max_runs: 0",
+        "max_runs: 2001",
+        "max_backoff_seconds: 0",
+        "check_timeout_seconds: 3601",
+        "approval_wait_seconds: 0",
+        "per_run: (max_model_turns: 0)",
+        "per_run: (max_tool_calls: 0)",
+        "per_run: (max_duration_ms: 0)",
+        "per_run: (max_cost_usd_nanos: 0)",
+    ] {
+        let tree = TempTree::new();
+        let document = format!("(version: 1, goals: ({fields}))");
+        let error = tree
+            .loader()
+            .load(&tree.request().with_explicit_content(document))
+            .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::InvalidGoals { .. }),
+            "{fields}: {error}"
+        );
+    }
+    let tree = TempTree::new();
+    tree.write(
+        "work/qq.ron",
+        "(version: 1, goals: (default_max_runs: 500))",
+    );
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+    let granted = tree.loader().grant_pending_trust(&tree.request()).unwrap();
+    assert_eq!(granted.len(), 1);
+    assert_eq!(
+        tree.loader()
+            .load(&tree.request())
+            .unwrap()
+            .goals()
+            .default_max_runs,
+        500
+    );
+    tree.write(
+        "work/qq.ron",
+        "(version: 1, goals: (default_max_runs: 501))",
+    );
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::TrustRequired { .. })
+    ));
 }

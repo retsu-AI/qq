@@ -4,13 +4,13 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation checkpoint; not on main, full goal acceptance incomplete |
+| G0 | Foundation: durable goals and AC4 loop guard | Shipped (87d3ed1a) | ENG-1045 | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation merged; whole-plan acceptance remains open |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | The driver | In review | [ENG-1053](https://linear.app/retsu-ai/issue/ENG-1053) | [#309](https://github.com/retsu-AI/qq/pull/309), stacked on #308 | Implemented checkpoint only; full G2 acceptance remains open; not shipped |
-| G2.1 | Bounded idle driver, historical spend and direct-goal admission checkpoint | In review | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Implemented subset; current local socket-dependent qualification blocked; full G2 acceptance remains open |
-| G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
-| G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
-| G5 | Evidence | Planned | | | ENG-809 |
+| G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
+| G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
+| G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
+| G4 | TUI, CLI, foreground hosting and configuration | Planned | ENG-1064 | Next stacked PR | Depends on G2/G3 execution |
+| G5 | Live multi-hour qualification | Planned | ENG-1065 / ENG-809 | Final stacked PR | Authorized: openai-codex/gpt-6.1-sol subscription only; no paid API fallback |
 
 ## Entries
 
@@ -812,3 +812,135 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 - Reconfirmed published308f078ccaa/3090b15c8c7 exclude PR319: runtime/manifests match pre-Jev baselines, removed files/provenance and ancestry absent; clean main73ff0647 retained. Both hosted CI runs passed.308received genuine Codex thumbs-up;309received4new findings, all reproduced before implementation.
 - Regression commitsab8d1dd6/21942446 reproduce lost cancellation replay wake, generic automatic routing input, expired sponsored-child admission and request cap256against inherited60. Fix retains replay receipts, routes captured objectives only for Goal-origin work, intersects all paid-ancestor absolute deadlines at claim/routing/main start, and shapes child provider output including routing spend. Independent reviews approve both scheduling/routing and revised ancestry admission; no ancestor goal authority granted.
 - Focused goal_review7/7pass (2.39s), including own-goal child deadline variants. Final repository gate and hosted review follow. PR308 remains unmerged: normal async merge failed last-pusher approval and active github-pages deployment requirements. No protection bypass, fabricated review or deployment. Four309threads remain open until fixing commits are published.
+
+### 2026-10-16 — post-merge G2/G3, G4 and G5 stack
+
+- User requests three reviewable PRs: G2 closeout+G3 (ENG-1063), G4 surfaces (ENG-1064), G5 evidence (ENG-1065), parent ENG-1011. Start clean isolated worktree `/tmp/qq-goal-delivery-20261015/g3` on exact main3d58b3d3; root is sole writer. Preserve #293 cooperative preparation drain and all #309 review fixes; exclude removed PR319.
+- Pre-change optimized turn_overhead diagnostic:3iterations×1000executed/durable calls,9compactions each, all assertions pass. Median gaps at10/100/1000 are92.690/102.274/57.591ms; broad sample variation is not quiet-host/tail qualification. Exact source/binary/fixture/raw samples: `/tmp/qq-goal-delivery-20261015/baseline.json` and `g3-baseline-turn-overhead.log`. Candidate comparison and acceptance follow.
+- Reuse prepared test-first runtime/check/surface work rather than replay old merge history. Independent static G2/G3 review confirms principal Unix acceptance paths; add literal simulated20-minute permit-wait coverage and resolve/document platform boundaries. G5 provider selected:openai-codex/gpt-6.1-sol; no paid allowance inferred.
+
+### 2026-10-16 — G2/G3 integration and G5 authorization
+
+- Integrated G2 paid-request admission, caller remainders and final-slot handoff onto main3d58b3d3; retained all-sponsor deadlines and #293 cancellation/drain ownership. Corrected the older tiny-total child fixture to retain a binding60-token output allowance with room for request input; focused regression1/1 passes.
+- Ported G3 exact check authorization, bounded process execution, independent model audits, historical results and durable interrupted-check holds; configuration/policy foundations move into this PR because execution must enforce them. G4 retains the TUI, CLI and foreground surfaces. Protocol34/schema56–58 are reserved in root; descriptor15 is unchanged.
+- Driver-only and checked40-run scenarios pass with actual process kills and simulated multi-day waits/outages. Added literal20-minute held-permit acceptance; integrated final checks remain pending. Independent read-only integration review of53043b99 found no defects and verified no PR319 provenance.
+- G5 user authorization: openai-codex/gpt-6.1-sol through subscription only, with no paid API fallback. A failed subscription/auth path must stop rather than select a billable provider. Live evaluation has not started.
+
+### 2026-10-16 — G2/G3 qualification and push-boundary regression
+
+- Runtime ae835237 passed full workspace2686/2686 (15 deliberate skips), doctests/all-feature Clippy, minimal-provider211/211 and real-binary smoke6/6. Both multi-day scenarios passed under full load. Fresh manual captures prove8provider request bodies byte-identical to main3d58b3d3; an initial stale-cache comparison was discarded, and candidate was rebuilt before comparison.
+- Goal-less optimized loop diagnostic:10/100/1000-turn medians92.69/102.27/57.59ms baseline →17.92/17.57/18.92ms candidate;3×1000 durable calls,0duplicates,9compactions each. Shared-host variation prevents causal/H0 claims. Raw logs, hashes and immutable binaries: /tmp/qq-goal-delivery-20261015/. G4 rendering baseline is captured separately.
+- First required push failed because inherited Git-local variables let a temporary Git fixture change this linked worktree's HEAD/index; no physical source blobs changed and nothing was published. Restored owned metadata, reproduced on disposable regular/linked pushes, and fixed the hook boundary. The final gate must run on the resulting head.
+
+### 2026-10-16 — final fixture qualification
+
+- Required push gate exposed a sponsored-approval test race: a five-second real-time keeper delayed scheduler timers and let virtual deadlines race real Store I/O. Setup now uses the normal clock with a one-hour fixture allowance, then crosses both clocks explicitly only after actual approval and paid-owner assertions. Same regression passes1/1 in1.72s; independent read-only review approved. Runtime bounds are unchanged. Final-head push gate follows.
+
+### 2026-10-16 — published stack and current-main reconciliation
+
+- Opened #330 (G2/G3) and #331 (G4 on #330), both non-draft with ci:full. Final old-base gates passed2687/2687 and2733/2733 respectively, plus doctests/Clippy/minimal profiles. Publication revealed bare-repository fetches had left origin/main stale; fixed the owned remote fetch mapping and refreshed explicitly to3e34eea2.
+- Rebased #330 onto current main, preserving #325 fixture stabilization and #299 auth changes. Only conflict was legacy sleep locations: retain main's73 sites and lowered ceiling, then refresh positions against integrated source. Main auth source is unchanged by this PR. Resulting-head qualification follows; previous reports remain evidence for their exact old heads.
+
+### 2026-10-16 — preparation fixture entry fence
+
+- Rebased full gate exposed #293's preparation test expecting a checkpoint stage after its real100ms setup deadline could already expire. Narrow and8concurrent diagnostic copies pass; source review confirms an expired first poll can emit entered only during cancellation drain. Production snapshots the stage before cancellation correctly.
+- Replace the ambiguous Notify with a bounded entry receipt proving not-yet-cancelled, establish that stage before explicit virtual expiry, and retain exact stage/no-request/cooperative-drain assertions. Narrow corrected regression1/1 passes in1.74s; independent review approved. No production bounds changed. The entry receipt encodes the fixture ordering rather than loosening the verdict. Final-head gates follow.
+
+### 2026-10-16 — G3 managed prompt ceilings review repair
+
+- New Codex finding330/f1 reproduced independently on originating #330: unmanaged prompt claim lacks managed per-run limits (g3-managed-caps-red.log). Ported test-first792e2d95/ba072461 from the isolated subscription-only review task as a51fef7e/978c3d3a.
+- Intersect all ten execution-limit fields with current managed policy at claim and refreshed admission, retaining stricter caller limits and final-slot/audit bounds. Independent fixed-snapshot review found no source defect; identified that initial regression only proved claim.
+- Extended the regression to tighten policy after reservation, require Reprepare, retry actual start and inspect durably persisted limits. Narrow test passes1/1 (9448918a); broader/final-head gate follows after remaining related findings are integrated. Nothing from this repair is published yet.
+
+### 2026-10-16 — G3 paid input and sponsored approval review repairs
+
+- Ported dense-input regression and conservative paid-admission bounds from the live review task. Its actual red receipt7fb496ec dispatches1request despite a binding token/cost remainder; repaired narrow pair c6762cc6 passes2/2 after integration with managed ceilings. Requests and owned summaries reserve byte upper bounds rather than occupancy estimates.
+- Independent review rejected the first sponsor-duration repair: RunStarted excludes preparation. Added a real held20-minute preparation row;3079a366 reproduces Active instead of needs_user/approval. A first attempted post-event repair was too late because runtime deadline enforcement drains children before emitting exhaustion; discarded that experiment.
+- Retain bounded live monotonic deadlines through paid execution lifetime, capture expiry on the executor and recheck bound active/non-cancelled owners in the existing store transaction. Focused40dd7664 passes2/2 including absolute deadline, per-run duration, preparation delay and wall-clock lag rows; independent mechanism review and broader final gates follow. No protocol/schema or dependency changes.
+
+### 2026-10-16 — G3 review repair integration gate
+
+- All four hosted330findings have local test-first repairs. Policy pool saturation now awaits a cancellation-safe bounded semaphore rather than durably pausing valid goals; its focused regression passes1/1 (031ffd42). Current goal refresh already bounds that wait by cancellation and deadline.
+- Independent read-only reviews approve managed ceiling source plus strengthened actual-start test, conservative paid input, and monotonic sponsor registration (a8933e72). Rejected timestamp-based and post-event experiments do not define the resulting source. Four-row sponsor test and ordinary approval regression pass2/2, including nonzero preparation and wall-clock lag.
+- Preserve all73existing sleep sites; final head full pre-push gate and runtime smoke follow. Review threads stay open until fixing commits are published and final evidence is verified.
+
+### 2026-10-16 — G3 conservative admission outage fixture
+
+- Full gate on1763403e stops at the outage fixture's10000-token row. Exact diagnostic rerun proves TotalTokens refusal before dispatch, not provider-retry/accounting failure. The new paid input bound correctly includes complete request bytes.
+- Keep caps finite but leave100000tokens of room to exercise the intended HTTP529 rejection; retain every retry, direct ownership, known-zero accounting and zero-run-charge assertion. Full goal_admission group passes19/19 (4c2ac02f), including token-only/cost-only/combined rows for goal and prompt origins. Resulting-head full push gate follows.
+
+### G3 full-gate descendant exit correction
+
+The full gate on `2a75c4aa` caught a descendant still in state `R` when completion
+check cancellation returned. A narrow rerun passed, but independent source review
+confirmed the real gap: killpg plus leader wait did not observe descendant exit.
+The test now pins the descendant with a pidfd before cancellation and checks
+terminal readiness at the return boundary. It retains its original /proc check.
+
+Linux completion checks now retain the WNOWAIT leader pin while confirming every
+matching process through pidfd readiness, including zombie leaders with live
+threads. A bounded off-executor /proc scan (65,536 entries, 4,096 members, 4,096
+bytes per stat) is repeated after observed exits to close the fork/enumeration
+window. All scans and waits share one five-second cleanup deadline. Identity is
+checked around pidfd acquisition. Failure still reaps the shell but leaves the
+process lease unconfirmed and the runtime failed, preserving workspace exclusion.
+This adds Linux check-cleanup work only; ordinary prompt requests are unchanged.
+Existing rustix enables its event API without a new dependency or version change.
+
+Focused run `14ab4e7d-0c5e-408e-95fe-5d8af95054c4`: 5/5 process supervision
+tests passed. Final full gate, smoke and independent source review remain pending.
+
+Independent review found non-UTF-8 process names could fail whole-record decoding.
+A real check that writes byte 0xff to its Linux process name reproduced Cleanup
+InvalidData before the correction. Bounded byte reads now decode only the numeric
+stat suffix; no process-name UTF-8 assumption remains. Focused nextest
+`b669c0a1-d4f6-44bc-9ca3-176b4894c37b`: 6/6 process tests passed.
+
+### 2026-10-16 — G3 current-head process and routing corrections
+
+- Reproduced workspace disappearance poisoning the host, unconfirmed portable
+  process groups, and token-capped routing dispatch. Test-first commits retain
+  each red regression. Missing workspaces now settle failed checks normally;
+  portable supervision requires bounded group absence after reap and disarm.
+- Routers declare conservative input/output bounds (default unknown). Atomic
+  admission reuses current paid-owner accounting, including pending spend,
+  before dispatch. TypeSafe leaves billed output unknown and refuses finite
+  total/output caps for paid routing; free single-candidate routing remains0/0.
+- Focused nextest `7bcd21be-7579-4c7d-a318-6356daa6bc3c`:49/49 pass.
+  Independent source review finds no blocker. Linux exercises the portable
+  signal-zero primitive; actual macOS execution remains unverified locally.
+  Full gate, stack integration/publication and review resolution remain pending.
+
+### 2026-10-16 — G3 final-slot verification and noisy descendants
+
+- Reproduced a cap-1 achievement claim losing its native audit and 32 noisy
+  descendants starving leader exit until timeout. Red commits precede fixes.
+- Native checks bypass only the model-run ceiling for a current pending audit;
+  strict paid admission and all deadline/token/cost/unknown limits remain.
+  Exit observation precedes pipe reads, below cancellation and deadline.
+- Focused completion tests:29/29 pass. Independent review approves b75b3419.
+  Full workspace gate passes (111.1s); final docs/evidence, smoke, stack
+  publication and hosted review-thread resolution remain pending.
+
+### 2026-10-16 — G3 completion-policy pool backpressure
+
+- Review-body finding5546040233 was missed during inline-thread triage. Holding
+  all4 shared policy slots reproduced immediate completion-check rejection.
+- Check validation now awaits bounded pool capacity, matching goal policy
+  loading; caller cancellation/check deadline/command timeout remain in force.
+  The regression cancels one queued waiter, then verifies success and all4 slots
+  returned after capacity frees. Focused policy/managed-denial tests:3/3 pass.
+  Final gate, independent review and stack publication remain pending.
+
+### 2026-10-16 — G3 check workspace, streak and diagnostic corrections
+
+- Red tests observed workspace opens on the Tokio worker, stale failure counts
+  after check edits, and unmasked check output. Workspace opening now joins the
+  existing bounded blocking preparation; failures settle normally.
+- Check-spec changes reset consecutive check failures; unchanged checks retain
+  them. Recognized secrets are masked before durable output/model notices;
+  truncated leading fragments are omitted to avoid marker-prefix loss.
+- Existing4KiB/binary/history fixtures retain their exact assertions using
+  complete retained lines. Masked durable messages/reopen/context and long-secret
+  truncation are covered. Focused completion tests:31/31 pass. Independent review,
+  final gate/smoke/restack/publication and thread resolution remain pending.

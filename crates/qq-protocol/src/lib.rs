@@ -22,10 +22,10 @@ pub use capabilities::{
     ToolCapabilities, ToolHostSummary, WorkspaceToolCapabilities, child_reasoning_effort,
 };
 pub use goals::{
-    DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason, GoalBudget, GoalCheck,
-    GoalCheckAuthorization, GoalCheckScope, GoalChecklistItem, GoalChecklistState, GoalControl,
-    GoalCounters, GoalExhaustion, GoalIdentity, GoalNeedsUser, GoalPauseReason, GoalSnapshot,
-    GoalStatus, GoalWait,
+    CheckInterruption, DEFAULT_GOAL_RUN_MODEL_TURNS, GoalAchievementClaim, GoalBlockedReason,
+    GoalBudget, GoalCheck, GoalCheckAuthorization, GoalCheckScope, GoalChecklistItem,
+    GoalChecklistState, GoalControl, GoalCounters, GoalExhaustion, GoalIdentity, GoalNeedsUser,
+    GoalPauseReason, GoalSnapshot, GoalStatus, GoalWait,
 };
 pub use headless::{
     HeadlessApproval, HeadlessOutcome, HeadlessRecord, HeadlessRecordRef, HeadlessStatus,
@@ -78,7 +78,7 @@ pub use sessions::{
     WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 33;
+pub const PROTOCOL_VERSION: u16 = 34;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles

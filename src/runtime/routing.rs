@@ -220,6 +220,17 @@ impl TaskRouter for TypeSafeTaskRouter {
             65_536 * 42
         })
     }
+    fn max_input_tokens(&self) -> Option<u64> {
+        Some(if self.candidates.len() == 1 {
+            0
+        } else {
+            64 * 1024
+        })
+    }
+    fn max_output_tokens(&self) -> Option<u64> {
+        // Response byte limits do not bound billed provider output.
+        (self.candidates.len() == 1).then_some(0)
+    }
     fn route(&self, task: String) -> TaskRoutingFuture {
         let router = Self {
             client: self.client.clone(),

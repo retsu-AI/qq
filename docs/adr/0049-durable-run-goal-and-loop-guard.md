@@ -354,9 +354,16 @@ a goal.
    effects. If it still targets the live active claimed revision, the goal
    becomes `paused { needs_user: check_interrupted }` and keeps
    `audit_pending`; a stale/interrupted check cannot pause a replacement or
-   edited goal. A client's resume explicitly acknowledges
-   the uncertain effects before retrying; a consumed `once` authorization
-   also requires fresh approval. A queued check never reached the durable
+   edited goal. Recovery also retains an independent workspace hold for each
+   interrupted check, including stale, cleared and replaced goals. Every model
+   reservation and side-question admission honors that hold. A dedicated
+   workspace/run-fenced acknowledgment confirms that the operator resolved
+   the uncertain effects, releases only that hold and leaves a matching goal
+   paused. Resume and a consumed `once` authorization still require their
+   separate explicit controls. Deletion cannot erase an unacknowledged check.
+   Protocol34/schema57 expose this recovery extension; snapshots/events name
+   one bounded unresolved hold at a time, and acknowledgment reveals any
+   remaining hold. A queued check never reached the durable
    start boundary, so its one-shot authorization remains unconsumed.
 6. **Stopping and waiting are durable and bounded.**
    - **Waits.** `update_goal { wait: { seconds ≤ 86 400, reason } }` sets

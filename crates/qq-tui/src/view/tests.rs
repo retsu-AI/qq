@@ -29,6 +29,7 @@ fn app_with_messages(count: u8) -> App {
     let summary = fixtures::session_summary(SESSION);
     let mut app = App::new(TuiOptions::default());
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![summary.clone()],
         focused: Some(SessionSnapshot {
             messages: (0..count)
@@ -3092,6 +3093,7 @@ fn app_with_two_sessions(count: u8) -> (App, SessionId, SessionId) {
         })
         .collect();
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         included: vec![SessionSnapshot {
             messages,
             ..fixtures::session_snapshot(summary.clone())
@@ -3239,6 +3241,7 @@ fn a_pane_following_a_deleted_session_shows_the_empty_prompt() {
 fn empty_workspace_app(options: TuiOptions) -> App {
     let mut app = App::new(options);
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: Vec::new(),
         focused: None,
         ..fixtures::workspace_snapshot()
@@ -3507,6 +3510,7 @@ fn the_try_these_cell_keeps_the_credential_remedy_above_it() {
         ..TuiOptions::default()
     });
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         sessions: vec![summary.clone()],
         focused: Some(fixtures::session_snapshot(summary)),
         ..fixtures::workspace_snapshot()
@@ -4388,6 +4392,7 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
     };
     // Warm the child through an included body so its calls are known.
     app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
         cursor: fixtures::cursor(1),
         sessions: vec![child.clone()],
         focused: None,

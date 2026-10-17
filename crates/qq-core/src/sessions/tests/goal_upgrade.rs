@@ -243,7 +243,7 @@ async fn goal_upgrade_preserves_independent_routing_receipts_before_main_start()
             let claim = store.reserve_next_run(false).await.unwrap().unwrap();
             let run = claim.identity.run_id;
             store
-                .record_routing_started(&claim, state != "skipped", None)
+                .record_routing_started(&claim, state != "skipped", None, (None, None))
                 .await
                 .unwrap()
                 .unwrap()
@@ -339,6 +339,175 @@ async fn goal_upgrade_preserves_independent_routing_receipts_before_main_start()
                 (first.0, first.2),
                 second,
                 "recovery after reopen must not recharge or republish"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn goal_check_schema56_upgrade_preserves_unknown_interruption_until_acknowledged() {
+    let (directory, store, claim) = super::goals::model_goal_claim(true).await;
+    let session = claim.identity.session_id;
+    let workspace = claim.identity.workspace_id;
+    let run = claim.identity.run_id;
+    store
+        .finish_run(
+            &claim,
+            RunOutcome::Interrupted,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let mut goal = (*claim.goal.as_ref().unwrap()).as_ref().clone();
+    goal.check = Some(qq_protocol::GoalCheck {
+        command: "true".to_owned(),
+        timeout_ms: 5000,
+    });
+    goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::Consumed);
+    goal.status = qq_protocol::GoalStatus::Paused {
+        reason: qq_protocol::GoalPauseReason::NeedsUser {
+            cause: qq_protocol::GoalNeedsUser::CheckInterrupted,
+        },
+    };
+    goal.audit_pending = true;
+    goal.audit_revision = Some(goal.revision);
+    goal.pending_run_id = None;
+    goal.counters.audits = 1;
+    store.close().await.unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection.execute_batch("DROP INDEX runs_pending_check_ack; ALTER TABLE runs DROP COLUMN check_acknowledgment_pending; UPDATE metadata SET value='56' WHERE key='schema_version';").unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET kind='goal_check',origin_json=?2,goal_snapshot_json=?3 WHERE id=?1",
+            params![
+                run.to_string(),
+                serde_json::to_string(&qq_protocol::RunOrigin::GoalCheck {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision
+                })
+                .unwrap(),
+                serde_json::to_string(&goal).unwrap()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE session_goals SET payload_json=?2 WHERE session_id=?1 AND live=1",
+            params![session.to_string(), serde_json::to_string(&goal).unwrap()],
+        )
+        .unwrap();
+    drop(connection);
+    let upgraded = Store::open(path.clone()).await.unwrap();
+    let snapshot = upgraded
+        .snapshot(SnapshotRequest::new(workspace, Some(session), 256, 256))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.check_interruption,
+        Some(qq_protocol::CheckInterruption {
+            session_id: session,
+            run_id: run
+        })
+    );
+    assert_eq!(snapshot.focused.unwrap().goal.as_deref(), Some(&goal));
+    upgraded.close().await.unwrap();
+    let again = Store::open(path).await.unwrap();
+    let snapshot = again
+        .snapshot(SnapshotRequest::new(workspace, Some(session), 256, 256))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.check_interruption,
+        Some(qq_protocol::CheckInterruption {
+            session_id: session,
+            run_id: run
+        })
+    );
+    assert_eq!(snapshot.focused.unwrap().goal.as_deref(), Some(&goal));
+    let id = CommandId::generate().unwrap();
+    let acknowledge = SessionCommand::AcknowledgeCheckInterruption {
+        workspace_id: workspace,
+        run_id: run,
+    };
+    let first = again.command(id, acknowledge.clone()).await.unwrap();
+    assert_eq!(
+        again.command(id, acknowledge).await.unwrap().receipt,
+        first.receipt
+    );
+    let snapshot = again
+        .snapshot(SnapshotRequest::new(workspace, Some(session), 256, 256))
+        .await
+        .unwrap();
+    assert!(snapshot.check_interruption.is_none());
+    assert!(matches!(
+        snapshot.focused.unwrap().goal.unwrap().status,
+        qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::User
+        }
+    ));
+    again.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_check_migration_rejects_incompatible_acknowledgment_storage_without_advancing_version()
+ {
+    for version in [56, 57] {
+        for (column, index) in [
+            (
+                "TEXT NOT NULL DEFAULT 0",
+                "CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1",
+            ),
+            (
+                "INTEGER DEFAULT NULL",
+                "CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1",
+            ),
+            (
+                "INTEGER NOT NULL DEFAULT 0",
+                "CREATE INDEX runs_pending_check_ack ON runs(session_id) WHERE check_acknowledgment_pending=1",
+            ),
+            (
+                "INTEGER NOT NULL DEFAULT 0 CHECK(check_acknowledgment_pending IN (0,1) AND (check_acknowledgment_pending=0 OR kind='goal_check'))",
+                "CREATE INDEX runs_pending_check_ack ON runs(id) WHERE check_acknowledgment_pending=0",
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("sessions.sqlite3");
+            Store::open(path.clone())
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            let connection = Connection::open(&path).unwrap();
+            connection.execute_batch(&format!("DROP INDEX runs_pending_check_ack; ALTER TABLE runs DROP COLUMN check_acknowledgment_pending; ALTER TABLE runs ADD COLUMN check_acknowledgment_pending {column}; {index};")).unwrap();
+            connection
+                .execute(
+                    "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                    [version.to_string()],
+                )
+                .unwrap();
+            drop(connection);
+            assert!(
+                matches!(
+                    Store::open(path.clone()).await,
+                    Err(SessionRuntimeError::CONSTRAINT)
+                ),
+                "schema {version} accepted {column} / {index}"
+            );
+            let connection = Connection::open(path).unwrap();
+            let actual: String = connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                actual,
+                version.to_string(),
+                "failed migration must roll back metadata"
             );
         }
     }

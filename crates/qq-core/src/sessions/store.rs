@@ -702,6 +702,30 @@ impl Store {
             .await
     }
 
+    /// Goal command replay must not wait on configuration resolution.
+    pub(super) async fn command_is_recorded(
+        &self,
+        command_id: CommandId,
+        command: &SessionCommand,
+    ) -> Result<bool, SessionRuntimeError> {
+        let expected = serde_json::to_string(command)?;
+        self.call(Priority::Control, move |connection| {
+            let stored: Option<String> = connection
+                .query_row(
+                    "SELECT request_json FROM commands WHERE id=?1",
+                    [command_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match stored {
+                Some(stored) if stored == expected => Ok(true),
+                Some(_) => Err(SessionRuntimeError::IdempotencyConflict),
+                None => Ok(false),
+            }
+        })
+        .await
+    }
+
     pub(super) async fn command_with_admission(
         &self,
         command_id: CommandId,
@@ -1843,7 +1867,7 @@ impl Store {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
-            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out)
+            conclude_tool_approval(connection, store_id, identity, tool_call_id, timed_out, &[])
         })
         .await
     }
@@ -1915,6 +1939,7 @@ impl Store {
         claimed: &ClaimedRun,
         paid: bool,
         maximum_cost: Option<u64>,
+        maximum_tokens: (Option<u64>, Option<u64>),
     ) -> Result<claim::RunStart, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -1923,7 +1948,6 @@ impl Store {
         let limits = claimed.limits;
         let admission = claimed.goal_admission;
         let goal_spend_owner = claimed.goal_spend_owner;
-        let tracked = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
         let goal_initial_notice = claimed.goal_initial_notice.clone();
         self.call(Priority::Output, move |connection| {
             streaming::record_routing_started(
@@ -1939,8 +1963,8 @@ impl Store {
                     admission,
                 },
                 paid,
-                tracked,
                 maximum_cost,
+                maximum_tokens,
             )
         })
         .await

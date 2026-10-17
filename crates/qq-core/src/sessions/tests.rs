@@ -18,6 +18,11 @@ mod delegation;
 mod execution_context;
 mod feeds;
 mod goal_admission;
+mod goal_check;
+mod goal_driver_soak;
+mod goal_final_slot;
+mod goal_model_audit;
+mod goal_paid_limits;
 mod goal_review;
 mod goal_upgrade;
 mod goals;
@@ -2184,6 +2189,7 @@ fn denial_capacity_fixture(
         goal: None,
         goal_initial_notice: None,
         goal_admission: None,
+        check_deadline: None,
         origin: None,
         checkpoint: None,
         routing: None,
@@ -2266,10 +2272,15 @@ fn apply_denial_capacity_path(
             CommandOrigin::Client,
         )
         .map(|_| ()),
-        DenialCapacityPath::Timeout => {
-            conclude_tool_approval(connection, store_id, claimed.identity, tool_call_id, true)
-                .map(|_| ())
-        }
+        DenialCapacityPath::Timeout => conclude_tool_approval(
+            connection,
+            store_id,
+            claimed.identity,
+            tool_call_id,
+            true,
+            &[],
+        )
+        .map(|_| ()),
     }
 }
 

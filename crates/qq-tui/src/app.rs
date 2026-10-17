@@ -368,6 +368,7 @@ pub(crate) struct App {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_id: Option<WorkspaceId>,
     pub workspace_path: String,
+    pub check_interruption: Option<qq_protocol::CheckInterruption>,
     /// Local root for `@` mention resolution and completion, when this
     /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
@@ -480,6 +481,7 @@ impl App {
             trust_resolving: false,
             workspace_id: None,
             workspace_path: String::new(),
+            check_interruption: None,
             workspace_root: options.workspace_root,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             panes: vec![TranscriptPane::default()],
@@ -931,6 +933,7 @@ impl App {
             self.workspace_path = snapshot.workspace.path;
         }
         if initial || snapshot_sequence >= self.last_sequence {
+            self.update_check_interruption(snapshot.check_interruption);
             for summary in snapshot.sessions {
                 if self
                     .sessions
@@ -1070,10 +1073,31 @@ impl App {
         effects
     }
 
+    fn update_check_interruption(&mut self, interruption: Option<qq_protocol::CheckInterruption>) {
+        let changed = self.check_interruption != interruption;
+        self.check_interruption = interruption;
+        if changed {
+            if self.check_interruption.is_some() {
+                self.set_warning(
+                    "An interrupted completion check holds this workspace until acknowledgment."
+                        .to_owned(),
+                );
+            } else {
+                self.set_info(
+                    "Completion check interruption acknowledged; workspace work may continue."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
     fn apply_state_effects(&mut self, reduced: impl IntoIterator<Item = StateEffect>) -> Effects {
         let mut effects = Effects::none();
         for effect in reduced {
             match effect {
+                StateEffect::CheckInterruptionChanged(interruption) => {
+                    self.update_check_interruption(interruption)
+                }
                 StateEffect::Notice {
                     session,
                     level,
