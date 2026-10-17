@@ -5,8 +5,8 @@
 | Analysis | Source comparison and plan | Complete | feat/desktop-production-readiness; local only | Five clones refreshed, source inspected |
 | DP1 | Bounded commands, durable submission | Implemented; live qualification partial | same | 5 Rust and 2 draft tests; offline live state |
 | DP2 | Run controls and recovery | Implemented; live qualification partial | same | Steer/interrupt mapping; startup retry; visible errors |
-| DP3 | Session organization | In progress | same | Local aliases/archive, search |
-| DP4–DP8 | Pickers through release qualification | Planned | same | See owning plan |
+| DP3 | Session organization | Implemented; fixture verified | same | Search, reversible local aliases/archive |
+| DP4–DP8 | Pickers through release qualification | In progress | same | Native integration, types, virtualization and packaging gates |
 
 ## 2026-10-17 — Start and comparative analysis
 
@@ -39,3 +39,15 @@
   discovered HTTP 500 workspace bootstrap previously hidden by Connecting text.
   Error now visible. Connected/provider/control live qualification remains open.
 - No model calls or engine source changes. Two protected edits unchanged.
+
+## 2026-10-17 — DP3 session organization
+
+- Local aliases and reversible archive are explicitly labelled desktop-local;
+  histories remain canonical. Active/needs-you sessions remain visible.
+- Case-insensitive multi-term search includes aliases and recent output;
+  search exposes matching child sessions. Metadata bounded at 2048 records.
+- Tests: persistence/reload/restore, malformed metadata, long names and search.
+- Live isolated 512-session fixture: searched Task 511, renamed it Release
+  smoke fixture, archived it, opened Archived locally, restored it.
+- Desktop fmt, Clippy, 8 Rust tests, typecheck, 8 JS tests and production UI
+  build passed in the integrated checkout. No engine or protocol changes.
