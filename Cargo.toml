@@ -24,6 +24,7 @@ members = [
   "crates/qq-client",
   "crates/qq-config",
   "crates/qq-core",
+  "crates/qq-decision",
   "crates/qq-harness",
   "crates/qq-mcp",
   "crates/qq-provider",
@@ -72,6 +73,7 @@ qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
 qq-config = { path = "crates/qq-config" }
 qq-core = { path = "crates/qq-core" }
+qq-decision = { path = "crates/qq-decision" }
 qq-harness = { path = "crates/qq-harness" }
 qq-mcp = { path = "crates/qq-mcp" }
 qq-provider = { path = "crates/qq-provider", default-features = false }

@@ -181,6 +181,25 @@ and QQ has **verified** with fixtures:
 
 Everything else is treated as unknown, and unknown fails closed.
 
+## Library foundation
+
+`qq_provider::decision` contains text/JSON state, Boolean/Choice/Score
+questions, raw response observations, requested/reported model provenance,
+nullable usage, capability declarations and typed dispatch uncertainty. A
+concrete `DecisionProvider` binds validation to its `DecisionTransport` before
+calling dispatch. It checks question/option/state/neutral-encoding limits;
+adapters must additionally enforce actual wire and response limits. No live
+decision transport or runtime consumer is installed through this seam yet.
+
+`qq-decision::validate_response` checks the exact question set, answer kinds,
+finite probabilities, feasible normalized rounding intervals, certain choice
+winners and jointly feasible expected scores. Probabilities remain in request
+option order, unnormalized; future wire adapters must verify exact labels
+before mapping. The declared rounding error applies to each option and to the
+reported scalar. Successful validation is not calibration, egress consent or
+execution authority. Pricing, image inputs and authority policy are deferred
+until an implemented consumer needs them. Existing Jev behavior is unchanged.
+
 ## 2. What QQ does with Jev today
 
 Four capabilities, each off by default and enabled independently. A stored

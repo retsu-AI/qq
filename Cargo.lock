@@ -2928,6 +2928,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qq-decision"
+version = "0.1.7"
+dependencies = [
+ "qq-provider",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "qq-harness"
 version = "0.1.7"
 dependencies = [

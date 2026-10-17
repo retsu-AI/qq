@@ -163,6 +163,7 @@ Next free number: 0063. Reserve here before opening a PR that adds an ADR.
 | Date | From | File(s) | Request | Status |
 | --- | --- | --- | --- | --- |
 | 2026-09-10 | multi-surface W1 | `.github/workflows/ci.yml`, `rust-toolchain.toml`, `.cargo/config.toml` | Add `wasm32-unknown-unknown` target, `getrandom_backend="wasm_js"` cfg for that target, and a `client-wasm` job | Done (#15; `ci.yml` `client-wasm`) |
+| 2026-10-16 | decision-models DM1 (ENG-1062) | root `Cargo.toml`, `Cargo.lock`, `AGENTS.md`, `docs/design/architecture.md` | Add concrete `qq-decision` validator crate and provider seam per ADR0055; no dependency version bump, no runtime wiring | Owner explicitly requested first-task implementation stacked on PR249; merge remains after docs |
 | 2026-09-10 | multi-surface S4 | root `Cargo.toml`, `Cargo.lock` | Add `rustls`-based TLS acceptor for `qq-server` (one bump) | Open |
 | 2026-09-10 | multi-surface plan | `docs/design/architecture.md` § Intentionally Deferred, § Local And Remote Networking, repository map; `docs/design/product.md` non-goals and open decisions | Remove web/mobile deferral; record remote exposure and enrollment once S2/S4 ship | Partly done 2026-09-16: `architecture.md` and `product.md` now point at the multi-surface plan; the exposure/enrollment text waits on S2/S4 |
 | 2026-09-10 | multi-surface plan | `docs/plans/README.md` | Plan row and priority entry | Done (plans/README rows present) |

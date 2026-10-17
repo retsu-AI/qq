@@ -8,7 +8,7 @@ One writer per ledger per `workflow.md` § 3. This was `progress/jev.md` until
 | Slice | Goal | Status | Branch/PR | Notes |
 | --- | --- | --- | --- | --- |
 | DM0 | Decision-model plan, design, ADR-0055, doc rename | In review | ENG-985 | This PR |
-| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | Planned | — | DM0 accepted, ADR-0055 settled, explicit owner scope/implementation approval required; root request for `Cargo.toml` |
+| DM1 | Decision seam in `qq-provider`; `qq-decision` crate | In review | ENG-1062; `feat/eng-1062-dm1-neutral-seam` | Owner authorized stacked implementation 2026-10-16; base PR249. No runtime activation |
 | DM2 | System One adapter on `HttpExchange` | Planned | — | |
 | DM3 | Move consumers into `qq-decision`, behavior-identical | Planned | — | J8 off-path gate |
 | DM4 | Interpretation and precision (absorbs JV3) | Planned | — | |
@@ -211,3 +211,23 @@ runtime/provider work ran and no slice is marked shipped by this entry.
 
 - Rebuilt docs-only on current main after main history changed; removed accidental integration of the no-longer-ancestral Jev source commit. Retained current main retirements, repaired new plan indexes and kept old Jev plan/ledger deleted.
 - Addressed expanded calibration identity, shared deployment admission, Clef slice ownership, immediate Off ownership/races, DM2 migration acceptance, DM6 qualification dependency, batched question IDs, advisory-only reuse and owner-gated recommendation. Runtime findings on the accidentally integrated commit are removed from this PR scope, not represented as fixed.
+
+
+### 2026-10-16 — DM1 foundation (ENG-1062), stacked on PR249
+
+- Owner explicitly authorized task 1 on the published docs branch; stacking is
+  the intentional exception to merged-input ordering. Docs final gate passed
+  395/395 tests, 2 skipped before publication; the earlier red run is historical.
+- Added neutral text/JSON question/response/capability types, typed dispatch
+  uncertainty, provenance and nullable usage; concrete provider handle validates
+  the receiving transport's bounds before dispatch. No live transport installed.
+- `qq-decision` validates raw observations, not approval. Exact question sets,
+  types, finite values, feasible rounding mass, winner certainty and jointly
+  feasible expected scores are checked without normalization.
+- First acceptance run failed compilation on absent API; final focused tests
+  pass 8/8. Independent source review found rounding and unbound admission-token
+  defects; replaced token with a concrete checked handle and added regressions.
+- Initial full workspace gate, doctests and minimal provider gates passed;
+  final committed-head gate/evidence follows. Dependency tree has no config/auth
+  or AWS SDK closure. No activation, protocol/schema change, media consumer,
+  hot-path wiring, paid inference or quality claim. DM2 owns transport.

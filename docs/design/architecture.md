@@ -256,6 +256,12 @@ xtask/
   `snapshots` (read projections), `events` (the journal), and `codec`
   (column forms). These modules import each other through globs in
   `sessions.rs`; they are one body divided for navigation, not a layering.
+- `qq-decision` validates typed decision observations against their requests,
+  preserving raw probabilities and unknown usage. It depends only on
+  `qq-provider` among workspace crates. It is not installed in runtime plans;
+  the existing Jev consumers remain unchanged. The separate one-shot
+  `qq_provider::decision` seam admits request capabilities before invoking
+  an adapter; no decision transport adapter is installed yet (ADR-0055).
 - `qq-provider` contains the provider-neutral model interface and concrete
   model-provider adapters. `lib.rs`, `model.rs`, and `compiler.rs` form its
   public facade; concrete adapters live privately under `providers/`. It also
@@ -297,6 +303,8 @@ qq-config    -> qq-provider
 qq-auth      -> qq-provider
 qq-core      -> qq-provider, qq-protocol
 qq-mcp       -> qq-provider
+
+qq-decision  -> qq-provider
 qq-provider  -> qq-reasoning
 qq-protocol  -> qq-reasoning
 ```
@@ -2114,6 +2122,8 @@ Do not add an agent-framework, plugin, tool-host, context, or addon crate.
 | `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
 | Root package | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
 | `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
+
+| `qq-decision` | Validate typed decision observations without granting execution authority; no runtime consumer installed |
 | `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
 | `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |
 | `qq-protocol` | Versioned profile IDs, plan digests, input parts, commands, outcomes, events, capabilities |
