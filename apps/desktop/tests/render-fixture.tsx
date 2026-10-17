@@ -122,6 +122,7 @@ function Fixture() {
   const [commands, setCommands] = useState<string[]>([]);
   const [measurement, setMeasurement] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [focusResult, setFocusResult] = useState("");
   useEffect(() => {
     let recorded = false;
     const measure = () => {
@@ -164,6 +165,33 @@ function Fixture() {
       command === "submit_prompt"
     )
       throw new Error("Fixture submission rejected");
+    if (
+      command === "submit_prompt" &&
+      new URLSearchParams(location.search).has("focus-check")
+    ) {
+      let retained = true;
+      await new Promise<void>((resolve) => {
+        let frames = 0;
+        const check = () => {
+          retained &&=
+            document.activeElement?.getAttribute("aria-label") === "Message";
+          if (++frames < 8) requestAnimationFrame(check);
+          else resolve();
+        };
+        requestAnimationFrame(check);
+      });
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const focused =
+            document.activeElement?.getAttribute("aria-label") === "Message";
+          setFocusResult(
+            retained && focused
+              ? "PASS: composer retained focus during and after acknowledgement"
+              : "FAIL: composer lost keyboard focus",
+          );
+        }),
+      );
+    }
     return undefined;
   });
   return (
@@ -217,6 +245,12 @@ function Fixture() {
         className="fixed right-0 top-0 bg-bg text-[10px]"
       >
         {measurement}
+      </output>
+      <output
+        aria-label="Composer focus regression"
+        className="fixed left-0 top-0 bg-bg text-[12px]"
+      >
+        {focusResult}
       </output>
     </>
   );

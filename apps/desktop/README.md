@@ -105,6 +105,14 @@ The development-only `tests/render.html?rows=2048&running&reject` fixture render
 state or credentials and is excluded from the production bundle. Remove `reject`
 to exercise accepted submissions; remove `running` for idle controls.
 
+For the acknowledgement-focus regression, open
+`tests/render.html?rows=1&running&focus-check`, focus Message, type text and press
+Enter. The fixture delays the mock receipt across eight animation frames and
+must report **PASS: composer retained focus during and after acknowledgement**.
+In the native app, send a streaming request and then press Escape without clicking
+back into the composer; the run must cancel. Pending input is read-only while its
+receipt is outstanding, preserving focus without permitting duplicate submission.
+
 ## Package
 
 ```sh
