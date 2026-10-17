@@ -5,10 +5,11 @@
 | | |
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
-| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 merged in #309 (`ffa46942`). G2/G3 closeout is in review in #330 (ENG-1063), G4 in #331 (ENG-1064), and G5 evidence in #332 (ENG-1065). The ninth trial qualifies G5 on final runtime `e84e3552`: 145.7 minutes, four compactions, 14 checklist identities retained and terminal accounting verified. The stack is not merged and resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
+| Now | G0–G5 merged: #308 (`87d3ed1a`), #309 (`ffa46942`), #330 G2/G3 (`0df22416`), #331 G4 (`53aae3ba`), #332 G5 evidence (`a9bff3ef`). The ninth trial qualifies G5 on final runtime `e84e3552`: 145.7 minutes, four compactions, 14 checklist identities retained and terminal accounting verified. Resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
+| External waits | G6 ([§ Waiting on external work](#waiting-on-external-work)) is design only: no slice is in progress |
 
 ## Delivery stack
 
@@ -161,12 +162,270 @@ request order, never in the parallel read batch. Its arguments:
 - `checklist`: edits to items, as add, set state or drop;
 - `notes`: a handoff note of at most 1 KiB for the next run;
 - `status`, optional: `achieved` with evidence, or `blocked` with a reason;
-- `wait`, optional: `seconds` of at most 86 400, plus a reason.
+- `wait`, optional: `seconds` of at most 86 400, plus a reason. From G6 it
+  can also take `until`, a list of watch names
+  ([§ Waiting on external work](#waiting-on-external-work)); `seconds` is
+  then the timeout.
 
 It returns the counts and typed results for rejected fields. It cannot
 touch the objective, check or budget. Checklist/notes can merge after a
 client edit; status and waits require the claimed revision. A stopped,
 cleared or replaced goal accepts no model writes.
+
+## Waiting on external work
+
+Slice G6. Design only; nothing here is built.
+
+**The problem.** A PR is not finished when the code is. CI has to pass.
+Reviewers post findings: people, or AI reviewers such as Codex, CodeRabbit
+or Copilot. Each fix starts CI and the reviews again, and `main` keeps
+moving under the branch. Today an agent has two bad options:
+- hold its run open with `sleep`. The shell tool caps that at 600 s, the
+  run keeps its active slot, and a restart loses the wait;
+- end its turn. The user then has to type "continue, the reviews are in".
+
+The aim: the user's first prompt carries the PR all the way to merge-ready,
+whatever CI system and reviewers the repository uses.
+
+**The decision.** Waiting belongs to the goal, not to a run. The model ends
+its run with `update_goal { wait }`. While the goal waits, no model run
+exists and nothing is spent on tokens. QQ answers one question by polling a
+command: **is this ready, is it waiting on someone else, or does the agent
+have work to do?** The runtime knows nothing about forges, CI or reviewers.
+It reads only the exit status of commands the user authorized. Everything
+provider-specific lives in a command, and that command's provider-specific
+parts live in configuration (§ 3).
+
+### 1. Watches
+
+Watches are declared by the client along with the goal, never by the model:
+`set_goal { …, watches: [{ name, command, interval_secs? }] }`. Limits:
+- at most 4 watches per goal;
+- `interval_secs` defaults to 60, minimum 30;
+- each probe has a 60 s timeout and keeps at most 4 KiB of stdout.
+
+A watch reports one of three states through its exit status. This is the
+whole contract between QQ and the outside world:
+
+| Exit | State | Meaning |
+| --- | --- | --- |
+| 0 | `ready` | Nothing is left to do or wait for |
+| 1 | `waiting` | Someone else is working: CI running, a review in progress. The agent has nothing to do |
+| 2 | `action` | The agent has work: a failed check, a finding, a conflict |
+| anything else, timeout, spawn failure | probe error | The answer is unknown |
+
+Stdout is text for the model: what is ready, what is pending, what to fix.
+QQ keeps its last 4 KiB and never parses it. The same command can serve as
+the goal's check, because the check passes exactly when the watch reports
+`ready`. Using one command for both means "wake up" and "done" can never
+disagree.
+
+Watches are polled again and again with no model involved, so they use the
+check's authorization path (ADR-0049 § 5) with one restriction: a watch only
+accepts `for_goal`. The authorization panel and `approve-check` list the
+check and every watch command exactly as written, and one decision covers
+them all. Managed shell denies are rechecked before every probe. A watch
+denied after the grant stops polling, and the goal moves to
+`paused { needs_user: watch_denied }`. Editing a watch command clears its
+authorization, like a check edit.
+
+A watch must be read-only, which makes re-running it safe. QQ treats it as
+idempotent and does not sandbox it; that is the same stance it takes on
+checks. This contract is the difference from a check: an interrupted probe
+is simply run again.
+
+### 2. Condition waits
+
+`update_goal.wait` gains `until`, a list of 1–4 watch names. The goal
+wakes as soon as any of them **settles**, meaning it reports `ready` or
+`action`, or stops reporting `waiting`:
+
+```json
+{ "wait": { "seconds": 3600, "reason": "CI and reviews of 4f2c1e",
+            "until": ["pr"] } }
+```
+
+`seconds` is the timeout. It is still at most 86 400 and clamped to the
+goal deadline.
+
+When a wait with `until` is accepted, the tool call probes every named
+watch once, inside the call. If any watch has already settled, no wait is
+recorded, and the tool result returns its state and output. The agent
+learns right away whether to keep fixing or claim `achieved`, and never
+waits on something that already happened. Unknown or unauthorized watch
+names are rejected in the typed result.
+
+The goal wakes with one of these reasons:
+- `settled { watch, state: ready | action }`;
+- `timeout`;
+- `probe_error { watch }`, after 3 errors in a row from one watch;
+- `deadline`. The deadline rules in ADR-0049 § 4 are unchanged, so it still
+  settles `budget_exhausted`.
+
+The next goal notice starts with the wake reason, the wait's own reason,
+how long it waited, and the output tail of the watch that woke it:
+
+```text
+Woke: watch `pr` reports action after 23m (you waited for: CI and reviews of 4f2c1e)
+  <stdout tail, at most 4 KiB>
+```
+
+The runtime side of waiting:
+- **Poller.** It lives in the session layer next to the driver and is not a
+  run. It holds no active slot or run permit and does not count against
+  `max_goal_runs`, tokens or cost. Waiting time does count against the
+  deadline.
+- **Bounds.** Each session has at most one probe in flight. A global pool
+  limits concurrent probes (`[goals] max_concurrent_watches`, default 4).
+  Probes do not take workspace exclusion.
+- **Store.** The wait row holds its watch names, last states, error streaks
+  and timeout. Individual probes are neither persisted nor published,
+  because polling for a day would mean about 1 440 events. Only the wake
+  writes the result and publishes `goal_updated`. The snapshot shows
+  `waiting on pr · 12m · timeout in 48m`.
+- **Restart.** Polling resumes from the stored wait. Because a watch
+  reports current state rather than a change, anything that happened while
+  QQ was down shows up on the first probe.
+- **Interactions.** A user prompt admitted during a wait clears the wait,
+  and a fresh goal run follows the prompt. That run can wait again. The
+  same holds for pause/resume and every specification edit, which already
+  clear waits (ADR-0049 § 2).
+
+### 3. Merge-ready, independent of provider
+
+A PR is merge-ready when the forge, CI and every reviewer the user cares
+about agree. One read-only command, `qq pr status`, answers that question.
+It is both the goal's check and its watch, and it uses the three-state exit
+status from § 1. It lives in the root package, next to the other
+composition-root integrations, and calls the user's `gh` CLI, so it brings
+no new credentials. `qq-core` stays forge-neutral. A GitLab backend
+through `glab` can implement the same command and exit codes later; it is
+not built until someone needs it.
+
+It finds the PR from the current branch and evaluates these, in order:
+
+| Signal | `action` (exit 2) | `waiting` (exit 1) |
+| --- | --- | --- |
+| Local branch | Unpushed commits, or the PR is a draft that the rules require to be ready | — |
+| Mergeability | Conflicts; behind the base when branch protection requires being current | GitHub is still computing it |
+| CI | A required check or commit status failed on the head | A required check is queued or running |
+| Review threads | An unresolved thread, from anyone | — |
+| Each configured reviewer | It has not started on the head after `start_within`; the output says how to ask for one | It has not finished with the head |
+
+The result is `ready` (exit 0) when no row reports anything. `action` beats
+`waiting`, because fixing a failure now is better than waiting on a review
+of code that is about to change.
+
+**CI is provider-neutral as it is.** Every CI system that reports to the
+forge does so as check runs or commit statuses: GitHub Actions, Buildkite,
+CircleCI, Jenkins, and AI reviewers that run as checks. Branch protection's
+required checks decide what counts. `ci.require` adds names on repositories
+without branch protection.
+
+**Reviewers are configuration, not code.** Branch protection can say that
+an approval is needed, but not that a particular reviewer has *finished*
+with the latest commit. Each tool signals that differently, so each
+reviewer gets a rule. A reviewer counts as done on the head when any of its
+`done_when` conditions holds:
+- `review`: the account submitted a review whose `commit_id` is the head.
+  This works for humans, Copilot, Claude Code's GitHub action, and most
+  bots;
+- `check`: a check run or status with this name completed on the head. This
+  covers reviewers that run as CI, such as CodeRabbit;
+- `comment`: a comment by the account matches a pattern in which `{sha}`
+  and `{sha10}` are replaced by the head commit. This covers reviewers that
+  report "no findings" as a comment rather than a review.
+
+```ron
+// .qq/config.ron
+pr: (
+    ci: (require: []),                 // branch protection's required checks apply anyway
+    reviewers: [
+        (login: "chatgpt-codex-connector[bot]",
+         done_when: [review, comment("Reviewed commit: `{sha10}`")],
+         start_within: "10m", request: "@codex review", skips_drafts: true),
+        (login: "coderabbitai[bot]", done_when: [check("CodeRabbit")]),
+    ],
+),
+```
+
+With no reviewers configured, a PR is ready once CI passes, it is
+mergeable, and no thread is unresolved. `skips_drafts` makes a draft PR
+report `action: mark ready for review`, because that reviewer will never
+start on a draft. `request` is only shown in the output. `qq pr status` is
+read-only, so it never posts. The agent posts the request through ordinary
+tool approvals. There is no quiet window anywhere: every rule is exact, and
+unknown or malformed data is reported as `waiting` or `action`, never as
+`ready`.
+
+The output is the agent's to-do list, for example:
+
+```text
+action: CI `smoke` failed on 4f2c1e (run 12345)
+action: 2 unresolved threads (src/x.rs:40 by coderabbitai[bot], src/y.rs:9 by alice)
+waiting: chatgpt-codex-connector[bot] has not finished with 4f2c1e (started 3m ago)
+```
+
+On this repository, Codex shows why the rules are needed (PRs #317–#327,
+read 2026-10-16). It skips drafts. When it has findings, it submits a
+review on the head. When it has none, it only comments "Didn't find any
+major issues … Reviewed commit: `<sha10>`". It starts within seconds of a
+push (#324: commit at 06:15:22, review `running` at 06:15:33). The
+configuration above encodes exactly that, and no other reviewer needs to
+behave the same way.
+
+### 4. The end-to-end flow
+
+```text
+user: qq run --goal-preset pr "Ship ENG-1234" --goal-check-approval for-goal
+  run 1   implement, cargo xtask check, push, open PR
+          update_goal wait until [pr]                ack: waiting  ──► 0 tokens while waiting
+  wake    pr: action · CI smoke failed          run 2  fix, push, wait
+  wake    pr: action · 2 unresolved threads     run 3  fix, reply, resolve, push, wait
+  wake    pr: action · conflicts with main      run 4  rebase, check, push, wait
+  wake    pr: ready                             run 5  claim achieved with the status output
+  GoalCheck: qq pr status exit 0 ──► achieved; qq run exits 0
+```
+
+If something changes between the wake and the check, such as a late
+review, the check fails with `action` output, the goal stays active, and
+the next run gets that output (ADR-0049 § 5).
+
+**Presets** make that one prompt. `goals.presets.<name>` in configuration
+supplies the check, the watches, the budget and an objective suffix. The
+shipped `pr` preset uses `qq pr status` for both the check and the `pr`
+watch, and its suffix is: "Open the PR, then loop: wait on `pr`; on
+`action`, fix what it lists, push and wait again; on `ready`, claim
+achieved." A preset never grants authority: its commands still need the
+explicit `for_goal` authorization, and they are shown verbatim when it is
+asked for. Users who don't use GitHub, or who need a different idea of
+"ready", can point the preset at their own command with the same three exit
+codes.
+
+### Alternatives rejected
+
+- **An in-run `wait` tool or longer `sleep`.** The run would hold its slot
+  and permit, would not survive a restart, and the prompt cache would expire
+  during the wait anyway. A fresh run after a durable wait costs about the
+  same and is correct.
+- **Forge, CI or reviewer integration in the core,** or webhooks. That puts
+  provider identity in the runtime, needs a public endpoint for a
+  local-first tool, and is speculative flexibility. A command polled every
+  minute covers the same need, and `qq-core` only sees exit codes.
+- **Code for each reviewer** (a Codex parser, a CodeRabbit parser). Every
+  new reviewer would need a QQ release. Three rule kinds (`review`,
+  `check`, `comment`) describe every reviewer surveyed so far.
+- **A quiet window** ("no new review for 15 minutes"). It is slow when
+  reviews are fast and wrong when they are slow.
+- **Change-detection waits** (wake when the output differs). They wake on
+  noise such as a review starting, and they force the model to work out
+  whether the change matters. Three states answer that directly.
+- **Watch commands proposed by the model.** That would let the model create
+  its own execution authority. ADR-0049 forbids model-created goals and
+  budgets for the same reason.
+- **Timer waits alone,** which already exist in G2. They wake too early,
+  wasting runs, or too late, leaving a green PR idle. They remain the
+  fallback when no watch fits.
 
 ## Surfaces
 
@@ -229,7 +488,10 @@ gap; the other G2/G3 behavior retains the initial wire contract.
 - `max_backoff`, 30 min;
 - `check_timeout`, 10 min, at most 60, also clamped to the goal deadline;
 - `approval_wait`, 10 min: how long an unanswered approval holds a goal run
-  before the goal pauses.
+  before the goal pauses;
+- G6: `max_concurrent_watches`, 4; `goals.presets.<name>` (check,
+  watches, budget, objective suffix; no authority); `pr` (required CI
+  names and reviewer rules for `qq pr status`).
 
 Runtime enforcement stores private `policy_json` and `specification_at_ms`
 on `session_goals` in schema58. A client specification sets the timestamp;
@@ -253,6 +515,7 @@ not merely as ordinary grant filters (ADR-0049 § 5).
 | G3 | Completion: `audit_pending`; dedicated `GoalCheck` runner with workspace exclusion, one deadline for acquisition/process, 4 KiB tail; consumes the G0 authorization with hard policy rechecks; revision-fenced results, failure output, three-strike/audit-exhausted blocks, no-check audit turn; restart requeues unstarted checks but pauses interrupted ones | `sessions/{settlement,scheduler,approvals}`, `sessions/goal_check.rs` (new), `runtime/run_loop.rs`, composition-root check policy mapping | **Full Goal 1 checked-completion scenario and Goal 3.** Other sessions cannot run during a check. Workspace wait plus execution share `min(check_timeout, goal deadline remainder)`; expired checks never spawn or accept late success. `once` authorizes one start only, failure/restart never refunds it; `for_goal` permits repeated exact checks with explicit consent. No ordinary `ApproveOnce`, delegate, mode or generic approval flag creates reusable authority. Check edits/stale answers and post-grant policy changes fail closed; `Forbidden`/managed denied checks never execute. A prompt preempts a queued check, retains `audit_pending`, and audit requeues afterward. Edit/pause/clear races cannot apply stale results; **a specification edit while an audit is paused clears that claim before resume**; neutral pause/resume/check approval atomically retags a still-valid audit to the new control revision, including approval that directly activates it. Pause retains cancellation ownership and early resume is rejected. A kill during a started check pauses, no automatic repeat; an unstarted one retains authorization. The 9th audit blocks |
 | G4 | Surfaces: `/goal` panel/form/status and check authorization choices; `qq run --goal`, `qq goal …`; `[goals]` config and guide pages | `qq-tui`, `src/{cli,headless}.rs`, `qq-config`, `docs/guide/` | TUI snapshots for each state and clearly labelled once/repeated authorization. Headless goldens for records/non-active exit statuses and explicit authorization. Docs-truth covers `/goal`, CLI/config keys. Read-only panel can land after G0; execution controls require G2/G3 |
 | G5 | Evidence | ledger, ENG-809 | Goal 5, recorded with its cost |
+| G6 | External waits: client-declared, `for_goal`-authorized watches with three-state exit codes (`ready` 0, `waiting` 1, `action` 2); `update_goal.wait.until` (wake when settled, timeout); session-layer poller; wake reasons in the goal notice; `goals.presets`; provider-neutral `qq pr status` (forge mergeability, required CI, threads, configured reviewer rules `review`/`check`/`comment`) and a `pr` preset | `qq-protocol` (watches, `wait.until`, wake result in the snapshot), schema, `sessions/goal_watch.rs` (new), `tools/goal.rs`, `qq-config` (`goals.presets`, `pr`), `src/pr_status.rs` (new), `docs/guide/` | **Scripted PR soak** with a fake `gh` and a simulated clock: a goal reaches `achieved` through red CI → fix → green → 2 threads → fixes → conflict → rebase → ready, all from one prompt. The provider sees **zero requests while waiting**; probes stay within interval and pool bounds. A restart mid-wait picks up a change made while down. A watch already settled at wait time records no wait. 3 probe errors wake with `probe_error`; timeout and deadline wake; a prompt clears the wait. Unauthorized or `once`-only watches never execute; a managed deny added mid-wait executes nothing more and pauses `watch_denied`; editing a watch clears its grant and any wait on it. Probes publish no events, only the wake does. **`qq pr status` table tests:** each signal row maps to its state, `action` beats `waiting`, malformed or missing data is never `ready`; reviewer rules for each kind, `start_within` and `skips_drafts`; no configured reviewers; three reviewer setups (Codex-like comment, review-only, check-only) pass the same soak unchanged. **Live:** one real PR in this repository taken from a single prompt to merge-ready, recorded with its cost |
 
 Order:
 - **G0 is the goal PR**, which includes autonomous-core AC4;
@@ -260,7 +523,12 @@ Order:
 - G3 depends on G2; it owns Goal 1's full checked-completion gate;
 - G4's read-only panel depends on G0, but its execution surfaces require
   G2 and G3. Split those subsets in the ledger if delivered separately;
-- G5 follows the working driver, check runner and surfaces.
+- G5 follows the working driver, check runner and surfaces;
+- G6 builds on the merged G3 check runner (authorization, hard policy
+  rechecks, process supervision) and G4's `qq run --goal`/`qq goal`. It is
+  delivered as G6.1 `qq pr status` (no runtime or wire change, usable by
+  hand at once), then G6.2 watches and condition waits (protocol bump),
+  then G6.3 presets and the live gate.
 
 There is no separate G1 slice.
 
@@ -273,6 +541,16 @@ There is no separate G1 slice.
    bound goal runs, or should they get a separate smaller pool so they can't
    starve interactive work? The proposal is a separate pool of
    `max(1, max_active_runs / 4)`.
+
+Decided:
+- **G6 wire shapes** (2026-10-16). G6 takes its own `PROTOCOL_VERSION`
+  and `DESCRIPTOR_VERSION` bump on top of the merged goal protocol. No
+  further proposal is needed.
+- **Merge-ready signal** (2026-10-16). Readiness comes from one
+  provider-neutral command, `qq pr status`. It combines forge mergeability,
+  required CI and review threads with a configured rule per reviewer, and
+  it fails closed with no quiet window (§ 3). Codex is one configured
+  reviewer, not a special case.
 
 ### Interrupted-check workspace recovery (G3, decision15)
 
