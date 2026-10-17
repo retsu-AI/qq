@@ -297,6 +297,13 @@ xtask/
   [`transcript.md`](transcript.md), and colors in [`theme.md`](theme.md).
 - `xtask` contains repository maintenance tasks and is not shipped as part of
   QQ.
+- `apps/desktop` is a Windows Tauri client in its own Cargo workspace. Its
+  native project actors reuse `qq-client` and its reducer, publishing coalesced
+  DTOs to a React/TypeScript renderer. It discovers the user-scoped server or
+  supervises the same `qq serve` binary; it does not embed another runtime.
+  File mentions reuse `qq-core::mentions` on bounded blocking work. Desktop
+  preferences, aliases and archive flags do not alter authoritative sessions.
+  See ADR-0062 and the desktop README for native integration and packaging.
 
 The direct workspace dependency graph is:
 
@@ -2228,13 +2235,14 @@ Targets the executable budgets and benchmarks enforce or approach:
 
 ## Intentionally Deferred
 
-The repository is pure Rust. It contains none of the following, and none is
+The engine and terminal remain Rust. The following are deferred and are not
 scaffolded:
 
 - Web and mobile client surfaces beyond `qq-client`'s transport and state
   (the WASM client crate and shared reducer exist); ADR-0015 records the
   proposed enrollment design.
-- JavaScript/TypeScript packages or package workspace.
+- A shared web/mobile JavaScript package workspace. The desktop renderer is
+  a separate package under `apps/desktop`.
 - Separate server executable.
 - Distributed workers or cloud control plane. These belong to a supervisor
   above the headless contract; see "Hosting Boundary".

@@ -101,18 +101,44 @@
 
 ## 2026-10-17 — Qualification blockers and safety boundaries
 
-- Native live launch in a throwaway project reproduces HTTP 500 workspace
-  bootstrap. A read-only SQLite quick_check of the existing user sessions.sqlite3
-  reports invalid pages, duplicate page references and out-of-order rowids.
-  No repair, replacement, reindex, history inspection or credential/token read.
-- Retry visibly transitions through Starting and reports bootstrap failure again;
-  settings diagnostics remain usable. Connected native runs, real approval flows,
-  provider calls and installed OS notifications cannot be qualified against this
-  store. They remain explicit release gates after human-directed recovery.
-- First simultaneous workspace-test/release attempt exhausted this 16 GB host:
-  rustc/LLVM out-of-memory and compiler process failure. Retried packaging with
-  CARGO_BUILD_JOBS=1; engine release build then succeeded in 13m04s. This is a
-  verification-environment failure, not evidence of a test assertion failure.
-- Signing certificate/authorized timestamp service and disposable install/upgrade
-  qualification are human-supplied release requirements. Automatic updates,
-  cross-client rename/archive and MCP mutation remain explicitly deferred.
+- A corrupted local test store blocked initial workspace bootstrap. Store handling
+  and diagnostics stayed outside git; retry visibly returned an actionable error.
+- Connected runs, approvals and installed notifications remained qualification
+  gates at this stage. Settings diagnostics stayed usable during the failure.
+- Concurrent workspace checks and release compilation exhausted available memory.
+  Retrying packaging with CARGO_BUILD_JOBS=1 succeeded. This was an environment
+  failure, not a failed assertion.
+- Signing requires a release identity and timestamp service. Automatic updates,
+  cross-client organization and MCP mutation remain deferred.
+
+## 2026-10-17 — Build checks and documentation
+
+- DP7 commits virtualization and the development-only fixture. Added a
+  Windows CI workflow with locked installs, frontend/native gates, generated
+  contract validation and manual NSIS artifact retention; it never publishes.
+- README and new guide cover controls, local metadata, input limits, diagnostics,
+  retained-history behavior, manual upgrades and signing. ADR-0062 evidence is
+  appended without changing its Decision. Architecture now describes the desktop.
+- Root formatting passed. Root binary tests initially showed 15 failures because
+  cmd could not find cp/rm. Retried with Git usr/bin on this process's PATH and
+  --test-threads=1: 253 passed, 11 failed, 2 ignored, matching the supplied Windows
+  baseline count. All four headless failures disappeared. Final failures:
+  - docs_truth: every_compatibility_number_in_the_guide_is_this_builds;
+    glossary_defines_each_term_with_the_builds_names_and_bounds;
+    output_samples_in_the_guide_match_the_code;
+    policy_table_marks_exactly_the_managed_only_keys;
+    precedence_table_names_every_override_and_mdm_source;
+    troubleshooting_headings_quote_real_messages; tui_command_table_is_the_registry.
+  - runtime: pack_profiles_compile_persona_skills_tool_policy_and_mcp_subsets_into_plans;
+    passive_advisory_does_not_gate_next_run_and_cancellation_retains_dispatch;
+    plan_descriptor_covers_provider_model_workspace_and_tools_without_secrets;
+    profiles_select_defaults_key_the_plan_cache_and_reject_unknown_names.
+- These report CRLF-sensitive documentation comparisons, Windows canonical path
+  expectations and a file-lock error. No engine source/root Cargo diff against
+  8170d4f7. Raw logs: target/qq-perf/desktop-bin-tests{,-serial}.log (ignored).
+  The supplied pre-change count is not an independently captured baseline run.
+- Final pnpm check:version and production build passed. Desktop fmt/Clippy,
+  13 Rust tests, 10 Node tests and typecheck passed before these local commits.
+- Closed native test windows and supervised engine; stopped the fixture dev server.
+  Closed the active fixture browser tab. A prior crashed temporary browser tab's
+  close action was policy-blocked; it is left to normal temporary-tab cleanup.
