@@ -10,7 +10,7 @@
 | DP5 | Settings, diagnostics and palette | Implemented; fixture verified | same | Modal focus isolation, preferences and shortcut guards |
 | DP6 | Single instance and notifications | Implemented; notification qualification pending | same | Native second-process forwarding verified; installed toast check outstanding |
 | DP7 | Virtualization and generated types | Implemented; fixture verified | same | 2048 retained messages, 11 mounted rows; contract drift test |
-| DP8 | CI, packaging and docs | Final checks in progress | same | Windows CI, metadata guard, release/signing guide |
+| DP8 | CI, packaging and docs | Implemented; NSIS built; install/live qualification pending | same | Windows CI, metadata guard, release/signing guide |
 | DP9 | Additional polish | Out of scope | same | P2 tray/key remapping/richer diff navigation recorded in decisions |
 
 ## 2026-10-17 — Start and comparative analysis
@@ -142,3 +142,81 @@
 - Closed native test windows and supervised engine; stopped the fixture dev server.
   Closed the active fixture browser tab. A prior crashed temporary browser tab's
   close action was policy-blocked; it is left to normal temporary-tab cleanup.
+- Additional shared reducer qualification: 24 of 25 state tests passed, including
+  both notification ordering/deduplication cases. The sole failure,
+  replaying_the_wire_fixtures_matches_the_golden_projection, compares LF output
+  against a CRLF checkout fixture. Parsed both assertion strings from the raw log:
+  equality after CRLF-to-LF normalization is true. No fixture/source rewrite.
+  Raw ignored evidence: target/qq-perf/desktop-reducer-golden.log.
+
+## 2026-10-17 — Final local implementation receipt
+
+Result: the comparative analysis, desktop implementation, local checks and unsigned
+release build are complete. **Production sign-off remains blocked** by the existing
+a corrupted local test store and the connected/installed qualification gates below.
+The branch is feat/desktop-production-readiness, based on 8170d4f7. Nothing was
+pushed, published, merged, rebased or written to a PR.
+
+### Shipped on the local branch
+
+| Commit | Result |
+| --- | --- |
+| Analysis | Five-reference source comparison, prioritized slices and decisions |
+| DP1 | Bounded submission admission and durable acknowledgement/draft handling |
+| DP3 | Search and reversible, explicitly local session organization |
+| DP4 | Native options/actions/files, actor recovery/lifetime, single instance, notifications and generated view contracts |
+| DP5 | Settings, command palette, pickers, remount-safe drafts and modal approval safeguards |
+| DP7 | Measured transcript virtualization, isolated fixture and release version guard |
+| DP8 | Windows CI, guide/README, architecture and appended ADR-0062 evidence |
+
+No engine/protocol change needs a separate upstream PR. Root src/, crates/,
+Cargo.toml and Cargo.lock match the base. The native desktop remains its own
+workspace and uses the shared runtime, transport and reducer. No reference code
+was copied. All five consulted source revisions are recorded in the plan.
+
+### Verification and package
+
+- Desktop formatting, Clippy with -D warnings, 13 Rust tests, 10 Node tests,
+  TypeScript typecheck, version guard, debug build and production UI build passed.
+- pnpm bundle with CARGO_BUILD_JOBS=1 succeeded: engine release 13m04s, desktop
+  release 12m09s, then NSIS. Artifact:
+  apps/desktop/src-tauri/target/release/bundle/nsis/QQ_0.1.6_x64-setup.exe,
+  16,761,583 bytes (15.99 MiB).
+- NSIS packaging includes the staged qq.exe sidecar and consistent release
+  metadata. The artifact is unsigned; signed distribution remains a release gate.
+- Root formatting passed; binary tests with required cp/rm and serial execution:
+  253 passed / 11 failed / 2 ignored, as detailed above. Shared reducer tests:
+  24 passed / one proven CRLF-only golden failure. The attempted full-workspace
+  run failed during compilation under memory pressure; it is not a passing gate.
+- Native live: visible bootstrap failure/retry, diagnostics and single-instance
+  forwarding verified in throwaway folders. Browser fixture: session organization,
+  picker/steering IPC, settings, approval modal isolation and bounded history
+  navigation verified. Mocked IPC is not evidence of connected engine execution.
+- Performance evidence is the diagnostic pair above, not a quiet-host tail result.
+- Native app, supervised engine, compiler/cargo and dev-server processes have
+  exited; no listener remains on 1420. Generated build evidence is ignored.
+  Only the two protected original edits remain after this receipt is committed.
+
+### Deferred choices and remaining release gates
+
+The plan records alternatives, reasons and reversal paths for local aliases/archive,
+configured defaults on new sessions, existing-session pickers, contained text/files,
+read-only MCP diagnostics, a typed desktop palette, generated DTO boundaries and
+native dialog isolation. Binary/image upload, canonical cross-client organization,
+MCP mutation and automatic updates require separately designed engine/release
+support. P2 tray, arbitrary key remapping and richer diff navigation are out of scope.
+
+1. Resolve the isolated qualification environment, then verify connected
+   create/submit, file resolution, steering/interruption/cancel, approvals/questions
+   and reconnect/replay against a throwaway project with a NoAuth loopback provider.
+2. On a disposable Windows account/VM qualify fresh installation, upgrade and
+   installed unfocused notifications. Hosted CI has been authored but not executed
+   on GitHub because publication was prohibited.
+3. Repeat large-history/streaming performance on a quiet host before assigning a
+   latency budget. The current diagnostic establishes bounded mounting only.
+4. For signed distribution supply an authorized signing identity, timestamp service
+   and release host, then follow the README procedure and verify both executables
+   and the installer. No signing identity or signed update feed is present.
+
+These gates are not silently waived and this receipt does not certify the app as
+fully production ready. All unaffected implementation work is committed for review.
