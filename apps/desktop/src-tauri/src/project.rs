@@ -30,7 +30,7 @@ use qq_protocol::{
     WorkspaceSnapshot,
 };
 use tauri::{AppHandle, Emitter};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     engine::Engine,
@@ -45,6 +45,18 @@ const NOTICE_TTL: Duration = Duration::from_secs(6);
 const MAX_RECENT_EVENTS: usize = 512;
 /// The server's per-grant byte cap (`qq_core::MAX_GRANT_BYTES`).
 const MAX_GRANT_BYTES: usize = 256;
+const MAX_COMMANDS: usize = 64;
+
+type SubmissionReply = oneshot::Sender<Result<(), String>>;
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubmitMode {
+    #[default]
+    Queue,
+    Steer,
+    Interrupt,
+}
 
 pub const STATE_EVENT: &str = "project-state";
 
@@ -56,6 +68,8 @@ pub enum UiCommand {
     Submit {
         session_id: Option<SessionId>,
         text: String,
+        reply: SubmissionReply,
+        mode: SubmitMode,
     },
     Cancel(SessionId),
     Approve {
@@ -87,14 +101,17 @@ pub enum ApprovalChoice {
 pub struct ProjectHandle {
     /// The canonical workspace path the server knows this project by.
     pub path: PathBuf,
-    commands: mpsc::UnboundedSender<UiCommand>,
+    commands: mpsc::Sender<UiCommand>,
 }
 
 impl ProjectHandle {
     pub fn send(&self, command: UiCommand) -> Result<(), String> {
         self.commands
-            .send(command)
-            .map_err(|_| "project is closed".to_owned())
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => "project is busy; try again".to_owned(),
+                mpsc::error::TrySendError::Closed(_) => "project is closed".to_owned(),
+            })
     }
 }
 
@@ -106,7 +123,7 @@ pub fn open(
     path: PathBuf,
     preferred_model: Option<String>,
 ) -> ProjectHandle {
-    let (commands, receiver) = mpsc::unbounded_channel();
+    let (commands, receiver) = mpsc::channel(MAX_COMMANDS);
     let handle = ProjectHandle {
         path: path.clone(),
         commands,
@@ -123,11 +140,27 @@ enum PendingIntent {
     /// exists.
     Create {
         draft: Option<String>,
+        reply: Option<SubmissionReply>,
     },
     Prompt {
         session_id: SessionId,
+        reply: Option<SubmissionReply>,
+        adopt: bool,
     },
     Other,
+}
+
+impl PendingIntent {
+    fn finish(self, result: Result<(), String>) {
+        let reply = match self {
+            Self::Create { reply, .. } | Self::Prompt { reply, .. } => reply,
+            Self::Other => None,
+        };
+        if let Some(reply) = reply {
+            // A closed webview can abandon its waiter; the receipt remains authoritative.
+            let _ = reply.send(result);
+        }
+    }
 }
 
 struct Notice {
@@ -192,22 +225,33 @@ impl Project {
         }
     }
 
-    async fn run(&mut self, mut commands: mpsc::UnboundedReceiver<UiCommand>) {
+    async fn run(&mut self, mut commands: mpsc::Receiver<UiCommand>) {
         self.emit();
-        let mut client = match self.connect().await {
-            Ok(client) => client,
-            Err(error) => {
-                self.connection = ConnectionDto::Failed;
-                self.error = Some(error);
-                self.emit();
-                // Keep answering refreshes so the UI can show the failure.
-                while let Some(command) = commands.recv().await {
-                    if matches!(command, UiCommand::Refresh) {
-                        self.last_emitted = None;
-                        self.emit();
+        let mut client = loop {
+            match self.connect().await {
+                Ok(client) => break client,
+                Err(error) => {
+                    self.connection = ConnectionDto::Failed;
+                    self.error = Some(error);
+                    self.emit();
+                    loop {
+                        match commands.recv().await {
+                            Some(UiCommand::Refresh) => {
+                                self.connection = ConnectionDto::Starting;
+                                self.error = None;
+                                self.emit();
+                                break;
+                            }
+                            Some(UiCommand::Submit { reply, .. }) => {
+                                let _ = reply.send(Err(
+                                    "engine is unavailable; retry connection".to_owned()
+                                ));
+                            }
+                            Some(_) => {}
+                            None => return,
+                        }
                     }
                 }
-                return;
             }
         };
         let mut tick = tokio::time::interval(EMIT_INTERVAL);
@@ -323,19 +367,42 @@ impl Project {
             ClientUpdate::CommandResult { command_id, result } => {
                 let intent = self.pending.remove(&command_id);
                 match result {
-                    Ok(receipt) => {
-                        if let (
+                    Ok(receipt) => match (&receipt.outcome, intent) {
+                        (
                             CommandOutcome::SessionCreated { session_id },
-                            Some(PendingIntent::Create { draft }),
-                        ) = (&receipt.outcome, intent)
-                        {
-                            self.adopt_created(*session_id);
+                            Some(PendingIntent::Create { draft, reply }),
+                        ) => {
                             if let Some(text) = draft {
-                                self.submit(client, *session_id, text);
+                                self.submit(client, *session_id, text, reply, true);
+                            } else {
+                                self.adopt_created(*session_id);
+                                if let Some(reply) = reply {
+                                    let _ = reply.send(Ok(()));
+                                }
                             }
                         }
+                        (
+                            _,
+                            Some(
+                                intent @ PendingIntent::Prompt {
+                                    session_id,
+                                    adopt: true,
+                                    ..
+                                },
+                            ),
+                        ) => {
+                            self.adopt_created(session_id);
+                            intent.finish(Ok(()));
+                        }
+                        (_, Some(intent)) => intent.finish(Ok(())),
+                        (_, None) => {}
+                    },
+                    Err(failure) => {
+                        if let Some(intent) = intent {
+                            intent.finish(Err(failure.message().to_owned()));
+                        }
+                        self.set_notice(NoticeLevel::Error, failure.message());
                     }
-                    Err(failure) => self.set_notice(NoticeLevel::Error, failure.message()),
                 }
             }
             ClientUpdate::SnapshotFailed(failure) => {
@@ -414,10 +481,7 @@ impl Project {
             self.reduce_event(client, &event);
         }
         if let Some(command_id) = event.caused_by
-            && !matches!(
-                self.pending.get(&command_id),
-                Some(PendingIntent::Create { .. })
-            )
+            && matches!(self.pending.get(&command_id), Some(PendingIntent::Other))
         {
             self.pending.remove(&command_id);
         }
@@ -457,11 +521,11 @@ impl Project {
                 // queued draft; the event can arrive first.
                 StateEffect::AdoptCreated(_) => {}
                 StateEffect::SubmitDraft { session_id, text } => {
-                    self.submit(client, session_id, text);
+                    self.submit(client, session_id, text, None, false);
                 }
                 StateEffect::SessionRemoved { session_id, .. } => {
                     self.pending.retain(|_, intent| {
-                        !matches!(intent, PendingIntent::Prompt { session_id: s } if *s == session_id)
+                        !matches!(intent, PendingIntent::Prompt { session_id: s, reply: None, .. } if *s == session_id)
                     });
                 }
             }
@@ -489,15 +553,48 @@ impl Project {
             }
             UiCommand::Focus(target) => self.focus(client, target),
             UiCommand::NewSession => self.focused = None,
-            UiCommand::Submit { session_id, text } => {
+            UiCommand::Submit {
+                session_id,
+                text,
+                reply,
+                mode,
+            } => {
                 let text = text.trim().to_owned();
-                if text.is_empty() {
+                if let Err(error) = validate_submission(self.connection, &text) {
+                    let _ = reply.send(Err(error));
                     return;
                 }
                 self.clear_error_notice();
+                if !matches!(mode, SubmitMode::Queue) {
+                    let result = steering_command(
+                        session_id
+                            .and_then(|id| self.sessions.get(&id))
+                            .and_then(|session| session.summary.active_run_id),
+                        text,
+                        mode,
+                    );
+                    match result {
+                        Ok(command) => {
+                            let Some(session_id) = session_id else { return };
+                            self.command(
+                                client,
+                                command,
+                                PendingIntent::Prompt {
+                                    session_id,
+                                    reply: Some(reply),
+                                    adopt: false,
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                        }
+                    }
+                    return;
+                }
                 match session_id {
-                    Some(session_id) => self.submit(client, session_id, text),
-                    None => self.create_session(client, Some(text)),
+                    Some(session_id) => self.submit(client, session_id, text, Some(reply), false),
+                    None => self.create_session(client, Some(text), Some(reply)),
                 }
             }
             UiCommand::Cancel(session_id) => {
@@ -575,8 +672,15 @@ impl Project {
         self.sessions.evict_cold_bodies(self.focused);
     }
 
-    fn create_session(&mut self, client: &TuiClient, draft: Option<String>) {
+    fn create_session(
+        &mut self,
+        client: &TuiClient,
+        draft: Option<String>,
+        reply: Option<SubmissionReply>,
+    ) {
         let Some(workspace_id) = self.workspace_id else {
+            PendingIntent::Create { draft, reply }
+                .finish(Err("still connecting to the workspace".to_owned()));
             self.set_notice(NoticeLevel::Warning, "still connecting to the workspace");
             return;
         };
@@ -587,6 +691,8 @@ impl Project {
             .map(|option| option.selection.clone())
             .unwrap_or_default();
         if model.model.is_none() {
+            PendingIntent::Create { draft, reply }
+                .finish(Err("no model is available; connect a provider".to_owned()));
             self.set_notice(
                 NoticeLevel::Error,
                 "no model is available; connect a provider from Providers in the sidebar",
@@ -604,11 +710,18 @@ impl Project {
                 reasoning_effort: None,
                 correlation: Correlation::default(),
             },
-            PendingIntent::Create { draft },
+            PendingIntent::Create { draft, reply },
         );
     }
 
-    fn submit(&mut self, client: &TuiClient, session_id: SessionId, text: String) {
+    fn submit(
+        &mut self,
+        client: &TuiClient,
+        session_id: SessionId,
+        text: String,
+        reply: Option<SubmissionReply>,
+        adopt: bool,
+    ) {
         if let Some(session) = self.sessions.get_mut(&session_id) {
             session.record_prompt(&text);
         }
@@ -621,7 +734,11 @@ impl Project {
                 correlation: Correlation::default(),
                 output: None,
             },
-            PendingIntent::Prompt { session_id },
+            PendingIntent::Prompt {
+                session_id,
+                reply,
+                adopt,
+            },
         );
     }
 
@@ -663,9 +780,20 @@ impl Project {
     }
 
     fn command(&mut self, client: &TuiClient, command: SessionCommand, intent: PendingIntent) {
+        if self.pending.len() >= MAX_COMMANDS {
+            intent.finish(Err(
+                "too many pending commands; wait for acknowledgement".to_owned()
+            ));
+            self.set_notice(
+                NoticeLevel::Error,
+                "too many pending commands; wait for acknowledgement",
+            );
+            return;
+        }
         let command_id = match CommandId::generate() {
             Ok(id) => id,
             Err(error) => {
+                intent.finish(Err(error.to_string()));
                 self.set_notice(NoticeLevel::Error, error.to_string());
                 return;
             }
@@ -677,8 +805,11 @@ impl Project {
                 command_id,
                 command,
             }),
-        ) {
-            self.pending.remove(&command_id);
+        ) && let Some(intent) = self.pending.remove(&command_id)
+        {
+            intent.finish(Err(
+                "command was not sent; try again when connected".to_owned()
+            ));
         }
     }
 
@@ -736,6 +867,14 @@ impl Project {
                 .and_then(|id| view::transcript(&self.sessions, id)),
             models: self.models.iter().map(ModelDto::from_option).collect(),
             selected_model: self.selected_model.clone(),
+            can_steer: self
+                .capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.steering.boundary),
+            can_interrupt: self
+                .capabilities
+                .as_ref()
+                .is_some_and(|caps| caps.steering.interrupt),
             notice: self.notice.as_ref().map(|notice| NoticeDto {
                 level: match notice.level {
                     NoticeLevel::Info => "info",
@@ -756,6 +895,28 @@ impl Project {
         let _ = self.app.emit(STATE_EVENT, &state);
         self.last_emitted = Some(state);
     }
+}
+
+fn steering_command(
+    run_id: Option<qq_protocol::RunId>,
+    text: String,
+    mode: SubmitMode,
+) -> Result<SessionCommand, String> {
+    let Some(run_id) = run_id else {
+        return Err("the run has finished; queue a follow-up instead".to_owned());
+    };
+    Ok(SessionCommand::SteerRun {
+        run_id,
+        input: vec![InputPart::text(text)],
+        interrupt: matches!(mode, SubmitMode::Interrupt),
+    })
+}
+
+fn validate_submission(connection: ConnectionDto, text: &str) -> Result<(), String> {
+    if connection != ConnectionDto::Live {
+        return Err("wait until the project is connected before sending".to_owned());
+    }
+    qq_protocol::validate_input(&[InputPart::text(text)]).map_err(|error| error.to_string())
 }
 
 /// The approve-for-session/workspace grant for a held call: shell calls
@@ -799,5 +960,85 @@ pub fn grant_label(grant: &ApprovalGrant) -> String {
         ApprovalGrant::Tool { name } => format!("the {name} tool"),
         ApprovalGrant::ShellPrefix { prefix } => format!("commands starting with `{prefix}`"),
         ApprovalGrant::Host { host } => format!("requests to {host}"),
+    }
+}
+
+#[cfg(test)]
+mod submission_tests {
+    use super::*;
+
+    #[test]
+    fn steering_targets_the_active_run_and_rejects_finished_runs() {
+        let run_id = qq_protocol::RunId::from_bytes([1; 16]);
+        for (mode, expected) in [(SubmitMode::Steer, false), (SubmitMode::Interrupt, true)] {
+            assert!(
+                matches!(steering_command(Some(run_id), "change course".to_owned(), mode).unwrap(), SessionCommand::SteerRun { run_id: id, interrupt, .. } if id == run_id && interrupt == expected)
+            );
+            assert!(steering_command(None, "change course".to_owned(), mode).is_err());
+        }
+    }
+
+    #[test]
+    fn queue_is_bounded_and_reports_closed_projects() {
+        let (commands, receiver) = mpsc::channel(MAX_COMMANDS);
+        let handle = ProjectHandle {
+            path: PathBuf::new(),
+            commands,
+        };
+        for _ in 0..MAX_COMMANDS {
+            assert!(handle.send(UiCommand::Refresh).is_ok());
+        }
+        assert!(
+            handle
+                .send(UiCommand::Refresh)
+                .unwrap_err()
+                .contains("busy")
+        );
+        drop(receiver);
+        assert!(
+            handle
+                .send(UiCommand::Refresh)
+                .unwrap_err()
+                .contains("closed")
+        );
+    }
+
+    #[test]
+    fn disconnected_empty_and_oversize_submissions_are_rejected() {
+        for state in [
+            ConnectionDto::Starting,
+            ConnectionDto::Connecting,
+            ConnectionDto::Replaying,
+            ConnectionDto::Offline,
+            ConnectionDto::Failed,
+        ] {
+            assert!(validate_submission(state, "hello").is_err());
+        }
+        assert!(validate_submission(ConnectionDto::Live, "  ").is_err());
+        assert!(
+            validate_submission(
+                ConnectionDto::Live,
+                &"x".repeat(qq_protocol::MAX_INPUT_TEXT_BYTES + 1)
+            )
+            .is_err()
+        );
+        assert!(validate_submission(ConnectionDto::Live, "hello").is_ok());
+    }
+
+    #[test]
+    fn submission_waiter_receives_failure_or_durable_acceptance() {
+        for result in [Ok(()), Err("server rejected input".to_owned())] {
+            let (reply, mut receipt) = oneshot::channel();
+            let intent = PendingIntent::Create {
+                draft: Some("keep my draft".to_owned()),
+                reply: Some(reply),
+            };
+            assert!(matches!(
+                receipt.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            intent.finish(result.clone());
+            assert_eq!(receipt.try_recv().unwrap(), result);
+        }
     }
 }

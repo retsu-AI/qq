@@ -82,6 +82,8 @@ export interface ProjectState {
   transcript: Transcript | null;
   models: Model[];
   selected_model: string | null;
+  can_steer: boolean;
+  can_interrupt: boolean;
   notice: Notice | null;
 }
 

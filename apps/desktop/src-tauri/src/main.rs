@@ -23,7 +23,7 @@ use tauri::{Emitter, Manager, State, WindowEvent};
 use crate::{
     auth::{AUTH_EVENT, AuthChanged, BrowserSignIn, PendingSignIns, ProviderDto, SignInError},
     engine::Engine,
-    project::{ApprovalChoice, ProjectHandle, UiCommand},
+    project::{ApprovalChoice, ProjectHandle, SubmitMode, UiCommand},
     settings::Settings,
     trust::{PendingFileDto, TrustError},
 };
@@ -199,14 +199,31 @@ fn new_session(state: State<'_, AppState>, project_id: String) -> Result<(), Str
 }
 
 #[tauri::command]
-fn submit_prompt(
+async fn submit_prompt(
     state: State<'_, AppState>,
     project_id: String,
     session_id: Option<String>,
     text: String,
+    mode: Option<SubmitMode>,
 ) -> Result<(), String> {
     let session_id = session_id.as_deref().map(parse_session).transpose()?;
-    state.send(&project_id, UiCommand::Submit { session_id, text })
+    let (reply, receipt) = tokio::sync::oneshot::channel();
+    state.send(
+        &project_id,
+        UiCommand::Submit {
+            session_id,
+            text,
+            reply,
+            mode: mode.unwrap_or_default(),
+        },
+    )?;
+    match tokio::time::timeout(std::time::Duration::from_secs(65), receipt).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => {
+            Err("project closed before acknowledgement; check history before retrying".to_owned())
+        }
+        Err(_) => Err("acknowledgement timed out; check history before retrying".to_owned()),
+    }
 }
 
 #[tauri::command]
