@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import {
   ChevronDown,
@@ -15,6 +15,7 @@ import { activate, closeProject, pickProject, showProviders } from "../lib/store
 import { relativeTime } from "../lib/format";
 import type { Connection, ProjectInfo, ProjectState, SessionRow } from "../lib/types";
 import { Logo } from "./Logo";
+import { matchesSession, parseSessionPreferences, updateSessionPreferences, type SessionPreferences } from "../lib/session-preferences";
 
 interface Props {
   app: { open: ProjectInfo[]; projects: Record<string, ProjectState>; activeId: string | null };
@@ -22,7 +23,29 @@ interface Props {
 }
 
 export function Sidebar({ app, project }: Props) {
-  const groups = useMemo(() => groupSessions(project?.sessions ?? []), [project?.sessions]);
+  const [query, setQuery] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [metadata, setMetadata] = useState<SessionPreferences>(() => parseSessionPreferences(null));
+  const [error, setError] = useState<string | null>(null);
+  const storageKey = `qq.sessions:${project?.project_id ?? ""}`;
+  useEffect(() => {
+    try { setMetadata(parseSessionPreferences(localStorage.getItem(storageKey))); }
+    catch { setMetadata(parseSessionPreferences(null)); }
+    setQuery(""); setShowArchived(false); setError(null);
+  }, [storageKey]);
+  const change = (id: string, update: { title?: string; archived?: boolean }) => {
+    try {
+      const next = updateSessionPreferences(metadata, id, update);
+      localStorage.setItem(storageKey, JSON.stringify(next));
+      setMetadata(next); setError(null);
+    } catch (error) { setError(String(error)); }
+  };
+  const groups = useMemo(() => {
+    const rows = (project?.sessions ?? []).map(row => ({ ...row, title: metadata.aliases[row.id] ?? row.title }));
+    const visible = rows.filter(row => matchesSession(query, row.title, row.tail) &&
+      (showArchived ? metadata.archived.includes(row.id) : !metadata.archived.includes(row.id) || row.status !== "idle" || row.group === "needs_you"));
+    return query.trim() || showArchived ? [[showArchived ? "Archived locally" : "Search results", visible] as [string, SessionRow[]]] : groupSessions(visible);
+  }, [project?.sessions, metadata, query, showArchived]);
 
   return (
     <aside className="flex w-[272px] shrink-0 flex-col border-r border-line bg-sidebar">
@@ -49,7 +72,12 @@ export function Sidebar({ app, project }: Props) {
         </div>
       )}
 
-      <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      {project && <div className="px-3 pb-2">
+        <input aria-label="Search sessions" placeholder="Search sessions…" value={query} onChange={event => setQuery(event.target.value)} className="w-full rounded border border-line bg-raised px-2 py-1 text-[13px]" />
+        <button aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)} className="mt-1 text-[11px] text-muted">{showArchived ? "Show current sessions" : `Archived locally (${metadata.archived.length})`}</button>
+        {error && <p role="alert" className="text-[12px] text-danger">{error}</p>}
+      </div>}
+      <nav aria-label="Sessions" className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {project &&
           groups.map(([label, rows]) =>
             rows.length === 0 ? null : (
@@ -65,6 +93,8 @@ export function Sidebar({ app, project }: Props) {
                       row={row}
                       projectId={project.project_id}
                       active={row.id === project.focused}
+                      archived={metadata.archived.includes(row.id)}
+                      onChange={update => change(row.id, update)}
                     />
                   ))}
                 </ul>
@@ -174,12 +204,18 @@ function SessionItem({
   row,
   projectId,
   active,
+  archived,
+  onChange,
 }: {
   row: SessionRow;
   projectId: string;
   active: boolean;
+  archived: boolean;
+  onChange: (update: { title?: string; archived?: boolean }) => void;
 }) {
   const working = row.status !== "idle";
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState(row.title);
   return (
     <li className="group relative">
       <button
@@ -218,15 +254,24 @@ function SessionItem({
           )}
         </span>
       </button>
+      {renaming && <form onSubmit={event => { event.preventDefault(); onChange({ title }); setRenaming(false); }} className="p-1">
+        <input autoFocus aria-label="Local session name" maxLength={160} value={title} onChange={event => setTitle(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setRenaming(false); }} className="w-full rounded border border-line bg-raised px-2 py-1" />
+        <button type="submit" className="px-2 text-[11px]">Save local name</button><button type="button" onClick={() => setRenaming(false)} className="text-[11px]">Cancel</button>
+      </form>}
+      <div className="flex justify-end gap-2 px-2 text-[11px] text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+        <button onClick={() => { setTitle(row.title); setRenaming(true); }} title="Name on this desktop only">Rename locally</button>
+        <button onClick={() => onChange({ archived: !archived })}>{archived ? "Restore" : "Archive locally"}</button>
+      </div>
       <button
         title="Delete session"
+        aria-label={`Delete ${row.title}`}
         onClick={(event) => {
           event.stopPropagation();
           if (confirm(`Delete "${row.title}"? This cannot be undone.`)) {
             void api.deleteSession(projectId, row.id);
           }
         }}
-        className="absolute right-1.5 top-1.5 hidden rounded p-1 text-faint hover:bg-active hover:text-danger group-hover:block"
+        className="absolute right-1.5 top-1.5 rounded p-1 text-faint opacity-0 hover:bg-active hover:text-danger group-hover:opacity-100 focus:opacity-100"
       >
         <Trash2 className="h-3.5 w-3.5" />
       </button>
