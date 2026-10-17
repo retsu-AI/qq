@@ -13,7 +13,7 @@ to the current owner's ledger; old slice IDs and tracker issues remain valid.
 | [Terminal-Bench](terminal-bench.md) | R6–R8, D6b economics and TB-pilot |
 | [speed first](speed-first.md) | Backend residuals and gated extensions |
 | [TUI](tui-redesign.md) | Remaining TUI work |
-| [Jev](jev.md) | JV precision/lifecycle/qualification |
+| [Decision models](decision-models.md) | JV precision/lifecycle/qualification |
 | [multi-surface](multi-surface-clients.md) | Remote readiness and clients |
 | [v0.1.7 release](release-0.1.7.md) | Publication verification receipt still pending; bump/guide pins merged |
 | [root](root.md) | Coordination, shared files, ADR allocation |
