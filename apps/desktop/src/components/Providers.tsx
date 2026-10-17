@@ -2,7 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CircleCheck, ExternalLink, Globe, KeyRound, Loader2, X } from "lucide-react";
+import {
+  CircleCheck,
+  ExternalLink,
+  Globe,
+  KeyRound,
+  Loader2,
+  X,
+} from "lucide-react";
 import { api } from "../lib/api";
 import { showProviders } from "../lib/store";
 import type { AuthChanged, BrowserSignIn, Provider } from "../lib/types";
@@ -52,6 +59,10 @@ const COPY: Record<string, Copy> = {
 const ORDER = ["anthropic", "openai-codex", "openai", "google", "xai"];
 
 export function Providers() {
+  const dialog = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    dialog.current?.showModal();
+  }, []);
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [browser, setBrowser] = useState<Record<string, BrowserSignIn>>({});
@@ -88,22 +99,30 @@ export function Providers() {
     };
   }, [reload]);
 
-  const sorted = (providers ?? []).slice().sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
+  const sorted = (providers ?? [])
+    .slice()
+    .sort((a, b) => ORDER.indexOf(a.id) - ORDER.indexOf(b.id));
   const connected = sorted.filter((p) => p.stored || p.environment).length;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6"
+    <dialog
+      ref={dialog}
+      aria-labelledby="providers-title"
+      onCancel={() => showProviders(false)}
+      className="m-auto max-h-[85vh] w-[620px] max-w-[90vw] overflow-hidden rounded-2xl border border-line-strong bg-bg p-0 text-fg shadow-2xl backdrop:bg-black/50"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) showProviders(false);
       }}
     >
-      <div className="flex max-h-full w-full max-w-[620px] flex-col overflow-hidden rounded-2xl border border-line-strong bg-bg shadow-2xl">
+      <div className="flex max-h-[85vh] w-full flex-col overflow-hidden">
         <header className="flex items-start gap-3 border-b border-line px-6 py-4">
           <div className="flex-1">
-            <h2 className="text-[16px] font-semibold">Model providers</h2>
+            <h2 id="providers-title" className="text-[16px] font-semibold">
+              Model providers
+            </h2>
             <p className="mt-0.5 text-[12.5px] text-muted">
-              Keys are stored in the Windows credential store and shared with the
+              Keys are stored in the Windows credential store and shared with
+              the
               <code className="mx-1 font-mono">qq</code>command line.
               {connected > 0 && ` ${connected} connected.`}
             </p>
@@ -112,6 +131,8 @@ export function Providers() {
             onClick={() => showProviders(false)}
             className="rounded-md p-1 text-muted hover:bg-hover hover:text-fg"
             title="Close (Esc)"
+            aria-label="Close model providers"
+            autoFocus
           >
             <X className="h-4 w-4" />
           </button>
@@ -135,15 +156,19 @@ export function Providers() {
                 provider={provider}
                 browser={browser[provider.id] ?? null}
                 error={errors[provider.id] || null}
-                onBrowser={(signIn) => setBrowser((c) => ({ ...c, [provider.id]: signIn }))}
-                onError={(message) => setErrors((c) => ({ ...c, [provider.id]: message }))}
+                onBrowser={(signIn) =>
+                  setBrowser((c) => ({ ...c, [provider.id]: signIn }))
+                }
+                onError={(message) =>
+                  setErrors((c) => ({ ...c, [provider.id]: message }))
+                }
                 onChanged={reload}
               />
             ))}
           </ul>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -218,7 +243,9 @@ function ProviderRow({
           </div>
           <div className="text-[12.5px] text-muted">
             {copy.blurb}
-            {provider.stored && <span className="text-faint"> · saved in {provider.stored}</span>}
+            {provider.stored && (
+              <span className="text-faint"> · saved in {provider.stored}</span>
+            )}
             {!provider.stored && provider.environment && (
               <span className="text-faint"> · from {provider.environment}</span>
             )}
@@ -249,7 +276,11 @@ function ProviderRow({
               : "bg-solid text-white hover:bg-solid-hover",
           )}
         >
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Globe className="h-4 w-4" />
+          )}
           {copy.browserLabel ?? "Sign in with browser"}
         </button>
       )}
@@ -323,7 +354,9 @@ function ProviderRow({
       )}
 
       {error && (
-        <p className="mt-2 rounded-md bg-danger-soft px-3 py-1.5 text-[12px] text-danger selectable">{error}</p>
+        <p className="mt-2 rounded-md bg-danger-soft px-3 py-1.5 text-[12px] text-danger selectable">
+          {error}
+        </p>
       )}
     </li>
   );
@@ -347,7 +380,9 @@ function SmallButton({
       disabled={disabled}
       className={clsx(
         "h-8 rounded-lg border border-line-strong px-2.5 text-[12px] disabled:opacity-50",
-        danger ? "text-danger hover:bg-danger-soft" : "text-muted hover:bg-hover hover:text-fg",
+        danger
+          ? "text-danger hover:bg-danger-soft"
+          : "text-muted hover:bg-hover hover:text-fg",
       )}
     >
       {children}
