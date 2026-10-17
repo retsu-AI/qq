@@ -3,14 +3,14 @@
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | Analysis | Source comparison and plan | Complete | feat/desktop-production-readiness; local only | Five clones refreshed, source inspected |
-| DP1 | Bounded commands, durable submission | Implemented; live qualification partial | same | 5 Rust and 2 draft tests; offline live state |
-| DP2 | Run controls and recovery | Implemented; live qualification partial | same | Steer/interrupt mapping; startup retry; visible errors |
+| DP1 | Bounded commands, durable submission | Implemented; native verified | same | Durable receipts, retained drafts, focus regression and disconnected state |
+| DP2 | Run controls and recovery | Implemented; native verified | same | Queue, boundary/interrupt steer, Escape stop, engine restart/reconnect |
 | DP3 | Session organization | Implemented; fixture verified | same | Search, reversible local aliases/archive |
-| DP4 | Pickers and workspace files | Implemented; native live qualification blocked | same | Shared mention resolver; typed files and session options |
+| DP4 | Pickers and workspace files | Implemented; native verified | same | Typed files, invalid mentions, profile/effort/delegate and held approval/question |
 | DP5 | Settings, diagnostics and palette | Implemented; fixture verified | same | Modal focus isolation, preferences and shortcut guards |
-| DP6 | Single instance and notifications | Implemented; notification qualification pending | same | Native second-process forwarding verified; installed toast check outstanding |
+| DP6 | Single instance and notifications | Implemented; native verified | same | Second-process forwarding; installed completion/attention, focus and opt-out |
 | DP7 | Virtualization and generated types | Implemented; fixture verified | same | 2048 retained messages, 11 mounted rows; contract drift test |
-| DP8 | CI, packaging and docs | Implemented; NSIS built; install/live qualification pending | same | Windows CI, metadata guard, release/signing guide |
+| DP8 | CI, packaging and docs | Implemented; installed release verified | same | Fresh install, upgrade, bundled engine; signing/hosted CI external |
 | DP9 | Additional polish | Out of scope | same | P2 tray/key remapping/richer diff navigation recorded in decisions |
 
 ## 2026-10-17 — Start and comparative analysis
@@ -262,3 +262,23 @@ fully production ready. All unaffected implementation work is committed for revi
   No user's original workspace/session was edited, trusted, run or pruned.
 - Fresh installation and upgrade qualification passed using disposable fixtures;
   the installed release used its bundled engine.
+
+## 2026-10-17 — Final installed-release qualification receipt
+
+- Live qualification used a throwaway project and NoAuth loopback provider. Local
+  test-store handling and private diagnostic evidence remain outside git.
+- Installed completion and attention notifications worked while unfocused;
+  focused completion and opt-out suppressed them. A longer fixture delay made
+  background attention testing deterministic. A sandbox-isolated provider restart
+  was corrected, its waiting request cancelled, and the reachable fixture passed.
+- Disposable test processes were closed and test preferences restored.
+- Desktop gates passed: fmt, Clippy -D warnings, Rust tests, typecheck, Node tests
+  and release version guard. Production frontend and NSIS packaging passed after
+  the composer focus fix. Generated artifacts remain ignored.
+- Engine/protocol source and root Cargo manifests are unchanged. Earlier Windows
+  root-test baseline failures, a shared-client CRLF-only golden mismatch and a
+  full-workspace resource failure remain recorded; no green workspace run claimed.
+- Signing requires a release identity; hosted CI awaits publication. Credentialed
+  provider sign-in remains external; NoAuth SSE and simulated 401 cover the local
+  request/error path. Deferred features and diagnostic timing limits remain in
+  the plan. No push or PR mutation occurred.
