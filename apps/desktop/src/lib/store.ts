@@ -39,7 +39,10 @@ function set(patch: Partial<AppSnapshot>) {
 
 function persist() {
   try {
-    localStorage.setItem(OPEN_KEY, JSON.stringify(snapshot.open.map((p) => p.path)));
+    localStorage.setItem(
+      OPEN_KEY,
+      JSON.stringify(snapshot.open.map((p) => p.path)),
+    );
     if (snapshot.activeId) localStorage.setItem(ACTIVE_KEY, snapshot.activeId);
   } catch {
     // Preferences only.
@@ -67,6 +70,9 @@ export async function openProject(path: string) {
       ? snapshot.open
       : [...snapshot.open, info];
     set({ open, activeId: info.id, error: null });
+    // The actor can emit before open_project resolves; request a projection
+    // after registration so the first state cannot be lost.
+    await api.refresh(info.id);
     persist();
     void refreshRecents();
     void checkTrust(info.id);
@@ -76,7 +82,11 @@ export async function openProject(path: string) {
 }
 
 export async function pickProject() {
-  const path = await openDialog({ directory: true, multiple: false, title: "Open project folder" });
+  const path = await openDialog({
+    directory: true,
+    multiple: false,
+    title: "Open project folder",
+  });
   if (typeof path === "string") await openProject(path);
 }
 
@@ -136,7 +146,10 @@ let started = false;
 export async function start() {
   if (started) return;
   started = true;
-  window.addEventListener("unhandledrejection", event => {
+  await listen<string[]>("open-paths", (event) => {
+    for (const path of event.payload) void openProject(path);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
     event.preventDefault();
     set({ error: String(event.reason) });
   });
@@ -154,7 +167,12 @@ export async function start() {
   let paths: string[] = [];
   let active: string | null = null;
   try {
-    paths = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]");
+    const saved: unknown = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]");
+    paths = Array.isArray(saved)
+      ? saved
+          .filter((path): path is string => typeof path === "string")
+          .slice(0, 16)
+      : [];
     active = localStorage.getItem(ACTIVE_KEY);
   } catch {
     paths = [];
