@@ -27,6 +27,30 @@ Exit status 0 means nothing failed. Then `qq config check`, `qq config
 sources`, `qq auth list` for the detail behind any one line
 ([CLI › `qq doctor`](cli.md#qq-doctor---json)).
 
+## Diagnostic tracing
+
+`QQ_LOG=info` is currently supported on Unix platforms only. On other platforms,
+explicit activation fails without creating files; unset it to run normally.
+`QQ_LOG=info` combined with `--tui-qa-root` is explicitly refused before file
+creation; unset `QQ_LOG` for that isolated fixture.
+
+Run `QQ_LOG=info qq run "your task"` (or start `qq serve` with the variable)
+for JSON-line boundary timings. Logging is off by default; `QQ_LOG=off` or an
+empty value also disables it. Other values are errors. Logs are separate from
+stdout and stderr under the QQ state directory's `logs/qq-N.jsonl` (on Linux,
+`${XDG_STATE_HOME:-$HOME/.local/state}/qq/logs`). Platforms without a separate
+state directory use the platform local-data directory.
+
+Run, turn, provider, tool and store spans record numeric ordinals and timing,
+not prompts, model output, arguments/results, paths, credentials or arbitrary
+provider errors. Dependency tracing is excluded. This is a lossy diagnostic,
+not an audit: queue pressure drops whole records, each file stops at 8 MiB,
+and abrupt termination can lose queued records. Sixteen exclusive files cap
+retention at 128 MiB. When all slots exist, remove old diagnostic files from
+**stopped** processes before enabling logging again. Initialization and writer
+failures produce a nonzero exit. For remote use enable it on the server, not
+just the attached client.
+
 ## Starting
 
 ### `no model is configured. Choose one with any of: …`

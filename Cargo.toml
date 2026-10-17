@@ -101,6 +101,10 @@ tree-sitter-bash = "0.25"
 tempfile = "3"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+tracing = "0.1"
+
+tracing-core = "0.1"
 webbrowser = "1"
 
 [dependencies]
@@ -127,6 +131,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+tracing.workspace = true
+
+tracing-core.workspace = true
 webbrowser.workspace = true
 
 # `qq init` opens its target relative to a no-follow directory handle.
@@ -144,12 +152,12 @@ lto = "fat"
 
 # Optimize application glue for size; keep runtime/provider libraries at level 3.
 [profile.release.package.qq]
-opt-level = "s"
+opt-level = "z"
 strip = "symbols"
 
 # Exercise the runtime in H0 with the same final optimization as the shipped bin.
 [profile.release.package.xtask]
-opt-level = "s"
+opt-level = "z"
 strip = "symbols"
 
 # Keep configuration and authentication compact without changing streaming crates.
@@ -159,6 +167,20 @@ opt-level = "s"
 
 [profile.release.package.qq-config]
 opt-level = "s"
+
+
+# Core is branch-heavy orchestration and policy code; qualify its compact
+# build against the existing end-to-end latency and artifact budgets.
+[profile.release.package.qq-core]
+opt-level = "z"
+
+
+[profile.release.package.qq-tui]
+opt-level = "z"
+
+
+[profile.release.package.qq-provider]
+opt-level = "z"
 
 # The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
 # ~600 MB. Line tables keep file:line backtraces for workspace code; deps

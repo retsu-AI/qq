@@ -127,6 +127,7 @@ pub(super) async fn schedule_runs(
     }
 }
 
+#[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
 async fn supervise_reserved_run(
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,

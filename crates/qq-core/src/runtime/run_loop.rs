@@ -2,6 +2,14 @@
 use super::loop_guard::{CallKey, LoopGuard};
 use crate::*;
 
+use tracing::Instrument as _;
+
+static NEXT_DIAGNOSTIC_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_diagnostic_run() -> u64 {
+    NEXT_DIAGNOSTIC_RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
 /// these counters (ADR-0048 § 1: harness bounds reset at their seams, so none
 /// of these is a lifetime bound on output). Stall and checkpoint state retain
@@ -287,7 +295,17 @@ impl plan::CompiledAgentPlan {
             )
         });
         let plan = Arc::clone(self);
+        let current_span = tracing::Span::current();
+        let run_span = if current_span.metadata().is_some_and(|metadata| {
+            metadata.target() == "qq::diagnostic" && metadata.name() == "run"
+        }) {
+            current_span
+        } else {
+            tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = next_diagnostic_run())
+        };
+        let run_parent = run_span.clone();
         let events: RuntimeStream = Box::pin(stream! {
+
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             let mut state = {
                 let initialization = plan.initialize(messages, cancelled, gate, file_state, capabilities, (started, deadline));
@@ -302,11 +320,13 @@ impl plan::CompiledAgentPlan {
                 }
             };
             'turns: for turn_ordinal in 1..=u32::MAX {
+
+                let turn_span = tracing::info_span!(target: "qq::diagnostic", parent: &run_parent, "turn", turn_ordinal);
                 let turn = {
                     let phase = state.prepare_turn(turn_ordinal);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -319,7 +339,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.compact_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -332,7 +352,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.stream_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -345,7 +365,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.settle_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -358,7 +378,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.route_turn(turn);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -372,7 +392,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.finish_candidate(turn_ordinal, assistant);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -387,7 +407,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.settle_tools(turn_ordinal, final_answer_turn, calls);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -400,7 +420,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.checkpoint_tools(outcomes);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -413,7 +433,7 @@ impl plan::CompiledAgentPlan {
                     let phase = state.close_tool_turn(outcomes);
                     tokio::pin!(phase);
                     loop {
-                        match phase.next().await {
+                        match phase.next().instrument(turn_span.clone()).await {
                             Some(TurnStep::Emit(event)) => yield event,
                             Some(TurnStep::Ready(value)) => break value,
                             Some(TurnStep::NextTurn) => continue 'turns,
@@ -430,6 +450,10 @@ impl plan::CompiledAgentPlan {
                 message: "run exhausted the durable u32 model-turn ordinal space".to_owned(),
             };
         });
+        let mut events = events;
+        let events: RuntimeStream = Box::pin(futures_util::stream::poll_fn(move |cx| {
+            run_span.in_scope(|| events.as_mut().poll_next(cx))
+        }));
         match (deadline, deadline_resources) {
             (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {
                 deadline.enforce(events, cancelled, tools, spawner, audit_hook)
@@ -1580,6 +1604,8 @@ impl RunState {
                             yield TurnStep::Emit(RuntimeEvent::ActivityChanged { activity });
                         }
                         let mut provider_events = provider.stream(request);
+
+                        let provider_span = tracing::info_span!(target: "qq::diagnostic", "provider");
                     let mut attempt = AttemptScope {
                         rejected_before_work: false,
                         activity,
@@ -1619,7 +1645,7 @@ impl RunState {
                             let event = tokio::select! {
                                 biased;
                                 () = interrupt => StreamStep::Interrupted,
-                                event = provider_events.next() => StreamStep::Event(event),
+                                event = provider_events.next().instrument(provider_span.clone()) => StreamStep::Event(event),
                             };
                             let event = match event {
                                 StreamStep::Interrupted => {
@@ -3122,6 +3148,8 @@ impl RunState {
                             // Under progressive exposure only pinned externals were
                             // offered; a call to one that was not is refused with the
                             // way to make it available.
+
+                            let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
                             async move {
                                 // `Some` when a sub-agent ran: its spend (or unknown
                                 // spend) is charged to the parent's budgets.
@@ -3395,7 +3423,7 @@ impl RunState {
                                     }
                                 };
                                 (call, result, child_spend)
-                            }
+                            }.instrument(tool_span)
                         };
                         // Read-only turns overlap under a small bound; a turn with any
                         // mutating, shell, or external call runs entirely in request
@@ -3616,7 +3644,8 @@ impl RunState {
                             started_calls[usize::from(call.call_ordinal - 1)] = true;
                             yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: call.id });
                             if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::SelectTools) {
-                                let (result, changed) = select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools"));
+                                let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
+                                let (result, changed) = tool_span.in_scope(|| select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools")));
                                 run.stall.settled(false);
                                 let retained = RetainedResult::retain(&result, &call.name, call.id);
                                 run.observe_tool(&call, &retained, network_policy, catalog.lookup(&call.name));
@@ -3633,6 +3662,8 @@ impl RunState {
                                 // workspace approval. Keep their position among
                                 // ordinary reads and mutations in this batch.
                                 if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::UpdateGoal) {
+
+                                    let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
                                     let index = usize::from(call.call_ordinal - 1);
                                     // An atomic store write already admitted stays
                                     // owned. At the next call boundary, stop before
@@ -3660,7 +3691,7 @@ impl RunState {
                                                 yield TurnStep::Stop; return;
                                             },
                                             () = interrupt => None,
-                                            receipt = goal.admit_update(arguments) => Some(receipt),
+                                            receipt = goal.admit_update(arguments).instrument(tool_span.clone()) => Some(receipt),
                                         };
                                         match admitted {
                                             None => {
@@ -3672,7 +3703,7 @@ impl RunState {
                                                 // durability even if steering arrives now.
                                                 let updated = match admitted {
                                                     Err(error) => Err(error),
-                                                    Ok(receipt) => match receipt.await {
+                                                    Ok(receipt) => match receipt.instrument(tool_span.clone()).await {
                                                         Ok(updated) => updated,
                                                         Err(_) => Err(sessions::SessionRuntimeError::Unavailable),
                                                     },
