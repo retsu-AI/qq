@@ -104,7 +104,7 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-
 
 tracing = "0.1"
 
-tracing-core = "0.1"
+tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
 
 [dependencies]

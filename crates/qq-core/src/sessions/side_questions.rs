@@ -1,8 +1,10 @@
 use super::*;
+
 use crate::tools::output::escaped_len;
 use std::collections::hash_map::Entry;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 
 /// In-memory side tasks (admitting, executing or settling) across the runtime.
 const MAX_SIDE_TASKS: usize = 64;
@@ -229,6 +231,7 @@ impl SessionRuntime {
 
     /// Executes a committed launch to durable settlement, including after a
     /// panic.
+    #[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
     pub(super) async fn run_launched_side_question(
         &self,
         launch: SideLaunch,
@@ -405,8 +408,26 @@ impl SessionRuntime {
         }
     }
 
-    #[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
     async fn execute_side_question(
+        &self,
+        launch: SideLaunch,
+        cancellation: RunCancellation,
+        started: tokio::time::Instant,
+    ) -> Result<SideAnswer, SessionRuntimeError> {
+        let existing = tracing::Span::current();
+        let run_span = if existing.metadata().is_some_and(|metadata| {
+            metadata.target() == "qq::diagnostic" && metadata.name() == "run"
+        }) {
+            existing
+        } else {
+            tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run())
+        };
+        self.execute_side_question_inner(launch, cancellation, started)
+            .instrument(run_span)
+            .await
+    }
+
+    async fn execute_side_question_inner(
         &self,
         launch: SideLaunch,
         cancellation: RunCancellation,

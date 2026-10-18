@@ -235,7 +235,7 @@ jobs:
             printf '%s\n' "$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-final-opt-level.txt"
             CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo rustc --locked --profile bench -p qq-core --bench turn_overhead --message-format=json -- -C "opt-level=$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
             python3 - "$arm" <<'PYTHON'
-          import json, os, shutil, subprocess, sys
+          import json, os, shutil, subprocess, sys, tomllib
           from pathlib import Path
           arm = sys.argv[1]
           root = Path(os.environ['RUNNER_TEMP']) / 'turn-recording'
@@ -247,8 +247,11 @@ jobs:
           # Cargo reports the bench profile before trailing rustc overrides.
           # The effective final opt-level is retained separately for each arm.
           profile = artifact['profile']
-          if profile['opt_level'] != '3' or profile['debug_assertions']:
-              raise SystemExit('benchmark is not the optimized profile')
+          manifest = tomllib.loads(Path('Cargo.toml').read_text())
+          release = manifest.get('profile', {}).get('release', {})
+          expected_opt = str(release.get('package', {}).get('qq-core', {}).get('opt-level', 3))
+          if profile['opt_level'] != expected_opt or profile['debug_assertions']:
+              raise SystemExit('benchmark profile does not match the production core profile')
           with Path(artifact['executable']).open('rb') as source, (root / f'{arm}-bin').open('xb') as target:
               shutil.copyfileobj(source, target)
           (root / f'{arm}-bin').chmod(0o755)
@@ -258,8 +261,11 @@ jobs:
           (root / f'{arm}-artifact.json').write_text(json.dumps(artifact, indent=2))
           if arm == 'candidate':
               baseline = json.loads((root / 'baseline-artifact.json').read_text())
-              if baseline['profile'] != profile:
-                  raise SystemExit('benchmark profiles differ')
+              # Optimization changes are the treatment; safety/debug settings
+              # must still match between the two separately built arms.
+              for key in ('debug_assertions', 'overflow_checks', 'test'):
+                  if baseline['profile'].get(key) != profile.get(key):
+                      raise SystemExit(f'benchmark profile setting differs: {key}')
           PYTHON
           done
       - name: Record thirty alternating and same-binary pairs

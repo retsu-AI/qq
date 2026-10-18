@@ -1,8 +1,10 @@
 use super::*;
+
 use super::{
     execution::{RunResources, execute_run, internal_failure, persistence_failure},
     runtime::SessionRuntimeInner,
 };
+use tracing::Instrument as _;
 
 struct SchedulerStopGuard(watch::Sender<bool>);
 
@@ -96,38 +98,42 @@ pub(super) async fn schedule_runs(
                 };
                 let task_inner = Arc::clone(&inner);
                 let panic_claimed = claimed.panic_settlement_claim();
-                tokio::spawn(async move {
-                    let resources = RunResources::default();
-                    #[cfg(test)]
-                    let resources = resources.for_test_run(claimed.identity.run_id);
-                    let execution = AssertUnwindSafe(supervise_reserved_run(
-                        Arc::clone(&task_inner),
-                        claimed,
-                        resources.clone(),
-                    ))
-                    .catch_unwind()
-                    .await;
-                    if execution.is_err() {
-                        if resources.drain().await.is_err() {
-                            task_inner.failed.send_replace(true);
-                        } else {
-                            settle_panicked_execution(&task_inner, &panic_claimed).await;
+
+                let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
+                tokio::spawn(
+                    async move {
+                        let resources = RunResources::default();
+                        #[cfg(test)]
+                        let resources = resources.for_test_run(claimed.identity.run_id);
+                        let execution = AssertUnwindSafe(supervise_reserved_run(
+                            Arc::clone(&task_inner),
+                            claimed,
+                            resources.clone(),
+                        ))
+                        .catch_unwind()
+                        .await;
+                        if execution.is_err() {
+                            if resources.drain().await.is_err() {
+                                task_inner.failed.send_replace(true);
+                            } else {
+                                settle_panicked_execution(&task_inner, &panic_claimed).await;
+                            }
+                        }
+                        drop(permit);
+                        task_inner
+                            .settlements
+                            .send_modify(|generation| *generation = generation.wrapping_add(1));
+                        if !*task_inner.shutdown.borrow() {
+                            let _ = task_inner.schedule.try_send(());
                         }
                     }
-                    drop(permit);
-                    task_inner
-                        .settlements
-                        .send_modify(|generation| *generation = generation.wrapping_add(1));
-                    if !*task_inner.shutdown.borrow() {
-                        let _ = task_inner.schedule.try_send(());
-                    }
-                });
+                    .instrument(run_span),
+                );
             }
         }
     }
 }
 
-#[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
 async fn supervise_reserved_run(
     inner: Arc<SessionRuntimeInner>,
     claimed: ClaimedRun,

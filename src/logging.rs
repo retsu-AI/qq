@@ -20,7 +20,7 @@ const QUEUE: usize = 256;
 pub(crate) enum LogError {
     #[error("QQ_LOG must be off or info")]
     Value,
-    #[error("cannot initialize diagnostic log")]
+    #[error("cannot initialize diagnostic log: {0}")]
     Io(#[from] io::Error),
     #[error("QQ_LOG is not supported with --tui-qa-root; unset QQ_LOG")]
     QaRoot,
