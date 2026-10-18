@@ -41,3 +41,18 @@ Deviations: AP4 splits into `state.rs` and `backend.rs` rather than one
 Docs: `docs/design/providers.md` (AP3), `docs/design/architecture.md`
 qq-auth source map.
 Open: AP4b next.
+
+#### AP4b receipt — 2026-10-18
+Commits: `112fbde9`, `b29fdd47` (#351).
+Tests: `perf::tests::credential_fixtures_resolve_the_stored_bearer_without_refresh`;
+the bearer check fails with a wrong expected token (0 of 6 requests).
+Gates: `cargo xtask check` (qq, xtask) 440/440. Local smoke
+`cargo xtask perf baseline --machine-class local-smoke --samples 5
+--warmups 0`: fixture 6, 80 metrics;
+`xai_request_credential_resolution_ns` median 26.3 µs,
+`xai_request_credential_concurrent_resolution_ns` median 137.4 µs,
+`request_time_authorized_stream_ns` median 124.6 µs; both credential
+checks pass. Five samples on a loaded dev host: execution receipt, not a
+qualified baseline.
+Evidence: target/qq-perf/ap4b-smoke.json (untracked).
+Open: AP5 records its candidate against this fixture.
