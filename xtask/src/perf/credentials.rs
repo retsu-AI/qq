@@ -12,15 +12,12 @@
 
 use std::{
     collections::BTreeMap,
-    io::{BufRead, BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{StreamExt, future::join_all};
-use qq_auth::{CredentialPaths, CredentialStore, KeyringBackend, KeyringError};
+use qq_auth::{CredentialPaths, CredentialStore, KeyringBackend, KeyringError, OfflineTokenCalls};
 use qq_provider::{
     EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe, Message, ModelRequest,
     ProviderCompiler, ProviderEvent, ProviderRecipe, RequestCredentialProvider,
@@ -70,12 +67,15 @@ impl KeyringBackend for MemoryKeyring {
 }
 
 /// A credential store holding one unexpired xAI OAuth credential for
-/// `PROFILE`. The token is valid for a day, so no sample ever refreshes.
-fn xai_oauth_store(directory: &TempDir) -> Result<CredentialStore, PerfError> {
-    let store = CredentialStore::with_backend(
+/// `PROFILE`. The token is valid for a day, so no sample should refresh; the
+/// store's token clients are offline, so a refresh fails instead of reaching
+/// a real authorization server, and the returned counter records it.
+fn xai_oauth_store(directory: &TempDir) -> Result<(CredentialStore, OfflineTokenCalls), PerfError> {
+    let (store, token_calls) = CredentialStore::with_backend(
         CredentialPaths::new(directory.path()),
         Arc::new(MemoryKeyring::default()),
-    );
+    )
+    .offline();
     let expires_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(fixture_error("read the clock"))?
@@ -97,7 +97,7 @@ fn xai_oauth_store(directory: &TempDir) -> Result<CredentialStore, PerfError> {
             Some(qq_auth::XAI_CREDENTIAL_ENDPOINT),
         )
         .map_err(fixture_error("store the xAI credential"))?;
-    Ok(store)
+    Ok((store, token_calls))
 }
 
 async fn resolve(provider: &SharedRequestCredentialProvider) -> Result<(), PerfError> {
@@ -112,7 +112,7 @@ pub(super) async fn credential_resolution_workloads(
     warmups: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
     let directory = TempDir::new().map_err(fixture_error("create credential directory"))?;
-    let store = xai_oauth_store(&directory)?;
+    let (store, token_calls) = xai_oauth_store(&directory)?;
     let provider = store.xai_request_credentials(PROFILE, None);
 
     let total = u32::from(samples) + u32::from(warmups);
@@ -155,9 +155,10 @@ pub(super) async fn credential_resolution_workloads(
         ],
         vec![CorrectnessCheck {
             name: "xai_request_credential_resolution".to_owned(),
-            passed: true,
+            passed: token_calls.count() == 0,
             detail: format!(
-                "{total} sequential resolutions and {total} batches of {CONCURRENT_RESOLUTIONS} concurrent resolutions returned a bearer credential without refreshing"
+                "{total} sequential resolutions and {total} batches of {CONCURRENT_RESOLUTIONS} concurrent resolutions returned a bearer credential; {} token-client calls (expected 0)",
+                token_calls.count()
             ),
         }],
     ))
@@ -165,15 +166,23 @@ pub(super) async fn credential_resolution_workloads(
 
 /// A keep-alive HTTP/1.1 loopback that answers every request with one small
 /// Chat Completions SSE body and records each request's `Authorization`.
+/// It runs as one task on the caller's runtime and stops, with every
+/// connection it opened, when [`KeepAliveSse::shutdown`] runs or it drops.
 struct KeepAliveSse {
     base_url: String,
     authorizations: Arc<Mutex<Vec<String>>>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Connections the loopback accepts; the workload reuses one.
+const MAX_LOOPBACK_CONNECTIONS: usize = 4;
+
 impl KeepAliveSse {
-    fn start() -> Result<Self, PerfError> {
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(fixture_error("bind loopback listener"))?;
+    async fn start() -> Result<Self, PerfError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(fixture_error("bind loopback listener"))?;
         let base_url = format!(
             "http://{}",
             listener
@@ -182,45 +191,69 @@ impl KeepAliveSse {
         );
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&authorizations);
-        // The accept loop lives as long as the process; each connection
-        // thread ends when the client closes it.
-        thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(stream) = stream else { return };
-                let recorded = Arc::clone(&recorded);
-                thread::spawn(move || serve_connection(stream, &recorded));
+        let (shutdown, mut stop) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stop => break,
+                    accepted = listener.accept(), if connections.len() < MAX_LOOPBACK_CONNECTIONS => {
+                        let Ok((stream, _)) = accepted else { break };
+                        connections.spawn(serve_connection(stream, Arc::clone(&recorded)));
+                    }
+                    Some(_) = connections.join_next(), if !connections.is_empty() => {}
+                }
             }
+            connections.shutdown().await;
         });
         Ok(Self {
             base_url,
             authorizations,
+            shutdown: Some(shutdown),
+            task: Some(task),
         })
+    }
+
+    /// Stops accepting, closes every connection and waits for the task.
+    async fn shutdown(mut self) -> Result<(), PerfError> {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(task) = self.task.take() {
+            with_timeout("stop loopback server", task)
+                .await?
+                .map_err(fixture_error("stop loopback server"))?;
+        }
+        Ok(())
     }
 }
 
-fn serve_connection(stream: TcpStream, authorizations: &Mutex<Vec<String>>) {
-    if stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .is_err()
-    {
-        return;
+impl Drop for KeepAliveSse {
+    fn drop(&mut self) {
+        // Reached only on an early return; the normal path awaits `shutdown`.
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
     }
-    let Ok(writer) = stream.try_clone() else {
-        return;
-    };
-    let mut writer = writer;
-    let mut reader = BufReader::new(stream);
+}
+
+async fn serve_connection(stream: tokio::net::TcpStream, authorizations: Arc<Mutex<Vec<String>>>) {
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
+
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+    let mut line = String::new();
     loop {
-        let mut content_length = 0_usize;
-        let mut authorization = None;
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
+        line.clear();
+        match reader.read_line(&mut line).await {
             Ok(0) | Err(_) => return,
             Ok(_) => {}
         }
+        let mut content_length = 0_usize;
+        let mut authorization = None;
         loop {
             line.clear();
-            if reader.read_line(&mut line).is_err() {
+            if reader.read_line(&mut line).await.is_err() {
                 return;
             }
             let header = line.trim_end();
@@ -235,8 +268,8 @@ fn serve_connection(stream: TcpStream, authorizations: &Mutex<Vec<String>>) {
                 }
             }
         }
-        let mut body = vec![0_u8; content_length];
-        if reader.read_exact(&mut body).is_err() {
+        let mut body = vec![0_u8; content_length.min(1024 * 1024)];
+        if reader.read_exact(&mut body).await.is_err() {
             return;
         }
         if let (Some(value), Ok(mut seen)) = (authorization, authorizations.lock()) {
@@ -246,7 +279,7 @@ fn serve_connection(stream: TcpStream, authorizations: &Mutex<Vec<String>>) {
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{SSE_BODY}",
             SSE_BODY.len()
         );
-        if writer.write_all(response.as_bytes()).is_err() || writer.flush().is_err() {
+        if writer.write_all(response.as_bytes()).await.is_err() || writer.flush().await.is_err() {
             return;
         }
     }
@@ -257,8 +290,8 @@ pub(super) async fn request_time_authorization_workloads(
     warmups: u16,
 ) -> Result<(Vec<MetricResult>, Vec<CorrectnessCheck>), PerfError> {
     let directory = TempDir::new().map_err(fixture_error("create credential directory"))?;
-    let store = xai_oauth_store(&directory)?;
-    let server = KeepAliveSse::start()?;
+    let (store, token_calls) = xai_oauth_store(&directory)?;
+    let server = KeepAliveSse::start().await?;
     let provider = ProviderCompiler::new()
         .map_err(fixture_error("create provider compiler"))?
         .compile_for_canary(ProviderRecipe::http(HttpProviderRecipe::new(
@@ -303,8 +336,10 @@ pub(super) async fn request_time_authorization_workloads(
         .lock()
         .map_err(|_| PerfError::Fixture("loopback request log was poisoned".to_owned()))?
         .clone();
+    server.shutdown().await?;
     let passed = authorizations.len() == total as usize
-        && authorizations.iter().all(|value| *value == expected);
+        && authorizations.iter().all(|value| *value == expected)
+        && token_calls.count() == 0;
     Ok((
         vec![MetricResult::measured(
             "request_time_authorized_stream_ns",
@@ -316,11 +351,12 @@ pub(super) async fn request_time_authorization_workloads(
             name: "request_time_authorization".to_owned(),
             passed,
             detail: format!(
-                "{} of {total} requests carried the stored bearer",
+                "{} of {total} requests carried the stored bearer; {} token-client calls (expected 0)",
                 authorizations
                     .iter()
                     .filter(|value| **value == expected)
-                    .count()
+                    .count(),
+                token_calls.count()
             ),
         }],
     ))
