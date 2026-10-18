@@ -31,10 +31,17 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    let logging_enabled = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let cli = cli::Cli::parse();
-    let logging = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
-        Ok(false) => None,
-        Ok(true) => match (|| {
+    let logging = match logging_enabled {
+        false => None,
+        true => match (|| {
             if cli.tui_qa_root.is_some() {
                 return Err(logging::LogError::QaRoot);
             }
@@ -59,10 +66,6 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         },
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
     };
     let executor = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

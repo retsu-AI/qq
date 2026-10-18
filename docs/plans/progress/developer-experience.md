@@ -130,3 +130,10 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 -4d1075a0 stable full gate passes911.4s and pushed. HostedH0 run39112300274 fails unchanged caps: full48444280>48000000, minimal43645144>41000000; A/B replay737865>729073ns. Same-binary A/A fails command ack/long-stream tails and long-stream MAD, so latency remains unqualified. Artifacts `target/af5-hosted-h0`, no waiver.
 - Disabled unused crossterm derive-more and pulldown-cmark CLI/HTML defaults, preserving bracketed paste/events/Windows/parser. Measured Linux minimal normal closure299 (was305); six helper crates absent. TUI393/393 passes (1skip). Local minimal release still43824208>41000000; removal fixes dependency count, not binary-size gate.
 - Typed subscriber serialization experiment passes logging9/9 but grows artifact1024bytes to43825232; reverted experiment rather than retaining unmeasured complexity. Release optimization/budgets unchanged. Full final gate for manifest/lock subtraction pending.
+
+
+## AF5 serial completion and environment validation review
+
+- bbcb6d8d full gate passes954.3s, pushed; GitHub CI green. Store tracing macro removal experiment saves only51328bytes and was reverted. No speculative restructure retained.
+- New Codex findings: completed serial tool future retains span over output/completion yields; invalid QQ_LOG can be bypassed by Clap exits. Completed future now drops in its ready branch before draining output. QQ_LOG validation precedes Clap parsing without initializing logs before successful parse.
+- Real structured-tracing smoke covers invalidQQ_LOG with help/version/malformed arguments, refusal/no stdout/no files; passes. Shell/cancel focused3/3 passes. Full final gate pending; two new threads await verified push and explicit resolution. Performance remains unmet, no thumbs-up or merge readiness.

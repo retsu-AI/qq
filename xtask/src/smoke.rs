@@ -506,6 +506,24 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
     };
     ensure!(!directory.exists(), "logging created state without opt-in");
 
+    for argument in ["--help", "--version", "--not-a-valid-option"] {
+        let output = home
+            .command(&provider.base_url)
+            .env("QQ_LOG", "debug")
+            .arg(argument)
+            .output()
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("QQ_LOG"),
+            "invalid QQ_LOG bypassed validation for {argument}"
+        );
+        ensure!(
+            output.stdout.is_empty() && !directory.exists(),
+            "invalid QQ_LOG produced output or state for {argument}"
+        );
+    }
+
     let qa_root = home.root.join("qa-fixture");
     let mut qa = home.command(&provider.base_url);
     qa.env("QQ_LOG", "info").arg("--tui-qa-root").arg(&qa_root);

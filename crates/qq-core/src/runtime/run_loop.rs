@@ -3814,7 +3814,10 @@ impl RunState {
                                             // Keep selecting interruption after output closes.
                                             None => execution_scope.output_closed = true,
                                         },
-                                        completed = &mut execution => break completed,
+                                        completed = &mut execution => {
+                                            drop(execution);
+                                            break completed;
+                                        },
                                     }
                                 };
                                 if let Err(error) = tool_tasks.check() {
