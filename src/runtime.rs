@@ -40,7 +40,7 @@ use qq_protocol::{
 };
 use qq_provider::{
     BedrockAuth as ProviderBedrockAuth, EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe,
-    ProviderCompiler, ProviderError, ProviderRecipe, SecretRef,
+    ProviderCompiler, ProviderError, ProviderRecipe, ResponsesBodyShape, SecretRef,
 };
 use qq_server::{
     CommandFuture, DelegationFuture, ModelsFuture, ProfilesFuture, ServerHandler,
@@ -1937,10 +1937,11 @@ impl RuntimeFactory {
                 limit: max_output_tokens,
             });
         }
+        // The codec, not the credential, decides whether the output limit
+        // reaches the wire: the Codex body omits `max_output_tokens`.
         let codex = matches!(
             access,
-            ProviderAccess::Http(access)
-                if matches!(access.auth(), HttpCredential::OpenAiCodex { .. })
+            ProviderAccess::Http(access) if responses_body_shape(access) == ResponsesBodyShape::Codex
         );
         // Explicit cache breakpoints exist only where the wire has them: the
         // Anthropic Messages and Bedrock Converse codecs mark the system
@@ -2143,7 +2144,9 @@ impl RuntimeFactory {
             EndpointMode::Exact => EndpointSpec::exact(access.endpoint(), allow_http),
         };
         let recipe = ProviderRecipe::http(
-            HttpProviderRecipe::new(endpoint, protocol, auth).with_headers(headers),
+            HttpProviderRecipe::new(endpoint, protocol, auth)
+                .with_headers(headers)
+                .with_body_shape(responses_body_shape(access)),
         );
         Ok((recipe, descriptor))
     }
@@ -3764,6 +3767,21 @@ fn provider_request_shape_identity(
             .expect("provider request-shape version must be non-zero"),
         digest: qq_protocol::ContentHash::from_bytes(digest.finalize().into()),
     })
+}
+
+/// The Responses body a configured HTTP route sends. Only the built-in OpenAI
+/// Codex route uses the Codex body. The recipe and the output-limit
+/// capability read the shape from here. The request-shape identity needs no
+/// separate input: the shape is a function of the credential variant, which
+/// the identity already digests (`request-time-codex`), so version 1 digests
+/// stay valid. A configurable shape must be digested in its own right.
+fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
+    match access.auth() {
+        HttpCredential::OpenAiCodex { .. } => ResponsesBodyShape::Codex,
+        HttpCredential::Configured(_)
+        | HttpCredential::ApiKey { .. }
+        | HttpCredential::XAi { .. } => ResponsesBodyShape::Standard,
+    }
 }
 
 fn bedrock_auth_shape(auth: &BedrockAuth) -> &'static [u8] {
@@ -6051,6 +6069,52 @@ mod tests {
                 ),
                 None,
                 "{access:?}"
+            );
+        }
+    }
+
+    /// The recipe body shape and the output-limit capability come from one
+    /// function of the route, so they cannot disagree: only the OpenAI Codex
+    /// route sends the Codex body, and every other credential sends the
+    /// standard body whatever its auth scheme.
+    #[test]
+    fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
+        let access = |auth| {
+            HttpAccess::new(
+                "https://example.test/v1",
+                EndpointMode::Base,
+                ProviderApi::OpenAiResponses,
+                auth,
+                BTreeMap::new(),
+            )
+        };
+        for (auth, expected) in [
+            (
+                HttpCredential::OpenAiCodex { profile: None },
+                ResponsesBodyShape::Codex,
+            ),
+            (
+                HttpCredential::XAi {
+                    api_key: None,
+                    profile: None,
+                },
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::Bearer(qq_config::SecretRef::Env(
+                    "TOKEN".to_owned(),
+                ))),
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::NoAuth),
+                ResponsesBodyShape::Standard,
+            ),
+        ] {
+            assert_eq!(
+                responses_body_shape(&access(auth.clone())),
+                expected,
+                "{auth:?}"
             );
         }
     }

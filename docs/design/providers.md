@@ -59,6 +59,14 @@ SigV4 authorizer is an internal field on `HttpConstructionSpec`, so public
 recipes cannot manufacture Mantle-only capability. `EndpointKind` beside
 `EndpointSpec` is the sole Base/Exact representation.
 
+The OpenAI Responses request body is a recipe field, `ResponsesBodyShape`
+(`Standard` or `Codex`), not a consequence of the auth intent.
+`HttpProviderRecipe::new` defaults it from the intent (Codex intents get the
+Codex body) and `with_body_shape` sets it explicitly; a Codex body on any
+other protocol is a configuration error. The root derives the shape from
+the configured route, so the recipe and the `output_token_control`
+capability always agree.
+
 A request-time credential (`RequestCredential`) is a list of prebuilt,
 validated headers, each marked secret or metadata. Secret values are added
 to the attempt's redactions; metadata such as `originator: qq` and
@@ -68,7 +76,8 @@ Codex: `Authorization`, `chatgpt-account-id`, `originator`, optionally
 `x-openai-fedramp`). Anything else, a duplicate, more than eight headers or
 more than 64 KiB of values fails the attempt before a header is applied.
 Optional names are cleared first, so a credential that drops one does not
-inherit it.
+inherit it. Google GenerateContent accepts request-time bearer credentials
+like the other adapters.
 
 ## Shared HTTP Execution And Adapter Kit
 
