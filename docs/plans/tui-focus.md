@@ -1,0 +1,193 @@
+# TUI Focus: sessions first, panes on demand, scoped selection
+
+**Status:** Active from 2026-10-18. Parent
+[ENG-1067](https://linear.app/retsu-ai/issue/ENG-1067). Ledger:
+[`progress/tui-focus.md`](progress/tui-focus.md).
+**Owner:** TUI lane.
+**Owned paths:** `crates/qq-tui/src/**`, `crates/qq-tui/tests/**`,
+`crates/qq-tui/benches/render.rs`, `docs/design/layout.md`,
+`docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`.
+`commands.rs`, `input.rs` and `terminal.rs` are shared with other lanes; this
+plan touches them only for the rows and effects named below.
+
+The [TUI redesign](tui-redesign.md) built the layout engine, tiers, rail and
+inspector. This plan changes *what* those surfaces show. It does not replace
+the open L4 and U8 slices there.
+
+## Problem
+
+Measured against the `sessions-*` and `tools-*` goldens and the code on
+`2f585b0d`:
+
+1. Every list is the whole session tree. The rail (`sidebar::rail_entries`),
+   the `/sessions` picker (`App::session_rows`) and the agent strip all walk
+   `thread_order()`, which includes every descendant. One task that fans out
+   to 20 agents adds 20–40 rail rows and 20 picker rows.
+2. The rail groups by state but indents by tree depth, so a child is drawn
+   indented under an unrelated session in another group
+   (`sessions-120x40.txt`: `Deploy helper` under `Refactor`, its parent under
+   IDLE).
+3. `Auto` shows the rail when `sessions.len() > 1`, so one conversation that
+   spawned one helper gets a 28-column rail.
+4. One child approval is shown three times in one frame: rail row plus detail
+   row, the composer-rule notice, and the transcript's `related sessions`.
+5. The strip counts agents as peers (`8 agents`). Audit children
+   (`SessionPurpose::Audit`) are listed like user sessions.
+6. The inspector's `Auto` takes 70–80 columns at Wide and Ultra even when it
+   only says `Nothing expanded`.
+7. Mouse capture is on, so a terminal drag does nothing and Shift-drag
+   selects the whole terminal row: transcript, inspector, rail and borders
+   together. There is no way to copy just the model's output.
+
+## Vocabulary
+
+- **Session**: a root conversation (`parent_id == None`). The unit the user
+  works on and the only thing lists show by default.
+- **Agent**: a sub-agent session under a session (`parent_id == Some`).
+  Shown on its own only when it needs the user, when its session is focused,
+  or when the user opens or searches for it.
+
+The guide, hints and picker titles use these two words consistently.
+
+## Principles
+
+The five principles of the redesign plan hold. Added:
+
+1. **Sessions by default, agents on request.**
+2. **Attention rises; activity rolls up.** An agent that needs the user
+   surfaces as its own line under its session; an agent that is only working
+   contributes to its session's counts.
+3. **One place per fact.** A pending approval or unread finish has one
+   primary place on screen and at most one pointer elsewhere.
+4. **A pane exists only while it has content.**
+5. **Shed by rank.** Rows drop their lowest-ranked items one at a time as
+   they narrow.
+
+## Slices
+
+Stacked PRs from one worktree, each on the previous branch, in this order.
+
+| ID | Issue | Goal | Acceptance |
+| --- | --- | --- | --- |
+| P0 | [ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068) | This plan and its ledger | Docs check passes |
+| F1–F2 | [ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069) | Session roll-up and a sessions-only rail | See below |
+| F3 | [ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070) | `/sessions` lists sessions; agents on expand or search | See below |
+| F4–F5 | [ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071) | One place per fact; inspector only with content | See below |
+| F6 | [ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072) | Clickable rail; mouse selection scoped to the transcript, copied with OSC 52 | See below |
+
+### F1–F2: roll-up and rail
+
+One O(sessions) pass replaces `rail_entries`. For each root session it
+yields its own state, the state rolled up over its agents (most urgent of
+NEEDS YOU > WORKING > the rest), agent counts (total, working, waiting), the
+agents that need the user (bounded), unread, a live flag, and spend. Audit
+agents are skipped everywhere.
+
+Rail rows:
+
+```
+│ NEEDS YOU  1
+│ ◇ Session 0       ⑂4
+│   ↳ ◇ Deploy helper
+│       approve run
+│
+│ WORKING  1
+│ ◐ Write tests  ⑂5 ◐3
+│    compacting context
+│
+│ RECENT  4
+│ ● Refactor       1 new
+│ ○ Notes
+```
+
+- Groups are NEEDS YOU, WORKING, RECENT. RECENT merges the old IDLE and DONE
+  groups; a finished-but-unseen or failed-and-unseen session is already in
+  NEEDS YOU, and RECENT rows keep their state glyphs (`●` seen finish, `◌`
+  stopped, `○` never run) so done and idle stay distinguishable.
+- One row per session with an `⑂N` agent badge (and `◐N` while any work).
+- Agents that need the user get one `↳` row under their session, whatever
+  group it is in. The focused session's agents are listed under it, capped at
+  `FOCUSED_AGENT_ROWS` (6), then `+N more  /agents`.
+- A focused agent shows its session expanded around it, so the focused row
+  is always on the rail.
+- `Auto` shows the rail when more than one *session* exists. The strip
+  counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
+
+Acceptance: unit tests for the roll-up (state rises, counts, audit skipped,
+strip and rail agree); view tests for the rail shape, cap and focused agent;
+a `fanout` golden scene (3 sessions × 20 agents) at the five golden sizes;
+`sessions_200_with_sidebar` and `children_20_with_sidebar` benches within 5 %
+of baseline or faster.
+
+### F3: picker
+
+- `/sessions` lists sessions only, with right-aligned agent badge and state.
+- `Tab` or `Right` expands the highlighted session's agents inline; `Left`
+  collapses (or moves to the parent row from an agent).
+- A non-empty search matches agents too; a matching agent row shows its
+  session's title as a muted prefix (`Session 0 › Deploy helper`).
+- `Ctrl-A` toggles showing every agent (the previous behavior).
+- `/agents` keeps opening the focused tree fully expanded.
+- The cursor stays on the same id across tree changes.
+
+Acceptance: app tests for default rows, expand/collapse, search hits,
+`Ctrl-A`, focus-preserving refresh; existing `/agents` tests unchanged.
+
+### F4–F5: one place per fact, panes on demand
+
+- The composer-rule notice for another session's approval appears only when
+  no rail or strip shows it (Compact with no strip, or the rail hidden).
+- `related sessions` becomes one muted summary row: `⑂ 3 agents · ◐ 2 · ◇ 1
+  /agents`.
+- Inspector `Auto` shows only when it has content (an expanded call or a
+  workspace view); `Shown` still pins it.
+- The top row omits a known zero cost.
+
+Acceptance: view tests that each approval is named once per frame outside
+its own transcript; inspector `Auto` hidden with nothing expanded and shown
+with an expansion; goldens moved deliberately.
+
+### F6: clickable rail and scoped selection
+
+Mouse capture stays on so the wheel keeps scrolling the transcript. QQ owns
+selection:
+
+- **Click** on a rail session or agent row focuses it.
+- **Drag** that starts inside a transcript pane selects text in that pane
+  only. The selection is clamped to the pane's columns and to body rows, so
+  the rail, inspector, borders, top row and composer are never included.
+  The selected cells repaint on the `selection` background.
+- **Release** copies the selected text to the system clipboard with OSC 52
+  (the transport Codex and most modern terminals and multiplexers support)
+  and shows `copied N lines`. Each row is the pane's text with the measure
+  inset and trailing spaces removed.
+- `Esc`, a key press, scrolling, a resize or a new frame that moves the body
+  clears the selection. `Shift`-drag keeps the terminal's native selection,
+  and `/mouse` still hands the mouse back to the terminal.
+
+The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
+coordinates) and resolved against the last committed frame, so no
+transcript cache changes. Copy payloads are bounded (`MAX_COPY_BYTES`, 1 MiB
+before encoding); a larger selection copies the first part and says so.
+
+Acceptance: app tests for click-to-focus, drag clamped to the pane, the copy
+effect's text (inset and rail excluded), clearing rules, and the bound;
+terminal test for the OSC 52 bytes; frame test that only selected cells take
+the selection style.
+
+## Non-goals
+
+No new dependencies (OSC 52 base64 uses the workspace `base64` crate already
+in the graph), no protocol change, no persisted layout preference, no
+split transcripts (L4), no word or line double-click selection.
+
+## Gates
+
+- Workspace gates per `AGENTS.md`; `cargo xtask smoke` on each code slice.
+- `cargo bench -p qq-tui --bench render` before and after each code slice:
+  `steady_state`, `streaming_focused`, `streaming_run_on_32kb`,
+  `golden_path_first_minute`, `sessions_200_with_sidebar`,
+  `children_20_with_sidebar`, `resize_horizontal` medians within 5 %.
+- Goldens updated deliberately in the PR that moves them.
+- Each PR is complete when the Codex review on it reports no major issues
+  (the 👍 reaction).
