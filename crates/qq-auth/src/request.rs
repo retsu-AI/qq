@@ -43,6 +43,13 @@ pub(crate) trait RequestCredentialSource: Send + Sync + 'static {
 
     /// The provider's error for an unreadable clock.
     fn clock_unavailable() -> AuthError;
+
+    /// Whether this source is known, before any resolution, never to yield a
+    /// cacheable credential (an explicit reference). Such sources skip the
+    /// fill lock from their first request, including when they fail.
+    fn never_cacheable(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) struct Resolution<C> {
@@ -95,12 +102,13 @@ pub(crate) struct CachedRequestCredentials<S: RequestCredentialSource> {
 
 impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
     pub(crate) fn new(store: &CredentialStore, source: S) -> Self {
+        let never_cacheable = source.never_cacheable();
         Self {
             store: store.clone(),
             source: Arc::new(source),
             cache: tokio::sync::Mutex::new(None),
             fill: tokio::sync::Mutex::new(()),
-            uncacheable: AtomicBool::new(false),
+            uncacheable: AtomicBool::new(never_cacheable),
             #[cfg(test)]
             fill_attempts: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
@@ -196,8 +204,20 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
                     }
                     source.resolve(&store, current_reuse.is_some()).map(Some)
                 })
-                .await?
-                .map_err(|error| self.source.map_error(error))?;
+                .await?;
+            // A failed resolution caches nothing, so the next miss would take
+            // `fill` again and every waiter would fail through it one by one.
+            // Mark the source uncacheable, so waiters and later requests
+            // resolve on the bounded worker pool, until a resolution that can
+            // be cached clears it.
+            let resolved = match resolved {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    self.uncacheable.store(true, Ordering::Relaxed);
+                    drop(fill);
+                    return Err(self.source.map_error(error));
+                }
+            };
             match (resolved, current) {
                 (Some(resolution), _) => {
                     let credential = self.store_resolution(resolution).await;

@@ -532,6 +532,20 @@ impl CredentialStore {
 }
 
 #[cfg(test)]
+pub(super) fn source_for_test(profile: &str, explicit: Option<SecretRef>) -> XaiSource {
+    XaiSource {
+        profile: profile.to_owned(),
+        explicit,
+        remedies: MissingCredentialRemedies::new(
+            "xai",
+            profile,
+            &["qq auth login xai --oauth", "qq auth login xai"],
+            Some("XAI_API_KEY"),
+        ),
+    }
+}
+
+#[cfg(test)]
 pub(super) fn request_credentials_for_test(
     store: &CredentialStore,
     profile: &str,
@@ -586,6 +600,10 @@ impl RequestCredentialSource for XaiSource {
 
     fn clock_unavailable() -> AuthError {
         XaiAuthError::ClockUnavailable.into()
+    }
+
+    fn never_cacheable(&self) -> bool {
+        self.explicit.is_some()
     }
 }
 

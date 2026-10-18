@@ -3941,6 +3941,70 @@ async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
     );
 }
 
+/// A failed first resolution leaves nothing cached, so it must not leave
+/// every later request queuing on the fill lock; once a cacheable OAuth
+/// credential resolves again, it is cached as before.
+#[tokio::test]
+async fn failed_resolutions_do_not_serialise_later_requests_and_oauth_recovers() {
+    let (store, keyring, _directory) = test_store();
+    set_xai_oauth(&store, "valid-access-token", hour_from_now());
+    let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
+
+    keyring.set_mode(FakeMode::Unavailable);
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap_err();
+    // With the fill lock held, the next (still failing) request completes
+    // without trying it.
+    let held = provider.fill.lock().await;
+    let attempts = provider
+        .fill_attempts
+        .load(std::sync::atomic::Ordering::SeqCst);
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        provider
+            .fill_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        attempts
+    );
+    drop(held);
+
+    keyring.set_mode(FakeMode::Available);
+    assert_eq!(served_xai_token(&provider).await, "valid-access-token");
+    let reads = keyring.read_count("xai/work");
+    assert_eq!(served_xai_token(&provider).await, "valid-access-token");
+    assert_eq!(
+        keyring.read_count("xai/work"),
+        reads,
+        "the recovered OAuth credential is cached again"
+    );
+}
+
+#[tokio::test]
+async fn explicit_xai_references_never_take_the_fill_lock() {
+    let (store, _keyring, _directory) = test_store();
+    let provider = request::CachedRequestCredentials::new(
+        &store,
+        xai::source_for_test(
+            "work",
+            Some(SecretRef::Env("QQ_TEST_UNSET_XAI_VARIABLE".to_owned())),
+        ),
+    );
+    let held = provider.fill.lock().await;
+    qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        provider
+            .fill_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    drop(held);
+}
+
 /// Moves a cached request credential past its refresh deadline, as time
 /// would, without waiting for it.
 async fn expire_cached<C: Clone>(cache: &tokio::sync::Mutex<Option<Arc<request::Cached<C>>>>) {
