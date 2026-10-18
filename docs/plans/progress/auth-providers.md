@@ -4,11 +4,11 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| AP0 | Plan and ledger | In review | `docs/eng-1066-auth-provider-plan`, #341 | Six Codex review passes on the plan (31 findings), all addressed |
-| AP1 | Shared OAuth helpers | In review | `refactor/eng-1066-ap1-oauth-helpers`, #343 | |
-| AP2 | One provider operation lock | In review | `refactor/eng-1066-ap2-refresh-lock`, #345 | |
-| AP3 | Audiences defined once | In review | `refactor/eng-1066-ap3-audiences`, #346 | |
-| AP4 | State and backends split out of `lib.rs` | In review | `refactor/eng-1066-ap4-store-module`, #347 | |
+| AP0 | Plan and ledger | Shipped (`cdbe4a5c`) | #341 | Six Codex review passes (31 findings); the last four fixes (`fe1fa5c7`) were not re-reviewed after Codex hit its usage limit |
+| AP1 | Shared OAuth helpers | Shipped (`4c0c4829`) | #343 | |
+| AP2 | One provider operation lock | Shipped (`92554c96`) | #345 | |
+| AP3 | Audiences defined once | Shipped (`332e8a62`) | #346 | |
+| AP4 | State and backends split out of `lib.rs` | Shipped (`b1c66be4`) | #347 | |
 | AP4b | Request-credential perf fixtures | Planned | | Baseline for AP5/AP6 |
 | AP5 | One request-credential provider + bench | Planned | | |
 | AP6 | Header-set request credentials | Planned | | |
@@ -30,3 +30,14 @@ after. Open: `cargo xtask check` fails on
 from #331, which also fails on the plan-only branch with no Rust change;
 main CI at `a9bff3ef` is red on `goal_model_audit_late_and_stale_confirmation_cannot_achieve`.
 Both belong to ENG-1063/ENG-1064.
+
+#### AP0–AP4 receipt — 2026-10-17
+Commits: `cdbe4a5c` (#341), `4c0c4829` (#343), `92554c96` (#345),
+`332e8a62` (#346), `b1c66be4` (#347), merged in that order.
+Tests: qq-auth 77 → 79; PR CI (affected gate) green on each head; smoke
+8/8 after the rebase. Codex 👍 on the merged heads of #343–#347.
+Deviations: AP4 splits into `state.rs` and `backend.rs` rather than one
+`store.rs`. AP3 keeps root stored-name literals until AP7.
+Docs: `docs/design/providers.md` (AP3), `docs/design/architecture.md`
+qq-auth source map.
+Open: AP4b next.
