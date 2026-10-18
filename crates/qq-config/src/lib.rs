@@ -30,7 +30,7 @@ pub use pack::{
     AgentPack, MAX_PACK_MANIFEST_BYTES, MAX_PACK_PROMPT_BYTES, MAX_PACKS, PACK_MANIFEST_FILE,
     PACK_SCHEMA_VERSION, PackProfile, PackRequirements, PackToolPolicy,
 };
-pub use qq_provider::{SecretLiteral, SecretRef, XAI_CREDENTIAL_ENDPOINT};
+pub use qq_provider::{SecretLiteral, SecretRef};
 pub use theme::{
     AnsiColor, COMPILED_THEMES, DEFAULT_THEME, Rgb, SyntaxRole, TERMINAL_THEME,
     TRUECOLOR_DEFAULT_THEME, ThemeColor, ThemeColorFault, ThemeColors, ThemeDocument, ThemeSyntax,

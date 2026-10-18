@@ -2052,10 +2052,10 @@ const LOGIN_PROVIDERS: [&str; 5] = ["openai", "anthropic", "google", "xai", "ope
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
     match provider {
         "openai" => Some("https://api.openai.com"),
-        "openai-codex" => Some("https://chatgpt.com"),
+        "openai-codex" => Some(auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
         "anthropic" => Some("https://api.anthropic.com"),
         "google" => Some("https://generativelanguage.googleapis.com"),
-        "xai" => Some("https://api.x.ai"),
+        "xai" => Some(auth::XAI_CREDENTIAL_ENDPOINT),
         _ => None,
     }
 }

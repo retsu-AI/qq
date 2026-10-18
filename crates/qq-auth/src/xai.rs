@@ -15,8 +15,10 @@ use super::{
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
-    SecretRef, SharedRequestCredentialProvider, XAI_CREDENTIAL_ENDPOINT,
+    SecretRef, SharedRequestCredentialProvider,
 };
+
+use super::XAI_CREDENTIAL_ENDPOINT;
 
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const DEVICE_ENDPOINT: &str = "https://auth.x.ai/oauth2/device/code";
