@@ -123,3 +123,10 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - PR CI failed inherited answer-wait deadline test:1500ms budget elapsed during setup before wait receipt under runner load. Changed fixture to paused clock with explicit wait-entry signal and independent10s watchdog, then1501ms advance; resume real time for persistence/cleanup so fake clock cannot outrun blocking I/O. First paused cleanup attempt timed out, final focused test passes0.37s. Same assertions, budget and ceiling retained; two legacy keys shifted+20 only. Full final gate pending.
 
 -791efffe stable full gate passes1005.4s, pushed. Manual functional gate also exposed headless trace fixture race: large delta could precede attachment cursor, so buffered/dev/full failure never occurs. Test now gates its sole large delta until foreground subscription's interrupt poll; retains payload/timeouts/assertions. Focused pass0.31s. Eight headless legacy line keys shifted+15 only; final gate pending. HostedH0 still running; no performance pass.
+
+
+## AF5 measured dependency subtraction and size blocker
+
+-4d1075a0 stable full gate passes911.4s and pushed. HostedH0 run39112300274 fails unchanged caps: full48444280>48000000, minimal43645144>41000000; A/B replay737865>729073ns. Same-binary A/A fails command ack/long-stream tails and long-stream MAD, so latency remains unqualified. Artifacts `target/af5-hosted-h0`, no waiver.
+- Disabled unused crossterm derive-more and pulldown-cmark CLI/HTML defaults, preserving bracketed paste/events/Windows/parser. Measured Linux minimal normal closure299 (was305); six helper crates absent. TUI393/393 passes (1skip). Local minimal release still43824208>41000000; removal fixes dependency count, not binary-size gate.
+- Typed subscriber serialization experiment passes logging9/9 but grows artifact1024bytes to43825232; reverted experiment rather than retaining unmeasured complexity. Release optimization/budgets unchanged. Full final gate for manifest/lock subtraction pending.
