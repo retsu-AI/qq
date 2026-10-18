@@ -5487,30 +5487,6 @@ mod tests {
     /// The busy-workspace fixture must seed at least 512 committed events before
     /// its acknowledgements are measured.
     #[tokio::test]
-    async fn credential_fixtures_resolve_the_stored_bearer_without_refresh() {
-        let (metrics, checks) = credentials::credential_resolution_workloads(5, 1)
-            .await
-            .unwrap();
-        let names: Vec<_> = metrics.iter().map(|metric| metric.name.as_str()).collect();
-        assert_eq!(
-            names,
-            [
-                "xai_request_credential_resolution_ns",
-                "xai_request_credential_concurrent_resolution_ns"
-            ]
-        );
-        assert!(metrics.iter().all(|metric| metric.samples.len() == 5));
-        assert!(checks[0].passed, "{}", checks[0].detail);
-
-        let (metrics, checks) = credentials::request_time_authorization_workloads(5, 1)
-            .await
-            .unwrap();
-        assert_eq!(metrics[0].name, "request_time_authorized_stream_ns");
-        assert_eq!(metrics[0].samples.len(), 5);
-        assert!(checks[0].passed, "{}", checks[0].detail);
-    }
-
-    #[tokio::test]
     async fn busy_workspace_fixture_seeds_a_long_history() {
         let (metrics, checks) = busy_workspace_ack_workloads(10).await.unwrap();
         assert_eq!(metrics.len(), 1);
@@ -6105,5 +6081,29 @@ mod tests {
             checks: Vec::new(),
             unsupported: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn credential_fixtures_resolve_the_stored_bearer_without_refresh() {
+        let (metrics, checks) = credentials::credential_resolution_workloads(5, 1)
+            .await
+            .unwrap();
+        let names: Vec<_> = metrics.iter().map(|metric| metric.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "xai_request_credential_resolution_ns",
+                "xai_request_credential_concurrent_resolution_ns"
+            ]
+        );
+        assert!(metrics.iter().all(|metric| metric.samples.len() == 5));
+        assert!(checks[0].passed, "{}", checks[0].detail);
+
+        let (metrics, checks) = credentials::request_time_authorization_workloads(5, 1)
+            .await
+            .unwrap();
+        assert_eq!(metrics[0].name, "request_time_authorized_stream_ns");
+        assert_eq!(metrics[0].samples.len(), 5);
+        assert!(checks[0].passed, "{}", checks[0].detail);
     }
 }
