@@ -147,6 +147,7 @@ impl ProviderCompiler {
             auth: recipe.auth,
             authorizer: None,
             headers: recipe.headers,
+            body_shape: recipe.body_shape,
         };
 
         construct_http_provider(client, spec)
@@ -198,16 +199,22 @@ pub struct HttpProviderRecipe {
     protocol: HttpProtocol,
     auth: HttpAuth,
     headers: Vec<(String, String)>,
+    body_shape: ResponsesBodyShape,
 }
 
 impl HttpProviderRecipe {
+    /// A recipe whose Responses body shape is the one its auth intent has
+    /// always implied: Codex for the Codex intents, standard otherwise. Use
+    /// [`Self::with_body_shape`] to choose it independently.
     #[must_use]
     pub fn new(endpoint: EndpointSpec, protocol: HttpProtocol, auth: HttpAuth) -> Self {
+        let body_shape = ResponsesBodyShape::implied_by(&auth);
         Self {
             endpoint,
             protocol,
             auth,
             headers: Vec::new(),
+            body_shape,
         }
     }
 
@@ -215,6 +222,40 @@ impl HttpProviderRecipe {
     pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.headers = headers;
         self
+    }
+
+    /// Selects the Responses request body shape. Only OpenAI Responses has
+    /// more than one; compiling another protocol with
+    /// [`ResponsesBodyShape::Codex`] is a configuration error.
+    #[must_use]
+    pub fn with_body_shape(mut self, body_shape: ResponsesBodyShape) -> Self {
+        self.body_shape = body_shape;
+        self
+    }
+}
+
+/// The OpenAI Responses request body a compiled provider sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResponsesBodyShape {
+    /// The public Responses API body, including `max_output_tokens`.
+    Standard,
+    /// The ChatGPT Codex backend body, which omits `max_output_tokens` and
+    /// may stream SSE without a `Content-Type`.
+    Codex,
+}
+
+impl ResponsesBodyShape {
+    /// The shape the auth intent implied before the shape was explicit.
+    #[must_use]
+    pub const fn implied_by(auth: &HttpAuth) -> Self {
+        match auth {
+            HttpAuth::Codex { .. } | HttpAuth::RequestTimeCodex(_) => Self::Codex,
+            HttpAuth::NoAuth
+            | HttpAuth::ApiKey(_)
+            | HttpAuth::Bearer(_)
+            | HttpAuth::Header(..)
+            | HttpAuth::RequestTimeBearer(_) => Self::Standard,
+        }
     }
 }
 
@@ -309,8 +350,8 @@ pub enum HttpAuth {
     RequestTimeBearer(SharedRequestCredentialProvider),
     /// Codex credentials resolved on each request.
     ///
-    /// This intent is valid only for OpenAI Responses and selects the Codex
-    /// request body shape automatically.
+    /// This intent is valid only for OpenAI Responses. [`HttpProviderRecipe::new`]
+    /// pairs it with [`ResponsesBodyShape::Codex`] unless another shape is set.
     RequestTimeCodex(SharedRequestCredentialProvider),
 }
 
@@ -735,5 +776,144 @@ mod tests {
                 }
             }
         }
+    }
+
+    struct StaticBearer(&'static str);
+
+    impl crate::RequestCredentialProvider for StaticBearer {
+        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
+            let token = self.0;
+            Box::pin(async move { crate::RequestCredential::bearer(token) })
+        }
+    }
+
+    /// The body shape is the recipe's choice, not the credential's: a
+    /// Codex-shaped body with plain bearer auth omits `max_output_tokens`, and
+    /// a standard body with Codex request-time credentials includes it while
+    /// still sending the Codex headers.
+    #[tokio::test]
+    async fn responses_body_shape_is_independent_of_the_auth_intent() {
+        let cases = [
+            (
+                HttpAuth::RequestTimeBearer(SharedRequestCredentialProvider::new(StaticBearer(
+                    "bearer-test-token",
+                ))),
+                ResponsesBodyShape::Codex,
+                false,
+                None,
+            ),
+            (
+                HttpAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                    StaticCodexCredentials,
+                )),
+                ResponsesBodyShape::Standard,
+                true,
+                Some("workspace-test-id"),
+            ),
+        ];
+        for (auth, shape, has_max_output_tokens, account_id) in cases {
+            let server = LoopbackServer::sse("data: {\"type\":\"response.completed\"}\n\n");
+            let provider = ProviderCompiler::new()
+                .unwrap()
+                .compile_for_canary(ProviderRecipe::http(
+                    HttpProviderRecipe::new(
+                        EndpointSpec::exact(format!("{}/v1/responses", server.base_url), true),
+                        HttpProtocol::OpenAiResponses,
+                        auth,
+                    )
+                    .with_body_shape(shape),
+                ))
+                .unwrap();
+            let events = provider
+                .stream(ModelRequest::new(
+                    "gpt-test",
+                    vec![Message::user("ping")],
+                    64,
+                ))
+                .collect::<Vec<_>>()
+                .await;
+            assert!(
+                matches!(&events[..], [Ok(ProviderEvent::Completed { .. })]),
+                "{shape:?}: {events:?}"
+            );
+            let request = server.capture();
+            assert_eq!(
+                request
+                    .json_body()
+                    .as_object()
+                    .unwrap()
+                    .contains_key("max_output_tokens"),
+                has_max_output_tokens,
+                "{shape:?}"
+            );
+            assert_eq!(
+                request.header("chatgpt-account-id"),
+                account_id,
+                "{shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_codex_body_shape_is_rejected_outside_openai_responses() {
+        for protocol in [
+            HttpProtocol::OpenAiChatCompletions,
+            HttpProtocol::AnthropicMessages,
+            HttpProtocol::GoogleGenerateContent,
+        ] {
+            let error = ProviderCompiler::new()
+                .unwrap()
+                .compile(ProviderRecipe::http(
+                    HttpProviderRecipe::new(
+                        EndpointSpec::exact("http://127.0.0.1:1/v1", true),
+                        protocol,
+                        HttpAuth::NoAuth,
+                    )
+                    .with_body_shape(ResponsesBodyShape::Codex),
+                ))
+                .err()
+                .expect("Codex body shape needs Responses");
+            assert!(
+                matches!(&error, ProviderError::Configuration(message)
+                    if message == "the Codex request body shape requires the OpenAI Responses protocol"),
+                "{protocol:?}: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn google_accepts_request_time_bearer_credentials() {
+        let server = LoopbackServer::sse(concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},",
+            "\"finishReason\":\"STOP\"}]}\n\n"
+        ));
+        let provider = ProviderCompiler::new()
+            .unwrap()
+            .compile_for_canary(ProviderRecipe::http(HttpProviderRecipe::new(
+                EndpointSpec::base(format!("{}/v1beta", server.base_url), true),
+                HttpProtocol::GoogleGenerateContent,
+                HttpAuth::RequestTimeBearer(SharedRequestCredentialProvider::new(StaticBearer(
+                    "google-request-time-token",
+                ))),
+            )))
+            .unwrap();
+        let events = provider
+            .stream(ModelRequest::new(
+                "gemini-test",
+                vec![Message::user("ping")],
+                64,
+            ))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(Ok(ProviderEvent::Completed { .. }))),
+            "{events:?}"
+        );
+        let request = server.capture();
+        assert_eq!(
+            request.header("authorization"),
+            Some("Bearer google-request-time-token")
+        );
+        assert_eq!(request.header("x-goog-api-key"), None);
     }
 }

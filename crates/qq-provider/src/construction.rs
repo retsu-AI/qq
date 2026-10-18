@@ -6,7 +6,7 @@
 
 use crate::{
     Provider, ProviderError, ProviderStream,
-    compiler::{EndpointKind, HttpAuth, HttpProtocol},
+    compiler::{EndpointKind, HttpAuth, HttpProtocol, ResponsesBodyShape},
     http::AttemptPolicy,
     providers::{
         anthropic::{AnthropicAuth, AnthropicMessages},
@@ -23,8 +23,8 @@ const CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
     "Codex authentication requires the OpenAI Responses protocol";
 const REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
     "request-time Codex authentication requires the OpenAI Responses protocol";
-const GOOGLE_REQUEST_TIME_UNSUPPORTED_MESSAGE: &str =
-    "request-time credentials are not supported by Google GenerateContent";
+const CODEX_BODY_REQUIRES_RESPONSES_MESSAGE: &str =
+    "the Codex request body shape requires the OpenAI Responses protocol";
 const AUTHORIZER_WITH_AUTH_MESSAGE: &str =
     "internal request authorization cannot be combined with HTTP authentication";
 
@@ -36,6 +36,7 @@ pub(crate) struct HttpConstructionSpec {
     pub(crate) auth: HttpAuth,
     pub(crate) authorizer: Option<RequestAuthorizer>,
     pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body_shape: ResponsesBodyShape,
 }
 
 enum ResolvedHttpAuth {
@@ -48,7 +49,10 @@ enum ResolvedHttpAuth {
         auth: AnthropicAuth,
         authorizer: RequestAuthorizer,
     },
-    GoogleGenerateContent(GoogleAuth),
+    GoogleGenerateContent {
+        auth: GoogleAuth,
+        authorizer: RequestAuthorizer,
+    },
 }
 
 // Only the Mantle adapter selects a retry mode at construction; the HTTP
@@ -125,11 +129,20 @@ pub(crate) fn construct_http_provider(
         auth,
         authorizer,
         headers,
+        body_shape,
     } = spec;
 
-    match resolve_http_auth(protocol, auth, authorizer)? {
+    let resolved = resolve_http_auth(protocol, auth, authorizer)?;
+    if body_shape == ResponsesBodyShape::Codex
+        && !matches!(resolved, ResolvedHttpAuth::OpenAiResponses(_))
+    {
+        return Err(ProviderError::Configuration(
+            CODEX_BODY_REQUIRES_RESPONSES_MESSAGE.to_owned(),
+        ));
+    }
+    match resolved {
         ResolvedHttpAuth::OpenAiResponses(auth) => Ok(CompiledHttpProvider::OpenAiResponses(
-            OpenAi::with_client_and_auth(client, endpoint, auth, headers)?,
+            OpenAi::with_client_and_auth(client, endpoint, auth, headers, body_shape)?,
         )),
         ResolvedHttpAuth::OpenAiChatCompletions { auth, authorizer } => {
             Ok(CompiledHttpProvider::OpenAiChatCompletions(
@@ -143,11 +156,16 @@ pub(crate) fn construct_http_provider(
                 client, endpoint, auth, headers, authorizer,
             )?),
         ),
-        ResolvedHttpAuth::GoogleGenerateContent(auth) => {
-            Ok(CompiledHttpProvider::GoogleGenerateContent(
-                GoogleGenerateContent::with_client(client, endpoint, endpoint_kind, auth, headers)?,
-            ))
-        }
+        ResolvedHttpAuth::GoogleGenerateContent { auth, authorizer } => Ok(
+            CompiledHttpProvider::GoogleGenerateContent(GoogleGenerateContent::with_client(
+                client,
+                endpoint,
+                endpoint_kind,
+                auth,
+                headers,
+                authorizer,
+            )?),
+        ),
     }
 }
 
@@ -188,9 +206,10 @@ fn resolve_http_auth(
                 auth: AnthropicAuth::NoAuth,
                 authorizer: RequestAuthorizer::default(),
             }),
-            HttpProtocol::GoogleGenerateContent => {
-                Ok(ResolvedHttpAuth::GoogleGenerateContent(GoogleAuth::NoAuth))
-            }
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::NoAuth,
+                authorizer: RequestAuthorizer::default(),
+            }),
         },
         (HttpAuth::ApiKey(secret), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
@@ -204,9 +223,10 @@ fn resolve_http_auth(
                 auth: AnthropicAuth::XApiKey(secret),
                 authorizer: RequestAuthorizer::default(),
             }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent(
-                GoogleAuth::XGoogApiKey(secret),
-            )),
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::XGoogApiKey(secret),
+                authorizer: RequestAuthorizer::default(),
+            }),
         },
         (HttpAuth::Bearer(secret), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
@@ -220,9 +240,10 @@ fn resolve_http_auth(
                 auth: AnthropicAuth::Bearer(secret),
                 authorizer: RequestAuthorizer::default(),
             }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent(
-                GoogleAuth::Bearer(secret),
-            )),
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::Bearer(secret),
+                authorizer: RequestAuthorizer::default(),
+            }),
         },
         (HttpAuth::Header(name, secret), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
@@ -236,9 +257,10 @@ fn resolve_http_auth(
                 auth: AnthropicAuth::Header(name, secret),
                 authorizer: RequestAuthorizer::default(),
             }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent(
-                GoogleAuth::Header(name, secret),
-            )),
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::Header(name, secret),
+                authorizer: RequestAuthorizer::default(),
+            }),
         },
         (
             HttpAuth::Codex {
@@ -271,16 +293,14 @@ fn resolve_http_auth(
                 auth: AnthropicAuth::NoAuth,
                 authorizer: RequestAuthorizer::request_time_bearer(credentials),
             }),
-            HttpProtocol::GoogleGenerateContent => Err(ProviderError::Configuration(
-                GOOGLE_REQUEST_TIME_UNSUPPORTED_MESSAGE.to_owned(),
-            )),
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::NoAuth,
+                authorizer: RequestAuthorizer::request_time_bearer(credentials),
+            }),
         },
         (HttpAuth::RequestTimeCodex(credentials), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
                 ResponsesConstructionAuth::RequestTimeCodex(credentials),
-            )),
-            HttpProtocol::GoogleGenerateContent => Err(ProviderError::Configuration(
-                GOOGLE_REQUEST_TIME_UNSUPPORTED_MESSAGE.to_owned(),
             )),
             _ => Err(ProviderError::Configuration(
                 REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE.to_owned(),
@@ -318,6 +338,7 @@ mod tests {
             protocol,
             endpoint: reqwest::Url::parse("http://127.0.0.1:1/test").unwrap(),
             endpoint_kind: EndpointKind::Exact,
+            body_shape: ResponsesBodyShape::Standard,
             auth,
             authorizer: None,
             headers: Vec::new(),
@@ -367,6 +388,7 @@ mod tests {
                     protocol: HttpProtocol::OpenAiResponses,
                     endpoint: reqwest::Url::parse("http://127.0.0.1:1/test").unwrap(),
                     endpoint_kind: EndpointKind::Base,
+                    body_shape: ResponsesBodyShape::implied_by(&auth),
                     auth,
                     authorizer: None,
                     headers: Vec::new(),
@@ -435,6 +457,7 @@ mod tests {
                 auth: HttpAuth::ApiKey("test-secret".into()),
                 authorizer: Some(RequestAuthorizer::default()),
                 headers: Vec::new(),
+                body_shape: ResponsesBodyShape::Standard,
             },
         )
         .err()
