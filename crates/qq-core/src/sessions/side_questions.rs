@@ -342,27 +342,32 @@ impl SessionRuntime {
                 request,
                 messages,
             };
-            let outcome =
-                AssertUnwindSafe(runtime.execute_side_question(launch, cancellation, started))
-                    .catch_unwind()
-                    .await;
-            let (result, fallback) = match outcome {
-                Ok(Ok(answer)) => (Ok(answer), None),
-                Ok(Err(error)) => (Err(error), Some(qq_protocol::SideQuestionState::Failed)),
-                Err(_) => (
-                    Err(SessionRuntimeError::Unavailable),
-                    Some(qq_protocol::SideQuestionState::Interrupted),
-                ),
-            };
-            if let Some(state) = fallback
-                && runtime
-                    .settle_side_question(id, state, false, limit)
-                    .await
-                    .is_err()
-            {
-                runtime.inner.failed.send_replace(true);
+            let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
+            async {
+                let outcome =
+                    AssertUnwindSafe(runtime.execute_side_question(launch, cancellation, started))
+                        .catch_unwind()
+                        .await;
+                let (result, fallback) = match outcome {
+                    Ok(Ok(answer)) => (Ok(answer), None),
+                    Ok(Err(error)) => (Err(error), Some(qq_protocol::SideQuestionState::Failed)),
+                    Err(_) => (
+                        Err(SessionRuntimeError::Unavailable),
+                        Some(qq_protocol::SideQuestionState::Interrupted),
+                    ),
+                };
+                if let Some(state) = fallback
+                    && runtime
+                        .settle_side_question(id, state, false, limit)
+                        .await
+                        .is_err()
+                {
+                    runtime.inner.failed.send_replace(true);
+                }
+                let _ = reply.send(result);
             }
-            let _ = reply.send(result);
+            .instrument(run_span)
+            .await;
         });
         drop(lifecycle);
         match response.await {

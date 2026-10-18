@@ -230,7 +230,7 @@ jobs:
             production_sha="$CANDIDATE_SHA"
             if [[ "$arm" == baseline ]]; then production_sha="$BASELINE_SHA"; fi
             python3 "$GITHUB_WORKSPACE/candidate/.github/scripts/turn-fixture.py" prepare --production-root "$PWD" --fixture-root "$GITHUB_WORKSPACE/fixture" --production-sha "$production_sha" --fixture-sha "$FIXTURE_SHA" --receipt "$RUNNER_TEMP/turn-recording/$arm-fixture.json"
-            final_opt=$(python3 -c 'import tomllib; p=tomllib.load(open("Cargo.toml", "rb")).get("profile", {}).get("release", {}); print(p.get("package", {}).get("qq", {}).get("opt-level", p.get("opt-level", 3)))')
+            final_opt=$(python3 -c 'import tomllib; p=tomllib.load(open("Cargo.toml", "rb")).get("profile", {}).get("release", {}); print(p.get("package", {}).get("qq-core", {}).get("opt-level", p.get("opt-level", 3)))')
             [[ "$final_opt" =~ ^[0-3sz]$ ]]
             printf '%s\n' "$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-final-opt-level.txt"
             CARGO_TARGET_DIR="$RUNNER_TEMP/turn-target-$arm" cargo rustc --locked --profile bench -p qq-core --bench turn_overhead --message-format=json -- -C "opt-level=$final_opt" > "$RUNNER_TEMP/turn-recording/$arm-build.jsonl" 2> "$RUNNER_TEMP/turn-recording/$arm-build.log"
