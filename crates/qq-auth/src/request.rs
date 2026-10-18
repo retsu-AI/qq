@@ -204,18 +204,27 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
                     }
                     source.resolve(&store, current_reuse.is_some()).map(Some)
                 })
-                .await?;
-            // A failed resolution caches nothing, so the next miss would take
-            // `fill` again and every waiter would fail through it one by one.
-            // Mark the source uncacheable, so waiters and later requests
-            // resolve on the bounded worker pool, until a resolution that can
-            // be cached clears it.
+                .await;
+            // A failed load caches nothing, so the next miss would take
+            // `fill` again and every waiter would fail through it one by one;
+            // with a hung keyring each would wait out the load timeout in
+            // turn. Whether the worker failed (timeout, no capacity, a dead
+            // worker) or the resolution itself did, mark the source
+            // uncacheable so waiters and later requests resolve on the bounded
+            // worker pool, until a resolution that can be cached clears it.
+            let failed = |error| {
+                self.uncacheable.store(true, Ordering::Relaxed);
+                error
+            };
             let resolved = match resolved {
-                Ok(resolved) => resolved,
-                Err(error) => {
-                    self.uncacheable.store(true, Ordering::Relaxed);
+                Ok(Ok(resolved)) => resolved,
+                Ok(Err(error)) => {
                     drop(fill);
-                    return Err(self.source.map_error(error));
+                    return Err(failed(self.source.map_error(error)));
+                }
+                Err(error) => {
+                    drop(fill);
+                    return Err(failed(error));
                 }
             };
             match (resolved, current) {

@@ -3982,6 +3982,42 @@ async fn failed_resolutions_do_not_serialise_later_requests_and_oauth_recovers()
     );
 }
 
+/// The same holds when the load never reaches the resolver: a worker-level
+/// failure (here the loader's permit pool is closed, as when the store shuts
+/// down) also leaves later requests off the fill lock.
+#[tokio::test]
+async fn worker_level_load_failures_do_not_serialise_later_requests() {
+    let (store, _keyring, _directory) = test_store();
+    set_xai_oauth(&store, "valid-access-token", hour_from_now());
+    let provider = xai::request_credentials_for_test(&store, "work");
+    store.request_credential_permits.close();
+
+    assert_eq!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::WorkerFailed
+    );
+    let held = provider.fill.lock().await;
+    let attempts = provider
+        .fill_attempts
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::WorkerFailed
+    );
+    assert_eq!(
+        provider
+            .fill_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        attempts,
+        "a worker-level failure must not leave later requests on the fill lock"
+    );
+    drop(held);
+}
+
 #[tokio::test]
 async fn explicit_xai_references_never_take_the_fill_lock() {
     let (store, _keyring, _directory) = test_store();
