@@ -443,8 +443,17 @@ impl plan::CompiledAgentPlan {
                 message: "run exhausted the durable u32 model-turn ordinal space".to_owned(),
             };
         });
-        let mut events = events;
-        let events: RuntimeStream = Box::pin(futures_util::stream::poll_fn(move |cx| {
+        let events = match (deadline, deadline_resources) {
+            (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {
+                deadline.enforce(events, cancelled, tools, spawner, audit_hook)
+            }
+            _ => events,
+        };
+        let mut events = Some(events);
+        Box::pin(futures_util::stream::poll_fn(move |cx| {
+            let Some(events_stream) = events.as_mut() else {
+                return std::task::Poll::Ready(None);
+            };
             let span = run_span.get_or_insert_with(|| {
                 let current = tracing::Span::current();
                 if current.metadata().is_some_and(|metadata| metadata.target() == "qq::diagnostic" && metadata.name() == "run") {
@@ -453,14 +462,24 @@ impl plan::CompiledAgentPlan {
                     tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = next_diagnostic_run())
                 }
             });
-            span.in_scope(|| events.as_mut().poll_next(cx))
-        }));
-        match (deadline, deadline_resources) {
-            (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {
-                deadline.enforce(events, cancelled, tools, spawner, audit_hook)
+            let result = span.in_scope(|| events_stream.as_mut().poll_next(cx));
+            if matches!(
+                &result,
+                std::task::Poll::Ready(
+                    None | Some(
+                        RuntimeEvent::Completed { .. }
+                            | RuntimeEvent::Failed { .. }
+                            | RuntimeEvent::BudgetExhausted { .. }
+                    )
+                )
+            ) {
+                // Release suspended phases and their parent handles before exposing
+                // the terminal event, even if the caller retains the public stream.
+                events.take();
+                run_span.take();
             }
-            _ => events,
-        }
+            result
+        }))
     }
 }
 impl plan::CompiledAgentPlan {

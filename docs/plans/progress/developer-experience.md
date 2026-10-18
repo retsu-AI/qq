@@ -77,3 +77,11 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Current main and candidate have IDENTICAL normal dependency closure sets, 305 crates; current main itself fails unchanged 300 ceiling. Main A/A also fails many relative tails, so local environment cannot currently qualify latency differences. Candidate comparison remains failed, not waived.
 - Full gate failed twice at new-main headless drain fixture's shared 10-second deadline across 16 complete runtime setups; focused case passed in 5.78s. Moved the same 10-second guard inside each iteration (all 16 assertions retained). Full CI-profile gate then passed 278.8s and smoke 9/9. This is a timing-guard correction, not evidence that initial gates passed.
 - Remaining: qualify profiles and tracing on controlled host, close inherited dependency-budget violation without widening, update ADR/build rationale, final source gate/CI and actual current-tip Codex 👍 before ready/merge.
+
+
+## AF5 terminal-span review and controlled recording
+
+- Current-tip CI and dispatched run [39091894930](https://github.com/retsu-AI/qq/actions/runs/39091894930) passed functional, Windows and WASM checks. Controlled turn recording completed, but is diagnostic only, not an H0 budget gate: median core work gaps changed +3.86%/+4.97%/+1.50% at turns 10/100/1000. Provider/TUI/startup/streaming qualification is absent.
+- Removed provisional qq-core/qq-provider/qq-tui `z` overrides rather than shipping unqualified hot-path code generation. Prior 40194448-byte receipt does not qualify the resulting artifact; size and full performance acceptance remain open, without budget changes.
+- Codex identified direct streams retaining run/turn handles after terminal events. New real-subscriber regression failed with zero run-close records while retaining the terminal stream; wrapper now drops suspended phases and its span before returning terminal results, including the deadline wrapper. Success/failure matrix and all seven logging tests pass after the fix. Full CI-profile gate passes (347.6s); real-binary smoke 9/9 passes.
+- All 15 earlier threads remain resolved; two new threads await verified fixes/replies and explicit resolution. No current-tip Codex thumbs-up or merge readiness claimed.

@@ -168,20 +168,6 @@ opt-level = "s"
 [profile.release.package.qq-config]
 opt-level = "s"
 
-
-# Core is branch-heavy orchestration and policy code; qualify its compact
-# build against the existing end-to-end latency and artifact budgets.
-[profile.release.package.qq-core]
-opt-level = "z"
-
-
-[profile.release.package.qq-tui]
-opt-level = "z"
-
-
-[profile.release.package.qq-provider]
-opt-level = "z"
-
 # The edit/test loop is link-bound: full debuginfo made `target/debug/qq`
 # ~600 MB. Line tables keep file:line backtraces for workspace code; deps
 # carry none. For a debugger session: `CARGO_PROFILE_DEV_DEBUG=full`

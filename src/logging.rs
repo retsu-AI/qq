@@ -220,6 +220,79 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn direct_run_span_closes_before_terminal_stream_is_dropped() {
+        use futures_util::StreamExt as _;
+        use qq_core::{
+            Runtime,
+            plan::{AgentProfile, CompiledAgentPlan},
+        };
+        use qq_protocol::{RunCommand, RunEvent};
+        use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream};
+
+        struct TerminalProvider(bool);
+        impl Provider for TerminalProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let event = if self.0 {
+                    Err(qq_provider::ProviderError::Configuration(
+                        "unavailable".into(),
+                    ))
+                } else {
+                    Ok(ProviderEvent::Completed { usage: None })
+                };
+                Box::pin(futures_util::stream::once(async move { event }))
+            }
+        }
+
+        for fails in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let directory = home.path().join("logs");
+            let logger = LogGuard::start(&directory).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stream =
+                tracing::dispatcher::with_default(logger.dispatch.as_ref().unwrap(), || {
+                    let agent = Runtime::new(TerminalProvider(fails), "test", 128).unwrap();
+                    let plan = CompiledAgentPlan::compile_blocking(AgentProfile::embedded(
+                        &agent,
+                        home.path().to_owned(),
+                    ))
+                    .unwrap();
+                    let mut stream = plan.run(RunCommand::new("answer"));
+                    runtime.block_on(async {
+                        loop {
+                            match stream.next().await.expect("terminal event") {
+                                RunEvent::Completed => {
+                                    assert!(!fails);
+                                    break;
+                                }
+                                RunEvent::Failed { .. } => {
+                                    assert!(fails);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                    stream
+                });
+            logger.finish().unwrap();
+            let logs = std::fs::read_to_string(directory.join("qq-0.jsonl")).unwrap();
+            let closed = logs
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .filter(|record| {
+                    record["span"]["name"] == "run" && record["fields"]["message"] == "close"
+                })
+                .count();
+            assert_eq!(closed, 1, "terminal stream retained its run span: {logs}");
+            drop(stream);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dependency_secrets_are_rejected_and_span_metadata_survives() {
         let home = tempfile::tempdir().unwrap();
         let directory = home.path().join("logs");
