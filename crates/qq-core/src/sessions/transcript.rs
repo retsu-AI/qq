@@ -455,11 +455,18 @@ fn assemble_model_context(
                     CASE WHEN t.tool_results_projection_json IS NULL THEN NULL
                          WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
                     length(CAST(t.tool_results_projection_json AS BLOB)),
+                    -- A reviewed turn without its projection is replayable unless a
+                    -- durable verdict names one of its calls. Turns without tool
+                    -- calls never reach the unindexed event probe.
                     CASE WHEN t.tool_results_projection_json IS NOT NULL THEN 0
                          WHEN CASE WHEN json_valid(r.plan_descriptor_json)
                                    THEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
                                         OR json_type(r.plan_descriptor_json,'$.checkpoint')='null'
                                    ELSE 0 END THEN 0
+                         WHEN NOT EXISTS (
+                             SELECT 1 FROM tool_calls k
+                             WHERE k.run_id = t.run_id AND k.turn_ordinal = t.turn_ordinal
+                         ) THEN 0
                          ELSE EXISTS (
                              SELECT 1 FROM events e
                              JOIN tool_calls c ON c.id = json_extract(e.envelope_json,'$.event.tool_call_id')
