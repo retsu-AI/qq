@@ -171,7 +171,7 @@ QQ covers:
 QQ does not include these products or scaffolds:
 
 - Web or React frontend and mobile application. No browser, desktop or mobile
-  client exists; see
+  client exists; see [`docs/plans/desktop.md`](../plans/desktop.md) and
   [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md).
 - JavaScript or TypeScript workspace.
 - Hosted SaaS or multi-user system.

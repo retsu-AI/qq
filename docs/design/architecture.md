@@ -2335,7 +2335,8 @@ scaffolded:
 
 - Web and mobile client surfaces beyond `qq-client`'s transport and state
   (the WASM client crate and shared reducer exist); see
-  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md)
+  [`docs/plans/desktop.md`](../plans/desktop.md),
+  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md),
   and ADR-0015.
 - JavaScript/TypeScript packages or package workspace.
 - Separate server executable.

@@ -27,6 +27,8 @@ written.
 | 0013 | [Context sources are part of plan identity; excess sources fail compilation](0013-context-sources-in-descriptor.md) | Accepted |
 | 0014 | [Typed final output: a per-run contract compiled at admission, judged at the completion boundary, repaired within a bounded allowance](0014-typed-final-output.md) | Accepted |
 | 0015 | [Enroll remote clients with a pairing code and issue per-client credentials](0015-pairing-code-client-enrollment.md) | Proposed (multi-surface S2) |
+| 0017 | [Client surfaces share a Rust view core and one React + TypeScript UI](0017-client-ui-stack.md) | Proposed (desktop C2/C3/A0) |
+| 0018 | [Apps live in a separate `apps/` workspace, integrated on `feat/desktop`](0018-apps-workspace-and-integration-branch.md) | Proposed (desktop A0) |
 | 0019 | [Spill handles are durable session state: cut tool outputs are stored with their result, cited by a content-addressed handle, masked inline and exact on explicit read](0019-spill-handles.md) | Accepted |
 | 0020 | [Shell `Forbidden` is a policy decision above every approval mode, produced by a CST classifier whose rules are self-tested data](0020-shell-forbidden-classifier.md) | Accepted |
 | 0021 | [`Interactive` and `Network` effect classes: a question is a hold, not a permission; a fetch is authority over the outside, not the workspace](0021-interactive-and-network-effect-classes.md) | Accepted (`Interactive` merged in #49, `Network` in #50) |
@@ -64,6 +66,7 @@ written.
 | 0060 | [Bind process context before classifying progress](0060-process-context-for-progress.md) | Proposed; implementation merged in #301/#306 (AB1, ENG-1038) |
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed; implementation merged in #302 (AB2, ENG-1039) |
 | 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
+| 0064 | [Writing agents get managed git worktrees; isolation is per checkout, not per server](0064-managed-worktree-workspaces.md) | Proposed (desktop K4); second review required |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet
@@ -72,13 +75,13 @@ written, or were released unused:
 | ADR | State |
 | --- | --- |
 | 0016 | Reserved: remote exposure (multi-surface S4) |
-| 0017 | Reserved: client UI stack (multi-surface W1/U1) |
-| 0018 | Reserved: `apps/` as a separate Cargo workspace (multi-surface U1) |
 | 0029 | Unused: native Jev routing was decided in ADR-0031–0034 |
 | 0037 | Reserved: responsive TUI layout tiers (tui-redesign U8) |
 | 0044, 0045 | Unused: reserved for session mode and strict verification (#187, closed unmerged) |
 | 0053 | Unused: reserved for #231's ADR, which was renumbered 0055 |
 | 0055 | Reserved: decision-model seam (open PR #249) |
+| 0063 | Reserved: opt-in structured tracing (open PR #329) |
+| 0065 | Reserved: tasks and the project coordinator (desktop K8) |
 
 ADR-0030–0034 predate the template and use a short form (status, date,
 prose); later ADRs follow [the template](0000-template.md).

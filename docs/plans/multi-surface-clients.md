@@ -4,7 +4,9 @@ Status: approved for Phases 1–2 on 2026-09-10. Shipped: W1 (transport-agnostic
 `qq-client`, `wasm32` build, #15), W2 (reducer extracted to `qq-client::state`,
 #19), S1 (stable `ServerId`, #14), S3 (CORS, #16). Open: S2 enrollment
 (ADR-0015), S4 remote exposure with TLS (ADR-0016), W3 multi-server model, S5,
-S6, then the U/D/M surfaces. Ledger:
+S6. The U, D, and M phases (and ADR-0017/0018) moved to
+[`desktop.md`](./desktop.md) on 2026-10-18; their sections below are
+historical until that plan's A5–A8 ship. Ledger:
 [`progress/multi-surface-clients.md`](./progress/multi-surface-clients.md).
 Shipped slices are one-line pointers; their design is in `design/` and the
 ledger receipts.

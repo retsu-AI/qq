@@ -15,6 +15,7 @@ to the current owner's ledger; old slice IDs and tracker issues remain valid.
 | [TUI](tui-redesign.md) | Remaining TUI work |
 | [Jev](jev.md) | JV precision/lifecycle/qualification |
 | [multi-surface](multi-surface-clients.md) | Remote readiness and clients |
+| [desktop](desktop.md) | Desktop app, projects, worktrees, tasks, coordinator |
 | [v0.1.7 release](release-0.1.7.md) | Publication verification receipt still pending; bump/guide pins merged |
 | [auth providers](auth-providers.md) | AP slices: qq-auth/provider credential refactor |
 | [root](root.md) | Coordination, shared files, ADR allocation |
