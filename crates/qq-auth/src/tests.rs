@@ -546,7 +546,7 @@ fn codex_request_provider(
     store: &CredentialStore,
     profile: &str,
 ) -> codex::CodexRequestCredentials {
-    codex::CodexRequestCredentials::new(store, profile)
+    codex::CodexRequestCredentials::for_profile(store, profile)
 }
 
 fn callback(port: u16, query: &str) -> String {
@@ -3646,4 +3646,202 @@ fn stored_keyring_active_result_poison_notifies_and_allows_retry() {
         .unwrap();
     assert_eq!(secret.expose_secret_bytes(), b"secret");
     assert_eq!(keyring.read_count("provider/result"), 2);
+}
+
+fn stored_xai_credential(access_token: &str, expires_at: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "version": 1,
+        "access_token": access_token,
+        "refresh_token": "refresh",
+        "expires_at": expires_at,
+    }))
+    .unwrap()
+}
+
+fn set_xai_oauth(store: &CredentialStore, access_token: &str, expires_at: u64) {
+    store
+        .set_with_metadata(
+            "xai/work",
+            stored_xai_credential(access_token, expires_at),
+            false,
+            Some("xai-oauth"),
+            Some("https://api.x.ai"),
+        )
+        .unwrap();
+}
+
+fn hour_from_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3_600
+}
+
+async fn request(provider: &qq_provider::SharedRequestCredentialProvider) {
+    qq_provider::RequestCredentialProvider::credential(provider)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn xai_request_cache_reloads_after_rotation_and_reports_removal() {
+    let (store, keyring, _directory) = test_store();
+    set_xai_oauth(&store, "first-access-token", hour_from_now());
+    let provider = store.xai_request_credentials("work", None);
+    request(&provider).await;
+    request(&provider).await;
+    assert_eq!(
+        keyring.read_count("xai/work"),
+        1,
+        "warm requests reuse the cache"
+    );
+
+    set_xai_oauth(&store, "rotated-access-token", hour_from_now());
+    request(&provider).await;
+    assert_eq!(
+        keyring.read_count("xai/work"),
+        2,
+        "a rotation moves the epoch, so the next request reloads"
+    );
+
+    assert!(store.remove("xai/work").unwrap());
+    let error = qq_provider::RequestCredentialProvider::credential(&provider)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "credential `xai/work` is not registered: run `qq auth login xai --oauth --profile work` or `qq auth login xai --profile work` or set the environment variable `XAI_API_KEY`"
+    );
+}
+
+#[tokio::test]
+async fn xai_request_cache_observes_a_rotation_by_an_independent_store() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(FakeKeyring::default());
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let requesting =
+        CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
+    let rotating = CredentialStore::with_backends(paths, keyring.clone(), protected);
+    set_xai_oauth(&requesting, "first-access-token", hour_from_now());
+    let provider = requesting.xai_request_credentials("work", None);
+    request(&provider).await;
+
+    set_xai_oauth(&rotating, "rotated-by-another-store", hour_from_now());
+    request(&provider).await;
+    assert_eq!(keyring.read_count("xai/work"), 2);
+
+    assert!(rotating.remove("xai/work").unwrap());
+    assert!(matches!(
+        qq_provider::RequestCredentialProvider::credential(&provider)
+            .await
+            .unwrap_err(),
+        qq_provider::RequestCredentialError::Missing { .. }
+    ));
+}
+
+#[tokio::test]
+async fn xai_request_cache_rechecks_at_its_refresh_deadline_and_refreshes_once() {
+    let (mut store, keyring, _directory) = test_store();
+    let client = Arc::new(FakeXaiTokenClient {
+        refreshes: Mutex::new(Vec::new()),
+        refreshed: xai::TokenSet {
+            access_token: "refreshed-access-token".to_owned(),
+            refresh_token: Some("rotated-refresh-token".to_owned()),
+            expires_in: Some(3_600),
+        },
+    });
+    store.xai_client = client.clone();
+    set_xai_oauth(&store, "valid-access-token", hour_from_now());
+    let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap();
+    provider.cache.lock().await.as_mut().unwrap().refresh_after = 0;
+
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        keyring.read_count("xai/work"),
+        2,
+        "a passed deadline rechecks the store"
+    );
+    assert!(
+        client.refreshes.lock().unwrap().is_empty(),
+        "the stored token is still valid"
+    );
+
+    set_xai_oauth(&store, "expired-access-token", 1);
+    let requests = (0..4)
+        .map(|_| {
+            let provider = Arc::clone(&provider);
+            tokio::spawn(async move {
+                qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+            })
+        })
+        .collect::<Vec<_>>();
+    for request in requests {
+        request.await.unwrap().unwrap();
+    }
+    assert_eq!(
+        client.refreshes.lock().unwrap().as_slice(),
+        ["refresh"],
+        "concurrent requests share one refresh"
+    );
+    let cached = provider.cache.lock().await.clone().unwrap();
+    assert_eq!(
+        cached.credential.expose_secret_str().unwrap(),
+        "refreshed-access-token"
+    );
+    assert_eq!(cached.epoch, store.epoch().unwrap());
+}
+
+#[tokio::test]
+async fn xai_api_key_resolutions_are_never_cached() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "xai/work",
+            b"xai-api-key",
+            false,
+            Some("xai"),
+            Some("https://api.x.ai"),
+        )
+        .unwrap();
+    let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
+    for _ in 0..3 {
+        qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+            .await
+            .unwrap();
+        assert!(provider.cache.lock().await.is_none());
+    }
+    // The store's own short read memo still applies, as before AP5.
+    assert_eq!(keyring.read_count("xai/work"), 1);
+}
+
+#[tokio::test]
+async fn warm_request_credentials_do_not_wait_behind_a_fill() {
+    let (store, _keyring, _directory) = test_store();
+    set_xai_oauth(&store, "valid-access-token", hour_from_now());
+    let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap();
+
+    // Hold the fill lock as an in-progress refresh would. A warm request
+    // must still complete without it; before AP5, Codex held one cache
+    // mutex across the whole load, so every request waited behind it. The
+    // timeout is a hang guard, not a latency bound: a warm request that
+    // needed the fill lock would never finish while this guard is held.
+    let fill = provider.fill.lock().await;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        qq_provider::RequestCredentialProvider::credential(provider.as_ref()),
+    )
+    .await
+    .expect("a warm request must not wait for an in-progress fill")
+    .unwrap();
+    drop(fill);
 }

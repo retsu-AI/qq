@@ -11,14 +11,16 @@ use thiserror::Error;
 
 use super::{
     AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
-    oauth::OAuthProvider, resolve_provider_credential,
+    oauth::OAuthProvider,
+    request::{CachedRequestCredentials, RequestCredentialSource, Resolution, Reuse},
+    resolve_provider_credential,
 };
 use qq_provider::{
-    RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
-    SecretRef, SharedRequestCredentialProvider,
+    RequestCredential, RequestCredentialError, SecretRef, SharedRequestCredentialProvider,
 };
 
 use super::XAI_CREDENTIAL_ENDPOINT;
+use qq_protocol::CredentialEpoch;
 
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const DEVICE_ENDPOINT: &str = "https://auth.x.ai/oauth2/device/code";
@@ -374,6 +376,17 @@ impl StoredXaiCredential {
     fn needs_refresh(&self, now: u64) -> bool {
         self.expires_at <= now
     }
+
+    fn into_resolution(self, epoch: CredentialEpoch) -> (Secret, Reuse) {
+        let reuse = Reuse {
+            epoch,
+            refresh_after: self.expires_at,
+        };
+        (
+            Secret::from_secret_bytes(self.access_token.into_bytes()),
+            reuse,
+        )
+    }
 }
 
 impl CredentialStore {
@@ -390,12 +403,14 @@ impl CredentialStore {
             &["qq auth login xai --oauth", "qq auth login xai"],
             Some("XAI_API_KEY"),
         );
-        SharedRequestCredentialProvider::new(XaiRequestCredentials {
-            store: self.clone(),
-            profile: profile.to_owned(),
-            explicit,
-            remedies,
-        })
+        SharedRequestCredentialProvider::new(CachedRequestCredentials::new(
+            self,
+            XaiSource {
+                profile: profile.to_owned(),
+                explicit,
+                remedies,
+            },
+        ))
     }
 
     pub fn resolve_xai(
@@ -403,17 +418,34 @@ impl CredentialStore {
         profile: &str,
         explicit: Option<&SecretRef>,
     ) -> Result<Secret, AuthError> {
+        self.resolve_xai_with_reuse(profile, explicit, false)
+            .map(|(secret, _)| secret)
+    }
+
+    /// [`Self::resolve_xai`] plus, for a stored OAuth credential, the epoch
+    /// and refresh deadline a request cache may reuse it until. Every other
+    /// source (an explicit reference, a stored API key, the environment)
+    /// returns `None`: the credential epoch cannot see those change.
+    fn resolve_xai_with_reuse(
+        &self,
+        profile: &str,
+        explicit: Option<&SecretRef>,
+        reload: bool,
+    ) -> Result<(Secret, Option<Reuse>), AuthError> {
         if let Some(reference) = explicit {
-            return self.resolve_with_endpoint(reference, Some(XAI_CREDENTIAL_ENDPOINT));
+            return self
+                .resolve_with_endpoint(reference, Some(XAI_CREDENTIAL_ENDPOINT))
+                .map(|secret| (secret, None));
         }
         let name = credential_name(profile)?;
+        let without_reuse = |secret| (secret, None);
         match self.status(&name)? {
-            Some(metadata) if metadata.kind.as_deref() == Some("xai-oauth") => {
-                self.resolve_xai_oauth(profile)
-            }
-            Some(metadata) if metadata.kind.as_deref() == Some("xai") => {
-                self.resolve_with_endpoint(&SecretRef::Stored(name), Some(XAI_CREDENTIAL_ENDPOINT))
-            }
+            Some(metadata) if metadata.kind.as_deref() == Some("xai-oauth") => self
+                .resolve_xai_oauth_with_epoch(profile, reload)
+                .map(|(secret, reuse)| (secret, Some(reuse))),
+            Some(metadata) if metadata.kind.as_deref() == Some("xai") => self
+                .resolve_with_endpoint(&SecretRef::Stored(name), Some(XAI_CREDENTIAL_ENDPOINT))
+                .map(without_reuse),
             Some(_) => Err(XaiAuthError::StoredCredentialInvalid.into()),
             None => resolve_provider_credential(
                 self,
@@ -421,27 +453,38 @@ impl CredentialStore {
                 &name,
                 "XAI_API_KEY",
                 Some(XAI_CREDENTIAL_ENDPOINT),
-            ),
+            )
+            .map(without_reuse),
         }
     }
 
+    #[cfg(test)]
     pub(super) fn resolve_xai_oauth(&self, profile: &str) -> Result<Secret, AuthError> {
+        self.resolve_xai_oauth_with_epoch(profile, false)
+            .map(|(secret, _)| secret)
+    }
+
+    /// The stored xAI OAuth access token, refreshed when due, with the epoch
+    /// of the index it was read from and the time it next needs refreshing.
+    /// `reload` bypasses the store's read memo for the first read, as a
+    /// request cache does once it has found its own value stale.
+    fn resolve_xai_oauth_with_epoch(
+        &self,
+        profile: &str,
+        reload: bool,
+    ) -> Result<(Secret, Reuse), AuthError> {
         let name = credential_name(profile)?;
         let now = unix_time()?;
-        let credential = self.load_xai_oauth(&name, false)?;
+        let (credential, epoch) = self.load_xai_oauth(&name, reload)?;
         if !credential.needs_refresh(now) {
-            return Ok(Secret::from_secret_bytes(
-                credential.access_token.into_bytes(),
-            ));
+            return Ok(credential.into_resolution(epoch));
         }
 
         let _refresh = self.lock_oauth_operation(OAuthProvider::XAi)?;
-        let credential = self.load_xai_oauth(&name, true)?;
+        let (credential, epoch) = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
-            return Ok(Secret::from_secret_bytes(
-                credential.access_token.into_bytes(),
-            ));
+            return Ok(credential.into_resolution(epoch));
         }
 
         let previous_refresh_token = credential.refresh_token;
@@ -454,12 +497,21 @@ impl CredentialStore {
             "xai-oauth".to_owned(),
             XAI_CREDENTIAL_ENDPOINT.to_owned(),
         )?;
-        Ok(Secret::from_secret_bytes(
-            credential.access_token.into_bytes(),
-        ))
+        // Bind the cache candidate to the exact durable value and epoch read
+        // under one state lock: another process may rotate or remove it
+        // immediately after this refresh write.
+        let (credential, epoch) = self.load_xai_oauth(&name, true)?;
+        if credential.needs_refresh(unix_time()?) {
+            return Err(XaiAuthError::TokenResponseInvalid.into());
+        }
+        Ok(credential.into_resolution(epoch))
     }
 
-    fn load_xai_oauth(&self, name: &str, fresh: bool) -> Result<StoredXaiCredential, AuthError> {
+    fn load_xai_oauth(
+        &self,
+        name: &str,
+        fresh: bool,
+    ) -> Result<(StoredXaiCredential, CredentialEpoch), AuthError> {
         let metadata =
             self.status(name)?
                 .ok_or_else(|| AuthError::StoredCredentialNotRegistered {
@@ -469,40 +521,71 @@ impl CredentialStore {
             return Err(XaiAuthError::StoredCredentialInvalid.into());
         }
         let reference = SecretRef::Stored(name.to_owned());
-        let secret = if fresh {
-            self.resolve_with_endpoint_uncached(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
+        let (secret, epoch) = if fresh {
+            self.resolve_with_epoch_uncached(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
         } else {
-            self.resolve_with_endpoint(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
+            self.resolve_with_epoch(&reference, Some(XAI_CREDENTIAL_ENDPOINT))?
         };
-        StoredXaiCredential::parse(secret.expose_secret_bytes()).map_err(Into::into)
+        let credential = StoredXaiCredential::parse(secret.expose_secret_bytes())?;
+        Ok((credential, epoch))
     }
 }
 
-struct XaiRequestCredentials {
-    store: CredentialStore,
+#[cfg(test)]
+pub(super) fn request_credentials_for_test(
+    store: &CredentialStore,
+    profile: &str,
+) -> CachedRequestCredentials<XaiSource> {
+    CachedRequestCredentials::new(
+        store,
+        XaiSource {
+            profile: profile.to_owned(),
+            explicit: None,
+            remedies: MissingCredentialRemedies::new(
+                "xai",
+                profile,
+                &["qq auth login xai --oauth", "qq auth login xai"],
+                Some("XAI_API_KEY"),
+            ),
+        },
+    )
+}
+
+/// xAI as a [`RequestCredentialSource`]. Only a stored OAuth credential is
+/// reusable across requests; see [`CredentialStore::resolve_xai_with_reuse`].
+pub(super) struct XaiSource {
     profile: String,
     explicit: Option<SecretRef>,
     remedies: MissingCredentialRemedies,
 }
 
-impl RequestCredentialProvider for XaiRequestCredentials {
-    fn credential(&self) -> RequestCredentialFuture<'_> {
-        let store = self.store.clone();
-        let profile = self.profile.clone();
-        let explicit = self.explicit.clone();
-        Box::pin(async move {
-            let secret = store
-                .load_request_credential(move |store| {
-                    store.resolve_xai(&profile, explicit.as_ref())
-                })
-                .await?
-                .map_err(|error| map_request_credential_error(error, &self.remedies))?;
-            RequestCredential::bearer(
-                secret
-                    .expose_secret_str()
-                    .map_err(|_| RequestCredentialError::Invalid)?,
-            )
-        })
+impl RequestCredentialSource for XaiSource {
+    type Credential = Secret;
+
+    fn resolve(
+        &self,
+        store: &CredentialStore,
+        reload: bool,
+    ) -> Result<Resolution<Secret>, AuthError> {
+        let (credential, reuse) =
+            store.resolve_xai_with_reuse(&self.profile, self.explicit.as_ref(), reload)?;
+        Ok(Resolution { credential, reuse })
+    }
+
+    fn request_credential(secret: &Secret) -> Result<RequestCredential, RequestCredentialError> {
+        RequestCredential::bearer(
+            secret
+                .expose_secret_str()
+                .map_err(|_| RequestCredentialError::Invalid)?,
+        )
+    }
+
+    fn map_error(&self, error: AuthError) -> RequestCredentialError {
+        map_request_credential_error(error, &self.remedies)
+    }
+
+    fn clock_unavailable() -> AuthError {
+        XaiAuthError::ClockUnavailable.into()
     }
 }
 

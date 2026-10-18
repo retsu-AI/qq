@@ -121,6 +121,7 @@ crates/
     src/backend.rs    OS keyring and Windows user-protected backends
     src/oauth.rs      OAuth provider table (names, lock file names), shared HTTP helpers
     src/codex.rs      OpenAI Codex OAuth login, refresh, request credentials
+    src/request.rs    cached request-time credential provider for OAuth providers
     src/xai.rs        xAI API-key and OAuth credentials
   qq-client/
     Cargo.toml

@@ -1,0 +1,181 @@
+//! The request-time credential provider shared by every OAuth provider.
+//!
+//! A compiled provider asks for a credential on every HTTP attempt. Warm
+//! requests copy the cached value out under a short lock and confirm it with
+//! one credential-epoch read, so concurrent requests never wait for each
+//! other. A miss (no cache, a newer epoch, or a passed refresh deadline) takes
+//! the fill lock, so one request per provider loads or refreshes while the
+//! rest wait and then reuse its result. Resolutions the epoch cannot
+//! invalidate (environment variables, explicit references, stored API keys
+//! outside the OAuth path) are never cached and never take the fill lock.
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+
+use qq_protocol::CredentialEpoch;
+use qq_provider::{
+    RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
+};
+
+use super::{AuthError, CredentialStore, oauth};
+
+/// One provider's credential loading: how to resolve it, how to turn the
+/// result into request headers, and how its errors read to a request.
+pub(crate) trait RequestCredentialSource: Send + Sync + 'static {
+    type Credential: Clone + Send + Sync + 'static;
+
+    /// Resolves the credential on a blocking thread. `reload` is set when a
+    /// cached value existed and was found stale, so the durable value must be
+    /// read again rather than through the store's short read memo.
+    fn resolve(
+        &self,
+        store: &CredentialStore,
+        reload: bool,
+    ) -> Result<Resolution<Self::Credential>, AuthError>;
+
+    fn request_credential(
+        credential: &Self::Credential,
+    ) -> Result<RequestCredential, RequestCredentialError>;
+
+    fn map_error(&self, error: AuthError) -> RequestCredentialError;
+
+    /// The provider's error for an unreadable clock.
+    fn clock_unavailable() -> AuthError;
+}
+
+pub(crate) struct Resolution<C> {
+    pub(crate) credential: C,
+    /// `Some` when the value may be reused until the credential epoch moves
+    /// or `refresh_after` (Unix seconds) passes; `None` when nothing the
+    /// store tracks would invalidate it.
+    pub(crate) reuse: Option<Reuse>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Reuse {
+    pub(crate) epoch: CredentialEpoch,
+    pub(crate) refresh_after: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct Cached<C> {
+    pub(crate) credential: C,
+    pub(crate) epoch: CredentialEpoch,
+    pub(crate) refresh_after: u64,
+}
+
+impl<C> Cached<C> {
+    fn reuse(&self) -> Reuse {
+        Reuse {
+            epoch: self.epoch,
+            refresh_after: self.refresh_after,
+        }
+    }
+}
+
+pub(crate) struct CachedRequestCredentials<S: RequestCredentialSource> {
+    pub(crate) store: CredentialStore,
+    source: Arc<S>,
+    /// Held only to copy or replace the value, never across an await.
+    pub(crate) cache: tokio::sync::Mutex<Option<Cached<S::Credential>>>,
+    /// Serialises misses so one request per provider loads or refreshes.
+    pub(crate) fill: tokio::sync::Mutex<()>,
+    /// The last resolution could not be cached, so misses skip `fill`.
+    uncacheable: AtomicBool,
+}
+
+impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
+    pub(crate) fn new(store: &CredentialStore, source: S) -> Self {
+        Self {
+            store: store.clone(),
+            source: Arc::new(source),
+            cache: tokio::sync::Mutex::new(None),
+            fill: tokio::sync::Mutex::new(()),
+            uncacheable: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether `reuse` still describes the durable credential.
+    async fn still_valid(&self, reuse: Reuse) -> Result<bool, RequestCredentialError> {
+        self.store
+            .load_request_credential(move |store| {
+                let now = oauth::unix_time().map_err(|_| S::clock_unavailable())?;
+                Ok(store.epoch()? == reuse.epoch && now < reuse.refresh_after)
+            })
+            .await?
+            .map_err(|error| self.source.map_error(error))
+    }
+
+    async fn resolve_uncached(&self) -> Result<RequestCredential, RequestCredentialError> {
+        let source = Arc::clone(&self.source);
+        let resolution = self
+            .store
+            .load_request_credential(move |store| source.resolve(&store, false))
+            .await?
+            .map_err(|error| self.source.map_error(error))?;
+        self.store_resolution(resolution).await
+    }
+
+    async fn store_resolution(
+        &self,
+        resolution: Resolution<S::Credential>,
+    ) -> Result<RequestCredential, RequestCredentialError> {
+        let request_credential = S::request_credential(&resolution.credential)?;
+        match resolution.reuse {
+            Some(reuse) => {
+                self.uncacheable.store(false, Ordering::Relaxed);
+                *self.cache.lock().await = Some(Cached {
+                    credential: resolution.credential,
+                    epoch: reuse.epoch,
+                    refresh_after: reuse.refresh_after,
+                });
+            }
+            None => {
+                self.uncacheable.store(true, Ordering::Relaxed);
+                *self.cache.lock().await = None;
+            }
+        }
+        Ok(request_credential)
+    }
+}
+
+impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCredentials<S> {
+    fn credential(&self) -> RequestCredentialFuture<'_> {
+        Box::pin(async move {
+            let snapshot = self.cache.lock().await.clone();
+            if let Some(cached) = &snapshot {
+                if self.still_valid(cached.reuse()).await? {
+                    return S::request_credential(&cached.credential);
+                }
+            } else if self.uncacheable.load(Ordering::Relaxed) {
+                return self.resolve_uncached().await;
+            }
+
+            let _fill = self.fill.lock().await;
+            // Another request may have filled the cache while this one waited.
+            let current = self.cache.lock().await.clone();
+            let current_reuse = current.as_ref().map(Cached::reuse);
+            let source = Arc::clone(&self.source);
+            let resolved = self
+                .store
+                .load_request_credential(move |store| {
+                    if let Some(reuse) = current_reuse {
+                        let now = oauth::unix_time().map_err(|_| S::clock_unavailable())?;
+                        if store.epoch()? == reuse.epoch && now < reuse.refresh_after {
+                            return Ok(None);
+                        }
+                    }
+                    source.resolve(&store, current_reuse.is_some()).map(Some)
+                })
+                .await?
+                .map_err(|error| self.source.map_error(error))?;
+            match (resolved, current) {
+                (Some(resolution), _) => self.store_resolution(resolution).await,
+                (None, Some(cached)) => S::request_credential(&cached.credential),
+                (None, None) => unreachable!("a cache hit requires a cached credential"),
+            }
+        })
+    }
+}
