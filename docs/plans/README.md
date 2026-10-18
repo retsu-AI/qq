@@ -47,6 +47,7 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
 | [v0.1.7 publication](release-0.1.7.md) | Remaining tag/assets/checksum/install/Homebrew verification receipt; bump and guide pins shipped |
 | [LSP diagnostics](lsp-diagnostics.md) | Unscheduled proposal; no active delivery inferred |
+| [auth providers](auth-providers.md) | AP0–AP4 behaviour-preserving qq-auth refactor; AP4b perf fixtures; AP5–AP8 provider-neutral credentials, configuration and OAuth grants; API-key presets and permitted OAuth grants |
 
 Linear project `qq`, team `ENG`, tracks live assignments and issue status.
 Query it when starting work; this cleanup does not close issues or assert
