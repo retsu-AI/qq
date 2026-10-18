@@ -9,6 +9,22 @@ from pathlib import Path
 
 
 class FixtureTests(unittest.TestCase):
+
+    def test_workflow_optimization_fallback_matches_build_and_validation(self):
+        workflow = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
+        build_line = next(line for line in workflow.splitlines() if "final_opt=$(python3" in line)
+        build = build_line.split("print(", 1)[1].rsplit(")", 2)[0]
+        validation_line = next(line for line in workflow.splitlines() if "expected_opt = str(" in line)
+        validation = validation_line.split("str(", 1)[1].rsplit(")", 1)[0]
+        for release, expected in [
+            ({}, "3"),
+            ({"opt-level": "s"}, "s"),
+            ({"opt-level": 2}, "2"),
+            ({"opt-level": "s", "package": {"qq-core": {"opt-level": "z"}}}, "z"),
+        ]:
+            with self.subTest(release=release):
+                self.assertEqual(str(eval(build, {"p": release})), expected)
+                self.assertEqual(str(eval(validation, {"release": release})), expected)
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
             "fixture", Path(__file__).with_name("turn-fixture.py"))

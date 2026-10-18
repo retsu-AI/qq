@@ -85,3 +85,10 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Removed provisional qq-core/qq-provider/qq-tui `z` overrides rather than shipping unqualified hot-path code generation. Prior 40194448-byte receipt does not qualify the resulting artifact; size and full performance acceptance remain open, without budget changes.
 - Codex identified direct streams retaining run/turn handles after terminal events. New real-subscriber regression failed with zero run-close records while retaining the terminal stream; wrapper now drops suspended phases and its span before returning terminal results, including the deadline wrapper. Success/failure matrix and all seven logging tests pass after the fix. Full CI-profile gate passes (347.6s); real-binary smoke 9/9 passes.
 - All 15 earlier threads remain resolved; two new threads await verified fixes/replies and explicit resolution. No current-tip Codex thumbs-up or merge readiness claimed.
+
+
+## AF5 root-profile and workflow fallback review
+
+- At `a60224f0`, current-tip CI is green and all17 prior Codex threads are resolved. Two further findings require restoring root qq `s` optimization and honoring top-level release optimization in artifact validation.
+- Restored qq and paired xtask `s` profiles; no unqualified `z` treatment remains. Updated validation to use the identical package→release→3 fallback as the build. Added four-case workflow expression regression: top-level `s` and `2` fail before fix; all5 fixture tests pass after.
+- Minimal artifact at prior a60224f0 is42883152 bytes, above unchanged41000000 cap; this is not a passing size receipt for the restored profile. Full performance/size and fresh current-tip Codex thumbs-up remain required. Final gate pending.

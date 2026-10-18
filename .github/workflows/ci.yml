@@ -249,7 +249,7 @@ jobs:
           profile = artifact['profile']
           manifest = tomllib.loads(Path('Cargo.toml').read_text())
           release = manifest.get('profile', {}).get('release', {})
-          expected_opt = str(release.get('package', {}).get('qq-core', {}).get('opt-level', 3))
+          expected_opt = str(release.get('package', {}).get('qq-core', {}).get('opt-level', release.get('opt-level', 3)))
           if profile['opt_level'] != expected_opt or profile['debug_assertions']:
               raise SystemExit('benchmark profile does not match the production core profile')
           with Path(artifact['executable']).open('rb') as source, (root / f'{arm}-bin').open('xb') as target:

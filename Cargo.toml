@@ -152,12 +152,12 @@ lto = "fat"
 
 # Optimize application glue for size; keep runtime/provider libraries at level 3.
 [profile.release.package.qq]
-opt-level = "z"
+opt-level = "s"
 strip = "symbols"
 
 # Exercise the runtime in H0 with the same final optimization as the shipped bin.
 [profile.release.package.xtask]
-opt-level = "z"
+opt-level = "s"
 strip = "symbols"
 
 # Keep configuration and authentication compact without changing streaming crates.
