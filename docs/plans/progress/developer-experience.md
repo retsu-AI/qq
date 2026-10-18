@@ -113,3 +113,5 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Full parallel gate then hit three inherited compaction deadlines; focused exact cases pass serial31.6s. Lower-concurrency synchronous gate killed at600s is incomplete. Async full two-process gate remains running under shared-host load; no final-source pass claimed yet.
 
 - Async two-process run completed all tests1205.0s plus fmt/lint/Clippy/doctests/minimal checks, but correctly refused its report because script/docs/workflow changed during execution. This is not a final gate pass. Commit stable snapshot then rerun without edits before push. Latest smoke9/9, fixture7/7 and focused actionlint pass.
+
+- Stable gate at3e565e67 failed a retried-pass side timeout fixture: finite5s real-time clock keeper exited before native read entry under load, advancing paused time prematurely. Replaced finite keeper with explicit lifetime and independent10s entry watchdog; targeted case passes1.38s. Only two shifted legacy line keys changed(+11), ceiling73 unchanged. Stable full gate rerun pending; no push yet.

@@ -19,8 +19,8 @@ crates/qq-core/src/sessions/tests.rs	7718	fn stream(&self, _: ModelRequest) -> P
 crates/qq-core/src/sessions/tests.rs	8233	async fn wait_side(	tokio::time::sleep(Duration::from_millis(2)).await;
 crates/qq-core/src/sessions/tests.rs	8299	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests.rs	8313	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(2)).await;
-crates/qq-core/src/sessions/tests.rs	8722	async fn side_dropped_submit_future_still_settles_and_frees_the_session() {	tokio::time::sleep(Duration::from_millis(2)).await;
-crates/qq-core/src/sessions/tests.rs	8910	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
+crates/qq-core/src/sessions/tests.rs	8734	async fn side_dropped_submit_future_still_settles_and_frees_the_session() {	tokio::time::sleep(Duration::from_millis(2)).await;
+crates/qq-core/src/sessions/tests.rs	8922	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/approvals.rs	2108	async fn a_reviewer_escalation_starts_the_human_wait_at_the_escalation() {	tokio::time::sleep(wait / 2).await;
 crates/qq-core/src/sessions/tests/approvals.rs	2435	async fn ask_mode_with_the_delegate_on_escalates_a_reviewer_denial_to_the_human() {	tokio::time::sleep(wait / 2).await;
 crates/qq-core/src/sessions/tests/approvals.rs	2437	async fn ask_mode_with_the_delegate_on_escalates_a_reviewer_denial_to_the_human() {	tokio::time::sleep(wait * 7 / 10).await;
