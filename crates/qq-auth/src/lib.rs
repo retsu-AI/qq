@@ -874,6 +874,19 @@ impl CredentialStore {
         Self::with_backends(paths, keyring, windows_protected)
     }
 
+    /// Replaces every OAuth token client with one that fails before any
+    /// network I/O and counts the attempt, for benchmarks and tests that
+    /// must never reach a real authorization server.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn offline(mut self) -> (Self, OfflineTokenCalls) {
+        let calls = OfflineTokenCalls::default();
+        self.codex_device_client = Arc::new(calls.clone());
+        self.codex_client = Arc::new(calls.clone());
+        self.xai_client = Arc::new(calls.clone());
+        (self, calls)
+    }
+
     pub(crate) fn with_backends(
         paths: CredentialPaths,
         keyring: Arc<dyn KeyringBackend>,
@@ -1898,6 +1911,81 @@ fn enforce_endpoint_binding(
         });
     }
     Ok(())
+}
+
+/// The OAuth token, refresh and device calls an [`CredentialStore::offline`]
+/// store refused.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct OfflineTokenCalls(Arc<std::sync::atomic::AtomicUsize>);
+
+impl OfflineTokenCalls {
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn record(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl codex::CodexTokenClient for OfflineTokenCalls {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "exchange",
+        })
+    }
+
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "refresh",
+        })
+    }
+}
+
+impl codex::CodexDeviceClient for OfflineTokenCalls {
+    fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::DeviceRequestFailed)
+    }
+
+    fn poll_device(
+        &self,
+        _device_auth_id: &str,
+        _user_code: &str,
+        _timeout: Duration,
+    ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::DeviceRequestFailed)
+    }
+}
+
+impl xai::XaiTokenClient for OfflineTokenCalls {
+    fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::DeviceRequestFailed)
+    }
+
+    fn poll_device(&self, _device_code: &str) -> Result<xai::DevicePoll, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::DeviceRequestFailed)
+    }
+
+    fn refresh(&self, _refresh_token: &str) -> Result<xai::TokenSet, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::RefreshRequestFailed)
+    }
 }
 
 #[cfg(test)]

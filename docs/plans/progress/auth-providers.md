@@ -9,7 +9,7 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP2 | One provider operation lock | Shipped (`92554c96`) | #345 | |
 | AP3 | Audiences defined once | Shipped (`332e8a62`) | #346 | |
 | AP4 | State and backends split out of `lib.rs` | Shipped (`b1c66be4`) | #347 | |
-| AP4b | Request-credential perf fixtures | Planned | | Baseline for AP5/AP6 |
+| AP4b | Request-credential perf fixtures | In review | `perf/eng-1066-ap4b-credential-fixtures`, #351 | Baseline recorded (30 samples, MAD ≤ 12%); `fixture_version` 6 |
 | AP5 | One request-credential provider + bench | Planned | | |
 | AP6 | Header-set request credentials | Planned | | |
 | AP7 | Table-driven built-in providers (ADR) | Planned | | |
@@ -41,3 +41,33 @@ Deviations: AP4 splits into `state.rs` and `backend.rs` rather than one
 Docs: `docs/design/providers.md` (AP3), `docs/design/architecture.md`
 qq-auth source map.
 Open: AP4b next.
+
+#### AP4b receipt — 2026-10-18
+Commits: `112fbde9`, `b29fdd47` (#351).
+Tests: `perf::tests::credential_fixtures_resolve_the_stored_bearer_without_refresh`;
+the bearer check fails with a wrong expected token (0 of 6 requests).
+Gates: `cargo xtask check` (qq, xtask) 440/440. Local smoke
+`cargo xtask perf baseline --machine-class local-smoke --samples 5
+--warmups 0`: fixture 6, 80 metrics;
+`xai_request_credential_resolution_ns` median 26.3 µs,
+`xai_request_credential_concurrent_resolution_ns` median 137.4 µs,
+`request_time_authorized_stream_ns` median 124.6 µs; both credential
+checks pass. Five samples on a loaded dev host: execution receipt, not a
+qualified baseline.
+Evidence: target/qq-perf/ap4b-smoke.json (untracked).
+Open: AP5 records its candidate against this fixture.
+
+#### AP4b baseline receipt — 2026-10-18
+Head `8180225b` (offline token clients, self-contained loopback).
+`cargo xtask perf baseline --machine-class local-dev --samples 30
+--warmups 3`: fixture 6, 80 metrics, 30 samples each.
+- `xai_request_credential_resolution_ns`: median 23.3 µs, p95 26.0 µs,
+  MAD 120 ns (0.5%).
+- `xai_request_credential_concurrent_resolution_ns`: median 82.7 µs,
+  p95 146.5 µs, MAD 5.1 µs (6.1%).
+- `request_time_authorized_stream_ns`: median 52.2 µs, p95 93.6 µs,
+  MAD 6.4 µs (12.3%).
+All three are under the budget file's 50% MAD limit. Both credential
+checks pass: 33/33 requests carried the stored bearer, 0 token-client
+calls. This is the AP5/AP6 baseline; dev host, not a dedicated machine.
+Evidence: target/qq-perf/ap4b-30-run2.json (untracked).
