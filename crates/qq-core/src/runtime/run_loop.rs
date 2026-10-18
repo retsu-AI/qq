@@ -3674,6 +3674,7 @@ impl RunState {
                                     run.tool_specs = catalog.specs_with_pins(base_specs, &run.pins, static_filter.as_ref().expect("pins require tools"));
                                     run.tool_schema = catalog.schema_measurement(&run.tool_specs);
                                 }
+                                drop(tool_span);
                                 yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, });
                                 continue;
                             }
@@ -3691,6 +3692,7 @@ impl RunState {
                                     if steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > run.handled_interrupt) {
                                         tool_scope.interrupted = true;
                                         results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                        drop(tool_span);
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                             id:call.id, result:INTERRUPTED_TOOL_RESULT.to_owned(), is_error:true,
                                             file_states:Vec::new(), display:None, spill:None,
@@ -3759,6 +3761,7 @@ impl RunState {
                             run.stall.settled(!result.is_error);
                             run.observe_tool(&call, &RetainedResult::retain(&result, &call.name, call.id), network_policy, catalog.lookup(&call.name));
                             results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
+                            drop(tool_span);
                             yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                 id:call.id, result:result.model_text, is_error:result.is_error,
                                 file_states:Vec::new(), display:result.ui_payload, spill:None,

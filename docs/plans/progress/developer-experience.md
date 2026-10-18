@@ -92,3 +92,11 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - At `a60224f0`, current-tip CI is green and all17 prior Codex threads are resolved. Two further findings require restoring root qq `s` optimization and honoring top-level release optimization in artifact validation.
 - Restored qq and paired xtask `s` profiles; no unqualified `z` treatment remains. Updated validation to use the identical package→release→3 fallback as the build. Added four-case workflow expression regression: top-level `s` and `2` fail before fix; all5 fixture tests pass after.
 - Minimal artifact at prior a60224f0 is42883152 bytes, above unchanged41000000 cap; this is not a passing size receipt for the restored profile. Full performance/size and fresh current-tip Codex thumbs-up remain required. Final gate pending.
+
+
+## AF5 paused/context terminal and special-tool lifetime review
+
+- `af394f8d` CI is green. All19 earlier threads explicitly resolved; Codex adds performance acceptance plus two span-lifetime findings. Performance acceptance remains open, not dismissed or waived.
+- Public adapter now releases its internal stream before every terminal result, including context rejection and paused→failed conversion. Added five-path drop-guard regression (success, failure, pause, budget, context refusal); passes without dropping the retained public stream. Selector/goal tool handles release before completion yields, including interrupted goal completion. Focused selector/goal tests3/3 pass.
+- First full gate refused shifted legacy sleep keys after adding regression; adjusted only the two exact lib.rs line numbers (+71), no new sleeps or ceiling change. Full final gate reruns next.
+- Interrupted release-build call has no durable result and was not retried; existing binary remains prior42883152-byte artifact. Read-only performance investigation confirms hosted turn job is diagnostic; existing full H0 workflow is hardcoded to another branch/baseline and needs a bounded generalized immutable-SHA dispatch before current-tip qualification. No safe five-crate subtraction established.
