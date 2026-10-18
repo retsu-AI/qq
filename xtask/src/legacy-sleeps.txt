@@ -32,8 +32,8 @@ crates/qq-core/src/sessions/tests/contract.rs	103	async fn the_contract_survives
 crates/qq-core/src/sessions/tests/deadlines.rs	267	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/deadlines.rs	435	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;
 crates/qq-core/src/sessions/tests/nonblocking.rs	183	async fn children_started(delegation: &Delegation, count: usize) {	tokio::time::sleep(Duration::from_millis(5)).await;
-crates/qq-core/src/sessions/tests/nonblocking.rs	1853	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(5)).await;
-crates/qq-core/src/sessions/tests/nonblocking.rs	2674	fn cancel_first(children: &[String]) -> String {	tokio::time::sleep(Duration::from_millis(300)).await;
+crates/qq-core/src/sessions/tests/nonblocking.rs	1873	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(5)).await;
+crates/qq-core/src/sessions/tests/nonblocking.rs	2694	fn cancel_first(children: &[String]) -> String {	tokio::time::sleep(Duration::from_millis(300)).await;
 crates/qq-core/src/sessions/tests/settlement.rs	1301	async fn saturated_cancellation_read_and_start_wait_without_failing_the_runtime() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/tools.rs	158	pub(crate) async fn assert_panicked_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 crates/qq-core/src/tools.rs	4414	async fn assert_process_exits(pid: u32) {	tokio::time::sleep(std::time::Duration::from_millis(25)).await;

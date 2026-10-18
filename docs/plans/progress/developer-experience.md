@@ -115,3 +115,9 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Async two-process run completed all tests1205.0s plus fmt/lint/Clippy/doctests/minimal checks, but correctly refused its report because script/docs/workflow changed during execution. This is not a final gate pass. Commit stable snapshot then rerun without edits before push. Latest smoke9/9, fixture7/7 and focused actionlint pass.
 
 - Stable gate at3e565e67 failed a retried-pass side timeout fixture: finite5s real-time clock keeper exited before native read entry under load, advancing paused time prematurely. Replaced finite keeper with explicit lifetime and independent10s entry watchdog; targeted case passes1.38s. Only two shifted legacy line keys changed(+11), ceiling73 unchanged. Stable full gate rerun pending; no push yet.
+
+
+## AF5 current-tip clean review and CI deadline repair
+
+- Stable8bdd246c full gate passes1078.0s (2785/2785, minimal211/211), pushed; zero unresolved threads. Codex receipt6247771317 reviews exact8bdd246c: no major issues. Actual thumbs-up not observed. HostedH0 run39112300274 remains running; Windows/WASM pass.
+- PR CI failed inherited answer-wait deadline test:1500ms budget elapsed during setup before wait receipt under runner load. Changed fixture to paused clock with explicit wait-entry signal and independent10s watchdog, then1501ms advance; resume real time for persistence/cleanup so fake clock cannot outrun blocking I/O. First paused cleanup attempt timed out, final focused test passes0.37s. Same assertions, budget and ceiling retained; two legacy keys shifted+20 only. Full final gate pending.
