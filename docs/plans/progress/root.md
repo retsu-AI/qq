@@ -41,8 +41,8 @@ may append a **request** row; only root changes a request's status.
 | 0014 | Typed final output contract | speed-first HC3 | Accepted (merged in #33) |
 | 0015 | Remote client authentication: pairing-code enrollment, per-client credentials | multi-surface S2 | Proposed: `docs/adr/0015-pairing-code-client-enrollment.md` |
 | 0016 | Remote exposure: loopback default, TLS required off loopback, `tailscale serve` front | multi-surface S4 | Reserved |
-| 0017 | Client UI stack: Rust/WASM, framework chosen by the W1 spike | multi-surface W1/U1 | Reserved |
-| 0018 | `apps/` as a separate Cargo workspace | multi-surface U1 | Reserved |
+| 0017 | Client UI stack: Rust view core in `qq-client` plus one React + TypeScript UI for every graphical surface | desktop C2/C3/A0 (ENG-1073); was multi-surface W1/U1 | Proposed 2026-10-18: `docs/adr/0017-client-ui-stack.md` |
+| 0018 | `apps/` as a separate Cargo and pnpm workspace, integrated on `feat/desktop` | desktop A0 (ENG-1073); was multi-surface U1 | Proposed 2026-10-18: `docs/adr/0018-apps-workspace-and-integration-branch.md` |
 | 0019 | Spill handles as durable session state; masked inline, exact on explicit read | tool-layer T4 | Accepted (merged in #36) |
 | 0020 | Shell `Forbidden` as a policy decision with a CST classifier and self-tested rules | tool-layer T6 | Accepted (merged in #40) |
 | 0021 | `Interactive` and `Network` effect classes | tool-layer T8/T9 | Accepted (`Interactive` merged in #49; `Network` amended in T9 PR) |
@@ -85,6 +85,8 @@ may append a **request** row; only root changes a request's status.
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Proposed ADR implemented in #304; no longer merely reserved; formal status remains Proposed in the decision record |
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 | 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
+| 0064 | Managed git worktrees as project workspaces; one writer per workspace, parallel writers across workspaces | desktop K4 (ENG-1073) | Proposed 2026-10-18: `docs/adr/0064-managed-worktree-workspaces.md`; 0063 is held by open PR #329 |
+| 0065 | Durable tasks and a coordinator profile with orchestration tools and no write tools | desktop K8 (ENG-1073) | Reserved 2026-10-18 |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current

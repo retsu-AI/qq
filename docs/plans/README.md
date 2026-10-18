@@ -43,7 +43,8 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [speed first](speed-first.md) | Residual backend performance gates, H22 deferrals and gated H10–H12; shipped backend design is in architecture |
 | [TUI](tui-redesign.md) | L4 split transcripts, U8 chrome |
 | [Jev](jev.md) | Remaining JV3–JV13 precision, hold lifecycle, receipts, UX and qualification |
-| [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W/S/U/D/M work |
+| [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W3 and S2–S6 (U/D/M phases moved to the desktop plan) |
+| [desktop](desktop.md) | Desktop app, projects, managed worktrees, parallel tasks and coordinator, then web and mobile surfaces; engine slices on `main`, app slices on `feat/desktop` |
 | [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
 | [v0.1.7 publication](release-0.1.7.md) | Remaining tag/assets/checksum/install/Homebrew verification receipt; bump and guide pins shipped |
 | [LSP diagnostics](lsp-diagnostics.md) | Unscheduled proposal; no active delivery inferred |
