@@ -1314,7 +1314,11 @@ impl App {
             return true;
         }
         self.terminal_width == 0
-            || crate::view::rail_visible(self.terminal_width, self.layout, self.sessions.len())
+            || crate::view::rail_visible(
+                self.terminal_width,
+                self.layout,
+                self.sessions.roots().len(),
+            )
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {

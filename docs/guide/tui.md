@@ -27,10 +27,13 @@ below works the same either way.
 - **Top row**: workspace and session breadcrumb; on the right the model,
   `as <profile>` when not default, the approval mode when not `auto`,
   context used, cost, and `connecting` / `offline` when relevant.
-- **Sidebar** (100 columns and wider; `Ctrl-\` toggles): sessions grouped by
-  what you should do — NEEDS YOU, WORKING, IDLE, DONE — with unread counts.
-  Below 100 columns a one-line agent strip above the composer carries the
-  same counts.
+- **Sidebar** (90 columns and wider; `Ctrl-\` toggles): your sessions
+  grouped by what you should do — NEEDS YOU, WORKING, RECENT — with unread
+  counts. A session's sub-agents (*agents*) roll up into its row as `↳N`;
+  an agent appears on its own only when it waits on you, or under the
+  session you are focused on (up to six, then `+N more  /agents`). Below 90
+  columns a one-line strip above the composer carries the same counts. One
+  session and its agents get neither.
 - **Transcript**: your prompts, the model's text, and one row per tool call
   with live elapsed time. `Ctrl-Up` / `Ctrl-Down` select a row; `Enter`
   expands it (a read shows the result head, an edit its diff, a command its

@@ -1,5 +1,5 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
- REPLACE GOAL review specification                                                          │ IDLE  3
+ REPLACE GOAL review specification                                                          │ RECENT  3
 Replace this goal? y confirms · n edits · PgUp/PgDn review · Esc cancels                    │ ○ Session 0
 Replaces: Finish the billing migration                                                      │ ○ Session 1
                                                                                             │ ○ Session 2

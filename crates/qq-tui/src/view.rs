@@ -218,7 +218,13 @@ impl FrameRenderer {
         let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
         let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
-        let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
+        let layout = compute_layout(
+            width,
+            height,
+            chrome_rows,
+            app.layout,
+            app.sessions.roots().len(),
+        );
         let body_height = layout.body.height;
         let mode = app.mode();
         // With the inspector on screen, expanded tool bodies and the

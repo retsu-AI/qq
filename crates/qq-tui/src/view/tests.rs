@@ -5,7 +5,7 @@ use qq_protocol::{
     WorkspaceSnapshot,
 };
 
-use qq_client::state::{Group, ToolCallTiming};
+use qq_client::state::ToolCallTiming;
 
 use super::*;
 use crate::{
@@ -2703,7 +2703,9 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
             SessionEvent::SessionCreated {
                 session: Box::new(SessionSummary {
                     model_is_fallback: false,
-                    parent_id: Some(parent),
+                    // A second session, not an agent: agents alone never
+                    // bring up the rail.
+                    parent_id: None,
                     title: "Survey callers".to_owned(),
                     status: SessionStatus::Running,
                     active_run_id: Some(run_id),
@@ -2754,7 +2756,8 @@ fn sidebar_appears_at_wide_widths_and_shows_live_status_for_cold_sessions() {
     assert!(wide.contains("WORKING  1"), "{wide}");
     // The narrow frame shows the agent strip instead so the child is not
     // invisible below the auto width.
-    assert!(narrow.contains("2 agents"), "{narrow}");
+    assert!(narrow.contains("2 sessions"), "{narrow}");
+    let _ = parent;
     assert!(wide.contains("Survey callers"));
     assert!(wide.contains("Found twelve cal"), "{wide}");
     // With the sidebar glued on, every body row is exactly the terminal
@@ -4427,21 +4430,21 @@ fn app_with_child_awaiting_approval() -> (App, SessionId, SessionId, RunId, Tool
 }
 
 #[test]
-fn the_agent_strip_names_a_sibling_needing_approval_below_the_sidebar_width() {
+fn a_lone_session_names_its_waiting_agent_on_the_rule_without_a_strip() {
     let (mut app, parent, _, _, _) = app_with_child_awaiting_approval();
     assert_eq!(app.focused(), Some(parent));
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 90, 24));
-    let strip = rows
-        .iter()
-        .find(|row| row.contains("2 agents"))
-        .unwrap_or_else(|| panic!("agent strip in {rows:#?}"));
-    assert!(strip.contains("◇ 1"), "{strip}");
-    assert!(strip.contains("Ctrl-G"), "{strip}");
-    // The rule offers the in-place answer chords.
+    // One session with one agent: there is no list to summarize.
+    assert!(
+        !rows.iter().any(|row| row.contains(" sessions  ")),
+        "{rows:#?}"
+    );
+    // The rule names the waiting agent and offers the in-place answer chords.
     let rule = rows
         .iter()
         .find(|row| row.contains("needs approval"))
         .unwrap_or_else(|| panic!("rule in {rows:#?}"));
+    assert!(rule.contains("Ctrl-G"), "{rule}");
     assert!(rule.contains("Alt-A/Alt-D answer"), "{rule}");
 }
 
@@ -4579,20 +4582,19 @@ fn the_sidebar_groups_sessions_by_what_the_user_should_do() {
         .collect();
     let text = sidebar.join("\n");
     let needs = text.find("NEEDS YOU").expect("needs-you group");
-    let idle = text
-        .find("IDLE")
-        .expect("idle group for the focused parent");
-    assert!(needs < idle, "needs-you first: {text}");
-    // The awaiting child and the unread finish both need the user.
+    // The focused parent is idle, but its agent waits on an approval, so
+    // the session lists under NEEDS YOU with the agent under it.
     assert!(text.contains("NEEDS YOU  2"), "{text}");
+    assert!(!text.contains("IDLE") && !text.contains("DONE"), "{text}");
     assert!(text.contains("Deploy helper"), "{text}");
     assert!(text.contains("Refactor"), "{text}");
     assert!(text.contains("1 new"), "unread count: {text}");
-    // Focusing the finished session clears its unread state and moves it to DONE.
+    let _ = needs;
+    // Focusing the finished session clears its unread state and moves it to RECENT.
     app.focus_session(done_id);
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 160, 30));
     let text = rows.join("\n");
-    assert!(text.contains("DONE  1"), "{text}");
+    assert!(text.contains("RECENT  1"), "{text}");
     assert!(text.contains("NEEDS YOU  1"), "{text}");
     let _ = (parent, child_id);
 }
@@ -4712,41 +4714,40 @@ fn rail_rows(app: &mut App, width: usize, height: usize) -> Vec<String> {
 }
 
 #[test]
-fn the_rail_lists_groups_needs_you_working_idle_done_from_one_pass() {
+fn the_rail_lists_sessions_with_agent_state_rolled_up_from_one_pass() {
     let (mut app, [refactor, child, survey, parent, migrate]) = app_with_every_rail_group();
-    let (entries, counts) = rail_entries(&app);
+    let rollup = rollup(&app);
     assert_eq!(
-        entries.iter().map(|entry| entry.group).collect::<Vec<_>>(),
+        rollup
+            .sessions
+            .iter()
+            .map(|entry| (entry.id, entry.group))
+            .collect::<Vec<_>>(),
         [
-            Group::NeedsYou,
-            Group::NeedsYou,
-            Group::Working,
-            Group::Idle,
-            Group::Done
+            (refactor, RailGroup::NeedsYou),
+            // Idle itself, but its agent waits on an approval.
+            (parent, RailGroup::NeedsYou),
+            (survey, RailGroup::Working),
+            (migrate, RailGroup::Recent),
         ],
-        "{entries:?}"
+        "agents are not listed as sessions: {rollup:?}"
     );
-    assert_eq!(counts, [2, 1, 1, 1]);
-    // Within NEEDS YOU the root `Refactor` precedes the child of the other
-    // root: tree order, roots newest first.
+    assert_eq!(rollup.counts, [2, 1, 1]);
+    assert_eq!(rollup.waiting, [(parent, child)]);
     assert_eq!(
-        entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
-        [refactor, child, survey, parent, migrate]
+        rollup.sessions[0].unread, 1,
+        "the unseen finish carries a badge"
     );
-    assert_eq!(entries[0].unread, 1, "the unseen finish carries a badge");
-    assert_eq!(entries[0].cost, Some(120_000_000));
-    assert!(
-        entries[1].live && entries[2].live,
-        "approval and streaming rows"
-    );
-    assert!(
-        !entries[3].live && entries[3].cost.is_none(),
-        "the idle root is quiet"
+    assert_eq!(rollup.sessions[0].cost, Some(120_000_000));
+    assert_eq!(
+        (rollup.sessions[1].agents, rollup.sessions[1].agents_working),
+        (1, 1)
     );
     assert_eq!(
-        entries[3].unread, 0,
+        rollup.sessions[1].unread, 0,
         "the focused session has seen everything"
     );
+    assert!(rollup.sessions[2].live, "streaming row");
 
     let rail = rail_rows(&mut app, 120, 40).join("\n");
     let position = |label: &str| {
@@ -4754,40 +4755,158 @@ fn the_rail_lists_groups_needs_you_working_idle_done_from_one_pass() {
             .unwrap_or_else(|| panic!("{label} in {rail}"))
     };
     assert!(position("NEEDS YOU  2") < position("WORKING  1"));
-    assert!(position("WORKING  1") < position("IDLE  1"));
-    assert!(position("IDLE  1") < position("DONE  1"));
-    assert!(position("Refactor") < position("Deploy helper"));
+    assert!(position("WORKING  1") < position("RECENT  1"));
+    assert!(position("Refactor") < position("Session"));
+    // The waiting agent sits under its own session, not under Refactor.
+    assert!(
+        position("Session") < position("↳ ◇ Deploy helper"),
+        "{rail}"
+    );
     assert!(position("Deploy helper") < position("Survey callers"));
-    assert!(position("Survey callers") < position("Session"));
-    assert!(position("Migrate") > position("DONE  1"));
+    assert!(position("Migrate") > position("RECENT  1"));
+}
+
+/// A session whose fan-out is wider than the cap: `agents` idle agents under
+/// the focused root, plus one other root so the rail shows.
+fn app_with_fanout(agents: u8) -> (App, SessionId, Vec<SessionId>) {
+    app_with_fanout_where(agents, |_, _| {})
+}
+
+fn app_with_fanout_where(
+    agents: u8,
+    edit: impl Fn(usize, &mut SessionSummary),
+) -> (App, SessionId, Vec<SessionId>) {
+    let root = SessionId::from_bytes([0x10; 16]);
+    let other = SessionId::from_bytes([0x11; 16]);
+    let mut app = App::new(TuiOptions::default());
+    let root_summary = SessionSummary {
+        title: "Fan out".to_owned(),
+        updated_at_ms: 2,
+        ..fixtures::session_summary(root)
+    };
+    let mut summaries = vec![
+        root_summary.clone(),
+        SessionSummary {
+            title: "Other".to_owned(),
+            updated_at_ms: 1,
+            ..fixtures::session_summary(other)
+        },
+    ];
+    let ids: Vec<SessionId> = (0..agents)
+        .map(|index| SessionId::from_bytes([0x20 + index; 16]))
+        .collect();
+    for (index, id) in ids.iter().enumerate() {
+        let mut summary = SessionSummary {
+            parent_id: Some(root),
+            title: format!("agent {index}"),
+            updated_at_ms: 10 + index as u64,
+            ..fixtures::session_summary(*id)
+        };
+        edit(index, &mut summary);
+        summaries.push(summary);
+    }
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: summaries,
+        focused: Some(fixtures::session_snapshot(root_summary)),
+        ..fixtures::workspace_snapshot()
+    }));
+    app.focus_session(root);
+    app.layout.rail = PanePref::Shown;
+    (app, root, ids)
 }
 
 #[test]
-fn the_strip_and_the_rail_count_the_same_entries() {
-    let (mut app, ids) = app_with_every_rail_group();
+fn the_focused_session_lists_its_agents_up_to_the_cap() {
+    let (mut app, _, ids) = app_with_fanout(10);
+    let rail = rail_rows(&mut app, 120, 40);
+    let agent_rows = rail.iter().filter(|row| row.contains("↳ ○ agent")).count();
+    assert_eq!(agent_rows, FOCUSED_AGENT_ROWS, "{rail:#?}");
+    assert!(
+        rail.iter()
+            .any(|row| row.contains("+4 more") && row.contains("/agents")),
+        "{rail:#?}"
+    );
+    assert!(
+        rail.iter()
+            .any(|row| row.contains("Fan out") && row.contains("↳10"))
+    );
+    // Focusing an agent past the cap keeps it on the rail, highlighted.
+    app.focus_session(ids[9]);
+    let rail = rail_rows(&mut app, 120, 40);
+    assert!(rail.iter().any(|row| row.contains("agent 9")), "{rail:#?}");
+    // An unfocused session's quiet agents are never listed.
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let rail = rail_rows(&mut app, 120, 40);
+    assert!(!rail.iter().any(|row| row.contains("agent ")), "{rail:#?}");
+    assert!(rail.iter().any(|row| row.contains("↳10")), "{rail:#?}");
+}
+
+#[test]
+fn audit_agents_are_never_listed_or_counted() {
+    let (mut app, root, _) = app_with_fanout_where(2, |index, summary| {
+        if index == 1 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+            summary.title = "audit final answer".to_owned();
+        }
+    });
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.agents, 1);
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    assert!(!rail.contains("audit"), "{rail}");
+    assert!(rail.contains("agent 0"), "{rail}");
+}
+
+#[test]
+fn a_session_with_only_agents_gets_no_rail() {
+    let (mut app, root, _) = app_with_fanout(3);
+    app.layout.rail = PanePref::Auto;
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.sessions.remove(&other);
+    app.focus_session(root);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.contains("RECENT") || row.contains(" sessions  ")),
+        "one session and its agents need neither rail nor strip: {rows:#?}"
+    );
+}
+
+#[test]
+fn the_strip_and_the_rail_count_the_same_sessions() {
+    let (mut app, _) = app_with_every_rail_group();
     app.layout.rail = PanePref::Hidden;
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
     let strip = rows
         .iter()
-        .find(|row| row.contains("agents"))
+        .find(|row| row.contains("4 sessions"))
         .unwrap_or_else(|| panic!("strip in {rows:#?}"));
-    let (entries, counts) = rail_entries(&app);
-    assert_eq!(entries.len(), ids.len());
+    let rollup = rollup(&app);
+    assert_eq!(rollup.sessions.len(), 4, "the agent is not a session");
+    assert!(strip.contains("4 sessions"), "{strip}");
     assert!(
-        strip.contains(&format!("{} agents", entries.len())),
+        strip.contains(&format!("◐ {}", rollup.counts[RailGroup::Working as usize])),
         "{strip}"
     );
     assert!(
-        strip.contains(&format!("◐ {}", counts[Group::Working as usize])),
+        strip.contains(&format!(
+            "◇ {}",
+            rollup.counts[RailGroup::NeedsYou as usize]
+        )),
         "{strip}"
     );
-    assert!(
-        strip.contains(&format!("◇ {}", counts[Group::NeedsYou as usize])),
-        "{strip}"
-    );
-    let unread = entries.iter().filter(|entry| entry.unread > 0).count();
+    let unread = rollup
+        .sessions
+        .iter()
+        .filter(|entry| entry.unread > 0)
+        .count();
     assert_eq!(unread, 2, "Refactor's finish and Survey's streamed message");
-    assert!(strip.contains(&format!("● {unread} unread")), "{strip}");
+    assert!(strip.contains(&format!("● {unread} new")), "{strip}");
 }
 
 #[test]
@@ -4830,7 +4949,7 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
         .position(|row| row.contains("Refactor"))
         .unwrap();
     assert!(
-        regular[refactor + 1].contains("Deploy helper"),
+        regular[refactor + 1].contains("○ Session"),
         "Regular: a finished session takes one row: {regular:#?}"
     );
     let survey = regular
@@ -4867,8 +4986,8 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
         .position(|row| row.contains("○ Session"))
         .unwrap();
     assert!(
-        wide[focused + 1].trim() == "│",
-        "a session with no tail and no spend still takes one row: {wide:#?}"
+        wide[focused + 1].contains("↳ ◇ Deploy helper"),
+        "a session with no tail and no spend still takes one row; its waiting agent follows: {wide:#?}"
     );
     assert_eq!(RailDensity::of(layout::Tier::Compact), RailDensity::Compact);
     assert_eq!(RailDensity::of(layout::Tier::Regular), RailDensity::Compact);
@@ -4904,7 +5023,10 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
         !rows.iter().any(|row| row.contains("NEEDS YOU")),
         "{rows:#?}"
     );
-    assert!(rows.iter().any(|row| row.contains("5 agents")), "{rows:#?}");
+    assert!(
+        rows.iter().any(|row| row.contains("4 sessions")),
+        "{rows:#?}"
+    );
 }
 
 #[test]

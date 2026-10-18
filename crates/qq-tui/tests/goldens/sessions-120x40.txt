@@ -1,22 +1,22 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
                                                                                             │ NEEDS YOU  2
  ▌ YOU                                                                                      │ ● Refactor          1 new
- ▌ plan the release                                                                         │   ◇ Deploy helper
-                                                                                            │      ◇ approve run
-   QQ                                                                                       │
-   Drafted the checklist.                                                                   │ WORKING  2
-   ✓ 0.0s · ttft 0.0s                                                                       │ ◐ Write tests       1 new
-                                                                                            │    compacting context
-  related sessions                                                                          │ ◐ Survey callers    1 new
-  ↳ ◇ Deploy helper                                                                         │    Found twelve call ...
+ ▌ plan the release                                                                         │ ○ Session 0         ↳1 ◐1
+                                                                                            │ ↳ ◇ Deploy helper
+   QQ                                                                                       │     ◇ approve run
+   Drafted the checklist.                                                                   │
+   ✓ 0.0s · ttft 0.0s                                                                       │ WORKING  2
+                                                                                            │ ◐ Write tests       1 new
+  related sessions                                                                          │    compacting context
+  ↳ ◇ Deploy helper                                                                         │ ◐ Survey callers    1 new
+                                                                                            │    Found twelve call ...
                                                                                             │
-                                                                                            │ IDLE  3
+                                                                                            │ RECENT  3
+                                                                                            │ ● Migrate
                                                                                             │ ○ Scratch
                                                                                             │ ○ Notes
-                                                                                            │ ○ Session 0
                                                                                             │
-                                                                                            │ DONE  1
-                                                                                            │ ● Migrate
+                                                                                            │
                                                                                             │
                                                                                             │
                                                                                             │

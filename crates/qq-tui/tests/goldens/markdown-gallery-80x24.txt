@@ -18,7 +18,7 @@
 
    Tail paragraph.
    ✓ 0.0s · ttft 0.0s
- 3 agents
+ 3 sessions
 ──────────────────────────────────────────────── ? help  ^K commands  ^O detail
  › Ask QQ...
 

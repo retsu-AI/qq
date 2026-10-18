@@ -6,8 +6,8 @@ bench reports live under `target/qq-perf/tui-focus-<slice>-<date>/`
 
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
-| P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In progress | `docs/eng-1068-tui-focus-plan` | Stack base |
-| F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | Planned | | On P0 |
+| P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In review | `docs/eng-1068-tui-focus-plan`, [#354](https://github.com/retsu-AI/qq/pull/354) | Stack base |
+| F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | In review | `feat/eng-1069-tui-session-rail` | On P0 (#354) |
 | F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | Planned | | On F1–F2 |
 | F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | Planned | | On F3 |
 | F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | Planned | | On F4–F5 |
@@ -23,3 +23,24 @@ rail; stacked PRs from one worktree (`.worktrees/tui-focus`). Added from the
 same request: QQ-owned mouse selection scoped to the transcript pane with
 OSC 52 copy (F6), because capture currently makes a native drag select the
 whole terminal row.
+
+### 2026-10-18 — F1–F2 receipt
+
+- `sidebar::rollup` replaces `rail_entries`: one walk of `thread_order`
+  yields sessions only, agents rolled up (state rises, `↳N` and working
+  count, inclusive cost), waiting agents, and the focused tree's range;
+  audit agents and their subtrees skipped. Groups NEEDS YOU / WORKING /
+  RECENT. `plan_rail` lists waiting agents under their own session and the
+  focused session's agents up to `FOCUSED_AGENT_ROWS` (6) + `+N more`.
+- Layout `Auto` and event visibility count `roots()`; the strip reads
+  `N sessions … ● N new`.
+- Tests: 4 new (`the_rail_lists_sessions_with_agent_state_rolled_up_from_one_pass`,
+  `the_focused_session_lists_its_agents_up_to_the_cap`,
+  `audit_agents_are_never_listed_or_counted`,
+  `a_session_with_only_agents_gets_no_rail`); 7 updated to the new rule.
+  Goldens: 60/60 moved (strip/label wording; `sessions-*` rail regrouped,
+  `Deploy helper` now under `Session 0`).
+- Bench (`target/qq-perf/tui-focus-F1-2026-10-18/{baseline,after}.txt`):
+  steady 21.7 → 22.4 µs; with_sidebar 33.5 → 34.1; streaming_focused
+  34.7 → 35.5; run_on_32kb 458.4 → 438.5; children_20 55.5 → 52.5;
+  sessions_200 28.8 → 26.8; golden_path 40.1 → 39.5; resize 30.8 → 30.6.

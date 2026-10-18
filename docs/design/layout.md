@@ -26,7 +26,7 @@ each pane is described in [`transcript.md`](./transcript.md) and
 
 | Tier | Columns | Panes |
 | --- | --- | --- |
-| Compact | < 90 | One transcript column. When more than one session exists, a one-row agent strip above the composer rule. Composer grows to at most 4 rows. |
+| Compact | < 90 | One transcript column. When more than one session exists (agents do not count), a one-row strip above the composer rule. Composer grows to at most 4 rows. |
 | Regular | 90–159 | Transcript plus a sessions rail on the right (a quarter of the width, 20–28 columns) when more than one session exists or the rail is pinned. |
 | Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
 | Ultra | ≥ 240 | Wide; the tier is distinct, but the layout still shows one transcript pane. |
@@ -152,32 +152,51 @@ the focused pane and does not scroll.
 
 ## Sessions rail
 
-The rail (`view/sidebar.rs`) lists every session grouped by what the user
-should do about it: **NEEDS YOU** (an approval waiting, a failure, or a
-finish not yet looked at), then **WORKING**, **IDLE**, **DONE**. Within a
-group sessions keep tree order (roots newest first, each followed by its
-children oldest first, indented two columns per level). A group header shows
-its label and count; one blank rail row separates groups; the focused row is
-padded to the rail width on the `selection` background.
+The rail (`view/sidebar.rs`) lists **sessions** (root conversations), not
+every session in the tree. A session's **agents** (sub-agent sessions under
+it) roll up into its row. The one pass `rollup` walks `thread_order` once
+and yields, per session, the group it lists under, its unread count, its live
+flag, its spend including its agents (`accounting.inclusive`), its agent
+count and working-agent count, plus every agent waiting on an approval.
+Audit agents (`SessionPurpose::Audit`) and anything under them are skipped
+everywhere.
 
-The rail and the one-row agent strip are built from one pass,
-`rail_entries`, which walks the sessions once and yields, per session, its
-group, unread count, whether it has a live status row, and its own reported
-spend. The rail plans rows from that list and paints only the rows inside its
-scrolled window (centered on the focused session); the strip counts from the
-same list. Neither surface re-derives grouping, so `8 agents ◐ 2 ◇ 2` on the
-strip and the headers on the rail always agree.
+Groups follow what the user should do: **NEEDS YOU** (the session, or any of
+its agents, waits on an approval; or the session failed or finished unseen),
+then **WORKING** (the session or an agent is running or queued), then
+**RECENT** (everything settled). RECENT merges never-run and done sessions;
+the row glyph tells them apart. Within a group sessions keep tree order
+(newest first). A group header shows its label and count; one blank rail row
+separates groups; the focused row is padded to the rail width on the
+`selection` background.
 
-Each row starts with a state glyph in the state's color and the session
-title, truncated to leave room for the badge: `◇` `warning` while an approval
-waits, `✕` `error` after a failure, `●` `accent` for a finish not yet looked
-at, the shared tool spinner in `info` while running, `○` `warning` while
-queued, and `○`, `●`, or `◌` `muted` for idle, seen-complete, and stopped
-early. When a session has unread messages and is not focused, an `N new`
-badge in `accent` sits right-aligned on its row (`N` alone when the rail is
-narrower than 26 columns). The accent is the only attention color on the
-rail besides the group headers; `warning` and `error` appear only for a real
-pending or failed state.
+Agents get rows in two cases only:
+
+- An agent waiting on an approval gets a `↳` row and a status row under its
+  own session, whichever group that session is in, so a child is never drawn
+  under an unrelated session.
+- The focused session lists its agents under it, at most
+  `FOCUSED_AGENT_ROWS` (6); the rest collapse to `+N more  /agents`. Waiting
+  agents and a focused agent always get a row, so focusing an agent past the
+  cap keeps it on the rail.
+
+The rail and the one-row strip both consume `rollup`. The rail plans rows
+from it and paints only the rows inside its scrolled window (centered on the
+focused row); the strip counts from the same pass, so `7 sessions ◐ 2 ◇ 2`
+on the strip and the headers on the rail always agree. The layout's `Auto`
+rail and strip count sessions (`SessionStore::roots`), so one conversation
+and its agents get neither.
+
+Each session row starts with a state glyph in the state's color and the
+title, truncated to leave room for right-aligned badges: `↳N` agents (with a
+spinner and the working count while any run) in `muted`/`info`, then an
+`N new` badge in `accent` when the session has unread messages and is not
+focused (`N` alone when the rail is narrower than 26 columns). Glyphs: `◇`
+`warning` while an approval waits, `✕` `error` after a failure, `●` `accent`
+for a finish not yet looked at, the shared tool spinner in `info` while
+running, `○` `warning` while queued, and `○`, `●`, or `◌` `muted` for
+never-run, seen-complete, and stopped early. `warning` and `error` appear
+only for a real pending or failed state.
 
 Density follows the tier the rail's width follows; height never changes it:
 
@@ -187,10 +206,9 @@ Density follows the tier the rail's width follows; height never changes it:
 | Regular | 20–28 columns | The same one row, plus the live status row (approval, tool verb, streamed tail, or activity; `compacting context` outranks the tail, see transcript.md § Run Activity) while the session has one |
 | Wide, Ultra | 28 columns | The same, plus a second muted row for any session with a live status or a reported spend: the tail on the left, `$0.12` right-aligned |
 
-A session with nothing to say (idle, no spend reported) takes one row at
-every density so a quiet list stays dense. The cost is the session's own
-direct spend (`SessionSummary.accounting.direct`, or the compatibility
-alias); a known zero is not shown.
+A session with nothing to say (settled, no spend reported) takes one row at
+every density so a quiet list stays dense. The cost includes the session's
+agents; a known zero is not shown.
 
 Pinning the rail (`PanePref::Shown`) shows it at any width where a
 20-column rail leaves the transcript at least 32 columns (60 columns and up);
