@@ -5013,18 +5013,29 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn foreground_goal_early_trace_failure_keeps_final_stdout_usable() {
-        struct LargeText;
+        struct LargeText {
+            release: Arc<tokio::sync::Notify>,
+        }
         impl Provider for LargeText {
             fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let release = Arc::clone(&self.release);
                 Box::pin(
-                    stream::iter([Ok(ProviderEvent::OutputTextDelta {
-                        text: "x".repeat(16384),
-                    })])
+                    stream::once(async move {
+                        release.notified().await;
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "x".repeat(16384),
+                        })
+                    })
                     .chain(stream::pending()),
                 )
             }
         }
-        let fixture = fixture(|| LargeText).await;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let provider_release = Arc::clone(&release);
+        let fixture = fixture(move || LargeText {
+            release: Arc::clone(&provider_release),
+        })
+        .await;
         let mut opts = options(&fixture.workspace);
         let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
             .await
@@ -5065,7 +5076,11 @@ mod tests {
                 &fixture.sessions,
                 opts,
                 request,
-                std::future::pending(),
+                async {
+                    // run_goal first polls interruption after subscribing.
+                    release.notify_one();
+                    std::future::pending::<()>().await;
+                },
                 &mut stdout,
                 &mut stderr,
             ),
