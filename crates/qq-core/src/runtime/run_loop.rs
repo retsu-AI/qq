@@ -295,16 +295,9 @@ impl plan::CompiledAgentPlan {
             )
         });
         let plan = Arc::clone(self);
-        let current_span = tracing::Span::current();
-        let run_span = if current_span.metadata().is_some_and(|metadata| {
-            metadata.target() == "qq::diagnostic" && metadata.name() == "run"
-        }) {
-            current_span
-        } else {
-            tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = next_diagnostic_run())
-        };
-        let run_parent = run_span.clone();
+        let mut run_span = None;
         let events: RuntimeStream = Box::pin(stream! {
+            let run_parent = tracing::Span::current();
 
             let _cancel_on_drop = CancelOnDrop(cancelled.clone());
             let mut state = {
@@ -452,7 +445,15 @@ impl plan::CompiledAgentPlan {
         });
         let mut events = events;
         let events: RuntimeStream = Box::pin(futures_util::stream::poll_fn(move |cx| {
-            run_span.in_scope(|| events.as_mut().poll_next(cx))
+            let span = run_span.get_or_insert_with(|| {
+                let current = tracing::Span::current();
+                if current.metadata().is_some_and(|metadata| metadata.target() == "qq::diagnostic" && metadata.name() == "run") {
+                    current
+                } else {
+                    tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = next_diagnostic_run())
+                }
+            });
+            span.in_scope(|| events.as_mut().poll_next(cx))
         }));
         match (deadline, deadline_resources) {
             (Some(deadline), Some((cancelled, tools, spawner, audit_hook))) => {

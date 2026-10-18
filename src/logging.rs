@@ -93,9 +93,11 @@ impl LogGuard {
         }
         // A global subscriber retains its sender. The worker uses an explicit
         // empty-record sentinel instead of waiting for channel disconnection.
-        self.stop.send(Vec::new()).map_err(|_| LogError::Worker)?;
+        let sent = self.stop.send(Vec::new());
+        // A disconnected receiver can mean the writer already failed. Always
+        // join so its preserved I/O error takes precedence over send failure.
         self.worker.join().map_err(|_| LogError::Worker)??;
-        Ok(())
+        sent.map_err(|_| LogError::Worker)
     }
 }
 
@@ -286,6 +288,33 @@ mod tests {
             std::fs::metadata(target).unwrap().permissions().mode() & 0o777,
             0o755
         );
+    }
+
+    #[test]
+    fn disconnected_writer_preserves_io_failure_on_shutdown() {
+        let (stop, receiver) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            drop(receiver);
+            Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "quota exhausted",
+            ))
+        });
+        while !worker.is_finished() {
+            thread::yield_now();
+        }
+        let logger = LogGuard {
+            dispatch: None,
+            stop,
+            worker,
+        };
+        match logger.finish() {
+            Err(LogError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+                assert_eq!(error.to_string(), "quota exhausted");
+            }
+            other => panic!("writer cause was lost: {other:?}"),
+        }
     }
 
     #[test]
