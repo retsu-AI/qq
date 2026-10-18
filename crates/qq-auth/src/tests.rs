@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     ffi::OsString,
-    fs,
+    fs::{self, File},
     io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
