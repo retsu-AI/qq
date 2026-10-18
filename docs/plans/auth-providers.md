@@ -12,12 +12,24 @@ plus its `qq-auth` endpoint specification and response mapping, which own
 its audience and protocol data.
 Neither should mean adding another lock file, store field, error enum, token
 client, polling loop, request-credential provider or CLI branch. AP1–AP4
-remove the per-provider storage and locking duplication in `qq-auth`
-without changing behaviour. AP5–AP7 make request-time credentials and
+(shipped) shared the OAuth HTTP and bookkeeping helpers, put operation locks
+behind one provider table, moved audiences into `qq-auth` constants and split
+the store into modules, without changing behaviour. The per-provider token
+clients, stored formats, request-credential providers and error mappings
+remain. AP5–AP7 make request-time credentials and
 built-in configuration provider-neutral, and AP8 makes the OAuth grants
 provider-neutral. New vendors land after that, as presets.
 
-## Current shape (2026-10-16, `origin/main` `3e34eea2`)
+## Shape before AP1 (2026-10-16, `origin/main` `3e34eea2`)
+
+What AP1–AP4 changed: the clock, credential-name, HTTP-client, bounded-body
+and HTTPS-URL helpers live in `qq-auth/src/oauth.rs`; one `OAuthProvider`
+table there names each provider and its lock file, and `CredentialStore`
+(`lib.rs`) takes one lock path for all of them; audiences are `qq-auth`
+constants; and the store is split into `lib.rs`, `state.rs` and `backend.rs`.
+Still as below: per-provider token clients and stored formats (AP8),
+request-credential providers and error mapping (AP5), and the provider
+request credentials (AP6).
 
 - `CredentialStore` holds per-provider token clients and refresh mutexes;
   `CredentialPaths` has a lock file per OAuth provider; `set` and `remove`

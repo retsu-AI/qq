@@ -116,7 +116,12 @@ src/
 crates/
   qq-auth/
     Cargo.toml
-    src/lib.rs
+    src/lib.rs        CredentialStore operations, OAuth operation locking, errors, secret resolution
+    src/state.rs      on-disk index/fallback formats, lock guards, hardened file operations
+    src/backend.rs    OS keyring and Windows user-protected backends
+    src/oauth.rs      OAuth provider table (names, lock file names), shared HTTP helpers
+    src/codex.rs      OpenAI Codex OAuth login, refresh, request credentials
+    src/xai.rs        xAI API-key and OAuth credentials
   qq-client/
     Cargo.toml
     src/lib.rs
