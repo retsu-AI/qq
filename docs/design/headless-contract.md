@@ -320,6 +320,83 @@ machine. It is **not** a hosted API: no tenancy, no per-caller authorization,
 no non-loopback bind without an explicit application authentication design.
 See `protocol.md`.
 
+### Foreground goal record contract
+
+Protocol35 defines two additional records for foreground goal hosting:
+`goal_run` contains `workspace_id`, owning `session_id`, immutable `goal`
+identity/revision and the authoritative settled `run` snapshot. It covers each
+direct goal prompt, model audit and completion check; helper, compaction and
+paid descendant runs remain event records. The final `goal` record contains
+`workspace_id`, the complete durable goal snapshot, invocation `status` and
+`exit_code`. Both owned and borrowing encoders use the same wire shape.
+
+A goal invocation continues while active and ends on any other state,
+including needs-user pauses. Final goal exits are achieved0, paused6,
+blocked7, budget_exhausted8, interrupted130 and harness_failure4. Only
+achievement exits0. Interruption conditionally pauses an active goal; an already
+stopped goal retains its reason, revision and natural exit. Only a pause committed
+by this interrupt selects130. Forbidden or policy-refused explicit check consent
+is a setup error2 and grants no new authority; a new goal retains its check-approval
+pause. On every stopped state, the
+adapter cancels and drains that exact goal's unsettled paid family under one
+30-second cleanup bound, including late admitted descendants. It replays the
+committed terminal prefix so settled direct-run records precede the final
+snapshot with its final counters. It leaves unrelated runs and the shared
+runtime open. The CLI retains ownership until other accepted runs settle
+naturally before closing. Closing first fences new autonomous goal admission;
+already accepted runs and their required children remain drainable.
+A fresh close-phase Ctrl-C listener can request
+ordinary shutdown, cancelling and draining the remaining accepted work while
+preserving the already-emitted selected goal result and exit status. The
+lifecycle admission guard is released before that shutdown; a settlement
+subscription precedes each idle check. Cleanup failure before final output
+reports harness failure. After final stdout is flushed, trace or runtime-close
+failures are reported on stderr and preserve its selected exit code. A final
+write is attempted at most once, including uncertain partial writes. Accepted
+goal cleanup atomically pauses only the matching active revision and preserves
+existing stopped reasons. Recoverable errors drain the accepted goal family
+before the final snapshot and replay missing settled direct-run records from
+the last emitted direct-run cursor. Replay does not reapply approvals or retry
+uncertain stdout writes. A failed optional trace is detached; final JSONL stdout
+is flushed before tracing that final record. Goal validation, candidate replacement and exact consent are checked before
+creating a new session or changing an existing session's settings. Observed
+same-goal edits advance the foreground owner's identity for later controls and
+cleanup; replaced goals remain fenced by their distinct identity. Both text and
+JSONL final stdout are flushed before optional final trace writes/flushes.
+New records do not change the
+ordinary prompt trial/event/outcome contract. `qq run --goal OBJECTIVE` hosts the runtime driver directly; bare `--goal`
+requires an existing session and resumes its specification. Separate
+`--goal-check-approval` plus the exact reviewed `--check` authorizes checks.
+The client does not resubmit prompts to implement the loop. It shares session
+preparation and unattended tool approval with ordinary headless execution.
+
+`PauseForInput` carries one exact held ask-user call. Core requires a matching
+live goal revision, an awaiting-approval ask-user call and active paid-family
+ownership; the normal goal-control transaction records NeedsUser::Approval
+and cancels the family. Foreign workspace holds are ignored by this client.
+Core's run_snapshot API fences a single run by workspace/session independently
+of transcript pagination; goal_owns_run checks the exact live goal's unsettled
+sponsorship before approvals. goal_pending_runs lists that same paid family,
+including already cancelled work that must drain. Both ownership reads reject
+stale goal identity/revision. Once terminal draining begins, replayed approval
+requests are evidence only; they are not answered against a superseded revision. No database handle enters the adapter.
+
+### `qq goal`
+
+Server goal scripting discovers the existing local authenticated server and
+uses `SessionClient` to resolve the workspace, inspect the focused session,
+and submit one revision-fenced command. It never opens the session store or
+starts a server. Only goal creation/editing loads model-less workspace defaults;
+the server validates current policy. Controls preserve the observed goal ID
+and revision, and check authorization requires the exact raw command plus an
+explicit once/for-goal scope. Conflicts are returned without automatic retry.
+
+`show` emits the existing `GoalSnapshot` JSON or `null`; mutations emit the
+existing `CommandReceipt`. Both end with a newline, with pretty formatting
+unless `--json` selects compact JSON. These are single responses, separate
+from `qq run` JSONL records. Success exits 0 (including a paused goal), runtime
+errors exit 1, and argument errors exit 2. There is no wire/schema addition.
+
 ## What The Supervisor Owns
 
 These are not gaps. They are deliberately outside QQ and should stay there.
@@ -395,3 +472,13 @@ Before adding a headless flag, record, or field, answer:
    An opt-in runtime feature such as typed-output validation needs explicit
    bounds, cancellation and budget tests, and measurements of both its
    enabled cost and the unchanged default path.
+
+If a foreground goal encounters a harness failure after accepting a goal, its
+final JSONL goal record uses `harness_failure` and exit code `4` when output is
+still writable and no final write has been attempted. A final write is never
+retried, because an output error can leave a partial record. Once the final
+stdout record is flushed, later trace or runtime-close failures are reported
+on stderr and preserve that record's exit code. The record includes the current snapshot of that same goal when
+available, otherwise its last observed snapshot. This fallback supplies context;
+it does not assert that the goal is still current or reached a terminal state.
+Clearing or replacing the goal never substitutes the replacement in this record.

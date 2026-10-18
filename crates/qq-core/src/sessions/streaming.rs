@@ -693,33 +693,79 @@ pub(super) fn record_routing_started(
     identity: RunIdentity,
     metadata: claim::RunStartMetadata<'_>,
     paid: bool,
-    tracked: bool,
     maximum_cost: Option<u64>,
+    maximum_tokens: (Option<u64>, Option<u64>),
 ) -> Result<claim::RunStart, SessionRuntimeError> {
+    let tracked = metadata.goal.is_some() || metadata.goal_spend_owner.is_some();
     let transaction = store::begin_unit(connection)?;
     if metadata.goal.is_some() || metadata.goal_spend_owner.is_some() {
-        let refreshed =
+        let (refreshed, final_slot) =
             match claim::refresh_goal_limits(&transaction, identity, &metadata, now_ms())? {
                 Ok(refreshed) => refreshed,
                 Err(refusal) => return Ok(Err(refusal)),
             };
-        if refreshed != metadata.limits {
+        if refreshed != metadata.limits
+            || final_slot
+                != matches!(
+                    metadata.admission,
+                    Some(goals::GoalAdmission::Allowed {
+                        final_slot: true,
+                        ..
+                    })
+                )
+        {
             return Ok(Err(claim::GoalStartRefusal::Reprepare {
                 limits: Box::new(refreshed),
+                final_slot,
             }));
         }
     }
-    if paid
-        && metadata.goal.is_some()
-        && let Some(limit) = metadata.limits.max_cost_usd_nanos
-    {
-        let refusal = match maximum_cost {
-            None => Some(claim::RoutingCostRefusal::Undeclared),
-            Some(cost) if cost > limit => Some(claim::RoutingCostRefusal::AboveAllowance),
-            Some(_) => None,
+    if paid && tracked {
+        let remaining = match goal_paid::remaining_goal_limits(&transaction, identity)? {
+            Ok(remaining) => remaining,
+            Err(goal_paid::PaidRequestAdmission::Cancelled) => {
+                return Ok(Err(claim::GoalStartRefusal::Cancelled));
+            }
+            Err(goal_paid::PaidRequestAdmission::Exhausted(_)) => {
+                return Ok(Err(claim::GoalStartRefusal::RoutingTokens));
+            }
+            Err(
+                goal_paid::PaidRequestAdmission::Allowed { .. }
+                | goal_paid::PaidRequestAdmission::Reprepare { .. },
+            ) => return Err(SessionRuntimeError::CONSTRAINT),
         };
-        if let Some(refusal) = refusal {
-            return Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal)));
+        for limits in [metadata.limits, remaining] {
+            let input_fits = limits
+                .max_input_tokens
+                .is_none_or(|limit| maximum_tokens.0.is_some_and(|tokens| tokens <= limit));
+            let output_fits = limits
+                .max_output_tokens
+                .is_none_or(|limit| maximum_tokens.1.is_some_and(|tokens| tokens <= limit));
+            let total_fits = limits.max_total_tokens.is_none_or(|limit| {
+                maximum_tokens
+                    .0
+                    .zip(maximum_tokens.1)
+                    .and_then(|(input, output)| input.checked_add(output))
+                    .is_some_and(|tokens| tokens <= limit)
+            });
+            if !input_fits || !output_fits || !total_fits {
+                return Ok(Err(claim::GoalStartRefusal::RoutingTokens));
+            }
+            if let Some(limit) = limits.max_cost_usd_nanos {
+                match maximum_cost {
+                    None => {
+                        return Ok(Err(claim::GoalStartRefusal::RoutingCost(
+                            claim::RoutingCostRefusal::Undeclared,
+                        )));
+                    }
+                    Some(cost) if cost > limit => {
+                        return Ok(Err(claim::GoalStartRefusal::RoutingCost(
+                            claim::RoutingCostRefusal::AboveAllowance,
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
         }
     }
     let usage = if paid {

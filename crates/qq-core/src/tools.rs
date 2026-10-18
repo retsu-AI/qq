@@ -17,6 +17,10 @@ mod tree;
 pub(crate) mod walk;
 mod write;
 
+pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
+#[cfg(unix)]
+pub(crate) use shell::ProcessGroupGuard;
+
 /// Parse qualification envelopes with the same type used by shell dispatch.
 pub(crate) fn parsed_shell_command(arguments: &str) -> Option<(String, bool)> {
     process_context::arguments_digest("shell", arguments)?;
@@ -105,7 +109,7 @@ use crate::RunCancellation;
 #[cfg(test)]
 use crate::workspace::{FileState, Workspace, content_hash};
 #[cfg(test)]
-use dispatch::{ToolCancellation, execute_blocking};
+use dispatch::execute_blocking;
 #[cfg(test)]
 use output::{MARKER_PREFIX, escaped_len};
 #[cfg(test)]

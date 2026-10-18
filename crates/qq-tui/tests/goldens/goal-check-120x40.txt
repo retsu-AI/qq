@@ -1,0 +1,40 @@
+ qq  Session 0                                                                                   openai/gpt-test  $0.00
+ GOAL CHECK explicit consent                                                                │ IDLE  3
+PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels                        │ ○ Session 0
+  search: deny, once, repeated                                                              │ ○ Session 1
+Workspace: /workspace                                                                       │ ○ Session 2
+Command:                                                                                    │
+cargo test -p billing                                                                       │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+                                                                                            │
+> Deny                                                                                      │
+withhold check consent; pause an active goal                                                │
+  Allow once                                                                                │
+one start only; failure does not refund consent                                             │
+  Allow repeated checks for this goal                                                       │
+only this goal and its exact check command                                                  │
+ goal · check consent required ─────────────────────────────────────────────────────────────────────────────────────────
+ › Ask QQ...
+

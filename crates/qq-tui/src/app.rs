@@ -51,8 +51,36 @@ const NOTICE_TICKS: u16 = 40;
 /// Animation ticks (125 ms) within which a second Esc cancels the active run.
 const ESC_CANCEL_TICKS: usize = 16;
 
+/// Configuration-neutral defaults and ceilings for the goal form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalDefaults {
+    pub duration_ms: u64,
+    pub max_duration_ms: u64,
+    pub max_runs: u32,
+    pub default_runs: u32,
+    pub per_run: qq_protocol::RunLimits,
+    pub check_timeout_ms: u64,
+}
+
+impl Default for GoalDefaults {
+    fn default() -> Self {
+        Self {
+            duration_ms: 86_400_000,
+            max_duration_ms: 604_800_000,
+            max_runs: 2000,
+            default_runs: 200,
+            per_run: qq_protocol::RunLimits {
+                max_model_turns: Some(256),
+                ..qq_protocol::RunLimits::default()
+            },
+            check_timeout_ms: 600_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TuiOptions {
+    pub goals: GoalDefaults,
     pub settings: Settings,
     pub model: ModelSelection,
     pub models: Vec<ModelOption>,
@@ -96,6 +124,7 @@ pub enum TrustChoice {
 /// the client skipped at startup because the configuration would not load.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustResolved {
+    pub goals: GoalDefaults,
     /// Paths now trusted, for the confirmation notice.
     pub trusted: Vec<String>,
     pub model: ModelSelection,
@@ -289,6 +318,12 @@ fn has_mention_syntax(text: &str) -> bool {
 
 #[derive(Debug, Clone)]
 enum PendingIntent {
+    GoalControl {
+        session_id: SessionId,
+    },
+    GoalSet {
+        session_id: SessionId,
+    },
     /// A side question in flight; `text` returns to the composer if the
     /// server refuses it.
     Side {
@@ -368,6 +403,7 @@ pub(crate) struct App {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub workspace_id: Option<WorkspaceId>,
     pub workspace_path: String,
+    pub check_interruption: Option<qq_protocol::CheckInterruption>,
     /// Local root for `@` mention resolution and completion, when this
     /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
@@ -427,6 +463,8 @@ pub(crate) struct App {
     /// so running rows show a live elapsed time without a system clock in
     /// the frame path. Zero until the first event.
     pub(crate) now_ms: u64,
+    pub(crate) goal_now_ms: u64,
+    pub(crate) goal_defaults: GoalDefaults,
     pub tool_detail: ToolDetail,
     /// Tool calls expanded individually (Enter on a selected row), on top of
     /// the global `tool_detail` toggle.
@@ -480,6 +518,7 @@ impl App {
             trust_resolving: false,
             workspace_id: None,
             workspace_path: String::new(),
+            check_interruption: None,
             workspace_root: options.workspace_root,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             panes: vec![TranscriptPane::default()],
@@ -505,6 +544,8 @@ impl App {
             status_ticks_left: 0,
             animation_tick: 0,
             now_ms: 0,
+            goal_now_ms: 0,
+            goal_defaults: options.goals,
             tool_detail: ToolDetail::default(),
             expanded_tool_calls: std::collections::HashSet::new(),
             transcript_cursor: None,
@@ -554,6 +595,7 @@ impl App {
     ) -> Effects {
         self.trust_resolving = false;
         self.pending_trust.clear();
+        self.goal_defaults = resolved.goals;
         self.unauthenticated_providers = resolved.unauthenticated_providers;
         // Through the catalog path so the sort, per-session context windows,
         // and an open picker are refreshed like a server catalog update.
@@ -677,6 +719,12 @@ impl App {
             }
             ClientUpdate::Event(event) => self.apply_live_event(event),
             ClientUpdate::CommandResult { command_id, result } => {
+                let failed_form = if result.is_err() {
+                    self.finish_goal_form(command_id, false)
+                } else {
+                    self.finish_goal_form(command_id, true);
+                    None
+                };
                 match result {
                     Ok(receipt) => {
                         let intent = self.pending.remove(&command_id);
@@ -855,9 +903,24 @@ impl App {
                     }
                     Err(error) => self.reject_pending(command_id, error),
                 }
-                Effects::redraw(Redraw::Scheduled)
+                let mut effects = Effects::redraw(Redraw::Scheduled);
+                if let (Some(session), Some(workspace)) = (failed_form, self.workspace_id) {
+                    effects.extend(Effects::send_now(ClientRequest::Snapshot(body_request(
+                        workspace, session,
+                    ))));
+                }
+                effects
             }
             ClientUpdate::SnapshotFailed(error) => {
+                if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                    && form.refresh == crate::input::GoalFormRefresh::Pending
+                {
+                    form.refresh = crate::input::GoalFormRefresh::Failed;
+                    form.error = Some(
+                        "Refresh failed. Enter retries the refresh; your draft is retained."
+                            .to_owned(),
+                    );
+                }
                 self.set_warning(error.message().to_owned());
                 Effects::redraw(Redraw::Scheduled)
             }
@@ -886,6 +949,15 @@ impl App {
             .as_ref()
             .is_some_and(|body| !body_is_current(body))
         {
+            if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                && snapshot
+                    .focused
+                    .as_ref()
+                    .is_some_and(|body| body.summary.id == form.session)
+            {
+                // The local body is already newer than the requested refresh.
+                form.refresh = crate::input::GoalFormRefresh::Ready;
+            }
             snapshot.focused = None;
         }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
@@ -931,6 +1003,7 @@ impl App {
             self.workspace_path = snapshot.workspace.path;
         }
         if initial || snapshot_sequence >= self.last_sequence {
+            self.update_check_interruption(snapshot.check_interruption);
             for summary in snapshot.sessions {
                 if self
                     .sessions
@@ -949,13 +1022,19 @@ impl App {
         }
         if let Some(focused) = snapshot.focused {
             let focused_id = focused.summary.id;
+            if let Some(Overlay::GoalForm(form)) = &mut self.overlay
+                && form.session == focused_id
+            {
+                form.refresh = crate::input::GoalFormRefresh::Ready;
+            }
             self.sessions
                 .install_session_snapshot(focused, &self.models, snapshot_sequence);
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
             // A side view over this session keeps showing side questions.
-            let side_view = self.view() == View::SideQuestions(focused_id);
+            let side_view =
+                matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == focused_id);
             if !side_view
                 && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
             {
@@ -1070,10 +1149,31 @@ impl App {
         effects
     }
 
+    fn update_check_interruption(&mut self, interruption: Option<qq_protocol::CheckInterruption>) {
+        let changed = self.check_interruption != interruption;
+        self.check_interruption = interruption;
+        if changed {
+            if self.check_interruption.is_some() {
+                self.set_warning(
+                    "An interrupted completion check holds this workspace until acknowledgment."
+                        .to_owned(),
+                );
+            } else {
+                self.set_info(
+                    "Completion check interruption acknowledged; workspace work may continue."
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
     fn apply_state_effects(&mut self, reduced: impl IntoIterator<Item = StateEffect>) -> Effects {
         let mut effects = Effects::none();
         for effect in reduced {
             match effect {
+                StateEffect::CheckInterruptionChanged(interruption) => {
+                    self.update_check_interruption(interruption)
+                }
                 StateEffect::Notice {
                     session,
                     level,
@@ -1095,7 +1195,8 @@ impl App {
                     self.acknowledged_side_questions.remove(&session_id);
                     // The reducer only refocuses a shown transcript; a side
                     // view over the deleted session gives way here.
-                    if self.view() == View::SideQuestions(session_id) {
+                    if matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == session_id)
+                    {
                         effects.extend(self.leave_workspace_view());
                     }
                     for call in tool_call_ids {
@@ -1173,6 +1274,9 @@ impl App {
             effects.extend(self.reduce_event(&event));
         }
         if let Some(command_id) = event.caused_by {
+            if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
+                self.finish_goal_form(command_id, true);
+            }
             self.pending.remove(&command_id);
         }
         self.recent_events.push_back(event);
@@ -1307,7 +1411,9 @@ impl App {
     fn reject_pending(&mut self, command_id: CommandId, error: ClientFailure) {
         let intent = self.pending.remove(&command_id);
         let status_session_id = match &intent {
-            Some(PendingIntent::Side { session_id, .. })
+            Some(PendingIntent::GoalSet { session_id })
+            | Some(PendingIntent::GoalControl { session_id })
+            | Some(PendingIntent::Side { session_id, .. })
             | Some(PendingIntent::CancelSide { session_id })
             | Some(PendingIntent::Prompt { session_id, .. })
             | Some(PendingIntent::Cancel { session_id })
@@ -1389,7 +1495,9 @@ impl App {
             return self.execute(Command::Quit);
         }
         match self.mode() {
-            Mode::Sessions
+            Mode::GoalForm
+            | Mode::GoalCheck
+            | Mode::Sessions
             | Mode::Models
             | Mode::Profiles
             | Mode::ApprovalModes
@@ -1438,7 +1546,7 @@ impl App {
                 // A workspace view returns to the session it replaced.
                 if matches!(
                     self.view(),
-                    View::Attention | View::Changes | View::SideQuestions(_)
+                    View::Attention | View::Changes | View::SideQuestions(_) | View::Goal(_)
                 ) {
                     return self.leave_workspace_view();
                 }
@@ -1719,6 +1827,27 @@ impl App {
     /// between them.
     pub(crate) fn execute(&mut self, command: Command) -> Effects {
         match command {
+            Command::ShowGoal => match self.focused().or(self.view_return) {
+                Some(session_id) => {
+                    let mut effects = self.show_workspace_view(View::Goal(session_id));
+                    if self
+                        .sessions
+                        .get(&session_id)
+                        .is_some_and(|view| !view.is_warm())
+                        && let Some(workspace_id) = self.workspace_id
+                    {
+                        effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                            workspace_id,
+                            session_id,
+                        ))));
+                    }
+                    effects
+                }
+                None => {
+                    self.set_warning("create a session before viewing its goal".to_owned());
+                    Effects::redraw(Redraw::Immediate)
+                }
+            },
             Command::ShowSideQuestions => match self.focused().or(self.view_return) {
                 Some(session_id) => self.show_workspace_view(View::SideQuestions(session_id)),
                 None => {
@@ -1865,6 +1994,11 @@ impl App {
             self.set_warning("secure randomness is unavailable".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
+        if matches!(&intent, PendingIntent::GoalSet { .. })
+            && let Some(Overlay::GoalForm(form)) = &mut self.overlay
+        {
+            form.sending = Some(command_id);
+        }
         self.pending.insert(command_id, intent);
         Effects::send_now(ClientRequest::Command(CommandRequest {
             command_id,
@@ -2004,6 +2138,16 @@ impl App {
         let (name, question) = prompt
             .split_once(char::is_whitespace)
             .unwrap_or((&prompt, ""));
+        if name == "/goal" && !question.trim().is_empty() {
+            return match question.trim() {
+                "pause" => self.control_goal(qq_protocol::GoalControl::Pause),
+                "resume" => self.control_goal(qq_protocol::GoalControl::Resume),
+                "clear" => self.control_goal(qq_protocol::GoalControl::Clear),
+                "check" => self.open_goal_check(),
+                "edit" => self.open_goal_form(None),
+                objective => self.open_goal_form(Some(objective.to_owned())),
+            };
+        }
         if matches!(name, "/btw" | "/ask" | "/btw-new") {
             let Some(session_id) = self.focused().or(self.view_return) else {
                 self.set_warning("create a session before asking a side question".to_owned());
@@ -2988,11 +3132,28 @@ impl App {
             .sessions
             .values()
             .any(|session| matches!(session.summary.status, qq_protocol::SessionStatus::Running));
-        self.expire_status() || active
+        self.expire_status()
+            || active
+            || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
+    }
+
+    fn has_active_goal(&self) -> bool {
+        self.focused()
+            .and_then(|id| self.sessions.get(&id))
+            .and_then(|session| session.goal.as_deref())
+            .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active)
+    }
+
+    pub(crate) fn refresh_goal_clock(&mut self) {
+        if self.has_active_goal() {
+            let ms = time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000;
+            self.goal_now_ms = ms.clamp(0, i128::from(u64::MAX)) as u64;
+        }
     }
 
     pub fn has_activity(&self) -> bool {
-        self.status.is_some()
+        self.has_active_goal()
+            || self.status.is_some()
             || self.sessions.values().any(|session| {
                 matches!(session.summary.status, qq_protocol::SessionStatus::Running)
             })
@@ -3013,6 +3174,8 @@ impl App {
                     text,
                 } if *candidate == session_id => Some(text.as_str()),
                 PendingIntent::Create
+                | PendingIntent::GoalSet { .. }
+                | PendingIntent::GoalControl { .. }
                 | PendingIntent::Prompt { .. }
                 | PendingIntent::Steer { .. }
                 | PendingIntent::Cancel { .. }

@@ -42,9 +42,6 @@ pub use request_auth::{
     SharedRequestCredentialProvider,
 };
 
-/// Canonical credential audience for the built-in xAI deployment.
-pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
-
 /// Identity of this provider adapter build for plan descriptors: the crate
 /// version plus the compiled adapter families. A plan compiled against a
 /// different adapter build may translate the same request differently, so the

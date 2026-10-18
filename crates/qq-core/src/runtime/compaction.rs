@@ -99,7 +99,9 @@ pub(crate) trait InRunCompactor: Send + Sync {
 /// its starting step has been admitted, and each completed turn can be
 /// persisted before the generator is polled for more provider work.
 pub(crate) enum SummarizeStep {
-    RequestStarting,
+    RequestStarting {
+        input_tokens: Option<u64>,
+    },
     TurnCompleted {
         ordinal: u32,
         message: Message,

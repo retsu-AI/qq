@@ -1,9 +1,8 @@
 //! xAI API-key and OAuth credentials.
 
 use std::{
-    io::Read,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use reqwest::blocking::Response;
@@ -11,13 +10,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
-    resolve_provider_credential, validate_credential_name,
+    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
+    oauth::OAuthProvider, resolve_provider_credential,
 };
 use qq_provider::{
     RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
-    SecretRef, SharedRequestCredentialProvider, XAI_CREDENTIAL_ENDPOINT,
+    SecretRef, SharedRequestCredentialProvider,
 };
+
+use super::XAI_CREDENTIAL_ENDPOINT;
 
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const DEVICE_ENDPOINT: &str = "https://auth.x.ai/oauth2/device/code";
@@ -91,11 +92,11 @@ impl TryFrom<DeviceResponse> for DeviceAuthorization {
             || response
                 .interval
                 .is_some_and(|interval| interval > MAX_POLL_INTERVAL)
-            || !is_https_url(&response.verification_uri)
+            || !oauth::is_https_url(&response.verification_uri)
             || response
                 .verification_uri_complete
                 .as_deref()
-                .is_some_and(|url| !is_https_url(url))
+                .is_some_and(|url| !oauth::is_https_url(url))
         {
             return Err(XaiAuthError::DeviceResponseInvalid);
         }
@@ -176,15 +177,7 @@ impl XaiTokenClient for SystemXaiTokenClient {
 }
 
 fn oauth_client() -> Result<reqwest::blocking::Client, XaiAuthError> {
-    reqwest::blocking::Client::builder()
-        .use_rustls_tls()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| XaiAuthError::DeviceRequestFailed)
+    oauth::http_client().map_err(|_| XaiAuthError::DeviceRequestFailed)
 }
 
 fn decode_poll(mut response: Response) -> Result<DevicePoll, XaiAuthError> {
@@ -243,19 +236,7 @@ fn decode_bounded<T: DeserializeOwned>(
     response: &mut Response,
     error: XaiAuthError,
 ) -> Result<T, XaiAuthError> {
-    let mut bytes = Vec::new();
-    response
-        .take((MAX_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| error)?;
-    if bytes.len() > MAX_RESPONSE_BYTES {
-        return Err(error);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| error)
-}
-
-fn is_https_url(value: &str) -> bool {
-    reqwest::Url::parse(value).is_ok_and(|url| url.scheme() == "https" && url.host().is_some())
+    oauth::read_json(response, MAX_RESPONSE_BYTES).ok_or(error)
 }
 
 pub struct XaiLogin {
@@ -454,9 +435,7 @@ impl CredentialStore {
             ));
         }
 
-        let _refresh = self
-            .lock_xai_operation(&name)?
-            .expect("xAI credential names always require the xAI lock");
+        let _refresh = self.lock_oauth_operation(OAuthProvider::XAi)?;
         let credential = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -554,16 +533,11 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    let name = format!("xai/{profile}");
-    validate_credential_name(&name)?;
-    Ok(name)
+    oauth::profile_credential_name(OAuthProvider::XAi, profile)
 }
 
 fn unix_time() -> Result<u64, XaiAuthError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| XaiAuthError::ClockUnavailable)
+    oauth::unix_time().map_err(|_| XaiAuthError::ClockUnavailable)
 }
 
 #[cfg(test)]

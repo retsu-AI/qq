@@ -543,6 +543,7 @@ impl TranscriptCache {
         let workspace_rows = match view {
             View::Attention => Some(attention_body(app, width)),
             View::Changes => Some(changes_body(app, width)),
+            View::Goal(session_id) => Some(goal_body(app, session_id, width)),
             View::SideQuestions(session_id) => Some(side_questions_body(app, session_id, width)),
             View::Transcript(_) => None,
         };
@@ -1339,6 +1340,7 @@ pub(super) fn shown_view(app: &App, pane: &TranscriptPane, inline_detail: bool) 
         View::Transcript(Some(session_id)) if !app.sessions.contains_key(&session_id) => {
             View::Transcript(None)
         }
+        View::Goal(session_id) if !app.sessions.contains_key(&session_id) => View::Transcript(None),
         View::Attention | View::Changes if !inline_detail => View::Transcript(
             app.view_return()
                 .filter(|session_id| app.sessions.contains_key(session_id)),

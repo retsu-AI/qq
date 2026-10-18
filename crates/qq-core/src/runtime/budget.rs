@@ -73,6 +73,14 @@ pub(crate) enum BudgetDecision {
 }
 
 impl BudgetMeter {
+    pub(crate) fn constrain_model_turns(&mut self, cap: u32) {
+        self.limits.max_model_turns = Some(
+            self.limits
+                .max_model_turns
+                .map_or(cap, |existing| existing.min(cap)),
+        );
+    }
+
     pub(crate) fn new(limits: RunLimits, pricing: Option<ModelPricing>, started: Instant) -> Self {
         Self {
             limits,
@@ -341,6 +349,23 @@ impl BudgetMeter {
         }
     }
 
+    /// A goal audit spends its sole primary turn on verification, rather
+    /// than reserving that turn for a budget handoff. It never gets a retry
+    /// or a final response after another hard bound trips.
+    pub(crate) fn before_goal_audit(&mut self, now: Instant) -> BudgetDecision {
+        if let Some(kind) = self.exceeded(now) {
+            return BudgetDecision::Exhausted(self.exhaustion(kind, false, now));
+        }
+        if self.turns >= self.limits.max_model_turns.unwrap_or(1).min(1) {
+            return BudgetDecision::Exhausted(self.exhaustion(
+                BudgetLimitKind::ModelTurns,
+                false,
+                now,
+            ));
+        }
+        BudgetDecision::Continue
+    }
+
     fn settle(&mut self, kind: BudgetLimitKind, now: Instant) -> BudgetDecision {
         // The reserve is one more provider turn. A tripped wall clock or an
         // unmeasurable cost cannot afford it; the countable bounds can.
@@ -361,7 +386,12 @@ impl BudgetMeter {
             }
             BudgetLimitKind::ModelTurns | BudgetLimitKind::ToolCalls => true,
         };
-        if !affordable {
+        if !affordable
+            || self
+                .limits
+                .max_model_turns
+                .is_some_and(|limit| self.turns >= limit)
+        {
             return BudgetDecision::Exhausted(self.exhaustion(kind, false, now));
         }
         self.final_response_requested = Some(kind);
@@ -468,6 +498,66 @@ mod tests {
             assert_eq!(meter.before_turn(now, 16), BudgetDecision::Continue);
         }
         assert_eq!(meter.deadline(), None);
+    }
+
+    #[test]
+    fn tightened_turn_cap_keeps_spend_and_refuses_an_extra_final_response() {
+        let now = Instant::now();
+        for spent in 0..=4 {
+            let mut meter = BudgetMeter::new(RunLimits::default(), None, now);
+            for _ in 0..spent {
+                meter.charge_turn(None);
+            }
+            meter.constrain_model_turns(3);
+            let decision = meter.before_turn(now, 0);
+            match spent {
+                0 | 1 => assert_eq!(decision, BudgetDecision::Continue),
+                2 => assert_eq!(
+                    decision,
+                    BudgetDecision::FinalResponse(BudgetLimitKind::ModelTurns)
+                ),
+                3 | 4 => assert!(
+                    matches!(
+                        decision,
+                        BudgetDecision::Exhausted(BudgetExhaustion {
+                            limit: BudgetLimitKind::ModelTurns,
+                            final_response: false,
+                            ..
+                        })
+                    ),
+                    "spent={spent}: {decision:?}"
+                ),
+                _ => unreachable!(),
+            }
+        }
+        for (limits, expected) in [
+            (
+                RunLimits {
+                    max_cost_usd_nanos: Some(1),
+                    ..RunLimits::default()
+                },
+                BudgetLimitKind::Cost,
+            ),
+            (
+                RunLimits {
+                    max_total_tokens: Some(1),
+                    ..RunLimits::default()
+                },
+                BudgetLimitKind::TotalTokens,
+            ),
+        ] {
+            let mut meter = BudgetMeter::new(limits, Some(pricing()), now);
+            for _ in 0..3 {
+                meter.charge_turn(Some(usage(1, 1)));
+            }
+            meter.constrain_model_turns(3);
+            assert!(
+                matches!(meter.before_turn(now,0), BudgetDecision::Exhausted(BudgetExhaustion {
+                limit, final_response: false, ..
+            }) if limit == expected),
+                "consumed turn cap must also bound {expected:?}"
+            );
+        }
     }
 
     #[test]

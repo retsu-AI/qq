@@ -5,7 +5,7 @@
 | | |
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
-| Now | Not shipped on main. G0/AC4 foundation is in review in #308 (ENG-1045); the G2 driver/accounting checkpoint is stacked in #309 (ENG-1053). Neither PR establishes complete G2 or whole-plan acceptance. G3–G5 remain open. The decision record is [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md), still Proposed |
+| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 merged in #309 (`ffa46942`). G2/G3 closeout is in review in #330 (ENG-1063), G4 in #331 (ENG-1064), and G5 evidence in #332 (ENG-1065). The ninth trial qualifies G5 on final runtime `e84e3552`: 145.7 minutes, four compactions, 14 checklist identities retained and terminal accounting verified. The stack is not merged and resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
@@ -18,7 +18,8 @@ design only. Side questions (SQ0–SQ2) shipped first
 Each PR targets its immediate predecessor until merge, then rebases/retargets.
 This is delivery ordering, not a runtime dependency. G0 retains AC4 and one
 goal protocol bump; G1 stays dropped. G4 stays together after G3 initially.
-G5 requires ENG-809’s explicit evaluation budget. Side queries never steer,
+G5 uses the explicitly authorized ENG-809 evaluation route: subscription-only
+`openai-codex/gpt-6.1-sol`, with no paid API fallback. Side queries never steer,
 mutate or charge goals, or bypass check workspace exclusion.
 
 ## Goal
@@ -57,9 +58,10 @@ Measured acceptance:
    requests to `main`, verified against a golden request. The one-time
    `DESCRIPTOR_VERSION` bump changes every plan digest once. After that,
    goal and goal-less runs share one compiled plan.
-5. **Live.** One real multi-hour task, run under ENG-809's paid-evaluation
-   budget: its checklist survives at least 3 compactions and the goal
-   reaches a terminal state with its cost reported.
+5. **Live.** One real multi-hour task on the authorized subscription-only
+   route: its checklist survives at least 3 compactions and the goal reaches
+   a terminal state with usage and cost reported. Record paid API spend
+   separately from estimated token value; no paid API fallback is allowed.
 
 ## Non-goals
 
@@ -114,7 +116,8 @@ client: resume while cancellation still drains → typed cancellation_pending, n
 client: replace or clear ──► old goal becomes history; cancel its work, still charge committed spend
 restart: recovery finalizes interrupted runs and re-queues an unstarted check/audit.
   A running check → paused{needs_user: check_interrupted}, never re-run automatically.
-  Explicit resume acknowledges uncertainty; consumed once authorization needs fresh approval.
+  Exact workspace/run acknowledgment releases the independent interruption hold.
+  Resume the goal separately; consumed once authorization needs fresh approval.
   ContinueRun and AutoContinue never touch runs with a goal snapshot.
 ```
 
@@ -214,8 +217,10 @@ the run, and the **runtime** pauses the goal. The status line then shows
 - `SessionSnapshot.goal`, and `RunOrigin` on runs.
 
 A client that reconnects gets the goal from its snapshot. All wire shapes,
-including the G3 authorization and cancellation reasons, land in G0's one
-protocol bump; G2 and G3 add behavior, not another wire change.
+including the G3 authorization and cancellation reasons, land in G0's initial
+protocol bump. The interrupted-check workspace recovery extension below adds
+protocol34/schema57 after real hard-kill evidence exposed a separate admission
+gap; the other G2/G3 behavior retains the initial wire contract.
 
 **Configuration** (`[goals]`):
 - default and maximum deadline, 24 h and 7 d;
@@ -225,6 +230,14 @@ protocol bump; G2 and G3 add behavior, not another wire change.
 - `check_timeout`, 10 min, at most 60, also clamped to the goal deadline;
 - `approval_wait`, 10 min: how long an unanswered approval holds a goal run
   before the goal pauses.
+
+Runtime enforcement stores private `policy_json` and `specification_at_ms`
+on `session_goals` in schema58. A client specification sets the timestamp;
+neutral controls do not move it. Existing rows retain explicit unknown values,
+using shipped operational defaults; a newly lowered duration ceiling requires
+an explicit specification edit when the original timestamp is unknown. Current
+workspace policy is checked before activation and paid execution. Wire protocol34,
+descriptor and prompt versions do not change; older binaries refuse schema58.
 
 Managed policy can lower any ceiling. Goal checks enforce the current
 managed shell denies as hard denies at authorization and every execution,
@@ -260,3 +273,20 @@ There is no separate G1 slice.
    bound goal runs, or should they get a separate smaller pool so they can't
    starve interactive work? The proposal is a separate pool of
    `max(1, max_active_runs / 4)`.
+
+### Interrupted-check workspace recovery (G3, decision15)
+
+A hard-killed host can leave its check process alive. Recovery must retain a
+workspace hold independently of the live goal until an operator explicitly
+acknowledges the uncertain check effects. Clearing or replacing a goal does not
+release that hold. Normal work, helpers and side questions stay excluded;
+control/read operations remain available. Acknowledgment names the exact
+workspace and interrupted run, is durable/idempotent and leaves a matching goal
+paused rather than starting work. Snapshots and events expose a bounded hold
+reference, including when the original goal is gone. Deletion cannot erase an
+unacknowledged hold. Protocol34/schema57 carry this extension; the descriptor
+and model prompt stay unchanged. Migration conservatively preserves uncertainty
+for historical interrupted checks. Real-process acceptance must prove the hold
+before and after reopen, stale acknowledgment refusal, explicit release only
+after the test-owned process exits, and resumed queued work without replaying
+the check.

@@ -117,6 +117,7 @@ pub struct Selection {
 /// Paths outside any crate directory that tests read at run time. Keep in
 /// sync with `CARGO_MANIFEST_DIR`/`include_str!` reads that leave a crate.
 const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
+    (".github/scripts/test-pre-push.sh", "xtask"),
     ("docs/guide/", "qq"),
     ("docs/design/protocol.md", "qq"),
     ("docs/design/architecture.md", "qq"),
@@ -137,6 +138,7 @@ const CROSS_CRATE_INPUTS: &[(&str, &str)] = &[
 
 /// Paths that can change the build or test behavior of every package.
 const FULL_INPUTS: &[&str] = &[
+    ".githooks/",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -1130,6 +1132,24 @@ fn indent(text: &str) -> String {
 mod tests {
     use std::collections::BTreeSet;
 
+    #[cfg(unix)]
+    #[test]
+    fn pre_push_keeps_fixture_git_operations_out_of_the_caller_repository() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let output = std::process::Command::new("bash")
+            .arg(root.join(".github/scripts/test-pre-push.sh"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn evidence_rejects_execution_options() {
         use clap::Parser;
@@ -1273,6 +1293,10 @@ mod tests {
         assert_eq!(scope(&["docs/guide/cli.md"]), packages(&["qq", "xtask"]));
         assert_eq!(scope(&["README.md"]), packages(&["qq", "xtask"]));
         assert_eq!(scope(&["build.rs"]), packages(&["qq"]));
+        assert_eq!(
+            scope(&[".github/scripts/test-pre-push.sh"]),
+            packages(&["xtask"])
+        );
 
         for path in [
             "docs/design/architecture.md",
@@ -1308,6 +1332,7 @@ mod tests {
             "Cargo.lock",
             "rust-toolchain.toml",
             ".config/nextest.toml",
+            ".githooks/pre-push",
         ] {
             assert_eq!(scope(&[path]), Scope::Full, "{path}");
         }

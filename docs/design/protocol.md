@@ -60,8 +60,36 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 33
+PROTOCOL_VERSION = 35
 ```
+
+Store schema58 adds private goal policy and specification-time fields, without
+a wire, descriptor or prompt change. New specifications persist their workspace
+ceilings and fixed deadline anchor atomically. Legacy admission time stays
+explicitly unknown; a lower duration ceiling then requires a specification edit.
+Older binaries refuse schema58. These fields are not model-writable goal data.
+
+Version 35 adds foreground goal JSONL records: `goal_run` carries one settled
+runtime-owned prompt/check with its immutable goal binding and durable run
+snapshot; `goal` carries the final goal snapshot and invocation status/exit.
+Paid descendants stay in event records, rather than inflating the count of
+direct goal runs. Ordinary prompt records retain their shapes. Older readers
+must upgrade before accepting these new tags; schema58, descriptor and prompt
+versions are unchanged. Goal controls add `pause_for_input` with the exact
+held ask-user call ID; a stale revision, settled/non-question call or foreign
+paid family is refused. Successful stops persist NeedsUser::Approval and
+cancel sponsored work atomically through existing goal-control admission.
+
+Version 34 adds `acknowledge_check_interruption` at
+`POST /v1/workspaces/check-interruptions/acknowledge`, its receipt and the
+`check_interruption_changed` event. `WorkspaceSnapshot.check_interruption`
+references one interrupted check whose workspace remains held until explicit
+workspace/run-fenced acknowledgment. Acknowledgment leaves a matching goal
+paused, is idempotent and cannot erase a newer hold. Older clients must reconnect
+with protocol34 before receiving the new event or command vocabulary. Store
+schema57 retains uncertain interrupted checks independently of live goals;
+older binaries refuse that store. The plan descriptor and provider prompt are
+unchanged.
 
 Version 33 adds durable goal controls (`set_goal`, `goal_control`), exact
 identity/revision fencing, explicit once/for-goal check authorization, session
@@ -93,7 +121,7 @@ waiting or answering without loading its body or having seen the request
 event.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v33/`; the `v17`–`v32` directories are
+`crates/qq-protocol/tests/fixtures/v35/`; the `v17`–`v34` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 

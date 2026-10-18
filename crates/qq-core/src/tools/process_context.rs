@@ -207,7 +207,7 @@ pub(super) enum OwnedLaunch {
 /// The command and its capabilities are prepared together. Keeping this value
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
-pub(super) struct PreparedLaunch {
+pub(crate) struct PreparedLaunch {
     command: tokio::process::Command,
     receipt: ExecutionContextReceipt,
     _cwd: cap_std::fs::Dir,
@@ -217,7 +217,7 @@ pub(super) struct PreparedLaunch {
 
 impl PreparedLaunch {
     /// Only stream/process supervision settings may change after verification.
-    pub(super) fn spawn(
+    pub(crate) fn spawn(
         &mut self,
         piped_stdin: bool,
     ) -> std::io::Result<(tokio::process::Child, Option<Box<ExecutionContextReceipt>>)> {
@@ -243,7 +243,7 @@ impl PreparedLaunch {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum PreparationError {
+pub(crate) enum PreparationError {
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -892,4 +892,30 @@ mod tests {
         dynamic[64..68].copy_from_slice(&3_u32.to_le_bytes());
         assert!(!static_native_elf(&dynamic));
     }
+}
+
+/// Prepare an explicitly authorized session check with the ordinary minimal
+/// process environment and captured workspace capability.
+#[cfg(unix)]
+pub(crate) fn prepare_goal_check(
+    workspace: Workspace,
+    command: String,
+    producer: Arc<ProcessProducer>,
+    cancelled: &ToolCancellation,
+    deadline: Instant,
+) -> Result<PreparedLaunch, PreparationError> {
+    prepare(
+        workspace,
+        OwnedLaunch::Shell(ShellArgs {
+            command,
+            cwd: None,
+            timeout_seconds: None,
+            env: Vec::new(),
+        }),
+        Arc::new(ApprovedReadImages::default()),
+        producer,
+        None,
+        cancelled,
+        deadline,
+    )
 }

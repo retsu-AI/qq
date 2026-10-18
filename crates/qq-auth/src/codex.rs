@@ -4,7 +4,7 @@ use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
-    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret,
-    validate_credential_name,
+    AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
+    oauth::OAuthProvider,
 };
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
@@ -25,7 +25,7 @@ use qq_provider::{
 };
 
 pub(super) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-pub(crate) const CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
+use super::OPENAI_CODEX_CREDENTIAL_ENDPOINT as CREDENTIAL_ENDPOINT;
 
 const ISSUER: &str = "https://auth.openai.com";
 const TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
@@ -353,15 +353,7 @@ pub(super) fn request_device_poll(
 }
 
 fn device_client() -> Result<reqwest::blocking::Client, CodexAuthError> {
-    reqwest::blocking::Client::builder()
-        .use_rustls_tls()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| CodexAuthError::DeviceRequestFailed)
+    oauth::http_client().map_err(|_| CodexAuthError::DeviceRequestFailed)
 }
 
 pub(super) fn decode_device_authorization(
@@ -449,27 +441,12 @@ fn validate_device_grant(grant: &DeviceGrant) -> Result<(), CodexAuthError> {
 }
 
 fn decode_device_body<T: DeserializeOwned>(response: &mut Response) -> Result<T, CodexAuthError> {
-    let mut bytes = Vec::new();
-    response
-        .take((MAX_DEVICE_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| CodexAuthError::DeviceResponseInvalid)?;
-    if bytes.len() > MAX_DEVICE_RESPONSE_BYTES {
-        return Err(CodexAuthError::DeviceResponseInvalid);
-    }
-    serde_json::from_slice(&bytes).map_err(|_| CodexAuthError::DeviceResponseInvalid)
+    oauth::read_json(response, MAX_DEVICE_RESPONSE_BYTES)
+        .ok_or(CodexAuthError::DeviceResponseInvalid)
 }
 
 fn token_client(operation: &'static str) -> Result<reqwest::blocking::Client, CodexAuthError> {
-    reqwest::blocking::Client::builder()
-        .use_rustls_tls()
-        .https_only(true)
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
-        .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|_| CodexAuthError::TokenRequestFailed { operation })
+    oauth::http_client().map_err(|_| CodexAuthError::TokenRequestFailed { operation })
 }
 
 fn decode_token_response<T: DeserializeOwned>(
@@ -484,16 +461,8 @@ fn decode_token_response<T: DeserializeOwned>(
         });
     }
 
-    let mut bytes = Vec::new();
-    response
-        .by_ref()
-        .take((MAX_TOKEN_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| CodexAuthError::TokenResponseInvalid { operation })?;
-    if bytes.len() > MAX_TOKEN_RESPONSE_BYTES {
-        return Err(CodexAuthError::TokenResponseInvalid { operation });
-    }
-    serde_json::from_slice(&bytes).map_err(|_| CodexAuthError::TokenResponseInvalid { operation })
+    oauth::read_json(&mut response, MAX_TOKEN_RESPONSE_BYTES)
+        .ok_or(CodexAuthError::TokenResponseInvalid { operation })
 }
 
 /// A short-lived loopback OAuth login awaiting the browser callback.
@@ -1225,9 +1194,7 @@ impl CredentialStore {
             return Ok((credential.runtime_credential(), epoch));
         }
 
-        let _refresh = self
-            .lock_codex_operation(&name)?
-            .expect("OpenAI Codex credential names always require the Codex lock");
+        let _refresh = self.lock_oauth_operation(OAuthProvider::OpenAiCodex)?;
         let (mut credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -1420,14 +1387,9 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    let name = format!("openai-codex/{profile}");
-    validate_credential_name(&name)?;
-    Ok(name)
+    oauth::profile_credential_name(OAuthProvider::OpenAiCodex, profile)
 }
 
 fn unix_time() -> Result<u64, CodexAuthError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .map_err(|_| CodexAuthError::ClockUnavailable)
+    oauth::unix_time().map_err(|_| CodexAuthError::ClockUnavailable)
 }

@@ -638,7 +638,7 @@ async fn routing_spend_survives_preparation_cancellation_and_recovery() {
             let run = store.reserve_next_run(false).await.unwrap().unwrap();
             assert!(
                 store
-                    .record_routing_started(&run, true, None)
+                    .record_routing_started(&run, true, None, (None, None))
                     .await
                     .unwrap()
                     .unwrap()
@@ -646,7 +646,7 @@ async fn routing_spend_survives_preparation_cancellation_and_recovery() {
             );
             assert!(
                 store
-                    .record_routing_started(&run, true, None)
+                    .record_routing_started(&run, true, None, (None, None))
                     .await
                     .unwrap()
                     .unwrap()
@@ -705,7 +705,7 @@ async fn routing_spend_survives_preparation_cancellation_and_recovery() {
             }
             assert!(
                 store
-                    .record_routing_started(&run, true, None)
+                    .record_routing_started(&run, true, None, (None, None))
                     .await
                     .unwrap()
                     .unwrap()

@@ -144,6 +144,26 @@ impl ToolGate for InspectionGate {
 }
 
 impl SessionRuntime {
+    async fn settle_side_question(
+        &self,
+        id: RunId,
+        state: qq_protocol::SideQuestionState,
+        known: bool,
+        duration: u64,
+    ) -> Result<qq_protocol::SideQuestionState, SessionRuntimeError> {
+        let result = self
+            .inner
+            .store
+            .finish_side_question(id, state, known, duration)
+            .await;
+        if result.is_ok() {
+            self.inner
+                .settlements
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+        result
+    }
+
     fn reserve_side_task(&self) -> Result<SideTaskSlot, SessionRuntimeError> {
         match self
             .inner
@@ -226,9 +246,7 @@ impl SessionRuntime {
             Err(_) => qq_protocol::SideQuestionState::Interrupted,
         };
         if self
-            .inner
-            .store
-            .finish_side_question(id, state, false, self.inner.side_limits.duration_ms)
+            .settle_side_question(id, state, false, self.inner.side_limits.duration_ms)
             .await
             .is_err()
         {
@@ -294,10 +312,7 @@ impl SessionRuntime {
                     let _ = reply.send(Err(SessionRuntimeError::SideQuestionTimedOut));
                     // Accepted admission may still commit; settle what it wrote.
                     if matches!(pending.await, Ok(Ok(_)))
-                        && runtime
-                            .inner
-                            .store
-                            .finish_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, limit)
+                        && runtime.settle_side_question(id, qq_protocol::SideQuestionState::TimedOut, true, limit)
                             .await
                             .is_err()
                     {
@@ -338,9 +353,7 @@ impl SessionRuntime {
             };
             if let Some(state) = fallback
                 && runtime
-                    .inner
-                    .store
-                    .finish_side_question(id, state, false, limit)
+                    .settle_side_question(id, state, false, limit)
                     .await
                     .is_err()
             {
@@ -668,9 +681,7 @@ impl SessionRuntime {
         };
         let spend_known = result.is_ok() || !in_flight.load(Ordering::Acquire);
         let effective = self
-            .inner
-            .store
-            .finish_side_question(id, state, spend_known, limits.duration_ms)
+            .settle_side_question(id, state, spend_known, limits.duration_ms)
             .await?;
         drop(ownership);
         match effective {
@@ -826,6 +837,12 @@ pub(super) fn admit_side_question(
 ) -> Result<(RuntimeLoadRequest, Vec<Message>), SessionRuntimeError> {
     if question.trim().is_empty() || question.len() > 8192 {
         return Err(SessionRuntimeError::InvalidSideQuestion);
+    }
+    let checking:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM runs r JOIN sessions checker ON checker.id=r.session_id
+        JOIN sessions target ON target.workspace_id=checker.workspace_id WHERE target.id=?1 AND r.kind='goal_check' AND (r.status='running' OR r.check_acknowledgment_pending=1))",
+        [session_id.to_string()],|row|row.get(0))?;
+    if checking {
+        return Err(SessionRuntimeError::SideQuestionBusy);
     }
     let pending: u64 = transaction.query_row(
         "SELECT COUNT(*) FROM side_questions WHERE state = 'running'",

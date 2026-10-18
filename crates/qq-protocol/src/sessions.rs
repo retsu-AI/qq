@@ -547,6 +547,12 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionCommand {
+    /// Confirms that the operator has resolved an interrupted check's uncertain
+    /// effects. Releases only the named workspace hold; it does not resume goals.
+    AcknowledgeCheckInterruption {
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    },
     SetGoal {
         session_id: SessionId,
         objective: String,
@@ -699,6 +705,9 @@ impl SessionCommand {
     #[must_use]
     pub const fn kind(&self) -> SessionCommandKind {
         match self {
+            Self::AcknowledgeCheckInterruption { .. } => {
+                SessionCommandKind::AcknowledgeCheckInterruption
+            }
             Self::SetGoal { .. } => SessionCommandKind::SetGoal,
             Self::GoalControl { .. } => SessionCommandKind::GoalControl,
             Self::CancelSideQuestion { .. } => SessionCommandKind::CancelSideQuestion,
@@ -727,6 +736,7 @@ impl SessionCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionCommandKind {
+    AcknowledgeCheckInterruption,
     SetGoal,
     GoalControl,
     CancelSideQuestion,
@@ -750,7 +760,8 @@ pub enum SessionCommandKind {
 
 impl SessionCommandKind {
     /// Every command this protocol revision routes, in declaration order.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
+        Self::AcknowledgeCheckInterruption,
         Self::SetGoal,
         Self::GoalControl,
         Self::CancelSideQuestion,
@@ -792,7 +803,8 @@ impl SessionCommandKind {
             | Self::SetSessionProfile
             | Self::SetSessionEffort
             | Self::CompactSession => true,
-            Self::GoalControl
+            Self::AcknowledgeCheckInterruption
+            | Self::GoalControl
             | Self::CancelSideQuestion
             | Self::CancelRun
             | Self::RespondToolApproval
@@ -808,6 +820,7 @@ impl SessionCommandKind {
     #[must_use]
     pub const fn route(self) -> &'static str {
         match self {
+            Self::AcknowledgeCheckInterruption => "/v1/workspaces/check-interruptions/acknowledge",
             Self::SetGoal => "/v1/sessions/goal",
             Self::GoalControl => "/v1/sessions/goal/control",
             Self::CancelSideQuestion => "/v1/sessions/side-questions/cancel",
@@ -833,8 +846,8 @@ impl SessionCommandKind {
 
 /// Every command route this protocol revision serves, in [`SessionCommandKind::ALL`]
 /// order. Routes are wire data: changing one is a protocol change.
-pub const COMMAND_ROUTES: [(SessionCommandKind, &str); 19] = {
-    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); 19];
+pub const COMMAND_ROUTES: [(SessionCommandKind, &str); SessionCommandKind::ALL.len()] = {
+    let mut routes = [(SessionCommandKind::ResolveWorkspace, ""); SessionCommandKind::ALL.len()];
     let mut index = 0;
     while index < SessionCommandKind::ALL.len() {
         let kind = SessionCommandKind::ALL[index];
@@ -862,6 +875,11 @@ pub struct CommandReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandOutcome {
+    /// The named interrupted check no longer holds its workspace.
+    CheckInterruptionAcknowledged {
+        workspace_id: WorkspaceId,
+        run_id: RunId,
+    },
     GoalUpdated {
         session_id: SessionId,
         goal: Box<crate::GoalSnapshot>,
@@ -2193,6 +2211,9 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceSnapshot {
+    /// Oldest unacknowledged completion check holding this workspace, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_interruption: Option<crate::CheckInterruption>,
     pub cursor: EventCursor,
     pub workspace: WorkspaceSummary,
     pub sessions: Vec<SessionSummary>,
@@ -2267,6 +2288,10 @@ pub struct SessionEventEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
+    /// Current oldest unresolved hold, or none after all holds are acknowledged.
+    CheckInterruptionChanged {
+        interruption: Option<crate::CheckInterruption>,
+    },
     GoalUpdated {
         goal: Box<crate::GoalSnapshot>,
     },
@@ -2695,6 +2720,7 @@ mod tests {
         assert_eq!(
             control,
             [
+                SessionCommandKind::AcknowledgeCheckInterruption,
                 SessionCommandKind::GoalControl,
                 SessionCommandKind::CancelSideQuestion,
                 SessionCommandKind::CancelRun,
@@ -4417,7 +4443,7 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 33);
+        assert_eq!(crate::PROTOCOL_VERSION, 35);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());
@@ -4525,7 +4551,7 @@ mod tests {
             serde_json::to_value(SessionCommandKind::SetSessionProfile).unwrap(),
             "set_session_profile"
         );
-        assert_eq!(SessionCommandKind::ALL.len(), 19);
+        assert_eq!(SessionCommandKind::ALL.len(), 20);
 
         let create = SessionCommand::CreateSession {
             workspace_id: id(2),

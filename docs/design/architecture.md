@@ -89,6 +89,13 @@ descriptions; the binary re-exports the first two, and runtime/model loading
 and headless outcome driving live in the root package. Core does not depend on
 harness or application configuration.
 
+Foreground goal hosting shares session preparation and unattended tool approval
+with ordinary headless runs. It observes the core goal driver, rather than
+submitting a parallel prompt loop. Exact-run snapshots and live paid-family
+ownership checks stay behind SessionRuntime; stopping an unanswered question is
+a revision-fenced core goal control that persists the needs-user reason before
+cancelling sponsored work. Server goal scripting remains a SessionClient path.
+
 The workspace is:
 
 ```text
@@ -98,6 +105,7 @@ src/
   cli.rs         argument parsing and command dispatch
   runtime.rs     configuration-to-runtime composition (runtime/approval.rs, runtime/routing.rs)
   headless.rs    `qq run` durable non-interactive execution
+  goals.rs       `qq goal` authenticated server client; no store ownership
   catalog.rs     authenticated model discovery
   advisory.rs    `qq jev observe` post-commit observer
   doctor.rs      `qq doctor`
@@ -108,7 +116,12 @@ src/
 crates/
   qq-auth/
     Cargo.toml
-    src/lib.rs
+    src/lib.rs        CredentialStore operations, OAuth operation locking, errors, secret resolution
+    src/state.rs      on-disk index/fallback formats, lock guards, hardened file operations
+    src/backend.rs    OS keyring and Windows user-protected backends
+    src/oauth.rs      OAuth provider table (names, lock file names), shared HTTP helpers
+    src/codex.rs      OpenAI Codex OAuth login, refresh, request credentials
+    src/xai.rs        xAI API-key and OAuth credentials
   qq-client/
     Cargo.toml
     src/lib.rs
@@ -222,6 +235,20 @@ xtask/
   `ModelRequired`; `load_for_client` yields a `ClientSnapshot` whose model is
   optional, used only by TUI startup and the served model catalog so an
   interactive client can open and ask for a model instead of exiting.
+  Both snapshots include validated goal defaults and effective managed goal
+  ceilings. Ordinary goal fields merge individually under workspace trust;
+  administrator ceilings compose by minimum and survive an ordinary Clear.
+  Per-field provenance distinguishes defaults from the ceilings constraining
+  them. Configuration-owned goal values do not depend on core runtime types.
+  Root translates workspace goal bounds into core-owned GoalPolicy values
+  through the existing grant authority seam, sharing its bounded configuration
+  loading pool. SetGoal and activating controls validate current settings after
+  journal replay. Goal commands probe immutable journal identity before external
+  policy resolution, so a committed replay cannot wait on a hung resolver.
+  Fresh resolution has a ten-second bound and stops with runtime shutdown.
+  Private goal policy and specification time persist atomically in schema58;
+  neutral controls retain the original deadline anchor. Legacy time remains
+  unknown rather than inventing an admission date.
 - `qq-core` contains the agent loop, session behavior, tool integration, and
   persistence behavior. It consumes the command and event vocabulary from
   `qq-protocol` and exposes a small interface that hides orchestration details
@@ -1504,6 +1531,10 @@ ordinary budgets. Past the allowance the run still completes: the verdict
 written for a cancelled, failed, or budget-exhausted run. Runs without a
 contract pay nothing: no allocation, no event, no prompt change.
 
+Repair instructions use the same bounded ordered boundary-notice storage as
+goal revisions. The next completed turn commits their text and position among
+child deliveries, preserving the actual model window on replay.
+
 After cancellation, deadline teardown or panic, a started prompt's terminal
 transaction settles its abandoned in-run summary first. This preserves the
 summary's durable measured prefix and unknown pending-send aggregate, and
@@ -1628,6 +1659,31 @@ only a matching goal `pending_run_id`. A live goal's counter update precedes
 the accounting and terminal outcome. Archived accounting does not publish a
 `GoalUpdated` event that could overwrite the client's replacement goal.
 
+Main and between-run summary requests carry a private accounting-only
+`GoalPaidInput` when they have a direct or sponsored goal. It previews current
+allowance before request preparation, then revalidates it in the transaction
+that records pending provider work. A tighter allowance repeats preparation at
+the same turn ordinal without dispatch. The request cap is separate from the
+caller's cumulative meter. Each dispatch intersects the caller's freshly reduced
+input, output, total-token and cost limits with every sponsoring goal's current
+remainder. The quote reserves estimated input before selecting output, using
+the greatest applicable base/tier fresh, cached-read or cached-write input rate.
+The caller's absolute deadline is checked again inside the store actor after
+queueing; an expired admission writes no pending marker. Turn/tool-count limits
+still permit their reserved tool-free reply when hard spending and time remain.
+Terminal counters and distinct unsettled direct run/helper aggregates are
+counted once. Resolved pricing is carried separately
+from the internal compactor's meter. A summary previews its owner and binds its
+committed helper identity before paid admission. The input grants no goal tools
+or mutation authority. In-run summaries use their committed helper identity at
+each RequestStarting boundary. A private goal-only cap bridge admits the current
+caller/goal allowance before constructing the provider request, including
+continuations and rejected-call retries. Input is estimated from current message
+bytes and cached system/tool measurements. Refusal returns settled durable accounting: known-zero no-send work,
+measured prefixes, or unknown spending when admission committed before its
+acknowledgement was interrupted. Goal-less requests retain the ordinary
+activity path and allocate no bridge.
+
 Goal-bound provider requests record a pending marker in the existing activity
 transaction before dispatch. Their turn transaction records whether the
 attempt committed model work, was rejected before work, or remains uncertain.
@@ -1692,8 +1748,28 @@ accepted model wait and resets both streaks. A per-run limit allows fresh work
 when the overall goal allowance remains; spent or unknown capped totals exhaust
 that allowance.
 
+Goal-bound execution resolves current workspace policy before loading, after
+loading, and immediately before main-request or check start. Tightened or
+unavailable policy pauses the active goal and cancels its paid family in the
+same store transaction. Goal-less runs skip this policy work. Refresh preserves
+the specification's original deadline anchor and never resumes a stopped goal.
+
+An unanswered goal-bound tool approval has a fixed deadline spanning reviewer
+and human stages: the earlier of its persisted goal approval wait and absolute
+goal deadline. An earlier ordinary human timeout also applies. Timeout durably
+denies the call, pauses the goal for approval, and requests family cancellation
+before another model request. This approval pause takes precedence over goal
+exhaustion, including when the absolute deadline ends the hold. A client resolution
+that committed first retains precedence. Escalation does not restart the goal
+clock; ordinary goal-less approval behavior is unchanged. Sponsored approval
+cancellation also checks live monotonic owner deadlines, retained through child
+drain and removed with the execution owner. Preparation counts toward expiry;
+the later durable RunStarted timestamp is not a replacement clock. Expiry is
+captured on the executor before a store transaction rechecks current goal
+identity, active state and explicit owner cancellation.
+
 Provider-retry pauses keep the goal active with a1-minute exponential backoff,
-capped at30minutes and the goal deadline. The retry streak comes from at most
+capped by the persisted workspace policy (30minutes by default) and the goal deadline. The retry streak comes from at most
 five prior durable terminal prompt outcomes for the same frozen goal/revision,
 separate from ordinary failures. Committed model work in the current or preceding
 retry run resets the delay to1minute. Reopening retains this terminal evidence.
@@ -1704,9 +1780,40 @@ A persisted model wait is a lower bound on every active automatic retry,
 including provider backoff, ordinary failures, no-progress and per-run exhaustion.
 The absolute goal deadline remains the upper bound and wins exhaustion.
 
+The TUI's `/goal` opens a session-following, scrollable status view over the
+shared client reducer's goal snapshot. It renders lifecycle reasons, scoped
+check consent, progress, budgets, UTC times and bounded check diagnostics,
+including a workspace hold independent of the live goal. It opens at the top
+and preserves the visible position as diagnostics grow. Snapshot refreshes keep
+the view open, deletion closes it, and navigation submits no work.
+The goal creation/edit overlay captures the exact session, workspace and goal
+revision. Bounded cursor-aware objective/check editors and finite budget presets
+use root-translated configuration defaults, refreshed after workspace trust.
+An edit retains the existing budget until a preset is chosen; preset selection
+changes duration and run allowance while retaining other edit limits. Replacement
+identifies the previous objective and requires an explicit yes. A pending request
+owns its form by command ID; either its committed event or receipt closes it.
+Errors retain the draft and refresh state. Failed refreshes can be retried without
+a mutation, and changed identities are never silently rebound. Check consent
+remains a separate command, and stopped-goal edits do not resume work.
+Pause/resume/clear submit the observed goal identity and revision, with no
+optimistic state mutation or conflict retry. Check consent freezes the session,
+workspace, goal identity/revision and exact command in a scrollable panel.
+Its default is denial; explicit one-shot or repeated-goal consent uses existing
+GoalControl commands. A changed target invalidates the panel, and ordinary tool
+approval settings cannot grant check authority. The composer rule prioritizes
+goal state, with run/deadline/wake counters for active goals and exhaustive stop
+reasons otherwise. A user pause shows draining while its run remains pending,
+then the resume command. Idle active goals refresh the countdown once per second;
+the terminal loop supplies current wall time without changing event-based run
+timing or adding clock reads to goal-less frames.
+
 User prompt admission settles unclaimed queued Goal/GoalCheck work before
 inserting the prompt, in the same transaction. This preemption clears only the
 old run's pending guard and keeps the goal active and its allowance unspent.
+A preempted check also retains its achievement evidence, pending audit and
+unconsumed consent. After the prompt settles, verification queues a fresh check
+instead of retaining the cancelled check's reservation.
 An ordinary edit likewise invalidates only unclaimed autonomous work. A recovered
 user prompt keeps its accepted task and frozen goal binding; pause, clear and
 replacement still cancel its paid obligations.
@@ -1723,6 +1830,22 @@ replacement scheduling wait for those cancelled obligations. Replayed controls
 restore outstanding cancellation signals without changing the original receipt
 or appending duplicate events. Later unrelated prompts in child sessions inherit
 no old paid ownership and remain independent of these controls.
+
+The last charged goal run, including a user prompt under an active goal, announces
+its final-slot status before model work. Admission and main start carry this
+classification independently of numeric limits, so a concurrent run-cap edit
+forces reprepare even when those limits stay equal. An early completion reserves
+one tool-free handoff within the existing run allowance. A caller's stricter
+one-turn cap uses that turn for the handoff; hard token, cost and deadline bounds
+still take precedence. Tools requested during the handoff are refused. The
+handoff follows normal output-contract validation and survives in-run compaction.
+Final-slot prompt admission intersects its model-turn cap with the finite goal
+per-run cap. If a live edit makes an already-running prompt final, the next turn
+boundary tightens its meter without resetting spend. A fully consumed tightened
+cap permits no additional response; the final response is reserved only when a
+turn remains. Rejected tools on that response retain a durable completed turn.
+Completion refreshes the live goal display without acknowledging a new revision
+until a subsequent request actually carries its notice.
 
 The session scheduler queues due active goals in batches of at most32. The
 idle-session check, absence of queued prompts/checks, fresh Goal-origin run,
@@ -1741,10 +1864,16 @@ An OS ownership lock excludes a second store worker before SQLite opens. Store
 clones share the presence cache; a successor reads durable presence after acquiring
 ownership. Replayed goal controls and cancellations retain the scheduler wake
 without changing their original durable receipts.
+When live goals exist at open, the store also captures an immutable event-row
+boundary before recovery and scheduling. Foreground adoption translates that
+boundary into the selected workspace's cursor, so completed startup runs and
+already-held input requests remain replayable. Stores without live goals skip
+this boundary query; ordinary prompt adoption keeps its existing cursor.
 
 After acquiring a scheduler permit, reservation derives paid-work admission
 from the captured goal's current durable budget. Goal-origin runs use current
-per-run limits; user prompts keep their own stricter limits. Token, cost and
+per-run limits; user prompts keep their own stricter limits. Both intersect
+all current managed per-run ceilings at reservation and refreshed start. Token, cost and
 duration bounds intersect with known remaining allowance. Expired or unknown
 capped spending refuses execution before runtime loading; stale inactive goal
 ownership cancels it. Sponsored descendants also intersect every historical
@@ -1773,8 +1902,14 @@ anchor, so rechecking the absolute goal deadline does not subtract preparation
 time again. Initial goal-owned and sponsored-child provider output is capped by the accepted total
 and output token limits. When task routing precedes that request, the runtime
 meter charges its reported spend once and caps initial output by the positive
-remaining total/output allowance. Exhausted or unknown routing remainder stops
-before the main provider dispatch. Durable limits remain inclusive of routing
+remaining total/output allowance. Before routing dispatch, the same transaction
+checks declared maximum input, output and cost against caller limits and every
+paid owner's current remainder, including pending spend. Unknown relevant bounds
+refuse finite caps before committing a pending marker. The TypeSafe adapter
+bounds input by its64KiB request limit but has no billed-output ceiling; finite
+output or total caps therefore require disabling multi-candidate routing. Its
+single-candidate path declares zero spend. Exhausted or unknown routing remainder
+stops before the main provider dispatch. Durable limits remain inclusive of routing
 spend; request shaping does not subtract it from the allowance a second time.
 
 Initial delegated prompt runs persist their immediate paid-owner run in the
@@ -1802,6 +1937,72 @@ runs; a second opener is refused as `StoreBusy` without touching the database
 (ADR-0022). Recovery therefore never runs against runs another live process
 is executing. The store belongs on a local filesystem, which SQLite's WAL
 mode already requires.
+
+Authorized goal checks use a distinct persisted `goal_check` run kind (store
+schema56) and bypass model loading. A current pending native audit may verify the
+last permitted model run because the check consumes no model run. Deadline,
+token and cost ceilings, including unknown accounting, still stop verification;
+a no-check model audit requires another available model run. Reservation fixes one acquisition/process
+deadline, bounded by the goal deadline. Waiting checks hold their own session
+reservation but do not exclude each other or the descendants needed by active
+work. The start transaction waits for active/preparing model work and running
+side questions, consumes exact Once authority, charges one audit, and marks the
+check Running. That durable row excludes new main/helper reservations and side
+questions in the workspace until confirmed process teardown and terminal commit.
+
+The Unix check supervisor reuses minimal-environment/cwd preparation and process
+groups. It observes leader exit without reaping, terminates the group while the
+leader still pins its id, then reaps; this also stops background descendants that
+closed their output pipes. Linux confirms process exit through pidfds before
+reaping the pinned leader. Other Unix targets reap the killed leader, disarm
+signals, and require process-group absence within five seconds using signal-zero
+probes. Reused group ids can only delay confirmation. Bounded blocking permits
+cover workspace opening, preparation and exit observation. Workspace opens run on
+the same bounded blocking path; started work is joined before releasing exclusion.
+Cancellation and the shared deadline drain the process group. A
+resource lease makes unconfirmed exit fail teardown, retaining durable exclusion
+rather than publishing completion. A workspace-open failure before spawn settles
+as a failed check through ordinary drain and finish, preserving host availability.
+Results mask recognized secrets before persistence and retain an exit/timeout
+diagnostic and UTF-8 output suffix within4KiB, including the diagnostic header.
+If raw capture drops a line prefix, its incomplete leading fragment is omitted
+so losing a credential marker cannot expose the retained value. Changing the
+check specification resets its consecutive failure streak; neutral edits retain it. Every check
+settlement persists that diagnostic on its original run's assistant message and
+publishes the existing message event in the terminal transaction, even if the
+goal was edited, replaced, cleared, or cancelled. A check has no user prompt,
+so these records appear in snapshots/replay but not model context assembly.
+Goal changes and terminal settlement share one transaction; only goal changes
+require the live active audit revision. Recovery pauses a
+started check as CheckInterrupted without refunding Once authority; an unstarted
+check remains queued. An expired unstarted check retains Once authority and is settled through the
+queued-run path, releasing its preparation pointer and queue count. Admission
+preserves its explicit calendar-expiry reason independently of the monotonic
+process clock; ordinary timeout counts as a failed check, while the goal
+deadline takes exhaustion precedence. Native process supervision outside Unix
+is unavailable.
+
+Hard-killing QQ can leave a running check shell alive because process guards
+cannot run. Startup recovery pauses the matching goal without repeating its
+check; it does not identify or stop that orphan. Recovery durably holds the
+workspace against new run and side-question admission, including after the goal
+is cleared or replaced. Snapshots expose the oldest unacknowledged check.
+`AcknowledgeCheckInterruption` releases that exact workspace/run hold after the
+operator resolves its uncertain effects; acknowledging one cannot release other
+holds. A matching interrupted goal remains user-paused and needs separate
+resume and any fresh Once authorization. The hold also prevents deleting its
+session, and survives repeated restarts.
+
+A no-check achievement claim queues a separate Goal-origin prompt run with a
+persisted zero-repair output contract. Its single primary turn has no tools,
+children, or nested audit hook; the first turn verifies rather than reserving a
+budget handoff, and no second request is allowed. Starting atomically charges
+one of eight audits. Only a valid positive verdict with nonblank evidence can
+achieve the live active claimed revision, after current overall exhaustion has
+been checked. Negative or invalid verdicts and protocol failures clear that
+claim and return to ordinary work; cancellation, interruption, provider retry,
+and authentication/configuration stops retain their existing recovery rules.
+The verdict is retained on the run through existing FinalOutput persistence.
 
 ## Workspaces And Tools
 

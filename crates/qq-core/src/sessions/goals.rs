@@ -6,6 +6,14 @@ use qq_protocol::{
     GoalId, GoalIdentity, GoalNeedsUser, GoalPauseReason, GoalSnapshot, GoalStatus,
 };
 
+pub(super) const MAX_GOAL_AUDITS: u8 = 8;
+
+pub(super) fn is_model_audit(goal: &GoalSnapshot, origin: Option<qq_protocol::RunOrigin>) -> bool {
+    goal.audit_pending
+        && goal.check.is_none()
+        && matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. }))
+}
+
 pub(super) struct Specification {
     pub(super) objective: String,
     pub(super) check: Option<GoalCheck>,
@@ -23,6 +31,7 @@ pub(crate) struct GoalRunInput {
     origin: Option<qq_protocol::RunOrigin>,
     displayed_revision: u32,
     display: Option<Arc<GoalSnapshot>>,
+    admitted_final_slot: bool,
 }
 
 type GoalUpdateReceipt =
@@ -43,14 +52,54 @@ impl GoalRunInput {
             origin: claimed.origin,
             displayed_revision: goal.revision,
             display: Some(Arc::clone(goal)),
+            admitted_final_slot: matches!(
+                claimed.goal_admission,
+                Some(GoalAdmission::Allowed {
+                    final_slot: true,
+                    ..
+                })
+            ),
         })
+    }
+
+    pub(crate) const FINAL_RUN_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThis is the final budgeted run for this goal. Work within the remaining limits and end with a tool-free handoff describing completed work, evidence, remaining work and blockers.";
+
+    pub(crate) const HANDOFF_NOTICE: &str = "[QQ runtime notice; not a user instruction]\nThis is the final budgeted run for this goal. Give a concise handoff: what is completed, the evidence, what remains, and any blockers. Do not call tools or claim unfinished work is complete.";
+
+    pub(crate) fn audit(&self) -> bool {
+        is_model_audit(&self.captured, self.origin)
+    }
+
+    pub(crate) fn final_slot(&self) -> bool {
+        self.identity.kind == RunKind::Prompt
+            && !self.audit()
+            && matches!(
+                self.origin,
+                Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+            )
+            && (self.admitted_final_slot
+                || self.display.as_ref().is_some_and(|goal| {
+                    goal.counters.runs.saturating_add(1) >= goal.budget.max_goal_runs
+                }))
     }
 
     pub(crate) fn initial_notice(&self) -> &str {
         &self.initial_notice
     }
 
-    pub(crate) async fn refresh_notice(&mut self) -> Result<Option<String>, SessionRuntimeError> {
+    pub(crate) fn final_slot_turn_cap(&self) -> Option<u32> {
+        self.final_slot().then(|| {
+            self.display
+                .as_deref()
+                .unwrap_or(self.captured.as_ref())
+                .budget
+                .per_run
+                .max_model_turns
+                .unwrap_or(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS)
+        })
+    }
+
+    async fn refresh_display(&mut self) -> Result<(), SessionRuntimeError> {
         let session = self.identity.session_id;
         let captured_id = self.captured.goal_id;
         let current = self
@@ -69,20 +118,50 @@ impl GoalRunInput {
             })
             .await?;
         self.display = current;
-        let Some(current) = &self.display else {
-            return Ok(None);
-        };
-        if current.revision == self.displayed_revision {
-            return Ok(None);
-        }
-        self.displayed_revision = current.revision;
-        Ok(Some(crate::tools::goal::render_notice(current, now_ms())))
+        Ok(())
     }
 
-    pub(crate) fn post_summary_notice(&self) -> Option<String> {
-        self.display
-            .as_ref()
-            .map(|goal| crate::tools::goal::render_notice(goal, now_ms()))
+    fn take_notice(&mut self) -> Option<String> {
+        let Some(current) = &self.display else {
+            return None;
+        };
+        if current.revision == self.displayed_revision {
+            return None;
+        }
+        self.displayed_revision = current.revision;
+        Some(crate::tools::goal::render_notice(current, now_ms()))
+    }
+
+    pub(crate) async fn refresh_notice(&mut self) -> Result<Option<String>, SessionRuntimeError> {
+        self.refresh_display().await?;
+        Ok(self.take_notice())
+    }
+
+    pub(crate) async fn refresh_handoff_notice(
+        &mut self,
+    ) -> Result<Option<String>, SessionRuntimeError> {
+        self.refresh_display().await?;
+        // A non-final candidate may still enter output repair or audit. Do not
+        // acknowledge its new revision until a subsequent request carries it.
+        Ok(if self.final_slot() {
+            self.take_notice()
+        } else {
+            None
+        })
+    }
+
+    pub(crate) fn post_summary_notice(&self, handoff: bool) -> Option<String> {
+        self.display.as_ref().map(|goal| {
+            let mut notice = crate::tools::goal::render_notice(goal, now_ms());
+            if handoff {
+                notice.push_str("\n\n");
+                notice.push_str(Self::HANDOFF_NOTICE);
+            } else if self.final_slot() {
+                notice.push_str("\n\n");
+                notice.push_str(Self::FINAL_RUN_NOTICE);
+            }
+            notice
+        })
     }
 
     pub(crate) async fn admit_update(
@@ -247,6 +326,7 @@ pub(super) fn set(
     expected: Option<GoalIdentity>,
     replace: bool,
     now: u64,
+    policy: GoalPolicy,
 ) -> Result<GoalSnapshot, SessionRuntimeError> {
     session_workspace(connection, session)?;
     let current = load_live(connection, session)?;
@@ -291,6 +371,12 @@ pub(super) fn set(
         specification.budget.per_run.max_model_turns =
             Some(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS);
     }
+    let policy = policy.validate()?;
+    policy.validate_specification(
+        &specification.budget,
+        specification.check.as_ref(),
+        Some(now),
+    )?;
     let check_changed = current
         .as_ref()
         .is_none_or(|goal| goal.check != specification.check);
@@ -342,6 +428,7 @@ pub(super) fn set(
     goal.check_output = None;
     goal.next_run_at_ms = now;
     if check_changed || replace {
+        goal.counters.check_failures = 0;
         goal.check_authorization = goal.check.as_ref().map(|_| GoalCheckAuthorization::Pending);
         if goal.check.is_some() && goal.status == GoalStatus::Active {
             goal.status = needs_check_approval();
@@ -352,6 +439,7 @@ pub(super) fn set(
         }
     }
     save(connection, &goal)?;
+    goal_policy::save(connection, goal.goal_id, policy, Some(now))?;
     Ok(goal)
 }
 
@@ -362,6 +450,7 @@ pub(super) fn control(
     action: GoalControl,
     now: u64,
     check_policy: Option<&Result<(), GoalCheckPolicyError>>,
+    policy: Option<&Result<GoalPolicy, GoalPolicyError>>,
 ) -> Result<(GoalSnapshot, bool), SessionRuntimeError> {
     session_workspace(connection, session)?;
     let mut goal = load_live(connection, session)?.ok_or(SessionRuntimeError::GoalNotFound)?;
@@ -378,12 +467,47 @@ pub(super) fn control(
     if goal.status == GoalStatus::Achieved && !clear {
         return Err(SessionRuntimeError::GoalImmutable);
     }
+    if matches!(
+        action,
+        GoalControl::Resume | GoalControl::ApproveCheck { .. }
+    ) {
+        let policy = match policy {
+            Some(result) => result.clone()?.validate()?,
+            None => GoalPolicy::default(),
+        };
+        let (_, at) = goal_policy::load(connection, goal.goal_id)?;
+        policy.validate_specification(&goal.budget, goal.check.as_ref(), at)?;
+        goal_policy::save(connection, goal.goal_id, policy, at)?;
+    }
     match action {
         GoalControl::Clear => {}
         GoalControl::Pause => {
             goal.status = GoalStatus::Paused {
                 reason: GoalPauseReason::User,
             }
+        }
+        GoalControl::PauseForInput { tool_call_id } => {
+            let call = connection.query_row(
+                "SELECT run_id,state='awaiting_approval' AND name='ask_user' FROM tool_calls WHERE id=?1",
+                [tool_call_id.to_string()], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            ).optional()?;
+            let Some((run, held_question)) = call else {
+                return Err(SessionRuntimeError::GoalInputNotPending);
+            };
+            let run = parse_id(&run)?;
+            if goal.status != GoalStatus::Active
+                || !held_question
+                || !paid_obligations(connection, session, Some(goal.goal_id))?
+                    .iter()
+                    .any(|work| work.run == run && !work.cancelled)
+            {
+                return Err(SessionRuntimeError::GoalInputNotPending);
+            }
+            goal.status = GoalStatus::Paused {
+                reason: GoalPauseReason::NeedsUser {
+                    cause: GoalNeedsUser::Approval { tool_call_id },
+                },
+            };
         }
         GoalControl::Resume => {
             if paid_obligations(connection, session, None)?
@@ -480,28 +604,7 @@ fn ensure_activation(goal: &GoalSnapshot, now: u64) -> Result<(), SessionRuntime
     if goal.pending_run_id.is_some() {
         return Err(SessionRuntimeError::GoalCancellationPending);
     }
-    if goal.budget.deadline_ms <= now || goal.counters.runs >= goal.budget.max_goal_runs {
-        return Err(SessionRuntimeError::GoalBudgetSpent);
-    }
-    if let Some(limit) = goal.budget.max_total_tokens {
-        let Some(usage) = goal.counters.usage else {
-            return Err(SessionRuntimeError::GoalBudgetSpent);
-        };
-        let spent = usage
-            .input_tokens
-            .checked_add(usage.cache_read_input_tokens)
-            .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
-            .and_then(|value| value.checked_add(usage.output_tokens));
-        if spent.is_none_or(|spent| spent >= limit) {
-            return Err(SessionRuntimeError::GoalBudgetSpent);
-        }
-    }
-    if let Some(limit) = goal.budget.max_cost_usd_nanos
-        && goal
-            .counters
-            .estimated_cost_usd_nanos
-            .is_none_or(|spent| spent >= limit)
-    {
+    if goal_driver_exhaustion(goal, now).is_some() {
         return Err(SessionRuntimeError::GoalBudgetSpent);
     }
     Ok(())
@@ -906,15 +1009,19 @@ pub(super) fn finalize_spend(
     };
     let base: RunId = parse_id(&base)?;
     let terminal = if own_goal.is_some() && base == run_id {
-        let (revision, outcome, finished): (u32, String, u64) = connection.query_row(
-            "SELECT goal_revision,outcome_json,finished_at_ms FROM runs WHERE id=?1",
+        let (revision, outcome, finished, model_audit, final_output): (u32, String, u64,bool,Option<String>) = connection.query_row(
+            "SELECT goal_revision,outcome_json,finished_at_ms,
+                COALESCE(json_extract(goal_snapshot_json,'$.audit_pending')=1 AND json_type(goal_snapshot_json,'$.check')='null'
+                    AND json_extract(origin_json,'$.type')='goal',0),final_output_json FROM runs WHERE id=?1",
             [run_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?,row.get(4)?)),
         )?;
         Some((
             revision,
             serde_json::from_str::<RunOutcome>(&outcome)?,
             finished,
+            model_audit,
+            final_output,
         ))
     } else {
         None
@@ -984,11 +1091,39 @@ pub(super) fn finalize_spend(
         if live
             && direct
             && goal.status == GoalStatus::Active
-            && let Some((revision, outcome, now)) = &terminal
+            && let Some((revision, outcome, now, model_audit, final_output)) = &terminal
             && goal.revision == *revision
         {
             changed |=
                 apply_terminal_outcome(connection, &mut goal, run_id, outcome, completed, *now)?;
+            if *model_audit
+                && matches!(
+                    outcome,
+                    RunOutcome::Completed
+                        | RunOutcome::BudgetExhausted { .. }
+                        | RunOutcome::Failed { .. }
+                )
+                && goal.status == GoalStatus::Active
+                && goal.audit_pending
+                && goal.audit_revision == Some(*revision)
+            {
+                let verdict = final_output
+                    .as_deref()
+                    .map(serde_json::from_str::<FinalOutput>)
+                    .transpose()?;
+                let confirmed = matches!(verdict,Some(FinalOutput::Valid {ref value,..})
+                    if value.get("achieved").and_then(serde_json::Value::as_bool)==Some(true)
+                        && value.get("evidence").and_then(serde_json::Value::as_str).is_some_and(|evidence|!evidence.trim().is_empty()))
+                    && matches!(outcome, RunOutcome::Completed);
+                goal.audit_pending = false;
+                goal.audit_revision = None;
+                if confirmed {
+                    goal.status = GoalStatus::Achieved;
+                } else {
+                    goal.achievement_claim = None;
+                }
+                changed = true;
+            }
         }
         if changed {
             save(connection, &goal)?;
@@ -1111,12 +1246,13 @@ fn apply_terminal_outcome(
                     }
                     streak += 1;
                 }
-                let delay = (60_000_u64 << streak).min(1_800_000);
+                let policy = goal_policy::load(connection, goal.goal_id)?.0;
+                let delay = (60_000_u64 << streak).min(policy.max_backoff_ms);
                 goal.next_run_at_ms = now.saturating_add(delay).min(goal.budget.deadline_ms);
             }
         },
         RunOutcome::BudgetExhausted { .. } => {
-            if let Some(reason) = goal_exhaustion(goal, now) {
+            if let Some(reason) = goal_driver_exhaustion(goal, now) {
                 goal.status = GoalStatus::BudgetExhausted { reason };
             } else {
                 if !committed {
@@ -1139,7 +1275,7 @@ fn apply_terminal_outcome(
                 .max(wait.until_ms)
                 .min(goal.budget.deadline_ms);
         }
-        if let Some(reason) = goal_exhaustion(goal, now) {
+        if let Some(reason) = goal_driver_exhaustion(goal, now) {
             goal.status = GoalStatus::BudgetExhausted { reason };
         }
     }
@@ -1157,6 +1293,7 @@ fn apply_terminal_outcome(
 #[derive(Clone, Copy)]
 pub(super) enum GoalAdmission {
     Allowed {
+        final_slot: bool,
         deadline_ms: u64,
         anchor_ms: u64,
         execution_started: Option<tokio::time::Instant>,
@@ -1188,10 +1325,64 @@ pub(super) fn admit_run(
     if let Some(reason) = goal_exhaustion(&current, now) {
         return Ok(GoalAdmission::Exhausted(reason));
     }
+    let model_audit = is_model_audit(captured, origin);
+    if model_audit
+        && (current.revision != captured.revision
+            || !current.audit_pending
+            || current.audit_revision != Some(current.revision)
+            || current.counters.audits >= MAX_GOAL_AUDITS)
+    {
+        return Ok(GoalAdmission::Cancelled);
+    }
     let original_duration = limits.max_duration_ms;
-    // Queued automatic limits are a cache; prompts retain their own limits.
+    let final_slot = !model_audit
+        && matches!(
+            origin,
+            Some(qq_protocol::RunOrigin::Goal { .. } | qq_protocol::RunOrigin::UserPrompt {})
+        )
+        && current.counters.runs.saturating_add(1) >= current.budget.max_goal_runs;
+    // Queued automatic limits are a cache; prompts retain their own limits
+    // except for the final slot's finite turn ceiling.
     if matches!(origin, Some(qq_protocol::RunOrigin::Goal { .. })) {
         *limits = current.budget.per_run;
+    }
+    if model_audit {
+        limits.max_model_turns = Some(1);
+    }
+
+    // Prompt limits are caller-owned, but managed ceilings apply to every
+    // execution claim and again after policy refresh at start.
+    let (policy, _) = goal_policy::load(connection, current.goal_id)?;
+    macro_rules! clamp {
+        ($($field:ident),+ $(,)?) => { $(
+            if let Some(cap) = policy.per_run.$field {
+                limits.$field = Some(limits.$field.map_or(cap, |requested| requested.min(cap)));
+            }
+        )+ };
+    }
+    clamp!(
+        max_duration_ms,
+        max_model_turns,
+        max_tool_calls,
+        max_total_tokens,
+        max_cost_usd_nanos,
+        max_input_tokens,
+        max_output_tokens,
+        max_tool_output_bytes,
+        max_children,
+        max_concurrent_children
+    );
+    if final_slot {
+        let cap = current
+            .budget
+            .per_run
+            .max_model_turns
+            .unwrap_or(qq_protocol::DEFAULT_GOAL_RUN_MODEL_TURNS);
+        limits.max_model_turns = Some(
+            limits
+                .max_model_turns
+                .map_or(cap, |existing| existing.min(cap)),
+        );
     }
     let remaining = current.budget.deadline_ms.saturating_sub(anchor_ms);
     limits.max_duration_ms = Some(
@@ -1235,6 +1426,7 @@ pub(super) fn admit_run(
         );
     }
     Ok(GoalAdmission::Allowed {
+        final_slot,
         deadline_ms: current.budget.deadline_ms,
         anchor_ms,
         execution_started: None,
@@ -1251,10 +1443,14 @@ pub(super) fn admit_sponsored_run(
     now: u64,
     anchor_ms: u64,
 ) -> Result<GoalAdmission, SessionRuntimeError> {
-    let mut deadline_ms = match own_admission {
-        Some(GoalAdmission::Allowed { deadline_ms, .. }) => deadline_ms,
+    let (mut deadline_ms, final_slot) = match own_admission {
+        Some(GoalAdmission::Allowed {
+            deadline_ms,
+            final_slot,
+            ..
+        }) => (deadline_ms, final_slot),
         Some(refusal) => return Ok(refusal),
-        None => u64::MAX,
+        None => (u64::MAX, false),
     };
     let mut sponsored = false;
     for (_, session, goal) in paid_goal_owners(connection, run_id)?.into_iter().skip(1) {
@@ -1283,17 +1479,42 @@ pub(super) fn admit_sponsored_run(
             .map_or(remaining, |cap| cap.min(remaining)),
     );
     Ok(GoalAdmission::Allowed {
+        final_slot,
         deadline_ms,
         anchor_ms,
         execution_started: None,
     })
 }
 
-fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExhaustion> {
+pub(super) fn goal_exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+) -> Option<qq_protocol::GoalExhaustion> {
+    exhaustion(goal, now, false)
+}
+
+pub(super) fn goal_driver_exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+) -> Option<qq_protocol::GoalExhaustion> {
+    // Native verification commits no model run. It may use the final work
+    // run's claim, but never bypass its deadline or token/cost ceilings.
+    exhaustion(
+        goal,
+        now,
+        goal.check.is_some() && goal.audit_pending && goal.audit_revision == Some(goal.revision),
+    )
+}
+
+fn exhaustion(
+    goal: &GoalSnapshot,
+    now: u64,
+    native_check_pending: bool,
+) -> Option<qq_protocol::GoalExhaustion> {
     if now >= goal.budget.deadline_ms {
         return Some(qq_protocol::GoalExhaustion::Deadline);
     }
-    if goal.counters.runs >= goal.budget.max_goal_runs {
+    if !native_check_pending && goal.counters.runs >= goal.budget.max_goal_runs {
         return Some(qq_protocol::GoalExhaustion::Runs);
     }
     if let Some(limit) = goal.budget.max_total_tokens {
@@ -1320,7 +1541,7 @@ fn goal_exhaustion(goal: &GoalSnapshot, now: u64) -> Option<qq_protocol::GoalExh
     None
 }
 
-const PAID_WORK_CTE: &str = "WITH RECURSIVE paid(id,depth) AS (
+pub(super) const PAID_WORK_CTE: &str = "WITH RECURSIVE paid(id,depth) AS (
     SELECT id,0 FROM runs WHERE session_id=?1 AND goal_id IS NOT NULL AND (?2 IS NULL OR goal_id=?2)
     UNION ALL SELECT child.id,paid.depth+1 FROM paid JOIN runs child ON child.goal_paid_owner_run_id=paid.id
       WHERE paid.depth<?3
@@ -1393,7 +1614,6 @@ pub(super) fn queue_due_goals(
         .replace("?3", &MAX_CHILD_DEPTH.to_string());
     let eligible=format!("g.live=1 AND json_extract(g.payload_json,'$.status.type')='active'
         AND json_extract(g.payload_json,'$.pending_run_id') IS NULL
-        AND json_extract(g.payload_json,'$.audit_pending')=0
         AND s.active_run_id IS NULL AND s.preparing_run_id IS NULL AND s.queued_prompts=0
         AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.session_id=s.id AND r.status IN ('queued','running'))
         AND NOT EXISTS({drainage_cte} SELECT 1 FROM obligations JOIN runs r ON r.id=obligations.id
@@ -1416,7 +1636,7 @@ pub(super) fn queue_due_goals(
                 .and_then(|value| value.checked_add(usage.cache_write_input_tokens))
                 .and_then(|value| value.checked_add(usage.output_tokens))
         });
-        let exhaustion = goal_exhaustion(&goal, now);
+        let exhaustion = goal_driver_exhaustion(&goal, now);
         if let Some(reason) = exhaustion {
             goal.status = GoalStatus::BudgetExhausted { reason };
             save(&transaction, &goal)?;
@@ -1430,6 +1650,33 @@ pub(super) fn queue_due_goals(
                 )?
                 .cursor,
             );
+            continue;
+        }
+        if goal.audit_pending && goal.counters.audits >= MAX_GOAL_AUDITS {
+            goal.status = GoalStatus::Blocked {
+                reason: qq_protocol::GoalBlockedReason::AuditExhausted,
+            };
+            save(&transaction, &goal)?;
+            cursors.push(
+                append_event(
+                    &transaction,
+                    EventContext::for_session(store_id, workspace, goal.session_id, None, now),
+                    SessionEvent::GoalUpdated {
+                        goal: Box::new(goal),
+                    },
+                )?
+                .cursor,
+            );
+            continue;
+        }
+        if goal.audit_pending && goal.check.is_some() {
+            cursors.extend(super::goal_check::queue(
+                &transaction,
+                store_id,
+                workspace,
+                &mut goal,
+                now,
+            )?);
             continue;
         }
         let run = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
@@ -1469,12 +1716,32 @@ pub(super) fn queue_due_goals(
             revision: goal.revision,
         };
         let notice = crate::tools::goal::render_notice(&goal, now);
-        let prompt =
-            "Work toward the current goal. Keep its checklist and notes current with update_goal.";
+        let model_audit = is_model_audit(&goal, Some(origin));
+        let (prompt, contract) = if model_audit {
+            limits.max_model_turns = Some(1);
+            let contract = qq_protocol::OutputContract {
+                schema: serde_json::json!({
+                    "type":"object","properties":{"achieved":{"type":"boolean"},"evidence":{"type":"string","minLength":1,"maxLength":512}},
+                    "required":["achieved","evidence"],"additionalProperties":false,
+                }),
+                repair_turns: 0,
+            };
+            crate::output::CompiledOutputSchema::compile(&contract)
+                .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
+            (
+                format!(
+                    "Independently audit the current goal's achievement claim against the persisted work. Do not assume the claim is correct. Use one tool-free turn. Return JSON with achieved (boolean) and evidence (a specific nonempty reason, at most 512 characters). Confirm only if the evidence supports completion.\nClaim under review: {}",
+                    serde_json::to_string(&goal.achievement_claim)?
+                ),
+                Some(serde_json::to_string(&contract)?),
+            )
+        } else {
+            ("Work toward the current goal. Keep its checklist and notes current with update_goal.".to_owned(),None)
+        };
         transaction.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms,limits_json,origin_json,
-            goal_id,goal_revision,goal_snapshot_json,goal_initial_notice) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?8,?9,?10,?11,?12)",
+            goal_id,goal_revision,goal_snapshot_json,goal_initial_notice,output_contract_json) VALUES(?1,?2,?3,?4,?5,'queued',?6,?7,?8,?9,?10,?11,?12,?13)",
             params![run.to_string(),goal.session_id.to_string(),command.to_string(),message.to_string(),assistant.to_string(),now,
-                serde_json::to_string(&limits)?,serde_json::to_string(&origin)?,goal.goal_id.to_string(),goal.revision,serde_json::to_string(&goal)?,notice])?;
+                serde_json::to_string(&limits)?,serde_json::to_string(&origin)?,goal.goal_id.to_string(),goal.revision,serde_json::to_string(&goal)?,notice,contract])?;
         transaction.execute("INSERT INTO messages(id,session_id,run_id,ordinal,role,state,output,created_at_ms)
             VALUES(?1,?2,?3,(SELECT COALESCE(MAX(ordinal),0)+1 FROM messages WHERE session_id=?2),'user','queued',?4,?5)",
             params![message.to_string(),goal.session_id.to_string(),run.to_string(),prompt,now])?;
@@ -1521,4 +1788,31 @@ pub(super) fn queue_due_goals(
         next_wake: next,
         cursors,
     })
+}
+
+pub(super) fn start_model_audit(
+    connection: &Connection,
+    identity: RunIdentity,
+    captured: Option<&GoalSnapshot>,
+    origin: Option<qq_protocol::RunOrigin>,
+) -> Result<Option<GoalSnapshot>, SessionRuntimeError> {
+    let Some(captured) = captured.filter(|goal| is_model_audit(goal, origin)) else {
+        return Ok(None);
+    };
+    let Some(mut goal) = load_live(connection, identity.session_id)? else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    if goal.goal_id != captured.goal_id
+        || goal.revision != captured.revision
+        || goal.status != GoalStatus::Active
+        || !goal.audit_pending
+        || goal.audit_revision != Some(goal.revision)
+        || goal.pending_run_id != Some(identity.run_id)
+        || goal.counters.audits >= MAX_GOAL_AUDITS
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    goal.counters.audits += 1;
+    save(connection, &goal)?;
+    Ok(Some(goal))
 }

@@ -58,7 +58,7 @@ pub(super) struct ShellArgs {
     #[serde(default)]
     pub(super) cwd: Option<String>,
     #[serde(default)]
-    timeout_seconds: Option<u64>,
+    pub(super) timeout_seconds: Option<u64>,
     /// Environment variable names to pass through from the server's
     /// environment. The child otherwise starts from [`BASE_ENV`] only.
     #[serde(default)]
@@ -638,13 +638,13 @@ fn shell_result(
 /// Kills the process group on task destruction, unless disarmed after a
 /// normal exit. Ordinary cancellation keeps the owning task alive to reap
 /// the child; this guard also covers unwinding of that task.
-struct ProcessGroupGuard {
+pub(crate) struct ProcessGroupGuard {
     #[cfg(unix)]
     pgid: Option<rustix::process::Pid>,
 }
 
 impl ProcessGroupGuard {
-    fn new(child_id: Option<u32>) -> Self {
+    pub(crate) fn new(child_id: Option<u32>) -> Self {
         #[cfg(unix)]
         {
             Self {
@@ -662,18 +662,18 @@ impl ProcessGroupGuard {
 
     /// Forgets the group after a normal exit; the reaped leader's pid may be
     /// recycled, so killing the group then would be unsound.
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         #[cfg(unix)]
         {
             self.pgid = None;
         }
     }
 
-    fn kill(&mut self) -> std::io::Result<()> {
+    pub(crate) fn kill(&mut self) -> std::io::Result<()> {
         #[cfg(unix)]
-        if let Some(pgid) = self.pgid.take() {
+        if let Some(pgid) = self.pgid {
             match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Ok(()) | Err(rustix::io::Errno::SRCH) => self.pgid = None,
                 Err(error) => return Err(error.into()),
             }
         }

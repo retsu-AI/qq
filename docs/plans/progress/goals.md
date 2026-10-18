@@ -4,13 +4,13 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 
 | Slice | Goal | Status | Linear | Branch / PR | Notes |
 | --- | --- | --- | --- | --- | --- |
-| G0 | The goal PR: protocol, store, goal in runs, `update_goal`, and autonomous-core AC4 | In review | [ENG-1045](https://linear.app/retsu-ai/issue/ENG-1045) | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation checkpoint; not on main, full goal acceptance incomplete |
+| G0 | Foundation: durable goals and AC4 loop guard | Shipped (87d3ed1a) | ENG-1045 | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation merged; whole-plan acceptance remains open |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | The driver | In review | [ENG-1053](https://linear.app/retsu-ai/issue/ENG-1053) | [#309](https://github.com/retsu-AI/qq/pull/309), stacked on #308 | Implemented checkpoint only; full G2 acceptance remains open; not shipped |
-| G2.1 | Bounded idle driver, historical spend and direct-goal admission checkpoint | In review | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Implemented subset; current local socket-dependent qualification blocked; full G2 acceptance remains open |
-| G3 | Completion check | Planned | | | Depends on G2; owns full checked Goal 1 |
-| G4 | Surfaces: `/goal`, `qq run --goal`, `qq goal` | Planned | | | Read-only panel after G0; execution after G2/G3 |
-| G5 | Evidence | Planned | | | ENG-809 |
+| G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
+| G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
+| G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
+| G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
+| G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Ninth qualifies final runtime `e84e3552`: 145.7 minutes, four compactions, 14 retained checklist identities, terminal usage reconciled; subscription only, no paid API fallback |
 
 ## Entries
 
@@ -812,3 +812,439 @@ Original fullG2 and autonomous-core acceptance, current-main integration and per
 - Reconfirmed published308f078ccaa/3090b15c8c7 exclude PR319: runtime/manifests match pre-Jev baselines, removed files/provenance and ancestry absent; clean main73ff0647 retained. Both hosted CI runs passed.308received genuine Codex thumbs-up;309received4new findings, all reproduced before implementation.
 - Regression commitsab8d1dd6/21942446 reproduce lost cancellation replay wake, generic automatic routing input, expired sponsored-child admission and request cap256against inherited60. Fix retains replay receipts, routes captured objectives only for Goal-origin work, intersects all paid-ancestor absolute deadlines at claim/routing/main start, and shapes child provider output including routing spend. Independent reviews approve both scheduling/routing and revised ancestry admission; no ancestor goal authority granted.
 - Focused goal_review7/7pass (2.39s), including own-goal child deadline variants. Final repository gate and hosted review follow. PR308 remains unmerged: normal async merge failed last-pusher approval and active github-pages deployment requirements. No protection bypass, fabricated review or deployment. Four309threads remain open until fixing commits are published.
+
+### 2026-10-16 — post-merge G2/G3, G4 and G5 stack
+
+- User requests three reviewable PRs: G2 closeout+G3 (ENG-1063), G4 surfaces (ENG-1064), G5 evidence (ENG-1065), parent ENG-1011. Start clean isolated worktree `/tmp/qq-goal-delivery-20261015/g3` on exact main3d58b3d3; root is sole writer. Preserve #293 cooperative preparation drain and all #309 review fixes; exclude removed PR319.
+- Pre-change optimized turn_overhead diagnostic:3iterations×1000executed/durable calls,9compactions each, all assertions pass. Median gaps at10/100/1000 are92.690/102.274/57.591ms; broad sample variation is not quiet-host/tail qualification. Exact source/binary/fixture/raw samples: `/tmp/qq-goal-delivery-20261015/baseline.json` and `g3-baseline-turn-overhead.log`. Candidate comparison and acceptance follow.
+- Reuse prepared test-first runtime/check/surface work rather than replay old merge history. Independent static G2/G3 review confirms principal Unix acceptance paths; add literal simulated20-minute permit-wait coverage and resolve/document platform boundaries. G5 provider selected:openai-codex/gpt-6.1-sol; no paid allowance inferred.
+
+### 2026-10-16 — G2/G3 integration and G5 authorization
+
+- Integrated G2 paid-request admission, caller remainders and final-slot handoff onto main3d58b3d3; retained all-sponsor deadlines and #293 cancellation/drain ownership. Corrected the older tiny-total child fixture to retain a binding60-token output allowance with room for request input; focused regression1/1 passes.
+- Ported G3 exact check authorization, bounded process execution, independent model audits, historical results and durable interrupted-check holds; configuration/policy foundations move into this PR because execution must enforce them. G4 retains the TUI, CLI and foreground surfaces. Protocol34/schema56–58 are reserved in root; descriptor15 is unchanged.
+- Driver-only and checked40-run scenarios pass with actual process kills and simulated multi-day waits/outages. Added literal20-minute held-permit acceptance; integrated final checks remain pending. Independent read-only integration review of53043b99 found no defects and verified no PR319 provenance.
+- G5 user authorization: openai-codex/gpt-6.1-sol through subscription only, with no paid API fallback. A failed subscription/auth path must stop rather than select a billable provider. Live evaluation has not started.
+
+### 2026-10-16 — G2/G3 qualification and push-boundary regression
+
+- Runtime ae835237 passed full workspace2686/2686 (15 deliberate skips), doctests/all-feature Clippy, minimal-provider211/211 and real-binary smoke6/6. Both multi-day scenarios passed under full load. Fresh manual captures prove8provider request bodies byte-identical to main3d58b3d3; an initial stale-cache comparison was discarded, and candidate was rebuilt before comparison.
+- Goal-less optimized loop diagnostic:10/100/1000-turn medians92.69/102.27/57.59ms baseline →17.92/17.57/18.92ms candidate;3×1000 durable calls,0duplicates,9compactions each. Shared-host variation prevents causal/H0 claims. Raw logs, hashes and immutable binaries: /tmp/qq-goal-delivery-20261015/. G4 rendering baseline is captured separately.
+- First required push failed because inherited Git-local variables let a temporary Git fixture change this linked worktree's HEAD/index; no physical source blobs changed and nothing was published. Restored owned metadata, reproduced on disposable regular/linked pushes, and fixed the hook boundary. The final gate must run on the resulting head.
+
+### 2026-10-16 — final fixture qualification
+
+- Required push gate exposed a sponsored-approval test race: a five-second real-time keeper delayed scheduler timers and let virtual deadlines race real Store I/O. Setup now uses the normal clock with a one-hour fixture allowance, then crosses both clocks explicitly only after actual approval and paid-owner assertions. Same regression passes1/1 in1.72s; independent read-only review approved. Runtime bounds are unchanged. Final-head push gate follows.
+
+### 2026-10-16 — published stack and current-main reconciliation
+
+- Opened #330 (G2/G3) and #331 (G4 on #330), both non-draft with ci:full. Final old-base gates passed2687/2687 and2733/2733 respectively, plus doctests/Clippy/minimal profiles. Publication revealed bare-repository fetches had left origin/main stale; fixed the owned remote fetch mapping and refreshed explicitly to3e34eea2.
+- Rebased #330 onto current main, preserving #325 fixture stabilization and #299 auth changes. Only conflict was legacy sleep locations: retain main's73 sites and lowered ceiling, then refresh positions against integrated source. Main auth source is unchanged by this PR. Resulting-head qualification follows; previous reports remain evidence for their exact old heads.
+
+### 2026-10-16 — preparation fixture entry fence
+
+- Rebased full gate exposed #293's preparation test expecting a checkpoint stage after its real100ms setup deadline could already expire. Narrow and8concurrent diagnostic copies pass; source review confirms an expired first poll can emit entered only during cancellation drain. Production snapshots the stage before cancellation correctly.
+- Replace the ambiguous Notify with a bounded entry receipt proving not-yet-cancelled, establish that stage before explicit virtual expiry, and retain exact stage/no-request/cooperative-drain assertions. Narrow corrected regression1/1 passes in1.74s; independent review approved. No production bounds changed. The entry receipt encodes the fixture ordering rather than loosening the verdict. Final-head gates follow.
+
+### 2026-10-16 — G3 managed prompt ceilings review repair
+
+- New Codex finding330/f1 reproduced independently on originating #330: unmanaged prompt claim lacks managed per-run limits (g3-managed-caps-red.log). Ported test-first792e2d95/ba072461 from the isolated subscription-only review task as a51fef7e/978c3d3a.
+- Intersect all ten execution-limit fields with current managed policy at claim and refreshed admission, retaining stricter caller limits and final-slot/audit bounds. Independent fixed-snapshot review found no source defect; identified that initial regression only proved claim.
+- Extended the regression to tighten policy after reservation, require Reprepare, retry actual start and inspect durably persisted limits. Narrow test passes1/1 (9448918a); broader/final-head gate follows after remaining related findings are integrated. Nothing from this repair is published yet.
+
+### 2026-10-16 — G3 paid input and sponsored approval review repairs
+
+- Ported dense-input regression and conservative paid-admission bounds from the live review task. Its actual red receipt7fb496ec dispatches1request despite a binding token/cost remainder; repaired narrow pair c6762cc6 passes2/2 after integration with managed ceilings. Requests and owned summaries reserve byte upper bounds rather than occupancy estimates.
+- Independent review rejected the first sponsor-duration repair: RunStarted excludes preparation. Added a real held20-minute preparation row;3079a366 reproduces Active instead of needs_user/approval. A first attempted post-event repair was too late because runtime deadline enforcement drains children before emitting exhaustion; discarded that experiment.
+- Retain bounded live monotonic deadlines through paid execution lifetime, capture expiry on the executor and recheck bound active/non-cancelled owners in the existing store transaction. Focused40dd7664 passes2/2 including absolute deadline, per-run duration, preparation delay and wall-clock lag rows; independent mechanism review and broader final gates follow. No protocol/schema or dependency changes.
+
+### 2026-10-16 — G3 review repair integration gate
+
+- All four hosted330findings have local test-first repairs. Policy pool saturation now awaits a cancellation-safe bounded semaphore rather than durably pausing valid goals; its focused regression passes1/1 (031ffd42). Current goal refresh already bounds that wait by cancellation and deadline.
+- Independent read-only reviews approve managed ceiling source plus strengthened actual-start test, conservative paid input, and monotonic sponsor registration (a8933e72). Rejected timestamp-based and post-event experiments do not define the resulting source. Four-row sponsor test and ordinary approval regression pass2/2, including nonzero preparation and wall-clock lag.
+- Preserve all73existing sleep sites; final head full pre-push gate and runtime smoke follow. Review threads stay open until fixing commits are published and final evidence is verified.
+
+### 2026-10-16 — G3 conservative admission outage fixture
+
+- Full gate on1763403e stops at the outage fixture's10000-token row. Exact diagnostic rerun proves TotalTokens refusal before dispatch, not provider-retry/accounting failure. The new paid input bound correctly includes complete request bytes.
+- Keep caps finite but leave100000tokens of room to exercise the intended HTTP529 rejection; retain every retry, direct ownership, known-zero accounting and zero-run-charge assertion. Full goal_admission group passes19/19 (4c2ac02f), including token-only/cost-only/combined rows for goal and prompt origins. Resulting-head full push gate follows.
+
+### G3 full-gate descendant exit correction
+
+The full gate on `2a75c4aa` caught a descendant still in state `R` when completion
+check cancellation returned. A narrow rerun passed, but independent source review
+confirmed the real gap: killpg plus leader wait did not observe descendant exit.
+The test now pins the descendant with a pidfd before cancellation and checks
+terminal readiness at the return boundary. It retains its original /proc check.
+
+Linux completion checks now retain the WNOWAIT leader pin while confirming every
+matching process through pidfd readiness, including zombie leaders with live
+threads. A bounded off-executor /proc scan (65,536 entries, 4,096 members, 4,096
+bytes per stat) is repeated after observed exits to close the fork/enumeration
+window. All scans and waits share one five-second cleanup deadline. Identity is
+checked around pidfd acquisition. Failure still reaps the shell but leaves the
+process lease unconfirmed and the runtime failed, preserving workspace exclusion.
+This adds Linux check-cleanup work only; ordinary prompt requests are unchanged.
+Existing rustix enables its event API without a new dependency or version change.
+
+Focused run `14ab4e7d-0c5e-408e-95fe-5d8af95054c4`: 5/5 process supervision
+tests passed. Final full gate, smoke and independent source review remain pending.
+
+Independent review found non-UTF-8 process names could fail whole-record decoding.
+A real check that writes byte 0xff to its Linux process name reproduced Cleanup
+InvalidData before the correction. Bounded byte reads now decode only the numeric
+stat suffix; no process-name UTF-8 assumption remains. Focused nextest
+`b669c0a1-d4f6-44bc-9ca3-176b4894c37b`: 6/6 process tests passed.
+
+### 2026-10-16 — G3 current-head process and routing corrections
+
+- Reproduced workspace disappearance poisoning the host, unconfirmed portable
+  process groups, and token-capped routing dispatch. Test-first commits retain
+  each red regression. Missing workspaces now settle failed checks normally;
+  portable supervision requires bounded group absence after reap and disarm.
+- Routers declare conservative input/output bounds (default unknown). Atomic
+  admission reuses current paid-owner accounting, including pending spend,
+  before dispatch. TypeSafe leaves billed output unknown and refuses finite
+  total/output caps for paid routing; free single-candidate routing remains0/0.
+- Focused nextest `7bcd21be-7579-4c7d-a318-6356daa6bc3c`:49/49 pass.
+  Independent source review finds no blocker. Linux exercises the portable
+  signal-zero primitive; actual macOS execution remains unverified locally.
+  Full gate, stack integration/publication and review resolution remain pending.
+
+### 2026-10-16 — G3 final-slot verification and noisy descendants
+
+- Reproduced a cap-1 achievement claim losing its native audit and 32 noisy
+  descendants starving leader exit until timeout. Red commits precede fixes.
+- Native checks bypass only the model-run ceiling for a current pending audit;
+  strict paid admission and all deadline/token/cost/unknown limits remain.
+  Exit observation precedes pipe reads, below cancellation and deadline.
+- Focused completion tests:29/29 pass. Independent review approves b75b3419.
+  Full workspace gate passes (111.1s); final docs/evidence, smoke, stack
+  publication and hosted review-thread resolution remain pending.
+
+### 2026-10-16 — G3 completion-policy pool backpressure
+
+- Review-body finding5546040233 was missed during inline-thread triage. Holding
+  all4 shared policy slots reproduced immediate completion-check rejection.
+- Check validation now awaits bounded pool capacity, matching goal policy
+  loading; caller cancellation/check deadline/command timeout remain in force.
+  The regression cancels one queued waiter, then verifies success and all4 slots
+  returned after capacity frees. Focused policy/managed-denial tests:3/3 pass.
+  Final gate, independent review and stack publication remain pending.
+
+### 2026-10-16 — G3 check workspace, streak and diagnostic corrections
+
+- Red tests observed workspace opens on the Tokio worker, stale failure counts
+  after check edits, and unmasked check output. Workspace opening now joins the
+  existing bounded blocking preparation; failures settle normally.
+- Check-spec changes reset consecutive check failures; unchanged checks retain
+  them. Recognized secrets are masked before durable output/model notices;
+  truncated leading fragments are omitted to avoid marker-prefix loss.
+- Existing4KiB/binary/history fixtures retain their exact assertions using
+  complete retained lines. Masked durable messages/reopen/context and long-secret
+  truncation are covered. Focused completion tests:31/31 pass. Independent review,
+  final gate/smoke/restack/publication and thread resolution remain pending.
+### 2026-10-16 — G4 surface integration
+
+- Root owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Integrated `/goal` status, explicit check consent, revision-fenced forms/controls, server `qq goal` and foreground `qq run --goal`, with complete terminal records and binary smoke scenarios.
+- Protocol35 adds foreground goal records and input-pause controls; schema58 and descriptor15 remain unchanged. All forced protocol consumers and guide/design docs move together. Verification feature copies remain identical; the lockfile adds only the existing workspace time dependency to qq-tui.
+- Retained all75 existing counted sleeps and refreshed their source positions, with no new sites or ceiling change. Local integrated gates, binary smoke and independent review remain pending; no PR or live G5 receipt yet.
+
+### 2026-10-16 — G4 local acceptance
+
+- Focused goal/CLI/docs/wire suite107/107 passes. Real-binary smoke8/8 passes, including exact check consent and one charged final-slot run with two requests and tool-free handoff. The earlier smoke assertion incorrectly equated runs with model requests; actual event/request artifacts established the correction, independently reviewed.
+- Isolated real-server CLI drive passes11 commands, once-authorized check marker, one work run and one audit to achieved; no-server command fails with guidance and creates no session store. Six CLI help surfaces captured.
+- Rendering19 scenarios×50 samples: candidate/baseline medians0.9607–1.0162; expanded32-call frame56.0→53.8us, ultra480×120 frame125.1→122.5us. Shared-host diagnostics, no H0/tail claim. Logs and verify homes remain outside Git under /tmp/qq-goal-delivery-20261015/. Independent static surface review approved; final-head gate/hosted platform checks remain.
+
+### 2026-10-16 — G4 rebase and live G5 start
+
+- Rebased #331 onto #330's current-main integration. Preserve all73 remaining sleep sites and main's lowered ceiling; G4 production source is unchanged apart from upstream main auth integration. Final-head gate follows; prior2733-pass report identifies old e72a82cc exactly.
+- G5 started2026-10-16T06:14:26Z on qualified e72a82cc with openai-codex/gpt-6.1-sol subscription only, no paid API fallback:4h deadline,8runs,64turns/250000tokens/30min per run. Private supervisor captures exit/usage and terminal state. Five real recovery tests pass; first run stopped after rejected compaction, next attempt compacted and retained15checklist items. Multi-hour/three-compaction acceptance remains open. No live raw content or credentials are committed.
+
+### 2026-10-16 — G4 rendered guide anchor
+
+- Hosted Linux, Windows and wasm checks pass for #330/#331. #331 website build exposed one bad headless-guide link to #qq-goal-; reproduced locally with the unchanged rendered-site checker and inspected actual CLI heading id #qq-goal. Corrected the guide source only.
+- Full local nub site build now succeeds:15pages and550resolved internal links. Existing check-links gate catches the regression; no gate or generated site output changed. Resulting-head repository/push gate follows.
+
+### 2026-10-16 — G4 external-pause foreground regression
+
+- Subscription-only live concurrency task demonstrated that an external Pause advances goal revision while the foreground event guard accepted only the original exact revision, hanging after paid-family drain. Independently ported tests first: nextest f96d48c8 fails with `pause: held-family acceptance hung` against original production code.
+- Accept newer stopped revisions only for the same goal ID, then settle and clean up using that observed exact identity; direct-run records retain original execution correlation and replacement IDs remain fenced. Repaired foreground suite13/13 passes (4c1fd710). Independent source/test review approved.
+- Seven reachable held-preparation rows prove cancellation/drain retention, child-before-parent finish, unrelated-run isolation and terminal-record ordering. Clear/replace are races during interrupt drain; output/drop prove retained asynchronous cleanup, not terminal output. No new sleep sites:73 remain. Full resulting-head gate and smoke follow.
+
+### 2026-10-16 — G4 review repairs on updated G3
+
+- Rebased owned #331 branch onto localG3review-fix head1763403e. Resolved append-only ledger overlap and refreshed the same73legacy sleep identities; no runtime source conflict or discarded upstream change. Publication awaits completed surface repair gate.
+- Ported test-first pairs for documented goal exit6/7/8, stale TUI refresh leaving its form Pending, and invalid stored-goal arguments arming cancellation cleanup. Focused8cf0c890 passes3/3 on integrated source; independent fixed-snapshot review approves TUI and argument validation.
+- Outer review rejects the initial foreign-work close repair: retained shutdown can wait forever after the sole Ctrl-C listener is dropped. Needs an interruptible close phase plus terminal-goal/held-foreign-work/interrupt regression. Other live task fixes remain in progress; hosted threads remain open.
+
+### 2026-10-16 — G4 interruptible retained runtime close
+
+- Caller-level teardown regression from the live task preserves foreign runs by awaiting natural settlement. Outer review found its original Ctrl-C future was already dropped after run_goal returned. Added a second closing row with a new interrupt; a97c4286 reproduces the uninterruptible wait and cleans up the test-owned runtime even on red.
+- A fresh close-phase listener remains polled at the idle query and settlement wait. On interruption, release the lifecycle admission guard before ordinary bounded shutdown cancels/drains remaining work. Keep the selected goal's already-emitted record and exit status. Focused db87522b passes1/1 with both natural and explicit-interrupt rows; independent review approves lock/wake/cancellation behavior. Guide and contract document the ownership phase. Broader/final gate follows after remaining repairs.
+
+### G4 review integration: owned compaction and harness failure records
+
+The adoption guard now considers queued/running prompt work rather than treating
+an owned compaction as an interactive preemptor. The real Store fixture reproduced
+the rejected goal adoption before the fix; both goal-owned and user-origin prompt
+rows pass afterward. The clear/replace held-family acceptance rows now require
+exactly one final `harness_failure` record for the originally accepted goal after
+its family drains. They retain the no-early-output and replacement-survival checks.
+The guide and headless contract describe the last-observed snapshot fallback.
+
+Focused nextest run `3662fc4e-5e7a-40e5-930a-00ba71739778`: 5/5 passed.
+The remaining changes in runtime/headless are rustfmt of the integrated review
+fixes. Existing sleep identities and the ceiling remain unchanged (73 sites).
+Full-stack gates and publication remain pending; review threads stay open.
+
+### G4 goal command argument exit codes
+
+Fresh review thread PRRT_kwDOTmbEW86tGxYJ identified semantic goal validation
+escaping main through the generic exit-1 path. An isolated real authenticated
+server reproduced `qq goal set '' --session ID` exiting1 with the objective
+validation diagnostic. Argument/target-state variants now map explicitly to2;
+workspace/configuration/server/client/encoding/output failures remain1, with
+exhaustive domain-error matching. The main dispatch preserves the diagnostic.
+
+Regression test failed before the mapping. Goal CLI focused nextest
+`780ec0c0-13df-4db1-94b7-5dff5e93e18c`: 9/9 passed. Real-binary isolated-server
+verification passed three cases (empty objective, resume without a goal, and
+check approval without a goal), each exit2 and its expected diagnostic. The
+server and fake provider were stopped after the drive. Full final-head gates,
+publication and thread resolution remain pending.
+
+### 2026-10-16 — G4 current-head output and startup corrections
+
+- Four review regressions reproduced: cleanup overwrote a held-input reason;
+  trace flush emitted two finals; caller close replaced an emitted exit; startup
+  adoption omitted two completed direct runs. Test-first commits precede fixes.
+- Atomic exact-identity cleanup preserves stopped state/revision. Final writes
+  are attempted once, and flushed stdout selects the immutable exit. Store open
+  captures an optional startup replay boundary before recovery and scheduling.
+- Focused nextest `13655696-1b3b-45a2-85af-ab37452baaae`:21/21 pass,
+  including reopened-store achievement and already-held question. Independent
+  reviewer approves28235006 with no correctness blocker. Full gate, final
+  upstream restack/publication and review-thread resolution remain pending.
+
+### 2026-10-16 — G4 admission, drain and output review corrections
+
+- Active branch ownership moved to `/tmp/qq-goal-delivery-20261015/g4-smoke`;
+  original detached `g4` retains the still-running G5 trial binary untouched.
+- Red regressions reproduce missing replacement errors, rejected resume widening
+  approval, host-close autonomous refill, early/final trace loss, and error
+  return before paid-family drain. Settings validate first; close fences new
+  autonomous admissions while accepted work/children drain naturally.
+- Error cleanup uses the atomic pause receipt and bounded exact-family drain,
+  then replays missing direct-run metadata through the settled cursor. Final
+  stdout precedes optional trace and uncertain stdout writes are never retried.
+  Focused foreground/close tests:23/23 pass; final independent review, stack
+  integration, full gate/smoke/site and publication remain pending.
+
+### 2026-10-16 — G4 active edits, session preflight and text output
+
+- Red tests reproduced Ctrl-C after an observed active edit using a stale
+  revision, invalid new requests creating visible empty sessions, and text
+  mode losing its final result on trace flush failure.
+- Observed same-goal edits update both action and cleanup identities; Ctrl-C
+  and owner-drop cases pause the edited goal. New requests validate before
+  creation; replacement/bounds/empty/missing cases leave no sessions. Text
+  stdout precedes optional trace work, retaining its selected status.
+- Focused foreground/close tests:26/26 pass. Final integration/full gate, smoke,
+  independent review, publication and three-thread resolution remain pending.
+
+
+### 2026-10-16 — G4 edit-event publication failure
+
+- A new row reproduces output failing on the active edit event itself: the
+  foreground exits4, but stale cleanup conflicts and leaves revision2 running.
+- Reconcile the observed same-goal durable identity before fallible publication,
+  so output failure still pauses and drains that revision. Normal interrupt and
+  owner-drop rows remain covered; all26foreground/close tests pass.
+- Exact unchanged legacy sleep locations move; ceiling73 stays fixed. Final
+  full gate, smoke, independent review and published thread resolution follow.
+
+
+### 2026-10-16 — G4 stopped-state interrupt race and refused consent
+
+- Red rows reproduce a same-revision authentication pause overwritten by
+  Ctrl-C (130 instead of6) and refused check consent returning harness4.
+- Interrupt uses the existing conditional pause transaction; an unchanged
+  stopped receipt or non-active snapshot keeps its reason and natural exit.
+  Only this interrupt's committed user pause selects130. Forbidden/managed
+  check consent maps to setup2, with pending authority and zero work retained.
+- Authentication/configuration/achievement race rows and both refusal sources
+  pass; focused foreground/close27/27. Design/guide clarify exits. Unchanged
+  legacy sleep locations move without raising73. Full gate/publication follow.
+
+### 2026-10-16 — rebased heads qualified and G5 trial outcome
+
+- #330 b750d347 passes2701/2701 plus doctests/Clippy/minimal211 and smoke6/6; #331 07aab1d1 passes2747/2747 and the same gates plus smoke8/8. Both heads are published and conflict-free; #331 is ready for review again. Hosted CI remains a separate gate.
+- G5 first trial settled in1502.661s with8runs,45model turns,15/15checklist done,1compaction; terminal budget_exhausted/runs, exit8. Independently reconciled192focused passes/1manual ignore. Paid APIUSD0; estimated token dollar value unknown. Multi-hour/three-compaction acceptance is NOT met. Curated record: g-goals-live-eng-1065.md.
+- Second useful subscription-only trial started on07aab1d1 to close foreground concurrency coverage. It stays inside the original four-hour window, uses8runs max and finite3million-token/64turn/30minute per-run limits, with32768-token context. No padding or manufactured compactions; final evidence remains pending. No credentials or raw sessions committed.
+
+### 2026-10-16 — G5 second live result
+
+- Second useful subscription-only goal finished achieved after1508.908seconds,5charged runs and1independent audit; all5checklist items done,69completed model turns,2real compactions. The initial32k context configuration failed three runs; restored64k and resumed the same goal, retaining spent caps and original deadline. No paid API fallback.
+- Demonstrated external-pause foreground hang; independently reproduced and repaired in originating #331 with13foreground regressions passing and read-only review approved. Curated trial evidence records actual token totals, unknown estimated/subscription dollar value, zero paid API spend and explicit HTTP/SSE terminal proof.
+- Both trials remain short of multi-hour/at-least-three-compaction G5 qualification. #332 remains draft/In Progress; no artificial delay or work used to meet duration. Raw transcripts, private homes and session stores remain outside Git.
+
+### 2026-10-16 — G5 third live result
+
+- Third useful subscription-only goal reached achieved/exit0 after3375.446seconds
+  (56minutes),6charged runs,256model turns and1audit;21/21checklist done.
+  Four actual compactions retained the same item IDs/texts. Exact route remained
+  openai-codex/gpt-6.1-sol; paid API spendUSD0, estimated/subscription dollar
+  value unknown. Affected-package2202/2202 and smoke8/8 independently reconciled.
+- The task supplied twelve captured review repairs. Outer review strengthened
+  execution-start caps, sponsor deadline handling, caller close interruption and
+  owned-compaction adoption before integration in #330/#331. The task's achieved
+  report is not qualification of the later final heads.
+- G5 still lacks one real multi-hour run. Separate trial durations are not added;
+  no padding or artificial work. #332 stays draft/In Progress. Curated receipt
+  is g-goals-live-eng-1065.md; raw content and private stores stay outside Git.
+
+### 2026-10-16 — G5 continuation admission and stack refresh
+
+- Restacked documentation on G3 `4bc4f247` / G4 `8a59caf4`; the G5 delta
+  remains the two Markdown evidence files. No runtime source changes here.
+- Recorded the fourth useful subscription-only admission, its exact earlier
+  runtime binary and finite bounds. It is active; no terminal or multi-hour
+  result is asserted. Original task sources and all prior trial receipts remain.
+- #332 remains draft. Rebased-head gate/publication follows; current live
+  acceptance and reviews of the newly published runtime heads remain pending.
+
+
+### 2026-10-16 — fourth G5 terminal result and current review fixes
+
+- Fourth subscription-only trial settled blocked/exit7 after6309.158seconds,
+  303model turns,8charged runs and19real compactions;11checklist identities
+  preserved,9done/2dropped. Exact usage reconciled; paid APIUSD0, estimated and
+  subscription dollar value unknown. It remains below7200seconds: G5 unqualified.
+- Local pinned continuation integration passed2817/2817 plus minimal211 and
+  smoke8/8; actual-outage loopback task passed2000turns/5000unique effects.
+  Resource/performance acceptance remains blocked; no fourth PR was opened.
+- G3 725dabe8 and G4 4851fc2e pass full workspace gates; independent source
+  review approves all six current Codex repairs. Final smoke/parity/publication
+  and hosted CI follow. G5 remains two evidence Markdown files above G4.
+
+
+### 2026-10-16 — G5 matched measurement admission
+
+- Fifth useful subscription-only task starts on pinned runtime4851fc2e and
+  continuation reviewab8eca3a; common baselinef98 versus current integration,
+  full resource sampling and matched A/B+A/A address known measurement gaps.
+  New finite4h/8run admission; prior terminal trials remain unchanged.
+- One180-second setup run was rejected and retained as invalid; corrected
+  baseline600-second outages are running. No final result or qualification yet.
+- #331 edit-event publication repair passes focused26/26 and independent
+  review. Restack #332 above it; only two Markdown evidence files differ.
+  Keep draft/unqualified pending actual live acceptance and final checks.
+
+
+### 2026-10-16 — G5 live acceptance and stack review
+
+- Fifth trial settled budget_exhausted/exit8 after7951.093seconds,8charged
+  runs,441model turns and20compactions; all12checklist identities survived.
+  Final states6done/2pending/1dropped/3in_progress. Every terminal audit passes.
+- Usage16746945fresh+4194176cache-read+180779output reconciles exactly;
+  paid APIUSD0, estimated/subscription value unknown. Exact subscription model,
+  original bounds and pinned4851fc2e binary preserved; no runner resume/padding.
+- Goals acceptance5 passes; #332 moves to review above independently reviewed
+  #331e84e3552. G2/G3 #330 and G4 #331 remain in review, not merged.
+- Separate local continuation measurement task remains incomplete; its baseline
+  passed, candidate capture was still running at settlement, final comparison
+  and stable-source full verification pending. ENG-1058/H0 are not closed.
+- Curated receipt: g-goals-live-eng-1065.md. Final docs check and publication
+  follow; no runtime source, protocol or schema changes in this three-file delta.
+
+
+### 2026-10-16 — final G5 documentation review corrections
+
+- Corrected the receipt's opening status to five settled trials and qualifying
+  fifth live result; made the earlier fifth admission status explicitly historical.
+- Published the exact audit logic in benchmarks/goals/audit_live.py, byte-identical
+  to the measured script, and recorded its invocation and private-input contract.
+  Raw receipts and transcripts stay untracked; no runtime behavior changes.
+- The final delta is three Markdown files plus the evaluation audit script.
+  Fresh real-receipt replay, negative audit probes and final checks follow.
+
+
+### 2026-10-16 — supersede G5 acceptance after audit review
+
+- New Codex findings supersede the earlier live-pass claim: trial4851fc2e does
+  not qualify the final e84e3552 runtime, and its launch receipt lacks structured
+  credential-isolation evidence. G5 remains open; #332 returns to draft.
+- Auditor now filters session/workspace, binds one goal ID, measures admission
+  to terminal event time, and requires subscription billing plus launch isolation
+  evidence. Missing evidence fails; nothing is retroactively added to admission.
+- Eight offline behavioral tests reproduce the old verifier's errors and pass
+  after repair, including foreign compactions, replacement and launcher idle time.
+  Historical stream retains20compactions/441turns/7950.672goal-event seconds;
+  hardened audit against final runtime returns false. Original receipt preserved.
+- Publish fixes and resolve all five findings after the gate. No new live run,
+  paid API request, runtime source change or merge in this correction.
+
+
+### 2026-10-17 — final-runtime evaluation resumed; sixth trial closed
+
+- Sixth trial on frozen `e84e3552` settled blocked/exit 7 after 1,832.913
+  goal-event seconds, 139 turns, 12 compactions and 4 charged runs. All 10
+  checklist identities survive. Hardened audit passes every check except the
+  7,200-second duration gate, including source, admission isolation and accounting.
+- Three context-window policy failures ended the goal. Usage: 5,491,604 fresh
+  input + 936,448 cache-read input + 61,953 output; paid API USD 0, estimated
+  cost/subscription value unknown. Original caps and receipts are preserved.
+- Useful local integration/analysis commits `b5b93d1b` / `ed888d96` retain full
+  candidate gate/smoke/analysis evidence. This is not a G5 or performance pass.
+- Seventh trial admitted at epoch 1792199637.2653844 on the same public runtime,
+  with isolation evidence captured first. Subscription model/fallback restriction,
+  4-hour / 8-run caps and per-run 64-turn / 3M-token / 60-minute bounds remain.
+  Fresh context uses the shipped 272K model catalog instead of the prior 64K
+  evaluation override; no failed trial is resumed or relabelled.
+- Real remaining work covers the production CLI endurance boundary missing from
+  internal-fixture captures. No padding, manufactured compactions, combining trial
+  durations or gate waiver. #332 stays draft and ENG-1065 In Progress. Terminal
+  audit and publication remain required; the delivery goal is active. No merge.
+
+
+### 2026-10-17 — seventh closed; corrected bounded admission active
+
+- Seventh final-runtime trial settles budget_exhausted/exit 8 at the original
+  eight-run cap: 6,287.074 event seconds, 133 model turns, zero compactions and
+  one audit. All 11 checklist states are done. Usage: 9,979,400 fresh input +
+  6,103,040 cache-read input + 63,712 output; estimated/subscription value unknown,
+  isolated paid API spend USD 0. Only duration/compaction acceptance fails.
+- Useful local commit `5a6b5468` retains independently audited public/candidate
+  production captures (2,000 turns, 5,000 effects, three real outages, two kills
+  each), with fake-provider limitations explicit. Separate fixture repairs pass
+  twelve tests and real compaction/checkpoint pilots. No public runtime change.
+- Eighth admission is preserved as aborted: a recorder variable collision wrote
+  the wrong hash field; stopped after 47 seconds, paused/user/exit 130. No receipt
+  was corrected into a pass and no old limits were reset or extended.
+- Ninth admission uses unchanged public `e84e3552` / hash `5b7635e2`, with correct
+  hash and actual effective-config/credential isolation recorded first. Fresh
+  limits: 2.5h / 64 runs; each 8 turns / 375K tokens / 30min, 48K working context.
+  Nominal direct-run products remain 512 turns / 24M tokens; internal compaction
+  and audit turns are separate and actual usage is reported. First compaction retains
+  all 14 checklist identities; goal is active after recovering a context refusal.
+- Remaining useful work is final-source foreground comparison, not another PR.
+  #332 remains draft, ENG-1065 In Progress; terminal qualification and publication
+  are still required. No paid fallback, padded time, manual compaction or merge.
+
+### 2026-10-17 — final-runtime G5 qualified
+
+- Ninth trial on unchanged public `e84e3552` ends blocked/model with exit 7 after
+  8,744.546 durable goal-event seconds: 141 model turns, 20 charged runs and four
+  compactions. All 14 checklist IDs/texts survive every compaction and finish done.
+- Root replays the checked-in auditor: qualifies true, all 25 checks true.
+  Exact usage: 3,719,297 fresh input + 637,184 cache-read input + 62,014 output;
+  cache-write 0. Paid API USD 0; estimated/subscription token value unknown.
+  Pre-admission isolation, final binary/source, unchanged finite bounds, no
+  resume, terminal process/stream agreement and exact accounting all verify.
+- Useful local commit `546b5a0c` retains the source-correct CLI comparison and
+  13 pairs / 26 closed arms; root reruns its five tests successfully and confirms
+  collector/native-arm cleanup. Remaining 107 registered pairs and absent H0/
+  host isolation remain explicit. ENG-1058/performance acceptance stays open.
+- Plan and curated receipt now qualify G5 for the final stack. ENG-1065 moves to
+  review; #332 publication/gate evidence is recorded in its PR body. No merge.

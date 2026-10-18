@@ -106,6 +106,17 @@ pub struct HeadlessOptions {
     pub arm: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct GoalInvocation {
+    pub objective: Option<String>,
+    pub check: Option<String>,
+    pub check_approval: Option<qq_protocol::GoalCheckScope>,
+    pub deadline: Option<Duration>,
+    pub max_runs: Option<u32>,
+    pub replace: bool,
+    pub defaults: qq_config::GoalsConfig,
+}
+
 /// The session approval mode a headless policy submits with.
 const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
     match approval {
@@ -127,9 +138,17 @@ pub fn exit_code(status: HeadlessStatus) -> ExitCode {
     ExitCode::from(status.code())
 }
 
+enum GoalRecordState {
+    Pending,
+    Attempted,
+    Emitted(u8),
+}
+
 /// Writes trial records to the optional trace file and, in JSONL format, to
 /// stdout. Text format still traces when a trace path is given.
 struct RecordSink {
+    goal_record: GoalRecordState,
+    stdout_failed: bool,
     trace: Option<BufWriter<std::fs::File>>,
     to_stdout: bool,
 }
@@ -143,6 +162,8 @@ impl RecordSink {
             .transpose()?
             .map(BufWriter::new);
         Ok(Self {
+            goal_record: GoalRecordState::Pending,
+            stdout_failed: false,
             trace,
             to_stdout: options.format == HeadlessFormat::Jsonl,
         })
@@ -153,14 +174,43 @@ impl RecordSink {
             return Ok(());
         }
         let line = serde_json::to_string(&record).map_err(io::Error::other)?;
-        if let Some(trace) = &mut self.trace {
-            trace.write_all(line.as_bytes())?;
-            trace.write_all(b"\n")?;
+        let final_code = match &record {
+            HeadlessRecordRef::Goal(goal) => Some(goal.exit_code),
+            _ => None,
+        };
+        if self.to_stdout
+            && let Some(code) = final_code
+        {
+            if let Err(error) = stdout
+                .write_all(line.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+                .and_then(|()| stdout.flush())
+            {
+                self.stdout_failed = true;
+                return Err(error);
+            }
+            self.goal_record = GoalRecordState::Emitted(code);
         }
-        if self.to_stdout {
-            stdout.write_all(line.as_bytes())?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
+        if let Some(trace) = &mut self.trace {
+            let result = trace
+                .write_all(line.as_bytes())
+                .and_then(|()| trace.write_all(b"\n"));
+            if let Err(error) = result {
+                // Keep a failed optional trace from blocking the final stdout
+                // record after an earlier event could not be traced.
+                self.trace = None;
+                return Err(error);
+            }
+        }
+        if self.to_stdout
+            && final_code.is_none()
+            && let Err(error) = stdout
+                .write_all(line.as_bytes())
+                .and_then(|()| stdout.write_all(b"\n"))
+                .and_then(|()| stdout.flush())
+        {
+            self.stdout_failed = true;
+            return Err(error);
         }
         Ok(())
     }
@@ -193,6 +243,21 @@ impl Failure {
             message: message.into(),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum SessionIntent<'a> {
+    Prompt,
+    Goal(&'a GoalInvocation),
+}
+
+#[derive(Clone)]
+struct SessionHandle {
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    subscribe_after: qq_protocol::EventCursor,
+    wait_for_delegate: bool,
+    child_waits_for_delegate: bool,
 }
 
 #[derive(Clone)]
@@ -295,6 +360,569 @@ impl RunEnd {
             final_output: None,
             answer: String::new(),
             denied_calls: 0,
+        }
+    }
+}
+
+/// Pure admission preparation runs before persisted session settings change.
+fn prepare_goal_request(
+    request: &GoalInvocation,
+    options: &HeadlessOptions,
+    session_id: SessionId,
+    current: Option<&qq_protocol::GoalSnapshot>,
+) -> Result<Option<SessionCommand>, Failure> {
+    let command = if let Some(objective) = &request.objective {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Failure::invalid(error.to_string()))?;
+        let args = crate::cli::GoalSetArgs {
+            target: crate::cli::GoalTarget {
+                session: session_id,
+                workspace: None,
+                json: true,
+            },
+            objective: objective.clone(),
+            replace: request.replace,
+            check: request.check.clone(),
+            clear_check: false,
+            goal_deadline: request.deadline,
+            goal_max_runs: request.max_runs,
+            max_cost_usd_nanos: options.max_cost_usd_nanos,
+        };
+        let mut command = crate::goals::prepare_set(
+            &args,
+            current,
+            &request.defaults,
+            u64::try_from(now.as_millis())
+                .map_err(|_| Failure::invalid("system clock exceeds supported range"))?,
+        )
+        .map_err(|error| Failure::invalid(error.to_string()))?;
+        if let SessionCommand::SetGoal { budget, .. } = &mut command {
+            if let Some(timeout) = options.timeout {
+                budget.per_run.max_duration_ms = Some(
+                    u64::try_from(timeout.as_millis())
+                        .map_err(|_| Failure::invalid("per-run timeout is too large"))?,
+                );
+            }
+            if let Some(turns) = options.max_turns {
+                budget.per_run.max_model_turns = Some(turns);
+            }
+        }
+        Some(command)
+    } else {
+        if current.is_none() {
+            return Err(Failure::invalid("session has no stored goal"));
+        }
+        None
+    };
+    let check = match &command {
+        Some(SessionCommand::SetGoal { check, .. }) => check.as_ref(),
+        _ => current.and_then(|goal| goal.check.as_ref()),
+    };
+    if request.check_approval.is_some() {
+        let check = check.ok_or_else(|| Failure::invalid("goal has no check"))?;
+        if request.check.as_deref() != Some(check.command.as_str()) {
+            return Err(Failure::invalid(
+                "check consent requires --check with the exact stored command",
+            ));
+        }
+    } else if request.objective.is_none() && request.check.is_some() {
+        return Err(Failure::invalid(
+            "stored check changes require --goal OBJECTIVE",
+        ));
+    }
+    Ok(command)
+}
+
+/// Hosts the core goal driver until its goal leaves Active. No prompt is
+/// resubmitted by this adapter; scheduling and spending remain runtime-owned.
+pub async fn run_goal(
+    sessions: &SessionRuntime,
+    options: HeadlessOptions,
+    request: GoalInvocation,
+    interrupt: impl Future<Output = ()>,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> u8 {
+    let mut cleanup = None;
+    let mut accepted: Option<(WorkspaceId, Box<qq_protocol::GoalSnapshot>)> = None;
+    let mut record_sink = None;
+    let mut direct_record_cursor = None;
+    let result: Result<u8, Failure> = async {
+        let sink = record_sink.insert(RecordSink::open(&options)
+            .map_err(|error| Failure::invalid(format!("could not open trace: {error}")))?);
+        let handle = prepare_session(sessions, &options, SessionIntent::Goal(&request)).await?;
+        direct_record_cursor = Some(handle.subscribe_after);
+        let snapshot = sessions.snapshot(SnapshotRequest::new(
+            handle.workspace_id, Some(handle.session_id), 1, 1,
+        )).await.map_err(|error| Failure::harness(error.to_string()))?;
+        let current = snapshot.focused.and_then(|session| session.goal);
+        let command = prepare_goal_request(&request, &options, handle.session_id, current.as_deref())?;
+        let mut goal = match command {
+            Some(command) => goal_receipt(send(sessions, command).await?)?,
+            None => current.ok_or_else(|| Failure::invalid("session has no stored goal"))?,
+        };
+        accepted = Some((handle.workspace_id, goal.clone()));
+        cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal, &handle));
+        let guard = cleanup.as_mut().unwrap();
+        if let Some(scope) = request.check_approval {
+            let check = goal.check.as_ref().unwrap();
+            goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                session_id: handle.session_id, expected: goal_identity(&goal),
+                action: qq_protocol::GoalControl::ApproveCheck { scope, command: check.command.clone() },
+            }).await?)?;
+            guard.expected = goal_identity(&goal);
+            guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
+                .then(|| (sessions.clone(), goal.session_id));
+        }
+        // Missing consent is a durable result, not an unreachable human wait.
+        let needs_check = matches!(goal.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::CheckApproval | qq_protocol::GoalNeedsUser::CheckInterrupted,
+            },
+        });
+        if !needs_check && matches!(goal.status,
+            qq_protocol::GoalStatus::Paused { .. } | qq_protocol::GoalStatus::Blocked { .. }) {
+            goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
+                session_id: handle.session_id, expected: goal_identity(&goal),
+                action: qq_protocol::GoalControl::Resume,
+            }).await?)?;
+            guard.expected = goal_identity(&goal);
+            guard.cleanup = (goal.status == qq_protocol::GoalStatus::Active)
+                .then(|| (sessions.clone(), goal.session_id));
+        }
+        let mut expected = goal_identity(&goal);
+        let stopped = if goal.status != qq_protocol::GoalStatus::Active {
+            Some(settle_goal(sessions, &handle, expected).await?)
+        } else { None };
+        let mut events = sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after: handle.subscribe_after,
+        }).map_err(|error| Failure::harness(error.to_string()))?;
+        let mut interrupt = pin!(interrupt);
+        let mut interrupt_armed = stopped.is_none();
+        let mut final_goal = stopped.map(|(goal, through)| (goal, through.sequence, None));
+        let mut observed = handle.subscribe_after.sequence;
+        loop {
+            if final_goal.as_ref().is_some_and(|(_, through, _)| observed >= *through) {
+                let (goal, _, forced) = final_goal.take().unwrap();
+                guard.disarm();
+                return finish_goal(sink, stdout, &options, handle.workspace_id, goal, forced);
+            }
+            tokio::select! {
+                biased;
+                () = interrupt.as_mut(), if interrupt_armed => {
+                    interrupt_armed = false;
+                    let paused = sessions.pause_goal_if_active(handle.session_id, expected).await;
+                    let (paused_goal, interrupted) = match paused {
+                        Ok(receipt) => {
+                            let goal = goal_receipt(receipt)?;
+                            // A stopped no-op retains its revision; only our pause advances it.
+                            let interrupted = goal.revision > expected.revision
+                                && goal.status == qq_protocol::GoalStatus::Paused {
+                                    reason: qq_protocol::GoalPauseReason::User,
+                                };
+                            (goal, interrupted)
+                        }
+                        Err(error) => {
+                            let current = sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)).await
+                                .map_err(|error| Failure::harness(error.to_string()))?
+                                .focused.and_then(|session| session.goal)
+                                .filter(|goal| goal.goal_id == expected.goal_id && goal.status != qq_protocol::GoalStatus::Active);
+                            match current { Some(goal) => (goal, false), None => return Err(Failure::harness(error.to_string())) }
+                        }
+                    };
+                    goal = paused_goal;
+                    guard.expected = goal_identity(&goal);
+                    let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
+                    final_goal = Some((goal, through.sequence, interrupted.then_some(qq_protocol::HeadlessGoalStatus::Interrupted)));
+                }
+                event = events.next() => {
+                    let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
+                        .map_err(|error| Failure::harness(error.to_string()))?;
+                    // Cleanup owns this durable revision even if its output fails.
+                    if let SessionEvent::GoalUpdated { goal: updated } = &envelope.event
+                        && updated.session_id == handle.session_id
+                        && updated.goal_id == expected.goal_id
+                        && updated.revision >= expected.revision
+                    {
+                        accepted = Some((handle.workspace_id, updated.clone()));
+                        expected = goal_identity(updated);
+                        guard.expected = expected;
+                    }
+                    sink.record(stdout, HeadlessRecordRef::Event { envelope: &envelope })
+                        .map_err(|error| Failure::harness(error.to_string()))?;
+                    observed = envelope.cursor.sequence;
+                    match &envelope.event {
+                        SessionEvent::GoalUpdated { goal: updated }
+                            if updated.session_id == handle.session_id
+                            && updated.goal_id == expected.goal_id
+                            && updated.revision >= expected.revision => {
+                            if updated.status != qq_protocol::GoalStatus::Active && final_goal.is_none() {
+                                interrupt_armed = false;
+                                guard.expected = goal_identity(updated);
+                                let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
+                                final_goal = Some((goal, through.sequence, None));
+                            }
+                        }
+                        SessionEvent::RunFinished { origin: Some(origin), run_id, .. }
+                            if envelope.session_id == handle.session_id && matches!(origin,
+                                qq_protocol::RunOrigin::Goal { goal_id, .. }
+                                | qq_protocol::RunOrigin::GoalCheck { goal_id, .. }
+                                if *goal_id == expected.goal_id) => {
+                            record_settled_goal_run(sessions, sink, stdout, &handle, *run_id).await?;
+                            direct_record_cursor = Some(envelope.cursor);
+                        }
+                        SessionEvent::ToolApprovalRequested { .. } if final_goal.is_some() => {}
+                        SessionEvent::ToolApprovalRequested { .. }
+                            if match envelope.run_id {
+                                Some(run) => !sessions.goal_owns_run(handle.session_id, expected, run).await
+                                    .map_err(|error| Failure::harness(error.to_string()))?,
+                                None => true,
+                            } => {}
+                        SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
+                            // The core validates held-question ownership before stopping.
+                            let id = CommandId::generate()
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                            let receipt = match sessions.command(id, SessionCommand::GoalControl {
+                                session_id: handle.session_id, expected,
+                                action: qq_protocol::GoalControl::PauseForInput { tool_call_id: tool_call.id },
+                            }).await {
+                                Ok(receipt) => receipt,
+                                Err(SessionRuntimeError::GoalInputNotPending) => continue,
+                                Err(error) => return Err(Failure::harness(error.to_string())),
+                            };
+                            goal = goal_receipt(receipt)?;
+                            guard.expected = goal_identity(&goal);
+                            interrupt_armed = false;
+                            let (goal, through) = settle_goal(sessions, &handle, guard.expected).await?;
+                            final_goal = Some((goal, through.sequence, None));
+                        }
+                        SessionEvent::ToolApprovalRequested { .. } => {
+                            unattended_approval(sessions, &options, &handle, &envelope, stderr).await;
+                        }
+                        SessionEvent::TextAppended { text, .. }
+                            if options.format == HeadlessFormat::Text
+                                && envelope.session_id == handle.session_id => {
+                            stderr.write_all(text.as_bytes()).and_then(|()| stderr.flush())
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }.await;
+    match result {
+        Ok(code) => code,
+        Err(failure) => {
+            let _ = writeln!(stderr, "error: {}", failure.message);
+            let mut code = failure.status.code();
+            if let Some(guard) = &mut cleanup {
+                match guard.settle().await {
+                    Ok(Some((goal, through))) => {
+                        if let Some(sink) = record_sink.as_mut()
+                            && matches!(sink.goal_record, GoalRecordState::Pending)
+                            && !sink.stdout_failed
+                            && let Some(after) = direct_record_cursor
+                            && let Err(error) = replay_settled_goal_runs(
+                                sessions,
+                                sink,
+                                stdout,
+                                &guard.handle,
+                                goal_identity(&goal),
+                                after,
+                                through,
+                            )
+                            .await
+                        {
+                            let _ = writeln!(
+                                stderr,
+                                "error: goal result replay failed: {}",
+                                error.message
+                            );
+                        }
+                        accepted = Some((guard.handle.workspace_id, goal));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let _ = writeln!(stderr, "error: goal cleanup failed: {}", error.message);
+                        code = HeadlessStatus::HarnessFailure.code();
+                    }
+                }
+            }
+            if let Some(RecordSink {
+                goal_record: GoalRecordState::Emitted(emitted),
+                ..
+            }) = &record_sink
+            {
+                return *emitted;
+            }
+            if code == HeadlessStatus::HarnessFailure.code()
+                && let Some((workspace, mut goal)) = accepted
+                && let Some(sink) = record_sink.as_mut()
+                && matches!(sink.goal_record, GoalRecordState::Pending)
+                && !sink.stdout_failed
+            {
+                // Prefer authoritative state when readable; otherwise retain
+                // the last observed goal without inventing a durable outcome.
+                if let Ok(snapshot) = sessions
+                    .snapshot(SnapshotRequest::new(workspace, Some(goal.session_id), 1, 1))
+                    .await
+                    && let Some(current) = snapshot.focused.and_then(|session| session.goal)
+                    && current.goal_id == goal.goal_id
+                {
+                    goal = current;
+                }
+                if let Err(error) = finish_goal(
+                    sink,
+                    stdout,
+                    &options,
+                    workspace,
+                    goal,
+                    Some(qq_protocol::HeadlessGoalStatus::HarnessFailure),
+                ) {
+                    let _ = writeln!(stderr, "error: final goal record failed: {}", error.message);
+                }
+            }
+            code
+        }
+    }
+}
+
+async fn record_settled_goal_run(
+    sessions: &SessionRuntime,
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    handle: &SessionHandle,
+    run_id: RunId,
+) -> Result<(), Failure> {
+    let run = sessions
+        .run_snapshot(handle.workspace_id, handle.session_id, run_id)
+        .await
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    let goal = match &run.origin {
+        Some(
+            qq_protocol::RunOrigin::Goal { goal_id, revision }
+            | qq_protocol::RunOrigin::GoalCheck { goal_id, revision },
+        ) => qq_protocol::GoalIdentity {
+            goal_id: *goal_id,
+            revision: *revision,
+        },
+        _ => return Err(Failure::harness("goal run has no durable goal origin")),
+    };
+    let record = qq_protocol::HeadlessGoalRun {
+        workspace_id: handle.workspace_id,
+        session_id: handle.session_id,
+        goal,
+        run: Box::new(run),
+    };
+    sink.record(stdout, HeadlessRecordRef::GoalRun(&record))
+        .map_err(|error| Failure::harness(error.to_string()))
+}
+
+async fn replay_settled_goal_runs(
+    sessions: &SessionRuntime,
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    handle: &SessionHandle,
+    expected: qq_protocol::GoalIdentity,
+    after: qq_protocol::EventCursor,
+    through: qq_protocol::EventCursor,
+) -> Result<(), Failure> {
+    tokio::time::timeout(SHUTDOWN_GRACE, async {
+        if after.sequence >= through.sequence { return Ok(()); }
+        let mut events = sessions.subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id, after,
+        }).map_err(|error| Failure::harness(error.to_string()))?;
+        loop {
+            let envelope = events.next().await
+                .ok_or_else(|| Failure::harness("goal result replay ended early"))?
+                .map_err(|error| Failure::harness(error.to_string()))?;
+            if envelope.cursor.sequence > through.sequence { return Err(Failure::harness("goal result replay skipped its boundary")); }
+            if let SessionEvent::RunFinished { origin: Some(origin), run_id, .. } = &envelope.event
+                && envelope.session_id == handle.session_id
+                && matches!(origin, qq_protocol::RunOrigin::Goal { goal_id, .. }
+                    | qq_protocol::RunOrigin::GoalCheck { goal_id, .. } if *goal_id == expected.goal_id)
+            {
+                record_settled_goal_run(sessions, sink, stdout, handle, *run_id).await?;
+            }
+            if envelope.cursor.sequence == through.sequence { return Ok(()); }
+        }
+    }).await.map_err(|_| Failure::harness("goal result replay exceeded the shutdown period"))?
+}
+
+/// Once stopped, cancel and drain only this goal's paid family. The single
+/// deadline bounds the entire cleanup, including late admitted descendants.
+async fn settle_goal(
+    sessions: &SessionRuntime,
+    handle: &SessionHandle,
+    expected: qq_protocol::GoalIdentity,
+) -> Result<(Box<qq_protocol::GoalSnapshot>, qq_protocol::EventCursor), Failure> {
+    let mut events = sessions
+        .subscribe(SubscribeRequest {
+            workspace_id: handle.workspace_id,
+            after: handle.subscribe_after,
+        })
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    tokio::time::timeout(SHUTDOWN_GRACE, async {
+        loop {
+            let pending = sessions
+                .goal_pending_runs(handle.session_id, expected)
+                .await
+                .map_err(|error| Failure::harness(error.to_string()))?;
+            if pending.is_empty() {
+                break;
+            }
+            for run in &pending {
+                request_cancel(sessions, *run).await?;
+            }
+            let mut pending: std::collections::HashSet<_> = pending.into_iter().collect();
+            while !pending.is_empty() {
+                let event = events
+                    .next()
+                    .await
+                    .ok_or_else(|| Failure::harness("goal drain stream ended"))?
+                    .map_err(|error| Failure::harness(error.to_string()))?;
+                if let SessionEvent::RunFinished { run_id, .. } = event.event {
+                    pending.remove(&run_id);
+                }
+            }
+        }
+        let snapshot = sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                1,
+                1,
+            ))
+            .await
+            .map_err(|error| Failure::harness(error.to_string()))?;
+        let goal = snapshot
+            .focused
+            .and_then(|session| session.goal)
+            .filter(|goal| {
+                goal_identity(goal) == expected && goal.status != qq_protocol::GoalStatus::Active
+            })
+            .ok_or_else(|| Failure::harness("goal changed while terminal work drained"))?;
+        Ok((goal, snapshot.cursor))
+    })
+    .await
+    .map_err(|_| Failure::harness("goal cancellation did not drain within the shutdown period"))?
+}
+
+fn goal_identity(goal: &qq_protocol::GoalSnapshot) -> qq_protocol::GoalIdentity {
+    qq_protocol::GoalIdentity {
+        goal_id: goal.goal_id,
+        revision: goal.revision,
+    }
+}
+
+fn goal_receipt(receipt: CommandReceipt) -> Result<Box<qq_protocol::GoalSnapshot>, Failure> {
+    match receipt.outcome {
+        CommandOutcome::GoalUpdated { goal, .. } => Ok(goal),
+        _ => Err(Failure::harness(
+            "goal command returned an unexpected receipt",
+        )),
+    }
+}
+
+fn finish_goal(
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    options: &HeadlessOptions,
+    workspace_id: WorkspaceId,
+    goal: Box<qq_protocol::GoalSnapshot>,
+    forced: Option<qq_protocol::HeadlessGoalStatus>,
+) -> Result<u8, Failure> {
+    let status = forced
+        .or_else(|| qq_protocol::HeadlessGoalStatus::from_goal(&goal.status))
+        .ok_or_else(|| Failure::harness("cannot finish an active goal"))?;
+    let record = qq_protocol::HeadlessGoalOutcome {
+        workspace_id,
+        goal,
+        status,
+        exit_code: status.code(),
+    };
+    if !matches!(sink.goal_record, GoalRecordState::Pending) {
+        return Err(Failure::harness("final goal output was already attempted"));
+    }
+    // A failed write can have emitted a prefix; never retry it. Once stdout
+    // is flushed, its selected exit remains authoritative despite trace errors.
+    sink.goal_record = GoalRecordState::Attempted;
+    if options.format == HeadlessFormat::Text {
+        writeln!(
+            stdout,
+            "goal {}: {:?}",
+            record.goal.goal_id, record.goal.status
+        )
+        .and_then(|()| stdout.flush())
+        .map_err(|error| Failure::harness(error.to_string()))?;
+        sink.goal_record = GoalRecordState::Emitted(status.code());
+    }
+    sink.record(stdout, HeadlessRecordRef::Goal(&record))
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    if options.format == HeadlessFormat::Jsonl {
+        sink.goal_record = GoalRecordState::Emitted(status.code());
+    }
+    sink.finish()
+        .map_err(|error| Failure::harness(error.to_string()))?;
+    Ok(status.code())
+}
+
+struct AcceptedGoalGuard {
+    handle: SessionHandle,
+    cleanup: Option<(SessionRuntime, SessionId)>,
+    expected: qq_protocol::GoalIdentity,
+}
+impl AcceptedGoalGuard {
+    fn new(
+        sessions: SessionRuntime,
+        goal: &qq_protocol::GoalSnapshot,
+        handle: &SessionHandle,
+    ) -> Self {
+        Self {
+            handle: handle.clone(),
+            cleanup: (goal.status == qq_protocol::GoalStatus::Active)
+                .then_some((sessions, goal.session_id)),
+            expected: goal_identity(goal),
+        }
+    }
+    async fn settle(
+        &mut self,
+    ) -> Result<Option<(Box<qq_protocol::GoalSnapshot>, qq_protocol::EventCursor)>, Failure> {
+        if let Some((sessions, session_id)) = &self.cleanup {
+            let receipt = sessions
+                .pause_goal_if_active(*session_id, self.expected)
+                .await
+                .map_err(|error| Failure::harness(error.to_string()))?;
+            let goal = goal_receipt(receipt)?;
+            self.expected = goal_identity(&goal);
+            let (goal, through) = settle_goal(sessions, &self.handle, self.expected).await?;
+            self.disarm();
+            return Ok(Some((goal, through)));
+        }
+        Ok(None)
+    }
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+impl Drop for AcceptedGoalGuard {
+    fn drop(&mut self) {
+        if let Some((sessions, session_id)) = self.cleanup.take() {
+            let expected = self.expected;
+            let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                report_detached_cleanup_failure("accepted goal cleanup requires a Tokio runtime");
+                return;
+            };
+            drop(runtime.spawn(async move {
+                if let Err(error) = sessions.pause_goal_if_active(session_id, expected).await {
+                    report_detached_cleanup_failure(&format!(
+                        "accepted goal cleanup failed: {}",
+                        error
+                    ));
+                }
+            }));
         }
     }
 }
@@ -509,6 +1137,72 @@ async fn submit(
     options: &HeadlessOptions,
     input: Vec<qq_protocol::InputPart>,
 ) -> Result<RunHandle, Failure> {
+    let SessionHandle {
+        workspace_id,
+        session_id,
+        subscribe_after,
+        wait_for_delegate,
+        child_waits_for_delegate,
+    } = prepare_session(sessions, options, SessionIntent::Prompt).await?;
+    // Budgets are core-owned: the runtime enforces them and settles the run
+    // with a typed outcome, so this adapter only relays and renders.
+    let queued = send(
+        sessions,
+        SessionCommand::SubmitPrompt {
+            session_id,
+            input,
+            limits: RunLimits {
+                max_duration_ms: options
+                    .timeout
+                    .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+                max_model_turns: options.max_turns,
+                max_tool_calls: None,
+                max_total_tokens: None,
+                max_cost_usd_nanos: options.max_cost_usd_nanos,
+                max_input_tokens: None,
+                max_output_tokens: None,
+                max_tool_output_bytes: None,
+                max_children: None,
+                max_concurrent_children: None,
+            },
+            correlation: options.correlation.clone(),
+            output: options.output.clone(),
+        },
+    )
+    .await?;
+    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+        return Err(Failure::harness(
+            "prompt submission returned an unexpected outcome",
+        ));
+    };
+
+    Ok(RunHandle {
+        workspace_id,
+        session_id,
+        run_id,
+        // Subscribing from the cursor just before submission replays the
+        // queued prompt and everything after it, so no event is lost to the
+        // gap between submission and subscription. For a resumed session that
+        // is the snapshot cursor (or the last settings write), not the
+        // session's history.
+        subscribe_after,
+        wait_for_delegate,
+        child_waits_for_delegate,
+    })
+}
+
+async fn prepare_session(
+    sessions: &SessionRuntime,
+    options: &HeadlessOptions,
+    intent: SessionIntent<'_>,
+) -> Result<SessionHandle, Failure> {
+    if options.session.is_none()
+        && let SessionIntent::Goal(request) = intent
+    {
+        let validation_target =
+            SessionId::generate().map_err(|error| Failure::harness(error.to_string()))?;
+        prepare_goal_request(request, options, validation_target, None)?;
+    }
     let workspace = options.workspace.display().to_string();
     let resolved = send(
         sessions,
@@ -546,9 +1240,9 @@ async fn submit(
         Some(session_id) => {
             // Store ownership was taken when the runtime opened and its
             // recovery sweep has already run, so what the snapshot shows is
-            // the session's settled state. Everything below is a rejection
-            // or a session-level setting; no run exists until the prompt
-            // is admitted.
+            // the recovered state. Ordinary prompts require an idle root;
+            // a stored active goal may already be running its driver. Session
+            // settings apply to the next claim without rewriting running work.
             let snapshot = match sessions
                 .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
                 .await
@@ -574,6 +1268,24 @@ async fn submit(
                     "workspace snapshot omitted the focused session",
                 ));
             };
+            if let SessionIntent::Goal(request) = intent {
+                prepare_goal_request(request, options, session_id, focused.goal.as_deref())?;
+            }
+            let active_goal = focused
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == qq_protocol::GoalStatus::Active);
+            if matches!(intent, SessionIntent::Goal(_))
+                && let Some(goal) = &focused.goal
+                && sessions
+                    .has_preempting_goal_work(session_id, goal.goal_id)
+                    .await
+                    .map_err(|error| Failure::harness(error.to_string()))?
+            {
+                return Err(Failure::invalid(
+                    "session has preempting user work; settle it with an interactive client before resuming the goal",
+                ));
+            }
             let summary = focused.summary;
             if summary.parent_id.is_some() {
                 return Err(Failure::invalid(format!(
@@ -581,9 +1293,10 @@ async fn submit(
                      resume its root session instead"
                 )));
             }
-            if summary.status != qq_protocol::SessionStatus::Idle
+            if (summary.status != qq_protocol::SessionStatus::Idle
                 || summary.active_run_id.is_some()
-                || summary.queued_prompts > 0
+                || summary.queued_prompts > 0)
+                && !(matches!(intent, SessionIntent::Goal(_)) && active_goal)
             {
                 return Err(Failure::invalid(format!(
                     "session {session_id} is {}; it must be idle with no queued prompts",
@@ -629,7 +1342,19 @@ async fn submit(
                 .await?;
                 after = receipt.committed_through;
             }
-            (session_id, after, summary.approval_delegate)
+            (
+                session_id,
+                if matches!(intent, SessionIntent::Goal(_)) {
+                    sessions
+                        .startup_goal_cursor(workspace_id)
+                        .await
+                        .map_err(|error| Failure::harness(error.to_string()))?
+                        .unwrap_or(snapshot.cursor)
+                } else {
+                    after
+                },
+                summary.approval_delegate,
+            )
         }
     };
     // Whether a held call waits for a delegate: one exists and the effective
@@ -644,47 +1369,9 @@ async fn submit(
     let child_waits_for_delegate = options.reviewer_configured
         && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Supervised);
 
-    // Budgets are core-owned: the runtime enforces them and settles the run
-    // with a typed outcome, so this adapter only relays and renders.
-    let queued = send(
-        sessions,
-        SessionCommand::SubmitPrompt {
-            session_id,
-            input,
-            limits: RunLimits {
-                max_duration_ms: options
-                    .timeout
-                    .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
-                max_model_turns: options.max_turns,
-                max_tool_calls: None,
-                max_total_tokens: None,
-                max_cost_usd_nanos: options.max_cost_usd_nanos,
-                max_input_tokens: None,
-                max_output_tokens: None,
-                max_tool_output_bytes: None,
-                max_children: None,
-                max_concurrent_children: None,
-            },
-            correlation: options.correlation.clone(),
-            output: options.output.clone(),
-        },
-    )
-    .await?;
-    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
-        return Err(Failure::harness(
-            "prompt submission returned an unexpected outcome",
-        ));
-    };
-
-    Ok(RunHandle {
+    Ok(SessionHandle {
         workspace_id,
         session_id,
-        run_id,
-        // Subscribing from the cursor just before submission replays the
-        // queued prompt and everything after it, so no event is lost to the
-        // gap between submission and subscription. For a resumed session that
-        // is the snapshot cursor (or the last settings write), not the
-        // session's history.
         subscribe_after,
         wait_for_delegate,
         child_waits_for_delegate,
@@ -970,7 +1657,7 @@ async fn stream_run(
                             shutdown_at = Some(Instant::now() + SHUTDOWN_GRACE);
                         }
                     }
-                    SessionEvent::ToolApprovalRequested { tool_call, shell, question, fetch, .. } => {
+                    SessionEvent::ToolApprovalRequested { tool_call, question, .. } => {
                         // A child session's question has no answerer either;
                         // declining lets the child proceed on its judgement.
                         if question.is_some() {
@@ -986,77 +1673,11 @@ async fn stream_run(
                             }
                             continue;
                         }
-                        // The headless invocation is the approval client.
-                        // An explicit allowlist answers first, as a session
-                        // grant so the same tool or prefix is not held again.
-                        // Otherwise full approves everything unattended; auto
-                        // denies whatever the policy escalated (dangerous
-                        // shell) so the run never stalls waiting for a human —
-                        // but when a reviewer model is configured the deny is
-                        // deferred briefly, giving the reviewer its window.
-                        // The reviewer settles the call itself on approve or
-                        // deny; the deferred deny is the unattended answer to
-                        // an escalation. A late deny is harmless: resolution is
-                        // idempotent, so a reviewer resolution that landed
-                        // first stands.
-                        // A child session's held calls belong to a supervised
-                        // write child: the reviewer adjudicates them, and the
-                        // headless root only supplies the unattended fallback
-                        // (a deferred deny), never a blanket approve. The
-                        // allowlist still applies: the human declared it.
-                        let granted = allowlisted_grant(
-                            options,
-                            &tool_call.name,
-                            shell.as_deref(),
-                            fetch.as_deref(),
-                        );
-                        let approval = if ours {
-                            options.approval
-                        } else {
-                            HeadlessApproval::Auto
-                        };
-                        let decision = match (granted, approval) {
-                            (Some(grant), _) => {
-                                if text {
-                                    let _ = writeln!(
-                                        stderr,
-                                        "[tool] {} approved for the session by allowlist",
-                                        tool_call.name
-                                    );
-                                }
-                                Some(ApprovalDecision::ApproveForSession { grant })
-                            }
-                            (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
-                            (None, HeadlessApproval::Auto)
-                                if (ours && handle.wait_for_delegate)
-                                    || (!ours && handle.child_waits_for_delegate) =>
-                            {
-                                if let Some(run_id) = envelope.run_id {
-                                    let sessions = sessions.clone();
-                                    let tool_call_id = tool_call.id;
-                                    tokio::spawn(async move {
-                                        tokio::time::sleep(REVIEWER_DENY_GRACE).await;
-                                        let _ = send(
-                                            &sessions,
-                                            SessionCommand::RespondToolApproval {
-                                                run_id,
-                                                tool_call_id,
-                                                decision: ApprovalDecision::Deny,
-                                            },
-                                        )
-                                        .await;
-                                    });
-                                }
-                                None
-                            }
-                            (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => {
-                                Some(ApprovalDecision::Deny)
-                            }
-                        };
-                        if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
-                            respond_approval(sessions, run_id, tool_call.id, decision, stderr)
-                                .await;
-                        }
+                        unattended_approval(sessions, options, &SessionHandle {
+                            workspace_id: handle.workspace_id, session_id: handle.session_id,
+                            subscribe_after: handle.subscribe_after, wait_for_delegate: handle.wait_for_delegate,
+                            child_waits_for_delegate: handle.child_waits_for_delegate,
+                        }, &envelope, stderr).await;
                     }
                     SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, .. }
                         if *run_id == handle.run_id => {
@@ -1338,6 +1959,89 @@ fn recordable_grant(value: &str) -> bool {
     !value.is_empty() && value.len() <= qq_core::MAX_GRANT_BYTES
 }
 
+async fn unattended_approval(
+    sessions: &SessionRuntime,
+    options: &HeadlessOptions,
+    handle: &SessionHandle,
+    envelope: &SessionEventEnvelope,
+    stderr: &mut impl Write,
+) {
+    let SessionEvent::ToolApprovalRequested {
+        tool_call,
+        shell,
+        fetch,
+        ..
+    } = &envelope.event
+    else {
+        return;
+    };
+    let text = options.format == HeadlessFormat::Text;
+    // The headless invocation is the approval client.
+    // An explicit allowlist answers first, as a session
+    // grant so the same tool or prefix is not held again.
+    // Otherwise full approves everything unattended; auto
+    // denies whatever the policy escalated (dangerous
+    // shell) so the run never stalls waiting for a human —
+    // but when a reviewer model is configured the deny is
+    // deferred briefly, giving the reviewer its window.
+    // The reviewer settles the call itself on approve or
+    // deny; the deferred deny is the unattended answer to
+    // an escalation. A late deny is harmless: resolution is
+    // idempotent, so a reviewer resolution that landed
+    // first stands.
+    // A child session's held calls belong to a supervised
+    // write child: the reviewer adjudicates them, and the
+    // headless root only supplies the unattended fallback
+    // (a deferred deny), never a blanket approve. The
+    // allowlist still applies: the human declared it.
+    let granted = allowlisted_grant(options, &tool_call.name, shell.as_deref(), fetch.as_deref());
+    let approval = if envelope.session_id == handle.session_id {
+        options.approval
+    } else {
+        HeadlessApproval::Auto
+    };
+    let decision = match (granted, approval) {
+        (Some(grant), _) => {
+            if text {
+                let _ = writeln!(
+                    stderr,
+                    "[tool] {} approved for the session by allowlist",
+                    tool_call.name
+                );
+            }
+            Some(ApprovalDecision::ApproveForSession { grant })
+        }
+        (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
+        (None, HeadlessApproval::Auto)
+            if (envelope.session_id == handle.session_id && handle.wait_for_delegate)
+                || (envelope.session_id != handle.session_id
+                    && handle.child_waits_for_delegate) =>
+        {
+            if let Some(run_id) = envelope.run_id {
+                let sessions = sessions.clone();
+                let tool_call_id = tool_call.id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(REVIEWER_DENY_GRACE).await;
+                    let _ = send(
+                        &sessions,
+                        SessionCommand::RespondToolApproval {
+                            run_id,
+                            tool_call_id,
+                            decision: ApprovalDecision::Deny,
+                        },
+                    )
+                    .await;
+                });
+            }
+            None
+        }
+        (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => Some(ApprovalDecision::Deny),
+    };
+    if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
+        respond_approval(sessions, run_id, tool_call.id, decision, stderr).await;
+    }
+}
+
 async fn respond_approval(
     sessions: &SessionRuntime,
     run_id: RunId,
@@ -1390,7 +2094,9 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::InvalidSlashCommand(_)
         | SessionRuntimeError::InvalidRunLimits
         | SessionRuntimeError::InvalidOutputContract(_)
-        | SessionRuntimeError::InvalidModelSelection => HeadlessStatus::InvalidConfiguration,
+        | SessionRuntimeError::InvalidModelSelection
+        | SessionRuntimeError::GoalCheckForbidden
+        | SessionRuntimeError::GoalCheckPolicy(_) => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }
 }
@@ -1421,8 +2127,8 @@ mod tests {
 
     use futures_util::stream;
     use qq_core::{
-        LoadedRuntime, Runtime, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadRequest,
-        RuntimeLoader, SessionRuntimeOptions,
+        LoadedRuntime, Runtime, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+        RuntimeLoadRequest, RuntimeLoader, SessionRuntimeOptions,
     };
     use qq_protocol::{AccountingTotal, ModelPricing, RunStatus, SessionStatus, WorkspaceSnapshot};
     use qq_provider::{
@@ -1498,19 +2204,63 @@ mod tests {
         }
     }
 
+    struct HeldChildPreparation {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<RuntimeLoadProgress>>>,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        exited: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
     struct ParentChildLoader {
         parent: Arc<dyn Provider>,
         child: Arc<dyn Provider>,
+        held_child: Option<Arc<HeldChildPreparation>>,
     }
 
     impl RuntimeLoader for ParentChildLoader {
         fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            let provider = if request.model.model.as_deref() == Some("test/child") {
+            // Spawn preflight validates before admission; hold only the queued
+            // child's real execution preparation, which has a cancellation owner.
+            Self {
+                parent: Arc::clone(&self.parent),
+                child: Arc::clone(&self.child),
+                held_child: None,
+            }
+            .load_with_progress(request, RuntimeLoadProgress::default())
+        }
+
+        fn load_with_progress(
+            &self,
+            request: RuntimeLoadRequest,
+            progress: RuntimeLoadProgress,
+        ) -> RuntimeLoadFuture {
+            let is_child = request.model.model.as_deref() == Some("test/child");
+            let held = is_child.then(|| self.held_child.clone()).flatten();
+            let provider: Arc<dyn Provider> = if is_child {
                 Arc::clone(&self.child)
+            } else if request.model.model.as_deref() == Some("test/foreign") {
+                Arc::new(HangingProvider)
             } else {
                 Arc::clone(&self.parent)
             };
             Box::pin(async move {
+                if let Some(held) = held {
+                    let release = held.release.lock().unwrap().take().unwrap();
+                    held.entered
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(progress)
+                        .unwrap();
+                    release.await.unwrap();
+                    held.exited
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .unwrap()
+                        .send(())
+                        .unwrap();
+                }
                 Runtime::with_provider(provider, "test-model", 256)
                     .map(|runtime| {
                         loaded_runtime(
@@ -2139,6 +2889,2423 @@ mod tests {
             resume_hint: false,
             arm: None,
         }
+    }
+
+    struct GoalVerdictProvider {
+        blocked: bool,
+        turns: Mutex<usize>,
+    }
+    impl Provider for GoalVerdictProvider {
+        fn stream(&self, request: ModelRequest) -> ProviderStream {
+            let mut turns = self.turns.lock().unwrap();
+            let mut events = if request.tools().is_empty() {
+                assert!(!self.blocked);
+                vec![Ok(ProviderEvent::OutputTextDelta {
+                    text: r#"{"achieved":true,"evidence":"independently verified the persisted work and evidence"}"#.to_owned(),
+                })]
+            } else if *turns == 0 {
+                assert!(
+                    request
+                        .tools()
+                        .iter()
+                        .any(|tool| tool.name() == "update_goal")
+                );
+                vec![
+                    Ok(ProviderEvent::ToolCallStarted { id: "goal-update".into(), name: "update_goal".into() }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta { id: "goal-update".into(),
+                        json: if self.blocked {
+                            r#"{"status":{"type":"blocked","reason":"missing external input"}}"#
+                        } else {
+                            r#"{"status":{"type":"achieved","evidence":"the requested work is ready"}}"#
+                        }.to_owned(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "goal-update".into() }),
+                ]
+            } else {
+                vec![Ok(ProviderEvent::OutputTextDelta {
+                    text: "work ready".into(),
+                })]
+            };
+            *turns += 1;
+            events.push(Ok(ProviderEvent::Completed {
+                usage: Some(ProviderUsage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    reasoning_tokens: None,
+                }),
+            }));
+            Box::pin(stream::iter(events))
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_achievement_and_blocking_emit_every_direct_run_before_final_state() {
+        for blocked in [true, false] {
+            let fixture = fixture(move || GoalVerdictProvider {
+                blocked,
+                turns: Mutex::new(0),
+            })
+            .await;
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_goal(
+                    &fixture.sessions,
+                    options(&fixture.workspace),
+                    request,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                code,
+                if blocked { 7 } else { 0 },
+                "{}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let final_record = records.last().unwrap();
+            assert_eq!(final_record["type"], "goal");
+            assert_eq!(final_record["exit_code"], code);
+            let runs: Vec<_> = records
+                .iter()
+                .filter(|record| record["type"] == "goal_run")
+                .collect();
+            assert_eq!(runs.len(), if blocked { 1 } else { 2 }, "{records:?}");
+            for run in runs {
+                assert!(run["run"]["outcome"].is_object());
+                assert_eq!(run["goal"], run["run"]["goal"]);
+                assert_eq!(run["session_id"], final_record["goal"]["session_id"]);
+            }
+            assert_eq!(
+                final_record["goal"]["status"]["type"],
+                if blocked { "blocked" } else { "achieved" }
+            );
+            if !blocked {
+                assert_eq!(final_record["goal"]["counters"]["audits"], 1);
+            }
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    fn goal_request() -> GoalInvocation {
+        GoalInvocation {
+            objective: Some("finish the task".to_owned()),
+            check: None,
+            check_approval: None,
+            deadline: None,
+            max_runs: Some(1),
+            replace: false,
+            defaults: qq_config::GoalsConfig::default(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_goal_reopen_replays_work_before_client_adoption() {
+        struct CheckAuthority;
+        impl qq_core::WorkspaceGrantAuthority for CheckAuthority {
+            fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
+                Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
+            }
+            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
+                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
+            }
+            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
+                panic!("check consent must not promote tool grants")
+            }
+            fn validate_goal_check(
+                &self,
+                _: &Path,
+                command: &str,
+            ) -> qq_core::GoalCheckPolicyFuture {
+                assert_eq!(command, "printf checked");
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+        for asking in [false, true] {
+            let loader: Arc<dyn RuntimeLoader> = if asking {
+                Arc::new(ProviderLoader(|| AskingProvider {
+                    turn: Mutex::new(0),
+                }))
+            } else {
+                Arc::new(ProviderLoader(|| GoalVerdictProvider {
+                    blocked: false,
+                    turns: Mutex::new(0),
+                }))
+            };
+            let mut fixture = fixture_with_loader(Arc::clone(&loader)).await;
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.check = Some("printf checked".into());
+            request.max_runs = Some(3);
+            assert_eq!(
+                run_goal(
+                    &fixture.sessions,
+                    opts.clone(),
+                    request,
+                    std::future::pending(),
+                    &mut Vec::new(),
+                    &mut Vec::new()
+                )
+                .await,
+                6
+            );
+            fixture.sessions.close().await.unwrap();
+            let path = fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sessions.sqlite3");
+            fixture.sessions = SessionRuntime::open(
+                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(CheckAuthority)),
+                loader,
+            )
+            .await
+            .unwrap();
+            let snapshot = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap();
+            let goal = snapshot.focused.unwrap().goal.unwrap();
+            let mut events = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id,
+                    after: snapshot.cursor,
+                })
+                .unwrap();
+            send(
+                &fixture.sessions,
+                SessionCommand::GoalControl {
+                    session_id: handle.session_id,
+                    expected: goal_identity(&goal),
+                    action: qq_protocol::GoalControl::ApproveCheck {
+                        scope: qq_protocol::GoalCheckScope::ForGoal,
+                        command: "printf checked".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            // Let startup work reach a held question or achievement before
+            // the foreground client takes its first adoption snapshot.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = events.next().await.unwrap().unwrap().event;
+                    if (asking && matches!(event, SessionEvent::ToolApprovalRequested { question: Some(_), .. }))
+                        || matches!(event, SessionEvent::GoalUpdated { ref goal } if goal.status == qq_protocol::GoalStatus::Achieved) {
+                        break;
+                    }
+                }
+            }).await.unwrap();
+            let mut resume = goal_request();
+            resume.objective = None;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    resume,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .expect("adoption must consume an already-held input request");
+            assert_eq!(
+                code,
+                if asking { 6 } else { 0 },
+                "{}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let direct: Vec<_> = records.iter().filter(|r| r["type"] == "goal_run").collect();
+            assert_eq!(
+                direct.len(),
+                if asking { 1 } else { 2 },
+                "every startup run must precede the final record"
+            );
+            if asking {
+                assert_eq!(
+                    records.last().unwrap()["goal"]["status"]["reason"]["cause"]["type"],
+                    "approval"
+                );
+            }
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_rejects_preempting_user_work_before_adoption() {
+        let fixture = fixture(|| HangingProvider).await;
+        let base = options(&fixture.workspace);
+        let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        send(
+            &fixture.sessions,
+            SessionCommand::SubmitPrompt {
+                session_id: owner.session_id,
+                input: vec![InputPart::text("question")],
+                limits: RunLimits::default(),
+                correlation: Default::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        send(
+            &fixture.sessions,
+            SessionCommand::SetGoal {
+                session_id: owner.session_id,
+                objective: "later objective".into(),
+                check: None,
+                budget: Box::new(qq_protocol::GoalBudget {
+                    max_goal_runs: 2,
+                    deadline_ms: now + 60000,
+                    max_total_tokens: None,
+                    max_cost_usd_nanos: None,
+                    per_run: RunLimits::default(),
+                }),
+                expected: None,
+                replace: false,
+            },
+        )
+        .await
+        .unwrap();
+        let mut opts = base;
+        opts.session = Some(owner.session_id);
+        let request = goal_request();
+        let result = prepare_session(&fixture.sessions, &opts, SessionIntent::Goal(&request)).await;
+        assert!(
+            matches!(
+                result,
+                Err(Failure {
+                    status: HeadlessStatus::InvalidConfiguration,
+                    ..
+                })
+            ),
+            "must reject same-session user work before accepting exclusive goal ownership"
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_invalid_resume_does_not_pause_active_goal() {
+        for approval in [None, Some(qq_protocol::GoalCheckScope::Once)] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut args = goal_request();
+            let command = crate::goals::prepare_set(
+                &crate::cli::GoalSetArgs {
+                    target: crate::cli::GoalTarget {
+                        session: handle.session_id,
+                        workspace: None,
+                        json: true,
+                    },
+                    objective: "keep working".into(),
+                    replace: false,
+                    check: None,
+                    clear_check: false,
+                    goal_deadline: None,
+                    goal_max_runs: Some(2),
+                    max_cost_usd_nanos: None,
+                },
+                None,
+                &args.defaults,
+                u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let goal = goal_receipt(send(&fixture.sessions, command).await.unwrap()).unwrap();
+            args.objective = None;
+            args.check = Some("new check".into());
+            args.check_approval = approval;
+            let mut opts = base;
+            opts.model.model = Some("test/changed-model".into());
+            opts.approval = HeadlessApproval::Full;
+            opts.session = Some(handle.session_id);
+            let code = run_goal(
+                &fixture.sessions,
+                opts,
+                args,
+                std::future::pending(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+            )
+            .await;
+            assert_eq!(code, 2);
+            let snapshot = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap();
+            let focused = snapshot.focused.unwrap();
+            assert_eq!(
+                focused.summary.approval_mode,
+                qq_protocol::ApprovalMode::ReadOnly
+            );
+            assert_eq!(
+                focused.summary.profile,
+                qq_protocol::AgentProfileId::default()
+            );
+            assert_eq!(focused.summary.model.as_deref(), Some("test/model"));
+            let current = focused.goal.unwrap();
+            assert_eq!(current.status, qq_protocol::GoalStatus::Active);
+            assert_eq!(current.revision, goal.revision);
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_missing_specification_rejects_before_settings_change() {
+        for replace in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut opts = base;
+            opts.session = Some(handle.session_id);
+            opts.model.model = Some("test/changed-model".into());
+            opts.profile = qq_protocol::AgentProfileId::new("reviewer").unwrap();
+            opts.approval = HeadlessApproval::Full;
+            let mut request = goal_request();
+            request.replace = replace;
+            if !replace {
+                request.objective = None;
+            }
+            let mut stdout = Vec::new();
+            assert_eq!(
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    request,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut Vec::new()
+                )
+                .await,
+                2
+            );
+            assert!(stdout.is_empty());
+            let focused = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap();
+            assert!(focused.goal.is_none());
+            assert_eq!(
+                focused.summary.approval_mode,
+                qq_protocol::ApprovalMode::ReadOnly
+            );
+            assert_eq!(
+                focused.summary.profile,
+                qq_protocol::AgentProfileId::default()
+            );
+            assert_eq!(focused.summary.model.as_deref(), Some("test/model"));
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_invalid_new_invocations_do_not_create_sessions() {
+        for case in ["replace", "runs", "objective", "missing"] {
+            let fixture = fixture(|| HangingProvider).await;
+            let opts = options(&fixture.workspace);
+            let CommandOutcome::WorkspaceResolved { workspace_id } = send(
+                &fixture.sessions,
+                SessionCommand::ResolveWorkspace {
+                    path: fixture.workspace.display().to_string(),
+                },
+            )
+            .await
+            .unwrap()
+            .outcome
+            else {
+                panic!("workspace");
+            };
+            let mut request = goal_request();
+            match case {
+                "replace" => request.replace = true,
+                "runs" => request.max_runs = Some(request.defaults.max_runs + 1),
+                "objective" => request.objective = Some(String::new()),
+                _ => request.objective = None,
+            }
+            assert_eq!(
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    request,
+                    std::future::pending(),
+                    &mut Vec::new(),
+                    &mut Vec::new()
+                )
+                .await,
+                2,
+                "{case}"
+            );
+            let snapshot = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(workspace_id, None, 16, 16))
+                .await
+                .unwrap();
+            assert!(
+                snapshot.sessions.is_empty(),
+                "{case}: invalid invocation created a visible session"
+            );
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_goal_text_trace_failure_preserves_summary_and_exit() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut opts = options(&fixture.workspace);
+        opts.format = HeadlessFormat::Text;
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        let mut request = goal_request();
+        request.check = Some("printf checked".into());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            request,
+            std::future::pending(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 6);
+        let summary = String::from_utf8(stdout).unwrap();
+        assert_eq!(summary.lines().count(), 1);
+        assert!(summary.starts_with("goal "), "{summary}");
+        assert!(!stderr.is_empty());
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_without_check_consent_returns_paused_without_model_work() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut request = goal_request();
+        request.check = Some("printf checked".to_owned());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 6, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let Some(qq_protocol::HeadlessRecord::Goal(final_goal)) = records.last() else {
+            panic!("final goal record")
+        };
+        assert_eq!(final_goal.goal.counters.runs, 0);
+        assert_eq!(
+            final_goal.goal.status,
+            qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::NeedsUser {
+                    cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                },
+            }
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record, qq_protocol::HeadlessRecord::GoalRun(_)))
+        );
+        let mut options = options(&fixture.workspace);
+        options.session = Some(final_goal.goal.session_id);
+        let mut resume = goal_request();
+        resume.objective = None;
+        resume.max_runs = None;
+        let mut resumed = Vec::new();
+        assert_eq!(
+            run_goal(
+                &fixture.sessions,
+                options,
+                resume,
+                std::future::pending(),
+                &mut resumed,
+                &mut stderr
+            )
+            .await,
+            6
+        );
+        let final_resumed: qq_protocol::HeadlessRecord =
+            serde_json::from_str(String::from_utf8(resumed).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert!(
+            matches!(final_resumed, qq_protocol::HeadlessRecord::Goal(record)
+            if record.goal == final_goal.goal)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_runs_existing_driver_until_budget_and_emits_each_direct_run() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 8, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let runs: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                qq_protocol::HeadlessRecord::GoalRun(run) => Some(run),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(
+            runs[0].run.origin,
+            Some(qq_protocol::RunOrigin::Goal { .. })
+        ));
+        assert!(runs[0].run.outcome.is_some());
+        assert!(
+            matches!(records.last(), Some(qq_protocol::HeadlessRecord::Goal(outcome))
+            if outcome.exit_code == 8 && outcome.goal.counters.runs == 1)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_unanswered_question_retains_needs_user_reason() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 6, "{}", String::from_utf8_lossy(&stderr));
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let Some(qq_protocol::HeadlessRecord::Goal(final_goal)) = records.last() else {
+            panic!("final goal record")
+        };
+        assert!(
+            matches!(
+                final_goal.goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Approval { .. },
+                    },
+                }
+            ),
+            "{:?}",
+            final_goal.goal.status
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_cleanup_preserves_an_existing_input_pause() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let goal = goal_receipt(
+            send(
+                &fixture.sessions,
+                SessionCommand::SetGoal {
+                    session_id: handle.session_id,
+                    objective: "ask for the missing input".into(),
+                    check: None,
+                    budget: Box::new(qq_protocol::GoalBudget {
+                        max_goal_runs: 2,
+                        deadline_ms: now + 60000,
+                        max_total_tokens: None,
+                        max_cost_usd_nanos: None,
+                        per_run: RunLimits::default(),
+                    }),
+                    expected: None,
+                    replace: false,
+                },
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let mut guard = AcceptedGoalGuard::new(fixture.sessions.clone(), &goal, &handle);
+        let call = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let SessionEvent::ToolApprovalRequested {
+                    tool_call,
+                    question: Some(_),
+                    ..
+                } = events.next().await.unwrap().unwrap().event
+                {
+                    break tool_call.id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let stopped = goal_receipt(
+            send(
+                &fixture.sessions,
+                SessionCommand::GoalControl {
+                    session_id: handle.session_id,
+                    expected: goal_identity(&goal),
+                    action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call },
+                },
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        guard.expected = goal_identity(&stopped);
+        guard.settle().await.unwrap();
+        let actual = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                1,
+                1,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(
+            actual.status, stopped.status,
+            "cleanup must preserve the actionable input request"
+        );
+        assert_eq!(actual.revision, stopped.revision);
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_input_controls_and_run_reads_are_identity_fenced() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let options = options(&fixture.workspace);
+        let owner = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let other = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: owner.workspace_id,
+                after: other.subscribe_after,
+            })
+            .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let receipt = send(
+            &fixture.sessions,
+            SessionCommand::SetGoal {
+                session_id: owner.session_id,
+                objective: "held goal".into(),
+                check: None,
+                budget: Box::new(qq_protocol::GoalBudget {
+                    max_goal_runs: 2,
+                    deadline_ms: now + 60000,
+                    max_total_tokens: None,
+                    max_cost_usd_nanos: None,
+                    per_run: RunLimits::default(),
+                }),
+                expected: None,
+                replace: false,
+            },
+        )
+        .await
+        .unwrap();
+        let goal = goal_receipt(receipt).unwrap();
+        let expected = goal_identity(&goal);
+        send(
+            &fixture.sessions,
+            SessionCommand::SubmitPrompt {
+                session_id: other.session_id,
+                input: vec![InputPart::text("foreign question")],
+                limits: RunLimits::default(),
+                correlation: Default::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+        let (own_call, foreign_call) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut own = None;
+            let mut foreign = None;
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::ToolApprovalRequested {
+                    tool_call,
+                    question: Some(_),
+                    ..
+                } = event.event
+                {
+                    if event.session_id == owner.session_id {
+                        own = Some(tool_call);
+                    } else if event.session_id == other.session_id {
+                        foreign = Some(tool_call);
+                    }
+                }
+                if let (Some(own), Some(foreign)) = (&own, &foreign) {
+                    break (own.clone(), foreign.clone());
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let pending = fixture
+            .sessions
+            .goal_pending_runs(owner.session_id, expected)
+            .await
+            .unwrap();
+        assert!(pending.contains(&own_call.run_id));
+        assert!(!pending.contains(&foreign_call.run_id));
+        assert!(matches!(
+            fixture
+                .sessions
+                .goal_pending_runs(
+                    owner.session_id,
+                    qq_protocol::GoalIdentity {
+                        revision: expected.revision + 1,
+                        ..expected
+                    }
+                )
+                .await,
+            Err(SessionRuntimeError::GoalConflict { .. })
+        ));
+        assert!(
+            fixture
+                .sessions
+                .goal_owns_run(owner.session_id, expected, own_call.run_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !fixture
+                .sessions
+                .goal_owns_run(owner.session_id, expected, foreign_call.run_id)
+                .await
+                .unwrap()
+        );
+        let control = |expected, call| SessionCommand::GoalControl {
+            session_id: owner.session_id,
+            expected,
+            action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call },
+        };
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(expected, qq_protocol::ToolCallId::from_bytes([0x99; 16]))
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(expected, foreign_call.id)
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(
+                        qq_protocol::GoalIdentity {
+                            revision: expected.revision + 1,
+                            ..expected
+                        },
+                        own_call.id
+                    )
+                )
+                .await,
+            Err(SessionRuntimeError::GoalConflict { .. })
+        ));
+        let run = fixture
+            .sessions
+            .run_snapshot(owner.workspace_id, owner.session_id, own_call.run_id)
+            .await
+            .unwrap();
+        assert_eq!(run.id, own_call.run_id);
+        assert!(matches!(
+            fixture
+                .sessions
+                .run_snapshot(
+                    WorkspaceId::from_bytes([0x90; 16]),
+                    owner.session_id,
+                    own_call.run_id
+                )
+                .await,
+            Err(SessionRuntimeError::SessionNotFound)
+        ));
+        assert!(matches!(
+            fixture
+                .sessions
+                .run_snapshot(owner.workspace_id, other.session_id, own_call.run_id)
+                .await,
+            Err(SessionRuntimeError::RunNotFound)
+        ));
+        let id = CommandId::generate().unwrap();
+        let command = control(expected, own_call.id);
+        let receipt = fixture.sessions.command(id, command.clone()).await.unwrap();
+        assert_eq!(
+            fixture.sessions.command(id, command).await.unwrap(),
+            receipt
+        );
+        let stopped = goal_receipt(receipt).unwrap();
+        assert!(matches!(stopped.status, qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id },
+            },
+        } if tool_call_id == own_call.id));
+        assert!(matches!(
+            fixture
+                .sessions
+                .command(
+                    CommandId::generate().unwrap(),
+                    control(goal_identity(&stopped), own_call.id)
+                )
+                .await,
+            Err(SessionRuntimeError::GoalInputNotPending)
+        ));
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_interrupt_pauses_and_returns_distinct_exit() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            options(&fixture.workspace),
+            goal_request(),
+            std::future::ready(()),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+        let final_record: qq_protocol::HeadlessRecord =
+            serde_json::from_str(String::from_utf8(stdout).unwrap().lines().last().unwrap())
+                .unwrap();
+        assert!(
+            matches!(final_record, qq_protocol::HeadlessRecord::Goal(record)
+            if record.exit_code == 130 && record.goal.status == qq_protocol::GoalStatus::Paused {
+                reason: qq_protocol::GoalPauseReason::User,
+            })
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_interrupt_reconciles_durable_achievement() {
+        struct RefusedLoad(qq_protocol::RunFailureKind);
+        impl RuntimeLoader for RefusedLoad {
+            fn load(&self, _: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let kind = self.0;
+                Box::pin(std::future::ready(Err(RuntimeLoadError {
+                    kind,
+                    message: "recover this configuration or credential".into(),
+                })))
+            }
+        }
+        for failure in [
+            None,
+            Some(qq_protocol::RunFailureKind::Authentication),
+            Some(qq_protocol::RunFailureKind::Configuration),
+        ] {
+            let loader: Arc<dyn RuntimeLoader> = match failure {
+                Some(kind) => Arc::new(RefusedLoad(kind)),
+                None => Arc::new(ProviderLoader(|| GoalVerdictProvider {
+                    blocked: false,
+                    turns: Mutex::new(0),
+                })),
+            };
+            let fixture = fixture_with_loader(loader).await;
+            let base = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut observer = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id,
+                    after: handle.subscribe_after,
+                })
+                .unwrap();
+            let stopped = Arc::new(Mutex::new(None));
+            let observed = Arc::clone(&stopped);
+            let interrupt = async move {
+                loop {
+                    let event = observer.next().await.unwrap().unwrap();
+                    if let SessionEvent::GoalUpdated { goal } = event.event
+                        && goal.status != qq_protocol::GoalStatus::Active
+                    {
+                        *observed.lock().unwrap() = Some((goal.status.clone(), goal.revision));
+                        break;
+                    }
+                }
+            };
+            let mut opts = base;
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(5),
+                run_goal(
+                    &fixture.sessions,
+                    opts,
+                    request,
+                    interrupt,
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                code,
+                if failure.is_none() { 0 } else { 6 },
+                "{failure:?}: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            assert_eq!(records.last().unwrap()["type"], "goal");
+            let (status, revision) = stopped.lock().unwrap().take().unwrap();
+            assert_eq!(
+                records.last().unwrap()["goal"]["status"],
+                serde_json::to_value(&status).unwrap()
+            );
+            assert_eq!(records.last().unwrap()["goal"]["revision"], revision);
+            match failure {
+                None => assert_eq!(status, qq_protocol::GoalStatus::Achieved),
+                Some(qq_protocol::RunFailureKind::Authentication) => assert!(matches!(
+                    status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Authentication { .. },
+                        }
+                    }
+                )),
+                Some(_) => assert!(matches!(
+                    status,
+                    qq_protocol::GoalStatus::Paused {
+                        reason: qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::Configuration { .. },
+                        }
+                    }
+                )),
+            }
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_refused_check_consent_is_invalid_configuration() {
+        struct DeniedCheck;
+        impl qq_core::WorkspaceGrantAuthority for DeniedCheck {
+            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
+                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
+            }
+            fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
+                Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
+            }
+            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
+                panic!("refused check cannot promote grants")
+            }
+            fn validate_goal_check(&self, _: &Path, _: &str) -> qq_core::GoalCheckPolicyFuture {
+                Box::pin(std::future::ready(Err(
+                    qq_core::GoalCheckPolicyError::ManagedDenied,
+                )))
+            }
+        }
+        for command in ["sudo printf checked", "printf checked"] {
+            let mut fixture = fixture(|| HangingProvider).await;
+            fixture.sessions.close().await.unwrap();
+            let path = fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sessions.sqlite3");
+            fixture.sessions = SessionRuntime::open(
+                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(DeniedCheck)),
+                Arc::new(ProviderLoader(|| HangingProvider)),
+            )
+            .await
+            .unwrap();
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            opts.session = Some(handle.session_id);
+            let mut request = goal_request();
+            request.check = Some(command.into());
+            request.check_approval = Some(qq_protocol::GoalCheckScope::ForGoal);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_goal(
+                &fixture.sessions,
+                opts,
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
+            assert_eq!(code, 2, "{command}: {}", String::from_utf8_lossy(&stderr));
+            assert!(!stderr.is_empty());
+            let goal = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap()
+                .goal
+                .unwrap();
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::CheckApproval
+                    },
+                }
+            ));
+            assert_eq!(
+                goal.check_authorization,
+                Some(qq_protocol::GoalCheckAuthorization::Pending)
+            );
+            assert_eq!(goal.counters.runs, 0);
+            assert_eq!(goal.counters.audits, 0);
+            assert!(goal.pending_run_id.is_none());
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_interrupt_with_queued_question_replays_to_final_record() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let receipt = send(
+            &fixture.sessions,
+            SessionCommand::ResolveWorkspace {
+                path: fixture.workspace.display().to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let CommandOutcome::WorkspaceResolved { workspace_id } = receipt.outcome else {
+            panic!("workspace receipt")
+        };
+        let mut observer = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: receipt.committed_through,
+            })
+            .unwrap();
+        let interrupt = async move {
+            loop {
+                let event = observer.next().await.unwrap().unwrap();
+                if matches!(
+                    event.event,
+                    SessionEvent::ToolApprovalRequested {
+                        question: Some(_),
+                        ..
+                    }
+                ) {
+                    break;
+                }
+            }
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                interrupt,
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(records.last().unwrap()["exit_code"], 130);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["type"] == "goal_run")
+                .count(),
+            1
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_goal_check_scopes_control_real_repeated_check_execution() {
+        const CHECK: &str = "printf x >> checks.log; if test -e checks.flag; then exit 0; else printf ready > checks.flag; exit 1; fi";
+        struct CheckAuthority;
+        impl qq_core::WorkspaceGrantAuthority for CheckAuthority {
+            fn seed_grants(&self, _: &Path) -> qq_core::GrantSeedFuture {
+                Box::pin(std::future::ready(qq_core::WorkspaceGrantSeed::default()))
+            }
+            fn goal_policy(&self, _: &Path) -> qq_core::GoalPolicyFuture {
+                Box::pin(std::future::ready(Ok(qq_core::GoalPolicy::default())))
+            }
+            fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> qq_core::GrantPromotionFuture {
+                panic!("goal check consent must not promote ordinary tool grants")
+            }
+            fn validate_goal_check(
+                &self,
+                workspace: &Path,
+                command: &str,
+            ) -> qq_core::GoalCheckPolicyFuture {
+                assert!(workspace.is_absolute());
+                assert_eq!(command, CHECK);
+                Box::pin(std::future::ready(Ok(())))
+            }
+        }
+        for scope in [
+            qq_protocol::GoalCheckScope::Once,
+            qq_protocol::GoalCheckScope::ForGoal,
+        ] {
+            let mut fixture = fixture(|| GoalVerdictProvider {
+                blocked: false,
+                turns: Mutex::new(0),
+            })
+            .await;
+            fixture.sessions.close().await.unwrap();
+            let path = fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sessions.sqlite3");
+            fixture.sessions = SessionRuntime::open(
+                SessionRuntimeOptions::new(path).with_grant_authority(Arc::new(CheckAuthority)),
+                Arc::new(ProviderLoader(|| GoalVerdictProvider {
+                    blocked: false,
+                    turns: Mutex::new(0),
+                })),
+            )
+            .await
+            .unwrap();
+            let mut request = goal_request();
+            request.max_runs = Some(3);
+            request.check = Some(CHECK.to_owned());
+            request.check_approval = Some(scope);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = tokio::time::timeout(
+                Duration::from_secs(10),
+                run_goal(
+                    &fixture.sessions,
+                    options(&fixture.workspace),
+                    request,
+                    std::future::pending(),
+                    &mut stdout,
+                    &mut stderr,
+                ),
+            )
+            .await
+            .unwrap();
+            let repeated = scope == qq_protocol::GoalCheckScope::ForGoal;
+            assert_eq!(
+                code,
+                if repeated { 0 } else { 6 },
+                "{}",
+                String::from_utf8_lossy(&stderr)
+            );
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let checks: Vec<_> = records
+                .iter()
+                .filter(|record| {
+                    record["type"] == "goal_run" && record["run"]["origin"]["type"] == "goal_check"
+                })
+                .collect();
+            // A consumed one-shot leaves a refused verification attempt;
+            // its durable record does not imply a second process execution.
+            assert_eq!(checks.len(), 2);
+            assert_ne!(checks[0]["run"]["id"], checks[1]["run"]["id"]);
+            assert_eq!(
+                records.last().unwrap()["goal"]["counters"]["audits"],
+                if repeated { 2 } else { 1 }
+            );
+            assert_eq!(
+                std::fs::read_to_string(fixture.workspace.join("checks.log")).unwrap(),
+                if repeated { "xx" } else { "x" }
+            );
+            let final_goal = &records.last().unwrap()["goal"];
+            assert_eq!(
+                final_goal["check_authorization"],
+                if repeated { "for_goal" } else { "consumed" }
+            );
+            assert_eq!(
+                final_goal["status"]["type"],
+                if repeated { "achieved" } else { "paused" }
+            );
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_adopts_active_work_and_leaves_foreign_runs_running() {
+        for interrupt_on_close in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let base = options(&fixture.workspace);
+            let owner = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let other = prepare_session(&fixture.sessions, &base, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            let mut events = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: owner.workspace_id,
+                    after: other.subscribe_after,
+                })
+                .unwrap();
+            let foreign = send(
+                &fixture.sessions,
+                SessionCommand::SubmitPrompt {
+                    session_id: other.session_id,
+                    input: vec![InputPart::text("independent work")],
+                    limits: RunLimits::default(),
+                    correlation: Default::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+            let CommandOutcome::PromptQueued {
+                run_id: foreign_id, ..
+            } = foreign.outcome
+            else {
+                panic!("foreign prompt")
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            let goal = goal_receipt(
+                send(
+                    &fixture.sessions,
+                    SessionCommand::SetGoal {
+                        session_id: owner.session_id,
+                        objective: "existing active objective".into(),
+                        check: None,
+                        budget: Box::new(qq_protocol::GoalBudget {
+                            max_goal_runs: 2,
+                            deadline_ms: now + 60000,
+                            max_total_tokens: None,
+                            max_cost_usd_nanos: None,
+                            per_run: RunLimits::default(),
+                        }),
+                        expected: None,
+                        replace: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut own_started = false;
+                let mut other_started = false;
+                while !own_started || !other_started {
+                    let event = events.next().await.unwrap().unwrap();
+                    if matches!(event.event, SessionEvent::RunStarted { .. }) {
+                        own_started |= event.session_id == owner.session_id;
+                        other_started |= event.session_id == other.session_id;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let goal = goal_receipt(
+                send(
+                    &fixture.sessions,
+                    SessionCommand::SetGoal {
+                        session_id: owner.session_id,
+                        objective: "edited while running".into(),
+                        check: goal.check.clone(),
+                        budget: Box::new(goal.budget.clone()),
+                        expected: Some(goal_identity(&goal)),
+                        replace: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            let mut options = base;
+            options.session = Some(owner.session_id);
+            let mut request = goal_request();
+            request.objective = None;
+            request.max_runs = None;
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_goal(
+                &fixture.sessions,
+                options,
+                request,
+                std::future::ready(()),
+                &mut stdout,
+                &mut stderr,
+            )
+            .await;
+            assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            let finished = &records.last().unwrap()["goal"];
+            assert_eq!(
+                finished["goal_id"],
+                serde_json::to_value(goal.goal_id).unwrap()
+            );
+            assert_eq!(finished["objective"], goal.objective);
+            assert_eq!(
+                finished["budget"],
+                serde_json::to_value(&goal.budget).unwrap()
+            );
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|record| record["type"] == "goal_run")
+                    .count(),
+                1
+            );
+            let adopted = records
+                .iter()
+                .find(|record| record["type"] == "goal_run")
+                .unwrap();
+            assert_eq!(adopted["goal"]["revision"], goal.revision - 1);
+            assert_eq!(
+                adopted["goal"]["goal_id"],
+                serde_json::to_value(goal.goal_id).unwrap()
+            );
+            assert_eq!(
+                fixture
+                    .sessions
+                    .run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+                    .await
+                    .unwrap()
+                    .status,
+                qq_protocol::RunStatus::Running
+            );
+            let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+            let closing = crate::close_headless(&fixture.sessions, true, async {
+                if interrupt_on_close {
+                    interrupted.await.unwrap();
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            });
+            tokio::pin!(closing);
+            assert!(futures_util::poll!(closing.as_mut()).is_pending());
+            let inspect_and_finish = async {
+                assert_eq!(
+                    fixture
+                        .sessions
+                        .run_snapshot(owner.workspace_id, other.session_id, foreign_id)
+                        .await
+                        .unwrap()
+                        .status,
+                    qq_protocol::RunStatus::Running
+                );
+                if interrupt_on_close {
+                    interrupt.send(()).unwrap();
+                    loop {
+                        let event = events.next().await.unwrap().unwrap();
+                        if let SessionEvent::RunFinished {
+                            run_id, outcome, ..
+                        } = event.event
+                            && run_id == foreign_id
+                        {
+                            assert!(matches!(outcome, qq_protocol::RunOutcome::Cancelled));
+                            break;
+                        }
+                    }
+                } else {
+                    request_cancel(&fixture.sessions, foreign_id).await.unwrap();
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(closing, inspect_and_finish)
+            })
+            .await;
+            if result.is_err() {
+                fixture.sessions.close().await.unwrap();
+            }
+            let (closed, ()) = result
+                .expect("runtime close must react to the new interrupt after the goal settles");
+            closed.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn closing_goal_host_drains_accepted_work_without_admitting_successors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct ReleasedRun {
+            calls: Arc<AtomicUsize>,
+            release: Arc<tokio::sync::Semaphore>,
+            started: tokio::sync::mpsc::Sender<usize>,
+        }
+        impl Provider for ReleasedRun {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let call = self.calls.fetch_add(1, Ordering::SeqCst);
+                self.started.try_send(call).unwrap();
+                let release = self.release.clone();
+                if call == 0 {
+                    Box::pin(
+                        stream::iter([Ok(ProviderEvent::OutputTextDelta {
+                            text: "accepted work finished".into(),
+                        })])
+                        .chain(stream::once(async move {
+                            release.acquire().await.unwrap().forget();
+                            Ok(ProviderEvent::Completed {
+                                usage: Some(ProviderUsage {
+                                    input_tokens: 1,
+                                    output_tokens: 0,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                }),
+                            })
+                        })),
+                    )
+                } else {
+                    Box::pin(stream::pending())
+                }
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for _ in 0..16 {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let release = Arc::new(tokio::sync::Semaphore::new(0));
+                let (started, mut starts) = tokio::sync::mpsc::channel(8);
+                let fixture = fixture({
+                    let calls = calls.clone(); let release = release.clone();
+                    move || ReleasedRun { calls: calls.clone(), release: release.clone(), started: started.clone() }
+                }).await;
+                let opts = options(&fixture.workspace);
+                let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt).await.unwrap();
+                let mut request = goal_request();
+                request.max_runs = Some(3);
+                let command = prepare_goal_request(&request, &opts, handle.session_id, None).unwrap().unwrap();
+                send(&fixture.sessions, command).await.unwrap();
+                assert_eq!(starts.recv().await, Some(0));
+                let closing = fixture.sessions.close_when_idle(std::future::pending());
+                tokio::pin!(closing);
+                assert!(futures_util::poll!(closing.as_mut()).is_pending());
+                tokio::select! {
+                    result = &mut closing => panic!("closed before accepted work settled: {result:?}"),
+                    snapshot = fixture.sessions.snapshot(SnapshotRequest::new(handle.workspace_id, Some(handle.session_id), 1, 1)) => { snapshot.unwrap(); }
+                }
+                release.add_permits(1);
+                tokio::select! {
+                    biased;
+                    call = starts.recv() => panic!("close admitted successor call {call:?}"),
+                    result = &mut closing => result.unwrap(),
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }).await.expect("close must drain accepted work without autonomous refill");
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_adopts_active_edits_for_interrupt_and_cleanup() {
+        struct ObservedRevision {
+            output: ForegroundOutput,
+            seen: Option<tokio::sync::oneshot::Sender<()>>,
+            fail_edit: bool,
+        }
+        impl Write for ObservedRevision {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let edited =
+                    serde_json::from_slice::<serde_json::Value>(bytes).is_ok_and(|record| {
+                        record["envelope"]["event"]["type"] == "goal_updated"
+                            && record["envelope"]["event"]["goal"]["revision"].as_u64() == Some(2)
+                    });
+                if edited && self.fail_edit {
+                    self.fail_edit = false;
+                    return Err(io::Error::other("injected edit-event output failure"));
+                }
+                let count = self.output.write(bytes)?;
+                if edited && let Some(seen) = self.seen.take() {
+                    let _ = seen.send(());
+                }
+                Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.output.flush()
+            }
+        }
+        for action in ["interrupt", "drop", "output"] {
+            let fixture = fixture(|| HangingProvider).await;
+            let mut opts = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            opts.session = Some(handle.session_id);
+            let mut events = fixture
+                .sessions
+                .subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id,
+                    after: handle.subscribe_after,
+                })
+                .unwrap();
+            let (seen, observed) = tokio::sync::oneshot::channel();
+            let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+            let mut writer = ObservedRevision {
+                output: ForegroundOutput::default(),
+                seen: Some(seen),
+                fail_edit: action == "output",
+            };
+            let mut stderr = Vec::new();
+            let mut foreground = Box::pin(run_goal(
+                &fixture.sessions,
+                opts,
+                goal_request(),
+                async {
+                    interrupted.await.unwrap();
+                },
+                &mut writer,
+                &mut stderr,
+            ));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop { tokio::select! {
+                    code = &mut foreground => panic!("returned before edit: {code}"),
+                    event = events.next() => if matches!(event.unwrap().unwrap().event, SessionEvent::RunStarted { .. }) { break; },
+                } }
+            }).await.unwrap();
+            let current = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap()
+                .goal
+                .unwrap();
+            let edited = goal_receipt(
+                send(
+                    &fixture.sessions,
+                    SessionCommand::SetGoal {
+                        session_id: handle.session_id,
+                        objective: "edited while adopted".into(),
+                        check: None,
+                        budget: Box::new(current.budget.clone()),
+                        expected: Some(goal_identity(&current)),
+                        replace: false,
+                    },
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap();
+            if action == "output" {
+                let code = tokio::time::timeout(Duration::from_secs(5), foreground)
+                    .await
+                    .unwrap();
+                assert_eq!(code, 4, "{}", String::from_utf8_lossy(&stderr));
+                let stopped = fixture
+                    .sessions
+                    .snapshot(SnapshotRequest::new(
+                        handle.workspace_id,
+                        Some(handle.session_id),
+                        1,
+                        1,
+                    ))
+                    .await
+                    .unwrap()
+                    .focused
+                    .unwrap()
+                    .goal
+                    .unwrap();
+                assert!(
+                    matches!(
+                        stopped.status,
+                        qq_protocol::GoalStatus::Paused {
+                            reason: qq_protocol::GoalPauseReason::User,
+                        }
+                    ),
+                    "edit-event output failure left adopted goal running: {stopped:?}; {}",
+                    String::from_utf8_lossy(&stderr)
+                );
+                assert!(stopped.pending_run_id.is_none());
+            } else {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::select! { result = observed => result.unwrap(),
+                    code = &mut foreground => panic!("returned while observing edit: {code}") }
+                })
+                .await
+                .unwrap();
+                if action == "drop" {
+                    drop(foreground);
+                } else {
+                    interrupt.send(()).unwrap();
+                    let code = tokio::time::timeout(Duration::from_secs(5), foreground)
+                        .await
+                        .unwrap();
+                    assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+                }
+            }
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let SessionEvent::GoalUpdated { goal } =
+                        events.next().await.unwrap().unwrap().event
+                        && goal.goal_id == edited.goal_id
+                        && goal.revision > edited.revision
+                        && matches!(
+                            goal.status,
+                            qq_protocol::GoalStatus::Paused {
+                                reason: qq_protocol::GoalPauseReason::User
+                            }
+                        )
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("edited adopted goal must be paused by its owner");
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct ForegroundOutput {
+        bytes: Arc<Mutex<Vec<u8>>>,
+        fail: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Write for ForegroundOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(io::Error::other("injected output failure"));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_held_family_drains_before_terminal_output() {
+        use futures_util::FutureExt;
+
+        for action in [
+            "interrupt",
+            "pause",
+            "cancel",
+            "clear",
+            "replace",
+            "output",
+            "abort",
+        ] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let (entered, entry) = tokio::sync::oneshot::channel();
+                let (release, released) = tokio::sync::oneshot::channel();
+                let (exited, exit) = tokio::sync::oneshot::channel();
+                let fixture = fixture_with_loader(Arc::new(ParentChildLoader {
+                    parent: Arc::new(SpawnsLoopingChildProvider::new()),
+                    child: Arc::new(HangingProvider),
+                    held_child: Some(Arc::new(HeldChildPreparation {
+                        entered: Mutex::new(Some(entered)),
+                        release: Mutex::new(Some(released)),
+                        exited: Mutex::new(Some(exited)),
+                    })),
+                })).await;
+                let mut opts = options(&fixture.workspace);
+                opts.approval = HeadlessApproval::Full;
+                let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+                    .await.unwrap();
+                opts.session = Some(handle.session_id);
+                let mut foreign_opts = opts.clone();
+                foreign_opts.session = None;
+                foreign_opts.model.model = Some("test/foreign".into());
+                let foreign = prepare_session(&fixture.sessions, &foreign_opts, SessionIntent::Prompt)
+                    .await.unwrap();
+                let receipt = send(&fixture.sessions, SessionCommand::SubmitPrompt {
+                    session_id: foreign.session_id,
+                    input: vec![InputPart::text("independent work")],
+                    limits: RunLimits::default(), correlation: Default::default(), output: None,
+                }).await.unwrap();
+                let CommandOutcome::PromptQueued { run_id: foreign_run, .. } = receipt.outcome else {
+                    panic!("foreign prompt")
+                };
+                let (interrupt, interrupted) = tokio::sync::oneshot::channel();
+                let output = ForegroundOutput::default();
+                let mut writer = output.clone();
+                let mut stderr = Vec::new();
+                let mut foreground = Box::pin(run_goal(
+                    &fixture.sessions, opts, goal_request(),
+                    async { interrupted.await.unwrap(); }, &mut writer, &mut stderr,
+                ));
+                let progress = tokio::select! {
+                    entry = entry => entry.unwrap(),
+                    code = &mut foreground => panic!("{action}: returned before child entry: {code}"),
+                };
+                let snapshot = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 16, 16,
+                )).await.unwrap();
+                let owner = snapshot.focused.unwrap();
+                let goal = owner.goal.unwrap();
+                let expected = goal_identity(&goal);
+                let root = owner.summary.active_run_id.expect("parent retains child ownership");
+                let pending = fixture.sessions.goal_pending_runs(handle.session_id, expected).await.unwrap();
+                assert_eq!(pending.len(), 2, "{action}: root and admitted sponsored child");
+                let child = *pending.iter().find(|id| **id != root).unwrap();
+                assert!(fixture.sessions.goal_owns_run(handle.session_id, expected, child).await.unwrap());
+                let mut events = fixture.sessions.subscribe(SubscribeRequest {
+                    workspace_id: handle.workspace_id, after: snapshot.cursor,
+                }).unwrap();
+
+                let early_code: Option<u8> = match action {
+                    "interrupt" | "clear" | "replace" => {
+                        interrupt.send(()).unwrap();
+                        None
+                    }
+                    "pause" => {
+                        send(&fixture.sessions, SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected, action: qq_protocol::GoalControl::Pause,
+                        }).await.unwrap();
+                        None
+                    }
+                    "cancel" => {
+                        request_cancel(&fixture.sessions, root).await.unwrap();
+                        None
+                    }
+                    "output" => {
+                        output.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+                        None
+                    }
+                    "abort" => None,
+                    _ => unreachable!(),
+                };
+                if action == "abort" || early_code.is_some() {
+                    drop(foreground);
+                } else {
+                    tokio::select! {
+                        () = progress.cancelled() => {},
+                        code = &mut foreground => panic!("{action}: returned while child preparation held: {code}"),
+                    }
+                    assert!(foreground.as_mut().now_or_never().is_none(),
+                        "{action}: foreground must remain pending after cancellation receipt");
+                    let stopped = fixture.sessions.snapshot(SnapshotRequest::new(
+                        handle.workspace_id, Some(handle.session_id), 1, 1,
+                    )).await.unwrap().focused.unwrap().goal.unwrap();
+                    if action != "cancel" {
+                        let error = fixture.sessions.command(CommandId::generate().unwrap(), SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected: goal_identity(&stopped),
+                            action: qq_protocol::GoalControl::Resume,
+                        }).await.unwrap_err();
+                        assert!(matches!(error, SessionRuntimeError::GoalCancellationPending));
+                    }
+                    assert_eq!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&stopped)).await.unwrap().len(), 2);
+                    if action == "clear" {
+                        send(&fixture.sessions, SessionCommand::GoalControl {
+                            session_id: handle.session_id, expected: goal_identity(&stopped),
+                            action: qq_protocol::GoalControl::Clear,
+                        }).await.unwrap();
+                    } else if action == "replace" {
+                        send(&fixture.sessions, SessionCommand::SetGoal {
+                            session_id: handle.session_id, objective: "replacement must survive".into(),
+                            check: Some(qq_protocol::GoalCheck {
+                                command: "printf checked".into(), timeout_ms: 1000,
+                            }),
+                            budget: Box::new(goal.budget.clone()), expected: Some(goal_identity(&stopped)), replace: true,
+                        }).await.unwrap();
+                    }
+                    assert!(foreground.as_mut().now_or_never().is_none());
+                    assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())
+                        .iter().any(|record| record["type"] == "goal"));
+                    release.send(()).unwrap();
+                    exit.await.unwrap();
+                    let code = foreground.await;
+                    let records = parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap());
+                    let finals: Vec<_> = records.iter().filter(|r| r["type"] == "goal").collect();
+                    if matches!(action, "clear" | "replace") {
+                        assert_eq!(code, 4);
+                        assert_eq!(finals.len(), 1, "{action}: {records:?}");
+                        assert_eq!(records.last().unwrap()["type"], "goal");
+                        assert_eq!(finals[0]["exit_code"], 4);
+                        assert_eq!(finals[0]["status"], "harness_failure");
+                        assert_eq!(finals[0]["goal"]["goal_id"], serde_json::to_value(expected.goal_id).unwrap());
+                        let errors = String::from_utf8_lossy(&stderr);
+                        assert!(errors.contains(if action == "clear" { "goal was not found" } else { "goal identity or revision conflicts with the current goal" })
+                            || errors.contains("goal changed while terminal work drained"), "{action}: {errors}");
+                    } else if action == "output" {
+                        assert_eq!(code, 4);
+                        assert!(finals.is_empty(), "broken stdout must not be retried");
+                    } else {
+                        assert_eq!(code, if action == "interrupt" { 130 } else { 6 });
+                        assert_eq!(finals.len(), 1, "{action}: {records:?}");
+                        assert_eq!(records.last().unwrap()["type"], "goal");
+                        assert_eq!(finals[0]["exit_code"], code);
+                        assert_eq!(finals[0]["status"], if action == "interrupt" { "interrupted" } else { "paused" });
+                        let direct: Vec<_> = records.iter().enumerate().filter(|(_, r)| r["type"] == "goal_run").collect();
+                        assert_eq!(direct.len(), 1, "descendants must not produce direct-run records");
+                        assert_eq!(direct[0].1["goal"], serde_json::to_value(expected).unwrap());
+                        assert_eq!(direct[0].1["run"]["id"], serde_json::to_value(root).unwrap());
+                        let finished = records.iter().position(|r| r["envelope"]["event"]["type"] == "run_finished"
+                            && r["envelope"]["run_id"] == serde_json::to_value(root).unwrap()).unwrap();
+                        assert!(finished < direct[0].0 && direct[0].0 < records.len() - 1);
+                        let sequences: Vec<_> = records.iter().filter(|r| r["type"] == "event")
+                            .map(|r| r["envelope"]["cursor"]["sequence"].as_u64().expect("event sequence")).collect();
+                        assert!(sequences.len() >= 2);
+                        assert!(sequences.windows(2).all(|w| w[0] < w[1]));
+                    }
+                    // Check current identity separately from the old family's finish stream.
+                    let durable = fixture.sessions.snapshot(SnapshotRequest::new(
+                        handle.workspace_id, Some(handle.session_id), 1, 16,
+                    )).await.unwrap().focused.unwrap();
+                    assert_eq!(durable.summary.active_run_id, None);
+                    if action == "clear" {
+                        assert!(durable.goal.is_none());
+                    } else {
+                        let final_goal = durable.goal.unwrap();
+                        if action == "replace" {
+                            assert_ne!(final_goal.goal_id, expected.goal_id);
+                            assert_eq!(final_goal.objective, "replacement must survive");
+                        }
+                        assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
+                    }
+                    let mut finished = Vec::new();
+                    while finished.len() < 2 {
+                        let event = events.next().await.unwrap().unwrap();
+                        if let SessionEvent::RunFinished { run_id, .. } = event.event
+                            && [root, child].contains(&run_id) {
+                            finished.push(run_id);
+                        }
+                    }
+                    assert_eq!(finished, vec![child, root], "child settles before parent publication");
+                    assert_eq!(fixture.sessions.run_snapshot(handle.workspace_id, foreign.session_id, foreign_run).await.unwrap().status, RunStatus::Running);
+                    fixture.sessions.close().await.unwrap();
+                    return;
+                }
+                // Failure/owner-drop may return early, but core must retain cleanup ownership.
+                progress.cancelled().await;
+                assert_eq!(early_code, (action == "output").then_some(4));
+                let stopped = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 1, 1,
+                )).await.unwrap().focused.unwrap().goal.unwrap();
+                assert_eq!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&stopped)).await.unwrap().len(), 2);
+                assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())
+                    .iter().any(|record| record["type"] == "goal"));
+                release.send(()).unwrap();
+                exit.await.unwrap();
+                let mut finished = Vec::new();
+                while finished.len() < 2 {
+                    let event = events.next().await.unwrap().unwrap();
+                    if let SessionEvent::RunFinished { run_id, .. } = event.event
+                        && [root, child].contains(&run_id) { finished.push(run_id); }
+                }
+                assert_eq!(finished, vec![child, root]);
+                let durable = fixture.sessions.snapshot(SnapshotRequest::new(
+                    handle.workspace_id, Some(handle.session_id), 1, 16,
+                )).await.unwrap().focused.unwrap();
+                let durable_goal = durable.goal.unwrap();
+                assert_eq!(durable_goal.status, qq_protocol::GoalStatus::Paused { reason: qq_protocol::GoalPauseReason::User });
+                assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&durable_goal)).await.unwrap().is_empty());
+                assert_eq!(fixture.sessions.run_snapshot(handle.workspace_id, foreign.session_id, foreign_run).await.unwrap().status, RunStatus::Running);
+                fixture.sessions.close().await.unwrap();
+            }).await.unwrap_or_else(|_| panic!("{action}: held-family acceptance hung"));
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_harness_failure_still_emits_final_record() {
+        let fixture = fixture(|| HangingProvider).await;
+        let opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        let stop = async {
+            loop {
+                if matches!(
+                    events.next().await.unwrap().unwrap().event,
+                    SessionEvent::RunStarted { .. }
+                ) {
+                    break;
+                }
+            }
+            fixture.sessions.close().await.unwrap();
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut opts = opts;
+        opts.session = Some(handle.session_id);
+        assert_eq!(
+            run_goal(
+                &fixture.sessions,
+                opts,
+                goal_request(),
+                stop,
+                &mut stdout,
+                &mut stderr
+            )
+            .await,
+            4
+        );
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(records.last().unwrap()["status"], "harness_failure");
+        assert_eq!(records.last().unwrap()["exit_code"], 4);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_goal_early_trace_failure_keeps_final_stdout_usable() {
+        struct LargeText;
+        impl Provider for LargeText {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(
+                    stream::iter([Ok(ProviderEvent::OutputTextDelta {
+                        text: "x".repeat(16384),
+                    })])
+                    .chain(stream::pending()),
+                )
+            }
+        }
+        let fixture = fixture(|| LargeText).await;
+        let mut opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        let mut request = goal_request();
+        request.objective = Some("x".repeat(2048));
+        let command = prepare_goal_request(&request, &opts, handle.session_id, None)
+            .unwrap()
+            .unwrap();
+        send(&fixture.sessions, command).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    events.next().await.unwrap().unwrap().event,
+                    SessionEvent::RunStarted { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        opts.session = Some(handle.session_id);
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        request.objective = None;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_goal(
+                &fixture.sessions,
+                opts,
+                request,
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .expect("trace failure cleanup must finish");
+        assert_eq!(code, 4);
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let finals: Vec<_> = records
+            .iter()
+            .filter(|record| record["type"] == "goal")
+            .collect();
+        assert_eq!(
+            finals.len(),
+            1,
+            "usable stdout needs a final harness result"
+        );
+        assert_eq!(records.last().unwrap()["type"], "goal");
+        assert_eq!(finals[0]["status"], "harness_failure");
+        assert_eq!(finals[0]["exit_code"], 4);
+        assert!(!stderr.is_empty());
+        let runs: Vec<_> = records
+            .iter()
+            .filter(|record| record["type"] == "goal_run")
+            .collect();
+        assert_eq!(
+            runs.len(),
+            1,
+            "error cleanup must emit the settled direct run"
+        );
+        assert!(runs[0]["run"]["outcome"].is_object());
+        assert!(finals[0]["goal"]["pending_run_id"].is_null());
+        let durable = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(
+                handle.workspace_id,
+                Some(handle.session_id),
+                1,
+                1,
+            ))
+            .await
+            .unwrap()
+            .focused
+            .unwrap()
+            .goal
+            .unwrap();
+        assert_eq!(
+            finals[0]["goal"]["counters"],
+            serde_json::to_value(durable.counters).unwrap()
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn foreground_goal_trace_flush_does_not_duplicate_the_final_record() {
+        let fixture = fixture(|| HangingProvider).await;
+        let mut opts = options(&fixture.workspace);
+        opts.trace = Some(PathBuf::from("/dev/full"));
+        let mut request = goal_request();
+        request.check = Some("printf checked".into());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            request,
+            std::future::pending(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let finals: Vec<_> = records
+            .iter()
+            .filter(|record| record["type"] == "goal")
+            .collect();
+        assert_eq!(
+            finals.len(),
+            1,
+            "a flushed final record must never be retried"
+        );
+        assert_eq!(finals[0]["exit_code"], code);
+        assert_eq!(code, 6);
+        assert!(
+            !stderr.is_empty(),
+            "the trace failure must still be reported"
+        );
+        let goal: Box<qq_protocol::GoalSnapshot> =
+            serde_json::from_value(finals[0]["goal"].clone()).unwrap();
+        let workspace = serde_json::from_value(finals[0]["workspace_id"].clone()).unwrap();
+        let mut trace = BufWriter::with_capacity(8192, std::fs::File::create("/dev/full").unwrap());
+        trace.write_all(&vec![b' '; 8191]).unwrap();
+        let mut sink = RecordSink {
+            goal_record: GoalRecordState::Pending,
+            stdout_failed: false,
+            trace: Some(trace),
+            to_stdout: true,
+        };
+        let mut final_stdout = Vec::new();
+        assert!(
+            finish_goal(
+                &mut sink,
+                &mut final_stdout,
+                &options(&fixture.workspace),
+                workspace,
+                goal,
+                None
+            )
+            .is_err()
+        );
+        let records = parse_records(&String::from_utf8(final_stdout).unwrap());
+        assert_eq!(
+            records.len(),
+            1,
+            "final stdout must survive an implicit trace-buffer flush failure"
+        );
+        assert_eq!(records[0]["exit_code"], 6);
+        assert!(matches!(sink.goal_record, GoalRecordState::Emitted(6)));
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_output_failure_pauses_active_work_and_preserves_stopped_reason() {
+        for needs_consent in [false, true] {
+            let fixture = fixture(|| HangingProvider).await;
+            let mut options = options(&fixture.workspace);
+            let handle = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+                .await
+                .unwrap();
+            options.session = Some(handle.session_id);
+            let mut request = goal_request();
+            if needs_consent {
+                request.check = Some("printf checked".into());
+            }
+            let mut stderr = Vec::new();
+            assert_eq!(
+                run_goal(
+                    &fixture.sessions,
+                    options,
+                    request,
+                    std::future::pending(),
+                    &mut BrokenWriter,
+                    &mut stderr
+                )
+                .await,
+                4
+            );
+            assert!(String::from_utf8_lossy(&stderr).contains("injected output failure"));
+            let snapshot = fixture
+                .sessions
+                .snapshot(SnapshotRequest::new(
+                    handle.workspace_id,
+                    Some(handle.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap();
+            let goal = snapshot.focused.unwrap().goal.unwrap();
+            assert_eq!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: if needs_consent {
+                        qq_protocol::GoalPauseReason::NeedsUser {
+                            cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                        }
+                    } else {
+                        qq_protocol::GoalPauseReason::User
+                    }
+                }
+            );
+            assert_eq!(goal.revision, if needs_consent { 1 } else { 2 });
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_owner_abort_durably_pauses_accepted_goal() {
+        struct AcceptanceSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Write for AcceptanceSignal {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if let Some(entered) = self.0.take() {
+                    entered.send(()).unwrap();
+                }
+                Ok(())
+            }
+        }
+        let fixture = fixture(|| HangingProvider).await;
+        let mut options = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &options, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        options.session = Some(handle.session_id);
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        let (entered, accepted) = tokio::sync::oneshot::channel();
+        let sessions = fixture.sessions.clone();
+        let owner = tokio::spawn(async move {
+            run_goal(
+                &sessions,
+                options,
+                goal_request(),
+                std::future::pending(),
+                &mut AcceptanceSignal(Some(entered)),
+                &mut Vec::new(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .unwrap()
+            .unwrap();
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::GoalUpdated { goal } = event.event
+                    && goal.session_id == handle.session_id
+                    && goal.status
+                        == (qq_protocol::GoalStatus::Paused {
+                            reason: qq_protocol::GoalPauseReason::User,
+                        })
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        fixture.sessions.close().await.unwrap();
     }
 
     async fn run_to_end(
@@ -4111,7 +7278,12 @@ mod tests {
     async fn hard_cost_budget_cancels_an_unmetered_looping_child() {
         let parent: Arc<dyn Provider> = Arc::new(SpawnsLoopingChildProvider::new());
         let child: Arc<dyn Provider> = Arc::new(ReadLoopProvider::unmetered());
-        let fixture = fixture_with_loader(Arc::new(ParentChildLoader { parent, child })).await;
+        let fixture = fixture_with_loader(Arc::new(ParentChildLoader {
+            parent,
+            child,
+            held_child: None,
+        }))
+        .await;
         std::fs::write(fixture.workspace.join("note.txt"), "content\n").unwrap();
         let mut options = options(&fixture.workspace);
         options.max_cost_usd_nanos = Some(4_000);

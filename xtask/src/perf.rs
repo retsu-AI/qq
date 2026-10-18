@@ -44,6 +44,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use thiserror::Error;
+mod credentials;
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
     process::Command as TokioCommand,
@@ -52,7 +54,7 @@ use tokio::{
 };
 
 const REPORT_SCHEMA_VERSION: u16 = 1;
-const FIXTURE_VERSION: u16 = 5;
+const FIXTURE_VERSION: u16 = 6;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(45);
 const METADATA_PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
@@ -2552,6 +2554,16 @@ async fn run_workloads(
     let (http_metrics, http_checks) = http_pipeline_workloads(samples, warmups).await?;
     metrics.extend(http_metrics);
     checks.extend(http_checks);
+
+    eprintln!("[perf +{:?}] request credentials", started.elapsed());
+    let (credential_metrics, credential_checks) =
+        credentials::credential_resolution_workloads(samples, warmups).await?;
+    metrics.extend(credential_metrics);
+    checks.extend(credential_checks);
+    let (authorization_metrics, authorization_checks) =
+        credentials::request_time_authorization_workloads(samples, warmups).await?;
+    metrics.extend(authorization_metrics);
+    checks.extend(authorization_checks);
 
     eprintln!("[perf +{:?}] file and shell tools", started.elapsed());
     let (tool_metrics, tool_checks) = tool_workloads(samples, warmups).await?;
@@ -6069,5 +6081,29 @@ mod tests {
             checks: Vec::new(),
             unsupported: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn credential_fixtures_resolve_the_stored_bearer_without_refresh() {
+        let (metrics, checks) = credentials::credential_resolution_workloads(5, 1)
+            .await
+            .unwrap();
+        let names: Vec<_> = metrics.iter().map(|metric| metric.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "xai_request_credential_resolution_ns",
+                "xai_request_credential_concurrent_resolution_ns"
+            ]
+        );
+        assert!(metrics.iter().all(|metric| metric.samples.len() == 5));
+        assert!(checks[0].passed, "{}", checks[0].detail);
+
+        let (metrics, checks) = credentials::request_time_authorization_workloads(5, 1)
+            .await
+            .unwrap();
+        assert_eq!(metrics[0].name, "request_time_authorized_stream_ns");
+        assert_eq!(metrics[0].samples.len(), 5);
+        assert!(checks[0].passed, "{}", checks[0].detail);
     }
 }

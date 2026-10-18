@@ -777,3 +777,234 @@ pub(super) fn history_picker(app: &App, width: usize, height: usize) -> Vec<Line
         },
     )
 }
+
+pub(super) fn goal_check_picker(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::GoalCheck {
+        target,
+        picker,
+        detail_row,
+    }) = &app.overlay
+    else {
+        return fit_height(Vec::new(), height);
+    };
+    let width = width.max(1);
+    let mut details = Vec::new();
+    for text in format!(
+        "Workspace: {}\nCommand:\n{}",
+        target.workspace_path, target.command
+    )
+    .lines()
+    {
+        let safe: String = text.chars().filter_map(terminal_safe_character).collect();
+        details.extend(wrap_line(Line::styled(safe, normal()), width));
+    }
+    let mut choices = Vec::new();
+    let mut selected_row = 0;
+    for (index, (_, row)) in picker.filtered().enumerate() {
+        let selected = index == picker.cursor();
+        if selected {
+            selected_row = choices.len();
+        }
+        let style = if selected {
+            selection(normal().bold())
+        } else {
+            normal()
+        };
+        choices.extend(wrap_line(
+            Line::styled(
+                format!("{}{}", if selected { "> " } else { "  " }, row.label),
+                style,
+            ),
+            width,
+        ));
+        choices.extend(wrap_line(Line::styled(row.description, muted()), width));
+    }
+    if choices.is_empty() {
+        choices.push(Line::styled("No matching choice. Esc cancels.", muted()));
+    }
+    let body_height = height.saturating_sub(3);
+    let choice_height = choices.len().min(body_height / 2);
+    let detail_height = body_height.saturating_sub(choice_height);
+    let mut rows = vec![
+        truncate_line(section("GOAL CHECK", "explicit consent"), width),
+        truncate_line(
+            Line::styled(
+                "PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels",
+                muted(),
+            ),
+            width,
+        ),
+        truncate_line(search_line(&picker.query, "deny, once, repeated"), width),
+    ];
+    let detail_row = (*detail_row).min(details.len().saturating_sub(1));
+    rows.extend(fit_height(
+        selection_viewport(details, detail_height, detail_row),
+        detail_height,
+    ));
+    rows.extend(selection_viewport(choices, choice_height, selected_row));
+    fit_height(rows, height)
+}
+
+pub(super) fn goal_form(app: &App, width: usize, height: usize) -> Vec<Line> {
+    let Some(Overlay::GoalForm(form)) = &app.overlay else {
+        return fit_height(Vec::new(), height);
+    };
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    if let Some(previous) = &form.previous_objective {
+        let safe: String = previous
+            .chars()
+            .filter_map(terminal_safe_character)
+            .collect();
+        rows.extend(wrap_line(
+            Line::styled(format!("Replaces: {safe}"), warning()),
+            width,
+        ));
+        rows.push(Line::default());
+    }
+    let mut selected = 0;
+    for (index, label) in ["Objective", "Check command (optional; consent is separate)"]
+        .into_iter()
+        .enumerate()
+    {
+        if form.field == index {
+            selected = rows.len();
+        }
+        rows.push(truncate_line(
+            Line::styled(
+                format!("{} {label}", if form.field == index { ">" } else { " " }),
+                accent(),
+            ),
+            width,
+        ));
+        let editor = &form.fields[index];
+        let text = &editor.text;
+        let cursor = editor.cursor();
+        let editing = form.field == index && !form.confirm && form.sending.is_none();
+        let decorated;
+        let display = if editing {
+            decorated = format!("{}▏{}", &text[..cursor], &text[cursor..]);
+            decorated.as_str()
+        } else {
+            text.as_str()
+        };
+        let safe: String = display
+            .chars()
+            .filter_map(terminal_safe_character)
+            .collect();
+        if editing {
+            let prefix: String = text[..cursor]
+                .chars()
+                .filter_map(terminal_safe_character)
+                .collect();
+            let wrapped = prefix
+                .lines()
+                .map(|line| {
+                    wrap_line(Line::styled(line.to_owned(), normal()), width)
+                        .len()
+                        .max(1)
+                })
+                .sum::<usize>();
+            selected = selected.saturating_add(wrapped);
+        }
+        if safe.is_empty() {
+            rows.push(Line::styled("(empty)", muted()));
+        } else {
+            for line in safe.lines() {
+                rows.extend(wrap_line(Line::styled(line.to_owned(), normal()), width));
+            }
+        }
+        rows.push(Line::default());
+    }
+    if form.field == 2 {
+        selected = rows.len();
+    }
+    rows.extend(wrap_line(
+        Line::styled(
+            format!(
+                "{} Budget: {}",
+                if form.field == 2 { ">" } else { " " },
+                form.preset_label()
+            ),
+            accent(),
+        ),
+        width,
+    ));
+    let budget = form.budget(0);
+    let window = if form.preset == 0 {
+        format!(
+            "deadline {} (unchanged)",
+            goal_timestamp(budget.deadline_ms)
+        )
+    } else {
+        format!("{} from submission", goal_duration(budget.deadline_ms))
+    };
+    rows.extend(wrap_line(
+        Line::styled(
+            format!(
+                "{} runs; {window}; per-run model turns: {}",
+                budget.max_goal_runs,
+                budget
+                    .per_run
+                    .max_model_turns
+                    .map_or_else(|| "unbounded".to_owned(), |value| value.to_string())
+            ),
+            normal(),
+        ),
+        width,
+    ));
+    if let Some(tokens) = budget.max_total_tokens {
+        rows.extend(wrap_line(
+            Line::styled(format!("Total token limit: {tokens}"), normal()),
+            width,
+        ));
+    }
+    if let Some(cost) = budget.max_cost_usd_nanos {
+        rows.extend(wrap_line(
+            Line::styled(
+                format!(
+                    "Total cost limit: ${}.{:09}",
+                    cost / 1_000_000_000,
+                    cost % 1_000_000_000
+                ),
+                normal(),
+            ),
+            width,
+        ));
+    }
+    rows.extend(wrap_line(Line::styled("Check commands require separate /goal check consent. Editing a stopped goal does not resume it.", muted()), width));
+    let title = if form.replace {
+        "REPLACE GOAL"
+    } else if form.expected.is_some() {
+        "EDIT GOAL"
+    } else {
+        "CREATE GOAL"
+    };
+    let mut out = vec![truncate_line(section(title, "review specification"), width)];
+    let hint = if form.sending.is_some() {
+        "Submitting · Esc closes the form"
+    } else if form.refresh == crate::input::GoalFormRefresh::Pending {
+        "Refreshing current goal · draft retained · Esc closes"
+    } else if form.refresh == crate::input::GoalFormRefresh::Failed {
+        "Refresh failed · Enter retries refresh · Esc closes"
+    } else if form.confirm {
+        "Replace this goal? y confirms · n edits · PgUp/PgDn review · Esc cancels"
+    } else {
+        "Tab / ↑↓ fields · ←→ budget preset · Enter submits · Esc cancels"
+    };
+    out.extend(wrap_line(
+        Line::styled(hint, if form.confirm { warning() } else { muted() }),
+        width,
+    ));
+    if let Some(error) = &form.error {
+        out.extend(wrap_line(Line::styled(error.clone(), failure()), width));
+    }
+    let remaining = height.saturating_sub(out.len());
+    let anchor = if form.confirm { 0 } else { selected };
+    out.extend(selection_viewport(
+        rows,
+        remaining,
+        anchor.saturating_add_signed(form.scroll),
+    ));
+    fit_height(out, height)
+}

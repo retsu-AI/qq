@@ -3,52 +3,60 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     env,
     ffi::OsString,
-    fmt,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
+    fmt, io,
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-#[cfg(windows)]
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
 
+mod backend;
 mod codex;
+mod oauth;
+mod state;
 mod xai;
+
+pub(crate) use backend::WindowsProtectedBackend;
+pub use backend::{KeyringBackend, KeyringError};
+use backend::{
+    SystemKeyring, SystemWindowsProtected, WindowsProtectedError, windows_protected_auth_error,
+};
+use state::{
+    CredentialRecord, FallbackState, INDEX_STATE_VERSION, IndexState, LockMode, OAuthOperationLock,
+    StateLock, atomic_write, ensure_atomic_replacement_supported, ensure_data_directory,
+    open_lock_file, read_state_file, serialize_state, validate_existing_state_file,
+    verify_open_regular_file,
+};
+
+use oauth::OAuthProvider;
 
 pub use codex::{CodexDeviceLogin, CodexLogin};
 pub use xai::XaiLogin;
+
+/// Credential audience (endpoint binding) of stored OpenAI Codex credentials.
+pub const OPENAI_CODEX_CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
+/// Credential audience of the built-in xAI deployment, for API keys and OAuth.
+pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
 
 pub const KEYRING_SERVICE: &str = "dev.qq";
 pub const MAX_CREDENTIAL_NAME_LEN: usize = 128;
 pub const MAX_STATE_BYTES: usize = 1024 * 1024;
 
-const INDEX_STATE_VERSION: u32 = 2;
-const LEGACY_INDEX_STATE_VERSION: u32 = 1;
-const FALLBACK_STATE_VERSION: u32 = 1;
 const MAX_KIND_LEN: usize = 128;
 const MAX_ENDPOINT_LEN: usize = 4096;
 const INDEX_FILE_NAME: &str = "credentials.ron";
 const FALLBACK_FILE_NAME: &str = "auth.ron";
 const LOCK_FILE_NAME: &str = "auth.lock";
-const CODEX_LOCK_FILE_NAME: &str = "openai-codex.lock";
-const XAI_LOCK_FILE_NAME: &str = "xai.lock";
 const WINDOWS_CREDENTIAL_DIRECTORY_NAME: &str = "windows-credentials";
-#[cfg(windows)]
-const WINDOWS_PROTECTED_MAGIC: &[u8] = b"QQDPAPI\x01";
 const REQUEST_CREDENTIAL_CONCURRENCY: usize = 4;
 const REQUEST_CREDENTIAL_CAPACITY_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_CREDENTIAL_LOAD_TIMEOUT: Duration = Duration::from_secs(65);
@@ -67,8 +75,6 @@ fn is_resolution_capacity_wait(error: &AuthError) -> bool {
         }
     )
 }
-
-static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Secret bytes whose formatted representations never reveal their contents.
 #[derive(Clone, PartialEq, Eq)]
@@ -135,8 +141,7 @@ pub struct CredentialPaths {
     index_file: PathBuf,
     fallback_file: PathBuf,
     lock_file: PathBuf,
-    codex_lock_file: PathBuf,
-    xai_lock_file: PathBuf,
+    oauth_lock_files: [PathBuf; OAuthProvider::ALL.len()],
     windows_credential_dir: PathBuf,
 }
 
@@ -148,8 +153,8 @@ impl CredentialPaths {
             index_file: data_dir.join(INDEX_FILE_NAME),
             fallback_file: data_dir.join(FALLBACK_FILE_NAME),
             lock_file: data_dir.join(LOCK_FILE_NAME),
-            codex_lock_file: data_dir.join(CODEX_LOCK_FILE_NAME),
-            xai_lock_file: data_dir.join(XAI_LOCK_FILE_NAME),
+            oauth_lock_files: OAuthProvider::ALL
+                .map(|provider| data_dir.join(provider.lock_file_name())),
             windows_credential_dir: data_dir.join(WINDOWS_CREDENTIAL_DIRECTORY_NAME),
             data_dir,
         }
@@ -175,14 +180,8 @@ impl CredentialPaths {
         &self.lock_file
     }
 
-    #[must_use]
-    pub fn codex_lock_file(&self) -> &Path {
-        &self.codex_lock_file
-    }
-
-    #[must_use]
-    pub fn xai_lock_file(&self) -> &Path {
-        &self.xai_lock_file
+    pub(crate) fn oauth_lock_file(&self, provider: OAuthProvider) -> &Path {
+        &self.oauth_lock_files[provider.index()]
     }
 
     #[must_use]
@@ -338,9 +337,8 @@ pub struct CredentialStore {
     windows_protected: Arc<dyn WindowsProtectedBackend>,
     codex_device_client: Arc<dyn codex::CodexDeviceClient>,
     codex_client: Arc<dyn codex::CodexTokenClient>,
-    codex_refresh: Arc<Mutex<()>>,
     xai_client: Arc<dyn xai::XaiTokenClient>,
-    xai_refresh: Arc<Mutex<()>>,
+    oauth_operations: Arc<[Mutex<()>; OAuthProvider::ALL.len()]>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
     stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
 
@@ -630,8 +628,7 @@ impl CredentialStore {
         let kind = normalize_kind(kind)?;
         let endpoint = endpoint.map(normalize_endpoint).transpose()?;
         let secret = secret.as_ref();
-        let _codex_lock = self.lock_codex_operation(name)?;
-        let _xai_lock = self.lock_xai_operation(name)?;
+        let _oauth_lock = self.lock_oauth_operation_for(name)?;
         self.set_with_metadata_normalized(name, secret, allow_file_fallback, kind, endpoint)
     }
 
@@ -823,8 +820,7 @@ impl CredentialStore {
     /// Removes a registered credential. Returns `false` when no index record existed.
     pub fn remove(&self, name: &str) -> Result<bool, AuthError> {
         validate_credential_name(name)?;
-        let _codex_lock = self.lock_codex_operation(name)?;
-        let _xai_lock = self.lock_xai_operation(name)?;
+        let _oauth_lock = self.lock_oauth_operation_for(name)?;
         let _lock = self.lock_state()?;
         let mut index = self.load_index()?;
         let Some(record) = index.find(name).cloned() else {
@@ -878,6 +874,19 @@ impl CredentialStore {
         Self::with_backends(paths, keyring, windows_protected)
     }
 
+    /// Replaces every OAuth token client with one that fails before any
+    /// network I/O and counts the attempt, for benchmarks and tests that
+    /// must never reach a real authorization server.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn offline(mut self) -> (Self, OfflineTokenCalls) {
+        let calls = OfflineTokenCalls::default();
+        self.codex_device_client = Arc::new(calls.clone());
+        self.codex_client = Arc::new(calls.clone());
+        self.xai_client = Arc::new(calls.clone());
+        (self, calls)
+    }
+
     pub(crate) fn with_backends(
         paths: CredentialPaths,
         keyring: Arc<dyn KeyringBackend>,
@@ -889,9 +898,8 @@ impl CredentialStore {
             windows_protected,
             codex_device_client: Arc::new(codex::SystemCodexDeviceClient),
             codex_client: Arc::new(codex::SystemCodexTokenClient),
-            codex_refresh: Arc::new(Mutex::new(())),
             xai_client: Arc::new(xai::SystemXaiTokenClient),
-            xai_refresh: Arc::new(Mutex::new(())),
+            oauth_operations: Arc::new(OAuthProvider::ALL.map(|_| Mutex::new(()))),
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
@@ -1469,48 +1477,38 @@ impl CredentialStore {
         Ok(StateLock { _file: file })
     }
 
-    fn lock_codex_operation(&self, name: &str) -> Result<Option<CodexStateLock<'_>>, AuthError> {
-        if !name.starts_with("openai-codex/") {
-            return Ok(None);
-        }
-        let process = self
-            .codex_refresh
-            .lock()
-            .map_err(|_| codex::CodexAuthError::RefreshLockUnavailable)?;
-        ensure_data_directory(self.paths.data_dir())?;
-        let file = open_lock_file(self.paths.codex_lock_file())?;
-        file.lock().map_err(|source| AuthError::Io {
-            operation: "lock",
-            path: self.paths.codex_lock_file().to_owned(),
-            source,
-        })?;
-        verify_open_regular_file(self.paths.codex_lock_file(), &file, true)?;
-        Ok(Some(CodexStateLock {
-            _process: process,
-            _file: file,
-        }))
+    /// Serialises logins, refreshes, rotations and removals of the OAuth
+    /// credential `name`, across threads and processes. `None` when `name`
+    /// is not stored under a built-in OAuth provider.
+    fn lock_oauth_operation_for(
+        &self,
+        name: &str,
+    ) -> Result<Option<OAuthOperationLock<'_>>, AuthError> {
+        OAuthProvider::for_credential(name)
+            .map(|provider| self.lock_oauth_operation(provider))
+            .transpose()
     }
 
-    fn lock_xai_operation(&self, name: &str) -> Result<Option<CodexStateLock<'_>>, AuthError> {
-        if !name.starts_with("xai/") {
-            return Ok(None);
-        }
-        let process = self
-            .xai_refresh
+    fn lock_oauth_operation(
+        &self,
+        provider: OAuthProvider,
+    ) -> Result<OAuthOperationLock<'_>, AuthError> {
+        let process = self.oauth_operations[provider.index()]
             .lock()
-            .map_err(|_| xai::XaiAuthError::RefreshLockUnavailable)?;
+            .map_err(|_| provider.lock_unavailable())?;
+        let path = self.paths.oauth_lock_file(provider);
         ensure_data_directory(self.paths.data_dir())?;
-        let file = open_lock_file(self.paths.xai_lock_file())?;
+        let file = open_lock_file(path)?;
         file.lock().map_err(|source| AuthError::Io {
             operation: "lock",
-            path: self.paths.xai_lock_file().to_owned(),
+            path: path.to_owned(),
             source,
         })?;
-        verify_open_regular_file(self.paths.xai_lock_file(), &file, true)?;
-        Ok(Some(CodexStateLock {
+        verify_open_regular_file(path, &file, true)?;
+        Ok(OAuthOperationLock {
             _process: process,
             _file: file,
-        }))
+        })
     }
 
     fn load_index(&self) -> Result<IndexState, AuthError> {
@@ -1915,873 +1913,78 @@ fn enforce_endpoint_binding(
     Ok(())
 }
 
-impl From<CredentialRecord> for CredentialMetadata {
-    fn from(record: CredentialRecord) -> Self {
-        Self {
-            name: record.name,
-            backend: record.backend,
-            kind: record.kind,
-            endpoint: record.endpoint,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CredentialRecord {
-    name: String,
-    backend: CredentialBackend,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    endpoint: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IndexState {
-    version: u32,
-    /// Advanced by every durable index write. Indexes written before the
-    /// field existed load as revision zero, so the first mutation after an
-    /// upgrade still produces a strictly newer epoch.
-    #[serde(default)]
-    revision: u64,
-    records: Vec<CredentialRecord>,
-}
-
-impl Default for IndexState {
-    fn default() -> Self {
-        Self {
-            version: INDEX_STATE_VERSION,
-            revision: 0,
-            records: Vec::new(),
-        }
-    }
-}
-
-impl IndexState {
-    fn validate(&self, path: &Path) -> Result<(), AuthError> {
-        if !matches!(
-            self.version,
-            LEGACY_INDEX_STATE_VERSION | INDEX_STATE_VERSION
-        ) {
-            return Err(AuthError::UnsupportedStateVersion {
-                path: path.to_owned(),
-                version: self.version,
-            });
-        }
-        let mut names = BTreeSet::new();
-        for record in &self.records {
-            if !names.insert(record.name.clone()) {
-                return Err(AuthError::DuplicateCredentialName {
-                    path: path.to_owned(),
-                    name: record.name.clone(),
-                });
-            }
-            let endpoint_is_invalid = record.endpoint.as_deref().is_some_and(|endpoint| {
-                !matches!(normalize_endpoint(endpoint), Ok(normalized) if normalized == endpoint)
-            });
-            if validate_credential_name(&record.name).is_err()
-                || normalize_kind(record.kind.as_deref()).is_err()
-                || endpoint_is_invalid
-            {
-                return Err(AuthError::CorruptState {
-                    path: path.to_owned(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn find(&self, name: &str) -> Option<&CredentialRecord> {
-        self.records.iter().find(|record| record.name == name)
-    }
-
-    fn upsert(&mut self, record: CredentialRecord) {
-        self.remove(&record.name);
-        self.records.push(record);
-        self.sort();
-    }
-
-    fn remove(&mut self, name: &str) -> bool {
-        let original_len = self.records.len();
-        self.records.retain(|record| record.name != name);
-        original_len != self.records.len()
-    }
-
-    fn sort(&mut self) {
-        self.records
-            .sort_by(|left, right| left.name.cmp(&right.name));
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FallbackRecord {
-    name: String,
-    secret: Vec<u8>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct FallbackState {
-    version: u32,
-    records: Vec<FallbackRecord>,
-}
-
-impl Default for FallbackState {
-    fn default() -> Self {
-        Self {
-            version: FALLBACK_STATE_VERSION,
-            records: Vec::new(),
-        }
-    }
-}
-
-impl FallbackState {
-    fn validate(&self, path: &Path) -> Result<(), AuthError> {
-        if self.version != FALLBACK_STATE_VERSION {
-            return Err(AuthError::UnsupportedStateVersion {
-                path: path.to_owned(),
-                version: self.version,
-            });
-        }
-        let mut names = BTreeSet::new();
-        for record in &self.records {
-            if !names.insert(record.name.clone()) {
-                return Err(AuthError::DuplicateCredentialName {
-                    path: path.to_owned(),
-                    name: record.name.clone(),
-                });
-            }
-            if validate_credential_name(&record.name).is_err() {
-                return Err(AuthError::CorruptState {
-                    path: path.to_owned(),
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn contains(&self, name: &str) -> bool {
-        self.records.iter().any(|record| record.name == name)
-    }
-
-    fn get(&self, name: &str) -> Option<Vec<u8>> {
-        self.records
-            .iter()
-            .find(|record| record.name == name)
-            .map(|record| record.secret.clone())
-    }
-
-    fn upsert(&mut self, name: &str, secret: &[u8]) {
-        self.remove(name);
-        self.records.push(FallbackRecord {
-            name: name.to_owned(),
-            secret: secret.to_vec(),
-        });
-        self.sort();
-    }
-
-    fn remove(&mut self, name: &str) -> bool {
-        let original_len = self.records.len();
-        self.records.retain(|record| record.name != name);
-        original_len != self.records.len()
-    }
-
-    fn sort(&mut self) {
-        self.records
-            .sort_by(|left, right| left.name.cmp(&right.name));
-    }
-}
-
-fn serialize_state<T: Serialize>(state: &T, path: &Path) -> Result<Vec<u8>, AuthError> {
-    let content =
-        ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).map_err(|_| {
-            AuthError::CorruptState {
-                path: path.to_owned(),
-            }
-        })?;
-    if content.len() > MAX_STATE_BYTES {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-    Ok(content.into_bytes())
-}
-
-fn ensure_data_directory(path: &Path) -> Result<(), AuthError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => validate_directory_metadata(path, &metadata)?,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
-            builder.create(path).map_err(|source| AuthError::Io {
-                operation: "create",
-                path: path.to_owned(),
-                source,
-            })?;
-            let metadata = fs::symlink_metadata(path).map_err(|source| AuthError::Io {
-                operation: "inspect",
-                path: path.to_owned(),
-                source,
-            })?;
-            validate_directory_metadata(path, &metadata)?;
-        }
-        Err(source) => {
-            return Err(AuthError::Io {
-                operation: "inspect",
-                path: path.to_owned(),
-                source,
-            });
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = File::open(path).map_err(|source| AuthError::Io {
-            operation: "open",
-            path: path.to_owned(),
-            source,
-        })?;
-        let open_metadata = verify_open_directory(path, &directory)?;
-        // This runs on every lock cycle, so the chmod is issued only when the
-        // mode actually differs; the verified metadata already carries it.
-        if open_metadata.permissions().mode() & 0o777 != 0o700 {
-            directory
-                .set_permissions(fs::Permissions::from_mode(0o700))
-                .map_err(|source| AuthError::Io {
-                    operation: "set permissions on",
-                    path: path.to_owned(),
-                    source,
-                })?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_directory_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), AuthError> {
-    if metadata.file_type().is_symlink() {
-        return Err(AuthError::SymlinkPath {
-            path: path.to_owned(),
-        });
-    }
-    if !metadata.is_dir() {
-        return Err(AuthError::WrongFileType {
-            path: path.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn open_lock_file(path: &Path) -> Result<File, AuthError> {
-    loop {
-        match fs::symlink_metadata(path) {
-            Ok(metadata) => {
-                validate_regular_metadata(path, &metadata)?;
-                let file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(path)
-                    .map_err(|source| AuthError::Io {
-                        operation: "open",
-                        path: path.to_owned(),
-                        source,
-                    })?;
-                verify_open_regular_file(path, &file, true)?;
-                return Ok(file);
-            }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                let mut options = OpenOptions::new();
-                options.read(true).write(true).create_new(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    options.mode(0o600);
-                }
-                match options.open(path) {
-                    Ok(file) => {
-                        set_private_file_permissions(path, &file)?;
-                        verify_open_regular_file(path, &file, true)?;
-                        return Ok(file);
-                    }
-                    Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
-                    Err(source) => {
-                        return Err(AuthError::Io {
-                            operation: "create",
-                            path: path.to_owned(),
-                            source,
-                        });
-                    }
-                }
-            }
-            Err(source) => {
-                return Err(AuthError::Io {
-                    operation: "inspect",
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        }
-    }
-}
-
-fn read_state_file(path: &Path) -> Result<Option<Vec<u8>>, AuthError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(AuthError::Io {
-                operation: "inspect",
-                path: path.to_owned(),
-                source,
-            });
-        }
-    };
-    validate_regular_metadata(path, &metadata)?;
-    if metadata.len() > MAX_STATE_BYTES as u64 {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-
-    let file = File::open(path).map_err(|source| AuthError::Io {
-        operation: "open",
-        path: path.to_owned(),
-        source,
-    })?;
-    verify_open_regular_file(path, &file, true)?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take((MAX_STATE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|source| AuthError::Io {
-            operation: "read",
-            path: path.to_owned(),
-            source,
-        })?;
-    if bytes.len() > MAX_STATE_BYTES {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-    Ok(Some(bytes))
-}
-
-fn validate_existing_state_file(path: &Path) -> Result<(), AuthError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(AuthError::Io {
-                operation: "inspect",
-                path: path.to_owned(),
-                source,
-            });
-        }
-    };
-    validate_regular_metadata(path, &metadata)?;
-    if metadata.len() > MAX_STATE_BYTES as u64 {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-    let file = File::open(path).map_err(|source| AuthError::Io {
-        operation: "open",
-        path: path.to_owned(),
-        source,
-    })?;
-    verify_open_regular_file(path, &file, true)
-}
-
-fn validate_regular_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), AuthError> {
-    if metadata.file_type().is_symlink() {
-        return Err(AuthError::SymlinkPath {
-            path: path.to_owned(),
-        });
-    }
-    if !metadata.is_file() {
-        return Err(AuthError::WrongFileType {
-            path: path.to_owned(),
-        });
-    }
-    Ok(())
-}
-
-/// Returns the open handle's metadata so the caller can act on the verified
-/// mode without a further stat.
-fn verify_open_directory(path: &Path, file: &File) -> Result<fs::Metadata, AuthError> {
-    let open_metadata = file.metadata().map_err(|source| AuthError::Io {
-        operation: "inspect",
-        path: path.to_owned(),
-        source,
-    })?;
-    let path_metadata = fs::symlink_metadata(path).map_err(|source| AuthError::Io {
-        operation: "inspect",
-        path: path.to_owned(),
-        source,
-    })?;
-    validate_directory_metadata(path, &path_metadata)?;
-    if !open_metadata.is_dir() || !same_file(&open_metadata, &path_metadata) {
-        return Err(AuthError::WrongFileType {
-            path: path.to_owned(),
-        });
-    }
-    Ok(open_metadata)
-}
-
-fn verify_open_regular_file(
-    path: &Path,
-    file: &File,
-    require_private_permissions: bool,
-) -> Result<(), AuthError> {
-    let open_metadata = file.metadata().map_err(|source| AuthError::Io {
-        operation: "inspect",
-        path: path.to_owned(),
-        source,
-    })?;
-    let path_metadata = fs::symlink_metadata(path).map_err(|source| AuthError::Io {
-        operation: "inspect",
-        path: path.to_owned(),
-        source,
-    })?;
-    validate_regular_metadata(path, &path_metadata)?;
-    if !open_metadata.is_file() || !same_file(&open_metadata, &path_metadata) {
-        return Err(AuthError::WrongFileType {
-            path: path.to_owned(),
-        });
-    }
-
-    #[cfg(unix)]
-    if require_private_permissions {
-        use std::os::unix::fs::MetadataExt;
-        if open_metadata.mode() & 0o7777 != 0o600 {
-            return Err(AuthError::InsecurePermissions {
-                path: path.to_owned(),
-                expected: "0600",
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = require_private_permissions;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
-#[cfg(not(unix))]
-fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    true
-}
-
-fn set_private_file_permissions(path: &Path, file: &File) -> Result<(), AuthError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(|source| AuthError::Io {
-                operation: "set permissions on",
-                path: path.to_owned(),
-                source,
-            })?;
-    }
-    #[cfg(not(unix))]
-    let _ = (path, file);
-    Ok(())
-}
-
-#[cfg(windows)]
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AuthError> {
-    if bytes.len() > MAX_STATE_BYTES {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-    let parent = path.parent().ok_or_else(|| AuthError::Io {
-        operation: "locate parent of",
-        path: path.to_owned(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent"),
-    })?;
-    ensure_data_directory(parent)?;
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        validate_regular_metadata(path, &metadata)?;
-    }
-    let mut file =
-        atomic_write_file::AtomicWriteFile::open(path).map_err(|source| AuthError::Io {
-            operation: "create temporary replacement for",
-            path: path.to_owned(),
-            source,
-        })?;
-    file.write_all(bytes).map_err(|source| AuthError::Io {
-        operation: "write temporary replacement for",
-        path: path.to_owned(),
-        source,
-    })?;
-    file.sync_all().map_err(|source| AuthError::Io {
-        operation: "synchronize temporary replacement for",
-        path: path.to_owned(),
-        source,
-    })?;
-    file.commit().map_err(|source| AuthError::Io {
-        operation: "replace",
-        path: path.to_owned(),
-        source,
-    })?;
-    let metadata = fs::symlink_metadata(path).map_err(|source| AuthError::Io {
-        operation: "inspect",
-        path: path.to_owned(),
-        source,
-    })?;
-    validate_regular_metadata(path, &metadata)
-}
-
-#[cfg(not(windows))]
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AuthError> {
-    if bytes.len() > MAX_STATE_BYTES {
-        return Err(AuthError::StateTooLarge {
-            path: path.to_owned(),
-            limit: MAX_STATE_BYTES,
-        });
-    }
-    let parent = path.parent().ok_or_else(|| AuthError::Io {
-        operation: "locate parent of",
-        path: path.to_owned(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "state path has no parent"),
-    })?;
-    ensure_data_directory(parent)?;
-
-    let destination_exists = match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            validate_regular_metadata(path, &metadata)?;
-            true
-        }
-        Err(source) if source.kind() == io::ErrorKind::NotFound => false,
-        Err(source) => {
-            return Err(AuthError::Io {
-                operation: "inspect",
-                path: path.to_owned(),
-                source,
-            });
-        }
-    };
-
-    #[cfg(not(unix))]
-    if destination_exists {
-        return Err(AuthError::AtomicReplacementUnsupported {
-            path: path.to_owned(),
-        });
-    }
-    #[cfg(unix)]
-    let _ = destination_exists;
-
-    let temporary = temporary_path(parent, path);
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary).map_err(|source| AuthError::Io {
-            operation: "create",
-            path: temporary.clone(),
-            source,
-        })?;
-        set_private_file_permissions(&temporary, &file)?;
-        file.write_all(bytes).map_err(|source| AuthError::Io {
-            operation: "write",
-            path: temporary.clone(),
-            source,
-        })?;
-        file.sync_all().map_err(|source| AuthError::Io {
-            operation: "synchronize",
-            path: temporary.clone(),
-            source,
-        })?;
-        verify_open_regular_file(&temporary, &file, true)?;
-        let written_metadata = file.metadata().map_err(|source| AuthError::Io {
-            operation: "inspect",
-            path: temporary.clone(),
-            source,
-        })?;
-        drop(file);
-
-        if let Ok(metadata) = fs::symlink_metadata(path) {
-            validate_regular_metadata(path, &metadata)?;
-        }
-        fs::rename(&temporary, path).map_err(|source| AuthError::Io {
-            operation: "replace",
-            path: path.to_owned(),
-            source,
-        })?;
-
-        let replaced_metadata = fs::symlink_metadata(path).map_err(|source| AuthError::Io {
-            operation: "inspect",
-            path: path.to_owned(),
-            source,
-        })?;
-        validate_regular_metadata(path, &replaced_metadata)?;
-        if !same_file(&written_metadata, &replaced_metadata) {
-            return Err(AuthError::WrongFileType {
-                path: path.to_owned(),
-            });
-        }
-
-        #[cfg(unix)]
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| AuthError::Io {
-                operation: "synchronize",
-                path: parent.to_owned(),
-                source,
-            })?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn ensure_atomic_replacement_supported(path: &Path) -> Result<(), AuthError> {
-    #[cfg(all(not(unix), not(windows)))]
-    if path.exists() {
-        return Err(AuthError::AtomicReplacementUnsupported {
-            path: path.to_owned(),
-        });
-    }
-    #[cfg(any(unix, windows))]
-    let _ = path;
-    Ok(())
-}
-
-fn temporary_path(parent: &Path, destination: &Path) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let counter = TEMPORARY_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("auth-state");
-    parent.join(format!(
-        ".{name}.{}.{}.{}.tmp",
-        std::process::id(),
-        nonce,
-        counter
-    ))
-}
-
-struct StateLock {
-    _file: File,
-}
-
-#[derive(Clone, Copy)]
-enum LockMode {
-    Exclusive,
-    Shared,
-}
-
-struct CodexStateLock<'a> {
-    _process: MutexGuard<'a, ()>,
-    _file: File,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The OAuth token, refresh and device calls an [`CredentialStore::offline`]
+/// store refused.
 #[doc(hidden)]
-pub enum KeyringError {
-    Unavailable,
-    Missing,
-    TooLarge,
-    Failure,
-}
+#[derive(Clone, Default)]
+pub struct OfflineTokenCalls(Arc<std::sync::atomic::AtomicUsize>);
 
-#[doc(hidden)]
-pub trait KeyringBackend: Send + Sync {
-    fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError>;
-    fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError>;
-    fn remove(&self, name: &str) -> Result<(), KeyringError>;
-}
+impl OfflineTokenCalls {
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(any(test, windows)),
-    allow(
-        dead_code,
-        reason = "non-Windows production builds only construct the unavailable backend error"
-    )
-)]
-pub(crate) enum WindowsProtectedError {
-    Unavailable,
-    Missing,
-    Failure,
-}
-
-pub(crate) trait WindowsProtectedBackend: Send + Sync {
-    fn get(&self, name: &str) -> Result<Vec<u8>, WindowsProtectedError>;
-    fn set(&self, name: &str, secret: &[u8]) -> Result<(), WindowsProtectedError>;
-    fn remove(&self, name: &str) -> Result<(), WindowsProtectedError>;
-}
-
-fn windows_protected_auth_error(
-    error: WindowsProtectedError,
-    operation: &'static str,
-    name: &str,
-) -> AuthError {
-    match error {
-        WindowsProtectedError::Unavailable => AuthError::WindowsProtectionUnavailable {
-            operation,
-            name: name.to_owned(),
-        },
-        WindowsProtectedError::Missing | WindowsProtectedError::Failure => {
-            AuthError::WindowsProtectionFailure {
-                operation,
-                name: name.to_owned(),
-            }
-        }
+    fn record(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-struct SystemWindowsProtected {
-    #[cfg(windows)]
-    paths: CredentialPaths,
-}
-
-impl SystemWindowsProtected {
-    fn new(paths: CredentialPaths) -> Self {
-        #[cfg(not(windows))]
-        let _ = paths;
-        Self {
-            #[cfg(windows)]
-            paths,
-        }
+impl codex::CodexTokenClient for OfflineTokenCalls {
+    fn exchange(
+        &self,
+        _code: &str,
+        _redirect_uri: &str,
+        _code_verifier: &str,
+    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "exchange",
+        })
     }
 
-    #[cfg(windows)]
-    fn path(&self, name: &str) -> PathBuf {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-
-        let digest = Sha256::digest(name.as_bytes());
-        self.paths
-            .windows_credential_dir()
-            .join(format!("{}.bin", URL_SAFE_NO_PAD.encode(digest)))
+    fn refresh(
+        &self,
+        _refresh_token: &str,
+    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::TokenRequestFailed {
+            operation: "refresh",
+        })
     }
 }
 
-#[cfg(windows)]
-impl WindowsProtectedBackend for SystemWindowsProtected {
-    fn get(&self, name: &str) -> Result<Vec<u8>, WindowsProtectedError> {
-        let path = self.path(name);
-        let bytes = read_state_file(&path)
-            .map_err(|_| WindowsProtectedError::Failure)?
-            .ok_or(WindowsProtectedError::Missing)?;
-        let encrypted = bytes
-            .strip_prefix(WINDOWS_PROTECTED_MAGIC)
-            .ok_or(WindowsProtectedError::Failure)?;
-        let entropy = windows_protected_entropy(name);
-        windows_dpapi::decrypt_data(encrypted, windows_dpapi::Scope::User, Some(&entropy))
-            .map_err(|_| WindowsProtectedError::Failure)
+impl codex::CodexDeviceClient for OfflineTokenCalls {
+    fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::DeviceRequestFailed)
     }
 
-    fn set(&self, name: &str, secret: &[u8]) -> Result<(), WindowsProtectedError> {
-        if secret.len() > MAX_STATE_BYTES {
-            return Err(WindowsProtectedError::Failure);
-        }
-        let entropy = windows_protected_entropy(name);
-        let encrypted =
-            windows_dpapi::encrypt_data(secret, windows_dpapi::Scope::User, Some(&entropy))
-                .map_err(|_| WindowsProtectedError::Failure)?;
-        let mut bytes = Vec::with_capacity(WINDOWS_PROTECTED_MAGIC.len() + encrypted.len());
-        bytes.extend_from_slice(WINDOWS_PROTECTED_MAGIC);
-        bytes.extend_from_slice(&encrypted);
-        atomic_write(&self.path(name), &bytes).map_err(|_| WindowsProtectedError::Failure)
-    }
-
-    fn remove(&self, name: &str) -> Result<(), WindowsProtectedError> {
-        let path = self.path(name);
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) => validate_regular_metadata(&path, &metadata)
-                .map_err(|_| WindowsProtectedError::Failure)?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(WindowsProtectedError::Missing);
-            }
-            Err(_) => return Err(WindowsProtectedError::Failure),
-        }
-        fs::remove_file(path).map_err(|_| WindowsProtectedError::Failure)
+    fn poll_device(
+        &self,
+        _device_auth_id: &str,
+        _user_code: &str,
+        _timeout: Duration,
+    ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
+        self.record();
+        Err(codex::CodexAuthError::DeviceRequestFailed)
     }
 }
 
-#[cfg(not(windows))]
-impl WindowsProtectedBackend for SystemWindowsProtected {
-    fn get(&self, _name: &str) -> Result<Vec<u8>, WindowsProtectedError> {
-        Err(WindowsProtectedError::Unavailable)
+impl xai::XaiTokenClient for OfflineTokenCalls {
+    fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::DeviceRequestFailed)
     }
 
-    fn set(&self, _name: &str, _secret: &[u8]) -> Result<(), WindowsProtectedError> {
-        Err(WindowsProtectedError::Unavailable)
+    fn poll_device(&self, _device_code: &str) -> Result<xai::DevicePoll, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::DeviceRequestFailed)
     }
 
-    fn remove(&self, _name: &str) -> Result<(), WindowsProtectedError> {
-        Err(WindowsProtectedError::Unavailable)
-    }
-}
-
-#[cfg(windows)]
-fn windows_protected_entropy(name: &str) -> Vec<u8> {
-    let mut entropy = Vec::with_capacity(KEYRING_SERVICE.len() + 1 + name.len());
-    entropy.extend_from_slice(KEYRING_SERVICE.as_bytes());
-    entropy.push(0);
-    entropy.extend_from_slice(name.as_bytes());
-    entropy
-}
-
-struct SystemKeyring;
-
-impl KeyringBackend for SystemKeyring {
-    fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, name).map_err(classify_keyring_error)?;
-        entry.get_secret().map_err(classify_keyring_error)
-    }
-
-    fn set(&self, name: &str, secret: &[u8]) -> Result<(), KeyringError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, name).map_err(classify_keyring_error)?;
-        entry.set_secret(secret).map_err(classify_keyring_error)
-    }
-
-    fn remove(&self, name: &str) -> Result<(), KeyringError> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, name).map_err(classify_keyring_error)?;
-        entry.delete_credential().map_err(classify_keyring_error)
-    }
-}
-
-fn classify_keyring_error(error: keyring::Error) -> KeyringError {
-    match error {
-        keyring::Error::NoEntry => KeyringError::Missing,
-        #[cfg(windows)]
-        keyring::Error::TooLong(attribute, _) if attribute == "secret" => KeyringError::TooLarge,
-        keyring::Error::NoDefaultStore
-        | keyring::Error::NoStorageAccess(_)
-        | keyring::Error::PlatformFailure(_)
-        | keyring::Error::NotSupportedByStore(_) => KeyringError::Unavailable,
-        _ => KeyringError::Failure,
+    fn refresh(&self, _refresh_token: &str) -> Result<xai::TokenSet, xai::XaiAuthError> {
+        self.record();
+        Err(xai::XaiAuthError::RefreshRequestFailed)
     }
 }
 

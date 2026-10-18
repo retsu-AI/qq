@@ -87,6 +87,15 @@ pub(crate) struct ToolTaskLease {
     process_pending: bool,
 }
 
+impl ToolTaskLease {
+    pub(crate) fn process_started(&mut self) {
+        self.process_pending = true;
+    }
+    pub(crate) fn process_reaped(&mut self) {
+        self.process_pending = false;
+    }
+}
+
 impl Drop for ToolTaskLease {
     fn drop(&mut self) {
         if self.process_pending {
@@ -105,7 +114,7 @@ impl Drop for ToolTaskLease {
 /// blocking tools check [`Self::is_cancelled`] between steps and the shell
 /// awaits [`Self::cancelled`] alongside its child process.
 #[derive(Clone)]
-pub(super) struct ToolCancellation {
+pub(crate) struct ToolCancellation {
     run: RunCancellation,
     call: Arc<CallCancellation>,
 }
@@ -117,19 +126,19 @@ struct CallCancellation {
 }
 
 impl ToolCancellation {
-    pub(super) fn new(run: RunCancellation) -> Self {
+    pub(crate) fn new(run: RunCancellation) -> Self {
         Self {
             run,
             call: Arc::new(CallCancellation::default()),
         }
     }
 
-    pub(super) fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.run.is_cancelled() || self.call.cancelled.load(Ordering::Acquire)
     }
 
     /// Resolves when either the run is cancelled or the call was dropped.
-    pub(super) async fn cancelled(&self) {
+    pub(crate) async fn cancelled(&self) {
         let caller_dropped = async {
             loop {
                 let wake = self.call.wake.notified();
