@@ -293,6 +293,73 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn provider_span_closes_before_synthesized_reasoning_completion() {
+        use futures_util::StreamExt as _;
+        use qq_core::{
+            Runtime,
+            plan::{AgentProfile, CompiledAgentPlan},
+        };
+        use qq_protocol::{ReasoningKind, RunCommand, RunEvent};
+        use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream};
+        struct ReasoningProvider(bool);
+        impl Provider for ReasoningProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let mut events = vec![Ok(ProviderEvent::ReasoningStarted {
+                    kind: ReasoningKind::Summary,
+                })];
+                if self.0 {
+                    events.push(Ok(ProviderEvent::Incomplete {
+                        usage: None,
+                        reason: qq_provider::IncompleteReason::OutputTokens,
+                    }));
+                }
+                Box::pin(futures_util::stream::iter(events))
+            }
+        }
+        for incomplete in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let directory = home.path().join("logs");
+            let logger = LogGuard::start(&directory).unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let stream =
+                tracing::dispatcher::with_default(logger.dispatch.as_ref().unwrap(), || {
+                    let agent = Runtime::new(ReasoningProvider(incomplete), "test", 128).unwrap();
+                    let plan = CompiledAgentPlan::compile_blocking(AgentProfile::embedded(
+                        &agent,
+                        home.path().to_owned(),
+                    ))
+                    .unwrap();
+                    let mut stream = plan.run(RunCommand::new("answer"));
+                    runtime.block_on(async {
+                        loop {
+                            if matches!(
+                                stream.next().await.expect("reasoning completion"),
+                                RunEvent::ReasoningCompleted { .. }
+                            ) {
+                                break;
+                            }
+                        }
+                    });
+                    stream
+                });
+            logger.finish().unwrap();
+            let logs = std::fs::read_to_string(directory.join("qq-0.jsonl")).unwrap();
+            assert!(
+                logs.lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .any(|record| record["span"]["name"] == "provider"
+                        && record["fields"]["message"] == "close"),
+                "provider span retained at reasoning completion: {logs}"
+            );
+            drop(stream);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn dependency_secrets_are_rejected_and_span_metadata_survives() {
         let home = tempfile::tempdir().unwrap();
         let directory = home.path().join("logs");

@@ -14,8 +14,13 @@ on:
   merge_group:
   workflow_dispatch:
     inputs:
+      perf_h0:
+        description: Run full matched H0 and size qualification against perf_baseline_sha
+        required: false
+        default: false
+        type: boolean
       perf_baseline_sha:
-        description: Immutable forty-hex baseline commit for controlled turn recording
+        description: Immutable forty-hex baseline commit for controlled performance recording
         required: false
         default: ''
         type: string
@@ -167,7 +172,7 @@ jobs:
 
   turn-overhead:
     name: controlled turn overhead
-    if: (github.event_name == 'workflow_dispatch' && inputs.perf_baseline_sha != '') || (github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates')
+    if: (github.event_name == 'workflow_dispatch' && inputs.perf_baseline_sha != '' && !inputs.perf_h0) || (github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -263,7 +268,7 @@ jobs:
               baseline = json.loads((root / 'baseline-artifact.json').read_text())
               # Optimization changes are the treatment; safety/debug settings
               # must still match between the two separately built arms.
-              for key in ('debug_assertions', 'overflow_checks', 'test'):
+              for key in ('debug_assertions', 'overflow_checks', 'test', 'debuginfo'):
                   if baseline['profile'].get(key) != profile.get(key):
                       raise SystemExit(f'benchmark profile setting differs: {key}')
           PYTHON
@@ -282,24 +287,24 @@ jobs:
 
   action-bias-h0:
     name: controlled action-bias H0 and size
-    if: github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates'
+    if: (github.event_name == 'workflow_dispatch' && inputs.perf_h0 && inputs.perf_baseline_sha != '') || (github.event_name == 'pull_request' && github.head_ref == 'fix/eng-834-performance-gates')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
       contents: read
     env:
-      BASELINE_SHA: 3b763ea17699a9d7650b99750c0220ab7206aa5d
-      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+      BASELINE_SHA: ${{ github.event_name == 'pull_request' && '3b763ea17699a9d7650b99750c0220ab7206aa5d' || inputs.perf_baseline_sha }}
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       CARGO_BUILD_JOBS: '2'
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ env.CANDIDATE_SHA }}
           path: candidate
           persist-credentials: false
       - uses: actions/checkout@v4
         with:
-          ref: 3b763ea17699a9d7650b99750c0220ab7206aa5d
+          ref: ${{ env.BASELINE_SHA }}
           path: baseline
           persist-credentials: false
       - name: Require matching H0 fixture source and toolchain
@@ -330,15 +335,18 @@ jobs:
           (Path(os.environ['RUNNER_TEMP']) / 'h0-recording/fixture-receipt.json').write_text(json.dumps(receipt, indent=2))
           baseline = json.loads(Path('baseline/benchmarks/perf/budgets-v1.json').read_text())
           candidate = json.loads(Path('candidate/benchmarks/perf/budgets-v1.json').read_text())
-          if baseline['fixture_version'] != 4:
-              raise SystemExit('baseline fixture version changed; review the comparison contract')
-          baseline['fixture_version'] = 5  # Exact per-run retry recovery receipt.
-          retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
-          if retry['maximum_p95'] != 1050:
-              raise SystemExit('baseline retry budget changed; review the comparison contract')
-          retry['maximum_p95'] = 6300  # ADR-0040: six sends, with the existing 5% allowance.
           if baseline != candidate:
-              raise SystemExit('only the approved retry-contract/version correction may change budgets')
+              if os.environ['BASELINE_SHA'] != '3b763ea17699a9d7650b99750c0220ab7206aa5d':
+                  raise SystemExit('matched qualification requires unchanged budgets')
+              if baseline['fixture_version'] != 4:
+                  raise SystemExit('baseline fixture version changed; review the comparison contract')
+              baseline['fixture_version'] = 5  # Exact per-run retry recovery receipt.
+              retry = next(row for row in baseline['metrics'] if row['metric'] == 'provider_retry_amplification_milli')
+              if retry['maximum_p95'] != 1050:
+                  raise SystemExit('baseline retry budget changed; review the comparison contract')
+              retry['maximum_p95'] = 6300  # ADR-0040: six sends, with the existing 5% allowance.
+              if baseline != candidate:
+                  raise SystemExit('only the approved retry-contract/version correction may change budgets')
           PYTHON
           channel=$(python3 -c 'import tomllib; print(tomllib.load(open("baseline/rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           # The recorder clears toolchain overrides before native builds.

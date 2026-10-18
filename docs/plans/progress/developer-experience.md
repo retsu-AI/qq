@@ -100,3 +100,16 @@ Plan: [remaining work](../developer-experience.md). Predecessor evidence is link
 - Public adapter now releases its internal stream before every terminal result, including context rejection and paused→failed conversion. Added five-path drop-guard regression (success, failure, pause, budget, context refusal); passes without dropping the retained public stream. Selector/goal tool handles release before completion yields, including interrupted goal completion. Focused selector/goal tests3/3 pass.
 - First full gate refused shifted legacy sleep keys after adding regression; adjusted only the two exact lib.rs line numbers (+71), no new sleeps or ceiling change. Full final gate reruns next.
 - Interrupted release-build call has no durable result and was not retried; existing binary remains prior42883152-byte artifact. Read-only performance investigation confirms hosted turn job is diagnostic; existing full H0 workflow is hardcoded to another branch/baseline and needs a bounded generalized immutable-SHA dispatch before current-tip qualification. No safe five-crate subtraction established.
+
+
+## AF5 hosted full-H0 dispatch
+
+- Added opt-in `perf_h0` dispatch using immutable baseline and dispatch candidate SHA. Reuses full baseline/candidate/same-binary-control recorder, exact budget checks, pressure refusal and retained evidence; no thresholds changed. Historical retry-contract exception remains restricted to its original pinned baseline; all other comparisons require identical budget documents.
+- New workflow-contract regression accepts identical current budgets and rejects a changed retry threshold. Fixture suite6/6 passes; full gate pending before publishing/dispatch. The current performance thread stays open until an actual qualifying result, not merely a successful recording.
+
+- Full gate exposed inherited audit allowance fixture timeout: shared10s across17runs/8audits expired under workspace load, retry and focused rerun passed. Kept10s stalled-progress guard, refreshing only when persisted audit counter advances (bounded8), retaining exact17run/8audit/no-ninth-request assertions. Audit suite4/4 passes; final full gate reruns. No failed attempt reported as success.
+
+- Further Codex fixes: provider attempt handle releases on terminal/error/EOF/interrupt before synthesized output; real-subscriber incomplete/EOF reasoning regression passes, logging8/8. Debuginfo arm mismatch now refuses with four-setting regression (fixture suite7/7). ADR0063 moved into contiguous index table. Actionlint caught malformed new dispatch input nesting; corrected it, focused actionlint passes with only pre-existingSC2129 style excluded.
+- Full parallel gate then hit three inherited compaction deadlines; focused exact cases pass serial31.6s. Lower-concurrency synchronous gate killed at600s is incomplete. Async full two-process gate remains running under shared-host load; no final-source pass claimed yet.
+
+- Async two-process run completed all tests1205.0s plus fmt/lint/Clippy/doctests/minimal checks, but correctly refused its report because script/docs/workflow changed during execution. This is not a final gate pass. Commit stable snapshot then rerun without edits before push. Latest smoke9/9, fixture7/7 and focused actionlint pass.

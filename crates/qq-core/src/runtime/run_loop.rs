@@ -1625,7 +1625,7 @@ impl RunState {
                         }
                         let mut provider_events = provider.stream(request);
 
-                        let provider_span = tracing::info_span!(target: "qq::diagnostic", "provider");
+                        let mut provider_span = Some(tracing::info_span!(target: "qq::diagnostic", "provider"));
                     let mut attempt = AttemptScope {
                         rejected_before_work: false,
                         activity,
@@ -1665,8 +1665,11 @@ impl RunState {
                             let event = tokio::select! {
                                 biased;
                                 () = interrupt => StreamStep::Interrupted,
-                                event = provider_events.next().instrument(provider_span.clone()) => StreamStep::Event(event),
+                                event = provider_events.next().instrument(provider_span.as_ref().expect("provider attempt is active").clone()) => StreamStep::Event(event),
                             };
+                            if matches!(&event, StreamStep::Interrupted | StreamStep::Event(None | Some(Err(_) | Ok(ProviderEvent::Completed { .. } | ProviderEvent::Incomplete { .. })))) {
+                                provider_span.take();
+                            }
                             let event = match event {
                                 StreamStep::Interrupted => {
                                     attempt.interrupted_turn = true;
