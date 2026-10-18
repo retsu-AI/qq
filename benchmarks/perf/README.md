@@ -23,8 +23,13 @@ Version 5 additionally requires exactly `MAX_TURN_RETRIES + 1` provider entries
 in every always-faulting run. Re-record both baseline and candidate with version
 5; earlier retry receipts do not prove this per-run recovery invariant. Version
 3 fan-out samples remain historical and are not comparable to the corrected
-metric. The focused feed worker declares `feed_fixture_version: 2` and
-`h0_fixture_version: 5`.
+metric. Version 6 adds the request-credential metrics
+(`xai_request_credential_resolution_ns`, the eight-way
+`xai_request_credential_concurrent_resolution_ns`, and
+`request_time_authorized_stream_ns`). They run against an in-memory keyring
+and a keep-alive loopback server, so they measure QQ's credential path and not
+a real keyring or network; version 5 reports lack them. The focused feed
+worker declares `feed_fixture_version: 2` and `h0_fixture_version: 6`.
 
 ## Record A Baseline
 

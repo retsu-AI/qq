@@ -9,7 +9,7 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP2 | One provider operation lock | Shipped (`92554c96`) | #345 | |
 | AP3 | Audiences defined once | Shipped (`332e8a62`) | #346 | |
 | AP4 | State and backends split out of `lib.rs` | Shipped (`b1c66be4`) | #347 | |
-| AP4b | Request-credential perf fixtures | Planned | | Baseline for AP5/AP6 |
+| AP4b | Request-credential perf fixtures | In review | `perf/eng-1066-ap4b-credential-fixtures` | Baseline for AP5/AP6; `fixture_version` 6 |
 | AP5 | One request-credential provider + bench | Planned | | |
 | AP6 | Header-set request credentials | Planned | | |
 | AP7 | Table-driven built-in providers (ADR) | Planned | | |

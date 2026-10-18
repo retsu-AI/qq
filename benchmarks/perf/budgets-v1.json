@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "fixture_version": 5,
+  "fixture_version": 6,
   "max_median_absolute_deviation_percent": 50,
   "metrics": [
     { "metric": "qq_release_binary_bytes", "max_regression_percent": 5, "maximum_p95": 48000000 },
@@ -27,6 +27,9 @@
     { "metric": "http_command_ack_ns", "max_regression_percent": 10, "maximum_p95": 10000000 },
     { "metric": "provider_delta_to_http_sse_event_ns", "max_regression_percent": 10 },
     { "metric": "http_cursor_reconnect_replay_ns", "max_regression_percent": 15 },
+    { "metric": "xai_request_credential_resolution_ns", "max_regression_percent": 20 },
+    { "metric": "xai_request_credential_concurrent_resolution_ns", "max_regression_percent": 20 },
+    { "metric": "request_time_authorized_stream_ns", "max_regression_percent": 15 },
     { "metric": "read_tool_run_ns", "max_regression_percent": 15 },
     { "metric": "one_shot_shell_run_ns", "max_regression_percent": 15 },
     { "metric": "cancellation_to_finished_ns", "max_regression_percent": 10, "maximum_p95": 100000000 },

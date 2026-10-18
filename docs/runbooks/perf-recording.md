@@ -29,7 +29,11 @@ cargo xtask perf check --baseline target/qq-perf/<slice>-<date>/baseline.json \
 
 The fixture version is embedded in each report; reports with different fixture
 versions, sample counts, or warmup counts are not comparable. Current fixture
-version: 5. Version 5 requires exactly `MAX_TURN_RETRIES + 1` entries in every
+version: 6. Version 6 adds the request-credential metrics
+(`xai_request_credential_resolution_ns`,
+`xai_request_credential_concurrent_resolution_ns`,
+`request_time_authorized_stream_ns`; ENG-1066 AP4b), so version 5 reports
+lack them and must be re-recorded. Version 5 requires exactly `MAX_TURN_RETRIES + 1` entries in every
 always-faulting run. Older aggregate-only retry receipts cannot be compared
 against the current budgets; re-record both arms with the current fixture.
 
