@@ -6073,52 +6073,6 @@ mod tests {
         }
     }
 
-    /// The recipe body shape and the output-limit capability come from one
-    /// function of the route, so they cannot disagree: only the OpenAI Codex
-    /// route sends the Codex body, and every other credential sends the
-    /// standard body whatever its auth scheme.
-    #[test]
-    fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
-        let access = |auth| {
-            HttpAccess::new(
-                "https://example.test/v1",
-                EndpointMode::Base,
-                ProviderApi::OpenAiResponses,
-                auth,
-                BTreeMap::new(),
-            )
-        };
-        for (auth, expected) in [
-            (
-                HttpCredential::OpenAiCodex { profile: None },
-                ResponsesBodyShape::Codex,
-            ),
-            (
-                HttpCredential::XAi {
-                    api_key: None,
-                    profile: None,
-                },
-                ResponsesBodyShape::Standard,
-            ),
-            (
-                HttpCredential::Configured(ProviderAuth::Bearer(qq_config::SecretRef::Env(
-                    "TOKEN".to_owned(),
-                ))),
-                ResponsesBodyShape::Standard,
-            ),
-            (
-                HttpCredential::Configured(ProviderAuth::NoAuth),
-                ResponsesBodyShape::Standard,
-            ),
-        ] {
-            assert_eq!(
-                responses_body_shape(&access(auth.clone())),
-                expected,
-                "{auth:?}"
-            );
-        }
-    }
-
     #[test]
     fn resolved_model_reports_codex_controls_and_named_auth_profiles() {
         let fixture = RuntimeFixture::new();
@@ -10450,5 +10404,51 @@ mod tests {
         assert!(final_claim.contains("final candidate"));
         assert!(final_instructions.contains("completion claim"));
         assert!(!final_instructions.contains("error result is supported"));
+    }
+
+    /// The recipe body shape and the output-limit capability come from one
+    /// function of the route, so they cannot disagree: only the OpenAI Codex
+    /// route sends the Codex body, and every other credential sends the
+    /// standard body whatever its auth scheme.
+    #[test]
+    fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
+        let access = |auth| {
+            HttpAccess::new(
+                "https://example.test/v1",
+                EndpointMode::Base,
+                ProviderApi::OpenAiResponses,
+                auth,
+                BTreeMap::new(),
+            )
+        };
+        for (auth, expected) in [
+            (
+                HttpCredential::OpenAiCodex { profile: None },
+                ResponsesBodyShape::Codex,
+            ),
+            (
+                HttpCredential::XAi {
+                    api_key: None,
+                    profile: None,
+                },
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::Bearer(qq_config::SecretRef::Env(
+                    "TOKEN".to_owned(),
+                ))),
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::NoAuth),
+                ResponsesBodyShape::Standard,
+            ),
+        ] {
+            assert_eq!(
+                responses_body_shape(&access(auth.clone())),
+                expected,
+                "{auth:?}"
+            );
+        }
     }
 }
