@@ -59,7 +59,6 @@ pub(crate) struct Reuse {
     pub(crate) refresh_after: u64,
 }
 
-#[derive(Clone)]
 pub(crate) struct Cached<C> {
     pub(crate) credential: C,
     pub(crate) epoch: CredentialEpoch,
@@ -78,12 +77,20 @@ impl<C> Cached<C> {
 pub(crate) struct CachedRequestCredentials<S: RequestCredentialSource> {
     pub(crate) store: CredentialStore,
     source: Arc<S>,
-    /// Held only to copy or replace the value, never across an await.
-    pub(crate) cache: tokio::sync::Mutex<Option<Cached<S::Credential>>>,
+    /// Held only to take or replace a shared handle, never across an await;
+    /// a warm request clones the `Arc`, not the credential bytes.
+    pub(crate) cache: tokio::sync::Mutex<Option<Arc<Cached<S::Credential>>>>,
     /// Serialises misses so one request per provider loads or refreshes.
     pub(crate) fill: tokio::sync::Mutex<()>,
     /// The last resolution could not be cached, so misses skip `fill`.
     uncacheable: AtomicBool,
+    /// Requests that reached the fill lock, for tests that prove a path
+    /// never takes it.
+    #[cfg(test)]
+    pub(crate) fill_attempts: std::sync::atomic::AtomicUsize,
+    /// Resolutions performed while holding the fill lock.
+    #[cfg(test)]
+    resolved_under_fill: std::sync::atomic::AtomicUsize,
 }
 
 impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
@@ -94,7 +101,16 @@ impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
             cache: tokio::sync::Mutex::new(None),
             fill: tokio::sync::Mutex::new(()),
             uncacheable: AtomicBool::new(false),
+            #[cfg(test)]
+            fill_attempts: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            resolved_under_fill: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_under_fill_for_test(&self) -> usize {
+        self.resolved_under_fill.load(Ordering::SeqCst)
     }
 
     /// Whether `reuse` still describes the durable credential.
@@ -126,11 +142,11 @@ impl<S: RequestCredentialSource> CachedRequestCredentials<S> {
         match resolution.reuse {
             Some(reuse) => {
                 self.uncacheable.store(false, Ordering::Relaxed);
-                *self.cache.lock().await = Some(Cached {
+                *self.cache.lock().await = Some(Arc::new(Cached {
                     credential: resolution.credential,
                     epoch: reuse.epoch,
                     refresh_after: reuse.refresh_after,
-                });
+                }));
             }
             None => {
                 self.uncacheable.store(true, Ordering::Relaxed);
@@ -153,10 +169,21 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
                 return self.resolve_uncached().await;
             }
 
-            let _fill = self.fill.lock().await;
+            #[cfg(test)]
+            self.fill_attempts.fetch_add(1, Ordering::SeqCst);
+            let fill = self.fill.lock().await;
+            // A concurrent first request may have found the source
+            // uncacheable while this one waited; such resolutions never need
+            // the fill lock, so release it rather than resolve serially.
+            if self.uncacheable.load(Ordering::Relaxed) {
+                drop(fill);
+                return self.resolve_uncached().await;
+            }
             // Another request may have filled the cache while this one waited.
             let current = self.cache.lock().await.clone();
-            let current_reuse = current.as_ref().map(Cached::reuse);
+            let current_reuse = current.as_deref().map(Cached::reuse);
+            #[cfg(test)]
+            self.resolved_under_fill.fetch_add(1, Ordering::SeqCst);
             let source = Arc::clone(&self.source);
             let resolved = self
                 .store
@@ -172,7 +199,11 @@ impl<S: RequestCredentialSource> RequestCredentialProvider for CachedRequestCred
                 .await?
                 .map_err(|error| self.source.map_error(error))?;
             match (resolved, current) {
-                (Some(resolution), _) => self.store_resolution(resolution).await,
+                (Some(resolution), _) => {
+                    let credential = self.store_resolution(resolution).await;
+                    drop(fill);
+                    credential
+                }
                 (None, Some(cached)) => S::request_credential(&cached.credential),
                 (None, None) => unreachable!("a cache hit requires a cached credential"),
             }

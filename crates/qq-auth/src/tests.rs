@@ -2695,7 +2695,7 @@ async fn codex_request_cache_rechecks_store_at_its_refresh_deadline() {
     qq_provider::RequestCredentialProvider::credential(&provider)
         .await
         .unwrap();
-    provider.cache.lock().await.as_mut().unwrap().refresh_after = 0;
+    expire_cached(&provider.cache).await;
 
     qq_provider::RequestCredentialProvider::credential(&provider)
         .await
@@ -3678,19 +3678,32 @@ fn hour_from_now() -> u64 {
         + 3_600
 }
 
-async fn request(provider: &qq_provider::SharedRequestCredentialProvider) {
+/// Requests a credential and returns the token the provider served. The
+/// served `RequestCredential` is opaque outside qq-provider, so the token is
+/// read from the cache entry that request just used or filled.
+async fn served_xai_token(provider: &request::CachedRequestCredentials<xai::XaiSource>) -> String {
     qq_provider::RequestCredentialProvider::credential(provider)
         .await
         .unwrap();
+    provider
+        .cache
+        .lock()
+        .await
+        .as_ref()
+        .expect("an OAuth credential is cached")
+        .credential
+        .expose_secret_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[tokio::test]
 async fn xai_request_cache_reloads_after_rotation_and_reports_removal() {
     let (store, keyring, _directory) = test_store();
     set_xai_oauth(&store, "first-access-token", hour_from_now());
-    let provider = store.xai_request_credentials("work", None);
-    request(&provider).await;
-    request(&provider).await;
+    let provider = xai::request_credentials_for_test(&store, "work");
+    assert_eq!(served_xai_token(&provider).await, "first-access-token");
+    assert_eq!(served_xai_token(&provider).await, "first-access-token");
     assert_eq!(
         keyring.read_count("xai/work"),
         1,
@@ -3698,12 +3711,12 @@ async fn xai_request_cache_reloads_after_rotation_and_reports_removal() {
     );
 
     set_xai_oauth(&store, "rotated-access-token", hour_from_now());
-    request(&provider).await;
     assert_eq!(
-        keyring.read_count("xai/work"),
-        2,
-        "a rotation moves the epoch, so the next request reloads"
+        served_xai_token(&provider).await,
+        "rotated-access-token",
+        "a rotation moves the epoch, so the next request serves the new token"
     );
+    assert_eq!(keyring.read_count("xai/work"), 2);
 
     assert!(store.remove("xai/work").unwrap());
     let error = qq_provider::RequestCredentialProvider::credential(&provider)
@@ -3725,11 +3738,14 @@ async fn xai_request_cache_observes_a_rotation_by_an_independent_store() {
         CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
     let rotating = CredentialStore::with_backends(paths, keyring.clone(), protected);
     set_xai_oauth(&requesting, "first-access-token", hour_from_now());
-    let provider = requesting.xai_request_credentials("work", None);
-    request(&provider).await;
+    let provider = xai::request_credentials_for_test(&requesting, "work");
+    assert_eq!(served_xai_token(&provider).await, "first-access-token");
 
     set_xai_oauth(&rotating, "rotated-by-another-store", hour_from_now());
-    request(&provider).await;
+    assert_eq!(
+        served_xai_token(&provider).await,
+        "rotated-by-another-store"
+    );
     assert_eq!(keyring.read_count("xai/work"), 2);
 
     assert!(rotating.remove("xai/work").unwrap());
@@ -3758,7 +3774,7 @@ async fn xai_request_cache_rechecks_at_its_refresh_deadline_and_refreshes_once()
     qq_provider::RequestCredentialProvider::credential(provider.as_ref())
         .await
         .unwrap();
-    provider.cache.lock().await.as_mut().unwrap().refresh_after = 0;
+    expire_cached(&provider.cache).await;
 
     qq_provider::RequestCredentialProvider::credential(provider.as_ref())
         .await
@@ -3832,16 +3848,107 @@ async fn warm_request_credentials_do_not_wait_behind_a_fill() {
 
     // Hold the fill lock as an in-progress refresh would. A warm request
     // must still complete without it; before AP5, Codex held one cache
-    // mutex across the whole load, so every request waited behind it. The
-    // timeout is a hang guard, not a latency bound: a warm request that
-    // needed the fill lock would never finish while this guard is held.
+    // mutex across the whole load, so every request waited behind it. A
+    // request that tried the fill lock would block here until the guard
+    // drops, so completing proves the warm path; the attempt counter proves
+    // it never even asked.
     let fill = provider.fill.lock().await;
-    tokio::time::timeout(
-        Duration::from_secs(30),
-        qq_provider::RequestCredentialProvider::credential(provider.as_ref()),
-    )
-    .await
-    .expect("a warm request must not wait for an in-progress fill")
-    .unwrap();
+    let attempts = provider
+        .fill_attempts
+        .load(std::sync::atomic::Ordering::SeqCst);
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .fill_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        attempts,
+        "a warm request must not take the fill lock"
+    );
     drop(fill);
+}
+
+/// Uncacheable sources (here a stored xAI API key) never queue on the fill
+/// lock: two first-use requests both miss, the first resolves under `fill`
+/// and finds the source uncacheable, and the second, already queued on
+/// `fill`, gives it up and resolves on the bounded worker pool instead of
+/// resolving serially under the lock.
+#[tokio::test]
+async fn uncacheable_resolutions_release_the_fill_lock_they_were_queued_on() {
+    let (store, keyring, _directory) = test_store();
+    store
+        .set_with_metadata(
+            "xai/work",
+            b"xai-api-key",
+            false,
+            Some("xai"),
+            Some("https://api.x.ai"),
+        )
+        .unwrap();
+    let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
+    let gate = Arc::new(ReadGate::default());
+    keyring.gate_next_read(Arc::clone(&gate));
+
+    let spawn = |provider: &Arc<request::CachedRequestCredentials<xai::XaiSource>>| {
+        let provider = Arc::clone(provider);
+        tokio::spawn(async move {
+            qq_provider::RequestCredentialProvider::credential(provider.as_ref()).await
+        })
+    };
+    // The first request takes `fill` and blocks inside the gated keyring read.
+    let first = spawn(&provider);
+    tokio::task::spawn_blocking({
+        let gate = Arc::clone(&gate);
+        move || gate.entered.wait_for(1)
+    })
+    .await
+    .unwrap();
+    // The second misses too and queues on `fill`.
+    let second = spawn(&provider);
+    while provider
+        .fill_attempts
+        .load(std::sync::atomic::Ordering::SeqCst)
+        < 2
+    {
+        tokio::task::yield_now().await;
+    }
+    gate.release.notify();
+    first.await.unwrap().unwrap();
+    second.await.unwrap().unwrap();
+
+    // The second request must have released `fill` without resolving under
+    // it: holding the lock now, a third uncacheable request still completes
+    // without trying it.
+    let held = provider.fill.lock().await;
+    let attempts = provider
+        .fill_attempts
+        .load(std::sync::atomic::Ordering::SeqCst);
+    qq_provider::RequestCredentialProvider::credential(provider.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(
+        provider
+            .fill_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        attempts
+    );
+    drop(held);
+    assert_eq!(
+        provider.resolved_under_fill_for_test(),
+        1,
+        "only the first request resolved while holding the fill lock"
+    );
+}
+
+/// Moves a cached request credential past its refresh deadline, as time
+/// would, without waiting for it.
+async fn expire_cached<C: Clone>(cache: &tokio::sync::Mutex<Option<Arc<request::Cached<C>>>>) {
+    let mut cache = cache.lock().await;
+    let cached = cache.as_ref().unwrap();
+    *cache = Some(Arc::new(request::Cached {
+        credential: cached.credential.clone(),
+        epoch: cached.epoch,
+        refresh_after: 0,
+    }));
 }
