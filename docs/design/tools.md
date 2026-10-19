@@ -322,8 +322,11 @@ checkpoint annotations, session execution commits the exact ordered projected
 replies and correction notice before sending another provider request. Replay,
 reopen and compaction input use this stored projection verbatim. Descriptor 15
 records the strict policy for unchecked incomplete turns that stopped before
-that barrier; checkpoint-enabled tool turns require the exact projection even
-for final-only reviewers, otherwise reconstruction fails closed;
+that barrier. A checkpoint-enabled tool turn without its exact projection is
+reconstructed generically (unfinished calls replay as cancelled or
+interrupted) unless a `checkpoint_started` or `checkpoint_reviewed` event names
+one of its calls; then reconstruction fails closed, so a verdict, or a review
+cut short, never silently drops out of history;
 known pre-AB2 plans retain the original generic projector. Ambiguous prompt-20
 history without exact replies or policy evidence returns an actionable error.
 A budget cut always names a recall path in its marker: the spill
