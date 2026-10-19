@@ -1313,13 +1313,15 @@ impl App {
         {
             return true;
         }
-        // The rail shows live tails for sessions only; a hidden agent's
-        // stream changes no cell, so it does not wake the frame.
+        // The rail shows live tails for sessions only; a hidden agent's (or a
+        // hidden audit's) stream changes no cell, so it does not wake the
+        // frame.
         let listed_on_rail = self.sessions.get(&event.session_id).is_some_and(|session| {
-            session
-                .summary
-                .parent_id
-                .is_none_or(|parent| !self.sessions.contains_key(&parent))
+            session.summary.purpose != qq_protocol::SessionPurpose::Audit
+                && session
+                    .summary
+                    .parent_id
+                    .is_none_or(|parent| !self.sessions.contains_key(&parent))
         });
         listed_on_rail
             && (self.terminal_width == 0
