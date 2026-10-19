@@ -1862,6 +1862,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                         compaction: sessions::context::CompactionDisposition::Unsupported,
                     });
                     if let Some(message) = sessions::context::rejection_message(plan) {
+                        drop(events);
                         yield RunEvent::Failed {
                             kind: RunFailureKind::Policy,
                             message,
@@ -1945,16 +1946,19 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                     };
                 }
                 RuntimeEvent::Completed { .. } => {
+                    drop(events);
                     yield RunEvent::Completed;
                     return;
                 }
                 RuntimeEvent::Failed { kind, message } => {
+                    drop(events);
                     yield RunEvent::Failed { kind, message };
                     return;
                 }
                 // Direct streams have no durable session to resume. Preserve
                 // the provider failure kind and expose no-progress separately.
                 RuntimeEvent::Paused { pause } => {
+                    drop(events);
                     let (kind, message) = match pause.as_ref() {
                         qq_protocol::RunPause::ProviderRetry { kind, message, attempts, .. } =>
                             (*kind, format!("{message} (paused after {attempts} turn retries)")),
@@ -1967,6 +1971,7 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 // The direct compatibility path imposes no caller limits, so
                 // this cannot occur; surface it truthfully rather than panic.
                 RuntimeEvent::BudgetExhausted { exhaustion } => {
+                    drop(events);
                     yield RunEvent::Failed {
                         kind: RunFailureKind::Policy,
                         message: exhaustion.message,
@@ -2168,6 +2173,72 @@ mod tests {
     use qq_provider::{ProviderError, ProviderStream};
 
     use super::*;
+
+    #[tokio::test]
+    async fn public_terminal_paths_release_the_internal_stream_before_yielding() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let cases = [
+            RuntimeEvent::Completed { final_output: None },
+            RuntimeEvent::Failed {
+                kind: RunFailureKind::Policy,
+                message: "failed".into(),
+            },
+            RuntimeEvent::Paused {
+                pause: Box::new(qq_protocol::RunPause::NoProgress {
+                    turn_ordinal: 1,
+                    slices: 1,
+                    calls: 1,
+                }),
+            },
+            RuntimeEvent::BudgetExhausted {
+                exhaustion: qq_protocol::BudgetExhaustion {
+                    limit: qq_protocol::BudgetLimitKind::Duration,
+                    final_response: false,
+                    message: "budget".into(),
+                },
+            },
+            RuntimeEvent::Prepared {
+                turn_ordinal: 1,
+                identity: None,
+                static_prefix: runtime::PreparedStaticPrefix::new(
+                    qq_protocol::ContentHash::from_bytes([0; 32]),
+                    None,
+                ),
+                weight: runtime::PreparedRequestWeight {
+                    max_output_tokens: 128,
+                    system_bytes: 1_000_000,
+                    tool_schema_bytes: 0,
+                    reducible_message_bytes: 0,
+                    irreducible_message_bytes: 0,
+                    compatible_input_tokens: None,
+                },
+            },
+        ];
+        for event in cases {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let guard = Dropped(dropped.clone());
+            let events: RuntimeStream = Box::pin(stream! {
+                let _guard = guard;
+                yield event;
+                std::future::pending::<()>().await;
+            });
+            let mut public = public_run_stream(events, Some(256));
+            assert!(matches!(
+                public.next().await,
+                Some(RunEvent::Completed | RunEvent::Failed { .. })
+            ));
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "terminal public stream retained internal execution"
+            );
+            assert!(public.next().await.is_none());
+        }
+    }
 
     struct ScriptedProvider {
         request: Arc<Mutex<Option<ModelRequest>>>,

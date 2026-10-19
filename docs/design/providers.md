@@ -127,6 +127,16 @@ probes use `ProviderCompiler::compile_for_canary`, which disables direct HTTP
 and Mantle adapter retries through the facade. Bedrock's AWS SDK client already
 has SDK retries disabled.
 
+`qq-auth` serves every OAuth provider's request-time credentials through one
+`CachedRequestCredentials` (`crates/qq-auth/src/request.rs`). A cached stored
+OAuth credential is reused while the store's credential epoch is unchanged and
+its refresh deadline has not passed; a warm request copies it out and confirms
+it with one epoch read, so concurrent requests on a compiled provider do not
+wait for each other. A miss takes a per-provider fill lock, so one request
+loads or refreshes while the others wait and reuse its result. Explicit
+references, stored API keys and environment variables are resolved on every
+request and never cached, because the epoch cannot see them change.
+
 The header deadline is not a separate setting. reqwest arms its `read_timeout`
 when the request is sent and resets it only on a body read, so `READ_TIMEOUT`
 also bounds the wait for response headers; a provider that accepts a request

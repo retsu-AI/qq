@@ -20,9 +20,26 @@ struct Model {
 }
 impl RuntimeLoader for Loader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
         let ordinal = self.prepared.load(Ordering::SeqCst);
         if ordinal >= 2 && self.scenario != "allowance" {
-            return Box::pin(std::future::pending());
+            // Later goal runs never reach a provider. The driver may queue one
+            // before shutdown; shutdown awaits preparation, so it must stop
+            // when cancelled rather than hang.
+            return Box::pin(async move {
+                progress.cancelled().await;
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Server,
+                    message: "preparation stopped".to_owned(),
+                })
+            });
         }
         self.prepared.fetch_add(1, Ordering::SeqCst);
         let model = Model {
@@ -161,9 +178,23 @@ async fn exercise(scenario: &'static str) {
             after: receipt.committed_through,
         })
         .unwrap();
-    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+    let observed = async {
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut audits = 0;
         loop {
-            let event = events.next().await.unwrap().unwrap();
+            let event = tokio::time::timeout_at(deadline, events.next())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{scenario}: independent bounded audit did not settle: {error}")
+                })
+                .unwrap()
+                .unwrap();
+            if let SessionEvent::GoalUpdated { goal } = &event.event
+                && goal.counters.audits > audits
+            {
+                audits = goal.counters.audits;
+                deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
             if let SessionEvent::GoalUpdated { goal } = event.event
                 && ((scenario == "confirm" && goal.status == qq_protocol::GoalStatus::Achieved)
                     || (scenario == "allowance"
@@ -180,11 +211,8 @@ async fn exercise(scenario: &'static str) {
                 break goal;
             }
         }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!("{scenario}: independent bounded audit did not settle: {error}")
-    });
+    }
+    .await;
     assert_eq!(
         observed.counters.audits,
         if scenario == "allowance" { 8 } else { 1 }
