@@ -12,7 +12,7 @@ import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
 import { collectChanges, type FileChange } from "../lib/changes";
 import { updatePreferences, usePreferences } from "../lib/preferences";
-import { activityLabel, cost, modelLabel, tokens } from "../lib/format";
+import { activityLabel, modelLabel } from "../lib/format";
 import type {
   PendingFile,
   ProjectState,
@@ -194,10 +194,6 @@ function Header({
   toggleChanges: () => void;
 }) {
   const running = transcript.status !== "idle";
-  const limit = transcript.context_window;
-  const used = transcript.context_tokens;
-  const percent =
-    limit && used ? Math.min(100, Math.round((used / limit) * 100)) : null;
   const runningTool = project.sessions.find(
     (s) => s.id === transcript.session_id,
   )?.active_tool;
@@ -224,32 +220,6 @@ function Header({
       >
         {modelLabel(transcript.model, project.models)}
       </span>
-      {percent !== null && (
-        <span
-          className="flex items-center gap-1.5 text-[12px] text-faint"
-          title={`${tokens(used)} of ${tokens(limit)} context tokens`}
-        >
-          <span className="h-1.5 w-12 overflow-hidden rounded-full bg-raised">
-            <span
-              className={clsx(
-                "block h-full rounded-full",
-                percent > 85
-                  ? "bg-danger"
-                  : percent > 65
-                    ? "bg-warn"
-                    : "bg-accent",
-              )}
-              style={{ width: `${percent}%` }}
-            />
-          </span>
-          {percent}%
-        </span>
-      )}
-      {transcript.cost_usd_nanos != null && transcript.cost_usd_nanos > 0 && (
-        <span className="text-[12px] text-faint">
-          {cost(transcript.cost_usd_nanos)}
-        </span>
-      )}
       <button
         onClick={toggleChanges}
         aria-pressed={changesOpen}
