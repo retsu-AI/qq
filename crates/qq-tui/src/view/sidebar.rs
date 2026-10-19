@@ -493,7 +493,14 @@ pub(super) struct RailPlan {
     pub collapsed: Vec<Vec<SessionId>>,
 }
 
+#[cfg(test)]
 pub(super) fn plan_rail(app: &App, density: RailDensity) -> RailPlan {
+    plan_rail_without(app, density, &[])
+}
+
+/// [`plan_rail`] leaving out of the focused session's agent rows the agents
+/// already named elsewhere on screen (a spawned child's live card).
+pub(super) fn plan_rail_without(app: &App, density: RailDensity, shown: &[SessionId]) -> RailPlan {
     let mut collapsed: Vec<Vec<SessionId>> = Vec::new();
     let rollup = rollup(app);
     let focused = app.focused();
@@ -549,13 +556,14 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> RailPlan {
         // (most urgent first), then quiet agents in tree order.
         let mut ranked: Vec<SessionId> = Vec::with_capacity(agents.len());
         ranked.extend(focused.filter(|id| agents.contains(id)));
-        ranked.extend(rollup.needs_under(&entry).filter(|id| Some(*id) != focused));
         ranked.extend(
-            agents
-                .iter()
-                .copied()
-                .filter(|id| Some(*id) != focused && agent_need(&app.sessions[id]).is_none()),
+            rollup
+                .needs_under(&entry)
+                .filter(|id| Some(*id) != focused && !shown.contains(id)),
         );
+        ranked.extend(agents.iter().copied().filter(|id| {
+            Some(*id) != focused && !shown.contains(id) && agent_need(&app.sessions[id]).is_none()
+        }));
         for &id in ranked.iter().take(FOCUSED_AGENT_ROWS) {
             if focused == Some(id) {
                 focused_row = plan.len();
@@ -592,6 +600,7 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
 /// returns the sessions and agents with a waiting approval whose row was
 /// painted, so the composer rule names only the rest, and every session
 /// or agent whose row is inside the window.
+#[cfg(test)]
 pub(super) fn sidebar(
     app: &App,
     width: usize,
@@ -603,6 +612,7 @@ pub(super) fn sidebar(
 
 /// [`sidebar`] with the window's first planned row given, for tests of a
 /// clipped window; `None` centres it on the focused row.
+#[cfg(test)]
 pub(super) fn sidebar_at(
     app: &App,
     width: usize,
@@ -610,12 +620,35 @@ pub(super) fn sidebar_at(
     density: RailDensity,
     window_start: Option<usize>,
 ) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+    sidebar_inner(app, width, height, density, window_start, &[])
+}
+
+/// [`sidebar`] leaving out of the focused session's agent rows the agents
+/// already named elsewhere on screen.
+pub(super) fn sidebar_without(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+    shown: &[SessionId],
+) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+    sidebar_inner(app, width, height, density, None, shown)
+}
+
+fn sidebar_inner(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+    window_start: Option<usize>,
+    shown: &[SessionId],
+) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
     let inner = width.saturating_sub(2);
     let RailPlan {
         rows: plan,
         focused_row,
         collapsed,
-    } = plan_rail(app, density);
+    } = plan_rail_without(app, density, shown);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
     // Sessions and agents whose titled row is on screen.

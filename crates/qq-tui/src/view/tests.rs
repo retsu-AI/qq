@@ -6311,6 +6311,14 @@ fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names()
         !named.contains(&ids[4]),
         "title clipped: the +2 is anonymous"
     );
+    // A window that keeps the title row but ends before the `+2` row: the
+    // collapsed needs have no painted pointer, so they are not named.
+    let named = sidebar_at(&app, 40, more - title, RailDensity::Compact, Some(title)).1;
+    assert!(named.contains(&root) || !named.contains(&ids[4]));
+    assert!(
+        !named.contains(&ids[4]),
+        "the +2 row is clipped: the rule must name them"
+    );
     let _ = root;
 }
 
@@ -6330,10 +6338,67 @@ fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
         rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
         "the card names it: {rows:#?}"
     );
+    // With the rail up too (a second session, pinned rail), the focused
+    // session's agent rows leave the carded child out.
+    let other = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(SessionId::from_bytes([0x5f; 16]))
+    };
+    let (mut railed, _) = app_with_spawned_child();
+    railed
+        .sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    railed.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        20,
+        other.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(other),
+        },
+    )));
+    railed.layout.rail = PanePref::Shown;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut railed, 160, 40));
+    let named: usize = rows
+        .iter()
+        .map(|row| row.matches("survey callers").count())
+        .sum();
+    // The `Spawn` row's subject repeats the task text, plus the card: two.
+    assert_eq!(named, 2, "card and spawn row only, no rail row: {rows:#?}");
     let rule = &rows[rows.len() - 3];
     assert!(
         !rule.contains("survey callers") && !rule.contains("needs approval"),
         "the rule does not repeat it: {rule}"
+    );
+    // A transcript long enough that, at the live tail of a short pane, the
+    // card scrolls out above: the rule names the child again.
+    let focused = app.focused().unwrap();
+    if let Some(messages) = app.sessions.get_mut(&focused).unwrap().messages.as_mut() {
+        for byte in 0..12u8 {
+            messages.push(MessageSnapshot {
+                turn_ordinal: 5,
+                ..fixtures::message(
+                    MessageId::from_bytes([0xa0 + byte; 16]),
+                    focused,
+                    &format!("later line {byte}"),
+                )
+            });
+        }
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
+    assert!(
+        !rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "fixture must scroll the card away: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        rule.contains("survey callers"),
+        "named when off screen: {rows:#?}"
     );
 }
 
