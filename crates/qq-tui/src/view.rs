@@ -196,6 +196,8 @@ pub(crate) struct FrameRenderer {
     selection_stale: bool,
     /// The app's selection with the fingerprint of the frame just built.
     selection_seen: Option<crate::selection::Selection>,
+    /// Sessions the last frame's rail window painted; handed to the app.
+    rail_painted: Option<Vec<SessionId>>,
 }
 
 impl FrameRenderer {
@@ -211,6 +213,7 @@ impl FrameRenderer {
         // Every frame's hit map replaces the last, even an empty one (a
         // too-small terminal), so a click never lands on stale rows.
         app.geometry = std::mem::take(&mut self.geometry);
+        app.rail_painted = self.rail_painted.take();
         // A selection whose cells changed under it (streamed text reflowed
         // or pushed the rows) no longer marks what the user pressed on.
         if self.selection_stale {
@@ -435,10 +438,39 @@ impl FrameRenderer {
             };
             geometry.text_x = slot.area.x + slot.inset + rail;
         }
+        // A spawned child's live card under its spawn call names that child
+        // in the transcript on screen, but only while the card is inside the
+        // viewport: the card's `↳ title` row must be among the body rows
+        // drawn. Such a child is named once: the rule does not repeat it and
+        // the rail does not list it again under the focused session.
+        let mut carded: Vec<SessionId> = Vec::new();
+        if let Some(shown) = app.view().transcript()
+            && let Some(calls) = app
+                .sessions
+                .get(&shown)
+                .and_then(|session| session.tool_calls.as_deref())
+        {
+            let drawn: Vec<String> = body
+                .iter()
+                .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+                .collect();
+            carded.extend(
+                calls
+                    .iter()
+                    .filter_map(|call| app.sessions.child_spawned_by(call.id))
+                    .filter(|child| {
+                        let title = &app.sessions[child].summary.title;
+                        drawn
+                            .iter()
+                            .any(|row| row.contains('↳') && row.contains(title.as_str()))
+                    }),
+            );
+        }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            let painted = sidebar(app, rail.width, body_height, density);
+            let painted = sidebar_without(app, rail.width, body_height, density, &carded);
             rail_named = Some(painted.named);
+            self.rail_painted = Some(painted.window);
             geometry.rail = Some(crate::selection::Area {
                 x: rail.x,
                 y: rail.y,
@@ -447,27 +479,11 @@ impl FrameRenderer {
             });
             geometry.rail_targets = painted.targets;
             columns.push((rail.x, painted.rows));
+        } else {
+            self.rail_painted = Some(Vec::new());
         }
-        // A spawned child's live card under its spawn call names that child
-        // in the transcript on screen, so the rule does not repeat it.
-        if let Some(shown) = app.view().transcript()
-            && let Some(calls) = app
-                .sessions
-                .get(&shown)
-                .and_then(|session| session.tool_calls.as_deref())
-        {
-            let carded = calls
-                .iter()
-                .filter_map(|call| app.sessions.child_spawned_by(call.id));
-            match &mut rail_named {
-                Some(named) => named.extend(carded),
-                None => {
-                    let carded: Vec<SessionId> = carded.collect();
-                    if !carded.is_empty() {
-                        rail_named = Some(carded);
-                    }
-                }
-            }
+        if !carded.is_empty() {
+            rail_named.get_or_insert_with(Vec::new).extend(carded);
         }
         self.geometry = geometry;
         // Each row is measured once and the running width carried through

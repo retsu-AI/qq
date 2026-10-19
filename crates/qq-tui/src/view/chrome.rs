@@ -424,6 +424,46 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         if !hints.is_empty() {
             left.push(format!("  {}", hints.join("  ")), muted());
         }
+    } else if crate::view::listed_sessions(app) < 2
+        && app.layout.rail != crate::view::PanePref::Shown
+    {
+        // With one session there is no rail (under `Auto`) and no strip, so
+        // an agent that failed or finished unseen has nowhere else to
+        // appear: name it here.
+        let unseen: Vec<(&str, bool)> = app
+            .sessions_needing_attention()
+            .into_iter()
+            .filter(|id| Some(*id) != app.view().transcript())
+            .filter_map(|id| {
+                let need = app.attention_need(id)?;
+                let title = app.sessions.get(&id)?.summary.title.as_str();
+                match need {
+                    qq_client::state::Need::Failed => Some((title, true)),
+                    qq_client::state::Need::FinishedUnread => Some((title, false)),
+                    qq_client::state::Need::Approval => None,
+                }
+            })
+            .collect();
+        if let [(first, failed), rest @ ..] = unseen.as_slice() {
+            left.push(if left.is_empty() { " " } else { "  " }, muted());
+            let (glyph, verb, style) = if *failed {
+                ("✕ ", "failed", failure())
+            } else {
+                ("● ", "finished", accent())
+            };
+            left.push(glyph, style.bold());
+            left.push(
+                if rest.is_empty() {
+                    format!("{first} {verb}")
+                } else {
+                    format!("{first} {verb} +{} need you", rest.len())
+                },
+                style,
+            );
+            if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+                left.push(format!("  {chord} jump"), muted());
+            }
+        }
     }
 
     let mut right = Line::default();

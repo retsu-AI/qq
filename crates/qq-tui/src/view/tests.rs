@@ -5529,6 +5529,155 @@ fn deleting_onto_an_audit_fetches_the_fallback_and_a_revealed_audit_moves_focus(
 }
 
 #[test]
+fn eighth_review_round_on_the_rail() {
+    use qq_client::state::Need;
+    // 1. A `/goal` view over an orphan whose missing parent arrives as an
+    //    audit moves focus off it.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x66; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    app.set_view(View::Goal(ids[0]));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_ne!(app.view().session(), Some(ids[0]), "a side view moves too");
+
+    // 2. An orphan session's audit subtree adds its legacy spend.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        summary.accounting = None;
+        summary.estimated_cost_usd_nanos = Some(1_000_000);
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        } else {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    let orphan = SessionSummary {
+        accounting: None,
+        estimated_cost_usd_nanos: Some(4_000_000),
+        parent_id: Some(SessionId::from_bytes([0x67; 16])),
+        ..fixtures::session_summary(SessionId::from_bytes([0x68; 16]))
+    };
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(orphan.id);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        orphan.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(orphan.clone()),
+        },
+    )));
+    app.sessions.remove(&root);
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == orphan.id)
+        .unwrap();
+    assert_eq!(entry.cost, Some(6_000_000), "own + audit + agent under it");
+
+    // 3. Reasoning deltas, and text for a root outside the rail window, do
+    //    not wake the frame.
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    let reasoning = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(RunId::from_bytes([0x69; 16])),
+        ..fixtures::envelope(
+            2,
+            other,
+            SessionEvent::ReasoningDelta {
+                run_id: RunId::from_bytes([0x69; 16]),
+                kind: qq_protocol::ReasoningKind::Summary,
+                text: "thinking".to_owned(),
+            },
+        )
+    }));
+    assert!(!reasoning.redraws(), "{reasoning:?}");
+    app.rail_painted = Some(Vec::new());
+    let text = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(RunId::from_bytes([0x69; 16])),
+        ..fixtures::envelope(
+            3,
+            other,
+            SessionEvent::TextAppended {
+                message_id: MessageId::from_bytes([0x6a; 16]),
+                channel: qq_protocol::TextChannel::Output,
+                text: "out of window".to_owned(),
+            },
+        )
+    }));
+    assert!(!text.redraws(), "{text:?}");
+
+    // 4. Two orphan components with equal needs rank newest first.
+    let older = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x71; 16])),
+        updated_at_ms: 1,
+        ..fixtures::session_summary(SessionId::from_bytes([0xf0; 16]))
+    };
+    let newer = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x72; 16])),
+        updated_at_ms: 9,
+        ..fixtures::session_summary(SessionId::from_bytes([0x01; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![older.clone(), newer.clone()],
+        ..fixtures::workspace_snapshot()
+    }));
+    for id in [older.id, newer.id] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x73; 16]));
+    }
+    assert_eq!(app.sessions_needing_attention(), [newer.id, older.id]);
+
+    // 5. One session whose agent failed unseen: the rule names it.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
+    assert!(rule.contains("✕ agent 0 failed"), "{rule}");
+
+    // 6. /attention shows the unseen failure, not the delegate-owned hold.
+    let hold = ToolCallId::from_bytes([0x74; 16]);
+    {
+        let live = &mut app.sessions.get_mut(&ids[0]).unwrap().live;
+        live.awaiting_approval.insert(hold);
+        live.with_delegate.insert(hold);
+    }
+    assert_eq!(app.attention_need(ids[0]), Some(Need::Failed));
+    app.execute(Command::ShowAttention);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 30));
+    assert!(
+        text.contains("failed") && !text.contains("needs approval"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its
@@ -6580,6 +6729,14 @@ fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names()
         !named.contains(&ids[4]),
         "title clipped: the +2 is anonymous"
     );
+    // A window that keeps the title row but ends before the `+2` row: the
+    // collapsed needs have no painted pointer, so they are not named.
+    let named = sidebar_at(&app, 40, more - title, RailDensity::Compact, Some(title)).named;
+    assert!(named.contains(&root) || !named.contains(&ids[4]));
+    assert!(
+        !named.contains(&ids[4]),
+        "the +2 row is clipped: the rule must name them"
+    );
     let _ = root;
 }
 
@@ -6599,10 +6756,67 @@ fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
         rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
         "the card names it: {rows:#?}"
     );
+    // With the rail up too (a second session, pinned rail), the focused
+    // session's agent rows leave the carded child out.
+    let other = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(SessionId::from_bytes([0x5f; 16]))
+    };
+    let (mut railed, _) = app_with_spawned_child();
+    railed
+        .sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    railed.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        20,
+        other.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(other),
+        },
+    )));
+    railed.layout.rail = PanePref::Shown;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut railed, 160, 40));
+    let named: usize = rows
+        .iter()
+        .map(|row| row.matches("survey callers").count())
+        .sum();
+    // The `Spawn` row's subject repeats the task text, plus the card: two.
+    assert_eq!(named, 2, "card and spawn row only, no rail row: {rows:#?}");
     let rule = &rows[rows.len() - 3];
     assert!(
         !rule.contains("survey callers") && !rule.contains("needs approval"),
         "the rule does not repeat it: {rule}"
+    );
+    // A transcript long enough that, at the live tail of a short pane, the
+    // card scrolls out above: the rule names the child again.
+    let focused = app.focused().unwrap();
+    if let Some(messages) = app.sessions.get_mut(&focused).unwrap().messages.as_mut() {
+        for byte in 0..12u8 {
+            messages.push(MessageSnapshot {
+                turn_ordinal: 5,
+                ..fixtures::message(
+                    MessageId::from_bytes([0xa0 + byte; 16]),
+                    focused,
+                    &format!("later line {byte}"),
+                )
+            });
+        }
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
+    assert!(
+        !rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "fixture must scroll the card away: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        rule.contains("survey callers"),
+        "named when off screen: {rows:#?}"
     );
 }
 

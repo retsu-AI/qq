@@ -392,14 +392,29 @@ pub(super) fn rollup(app: &App) -> Rollup {
         // A temporary session: its loaded descendants roll into it the
         // same way a root's do, depth-first in spawn order.
         let mut pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
-        let mut stack: Vec<SessionId> =
-            app.sessions.children_of(id).iter().rev().copied().collect();
-        while let Some(agent) = stack.pop() {
+        // `(agent, under an audit)`: an audit's subtree is never listed but
+        // its spend still counts toward a legacy session's total.
+        let mut stack: Vec<(SessionId, bool)> = app
+            .sessions
+            .children_of(id)
+            .iter()
+            .rev()
+            .map(|child| (*child, false))
+            .collect();
+        while let Some((agent, hidden)) = stack.pop() {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
             add_legacy_cost(&mut pending, session);
-            if is_audit(session) {
+            let hidden = hidden || is_audit(session);
+            stack.extend(
+                app.sessions
+                    .children_of(agent)
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, hidden)),
+            );
+            if hidden {
                 continue;
             }
             pending.entry.agents += 1;
@@ -413,7 +428,6 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if let Some(agents) = pending.agents.as_mut() {
                 agents.push(agent);
             }
-            stack.extend(app.sessions.children_of(agent).iter().rev().copied());
         }
         finish(pending, &mut rollup);
     }
@@ -479,7 +493,14 @@ pub(super) struct RailPlan {
     pub collapsed: Vec<Vec<SessionId>>,
 }
 
+#[cfg(test)]
 pub(super) fn plan_rail(app: &App, density: RailDensity) -> RailPlan {
+    plan_rail_without(app, density, &[])
+}
+
+/// [`plan_rail`] leaving out of the focused session's agent rows the agents
+/// already named elsewhere on screen (a spawned child's live card).
+pub(super) fn plan_rail_without(app: &App, density: RailDensity, shown: &[SessionId]) -> RailPlan {
     let mut collapsed: Vec<Vec<SessionId>> = Vec::new();
     let rollup = rollup(app);
     let focused = app.focused();
@@ -535,13 +556,14 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> RailPlan {
         // (most urgent first), then quiet agents in tree order.
         let mut ranked: Vec<SessionId> = Vec::with_capacity(agents.len());
         ranked.extend(focused.filter(|id| agents.contains(id)));
-        ranked.extend(rollup.needs_under(&entry).filter(|id| Some(*id) != focused));
         ranked.extend(
-            agents
-                .iter()
-                .copied()
-                .filter(|id| Some(*id) != focused && agent_need(&app.sessions[id]).is_none()),
+            rollup
+                .needs_under(&entry)
+                .filter(|id| Some(*id) != focused && !shown.contains(id)),
         );
+        ranked.extend(agents.iter().copied().filter(|id| {
+            Some(*id) != focused && !shown.contains(id) && agent_need(&app.sessions[id]).is_none()
+        }));
         for &id in ranked.iter().take(FOCUSED_AGENT_ROWS) {
             if focused == Some(id) {
                 focused_row = plan.len();
@@ -575,6 +597,8 @@ pub(super) struct RailFrame {
     pub rows: Vec<Line>,
     pub named: Vec<SessionId>,
     pub targets: Vec<Option<SessionId>>,
+    /// Every session and agent with a row inside the window.
+    pub window: Vec<SessionId>,
 }
 
 /// Right-hand session list grouped by what the user should do about each
@@ -584,12 +608,14 @@ pub(super) struct RailFrame {
 /// the session's cost. Agents appear only under the focused session and
 /// when they need the user. The focused row sits on the selection
 /// background. Always `height` rows so it zips against the body.
+#[cfg(test)]
 pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> RailFrame {
     sidebar_at(app, width, height, density, None)
 }
 
 /// [`sidebar`] with the window's first planned row given, for tests of a
 /// clipped window; `None` centres it on the focused row.
+#[cfg(test)]
 pub(super) fn sidebar_at(
     app: &App,
     width: usize,
@@ -597,16 +623,41 @@ pub(super) fn sidebar_at(
     density: RailDensity,
     window_start: Option<usize>,
 ) -> RailFrame {
+    sidebar_inner(app, width, height, density, window_start, &[])
+}
+
+/// [`sidebar`] leaving out of the focused session's agent rows the agents
+/// already named elsewhere on screen.
+pub(super) fn sidebar_without(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+    shown: &[SessionId],
+) -> RailFrame {
+    sidebar_inner(app, width, height, density, None, shown)
+}
+
+fn sidebar_inner(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+    window_start: Option<usize>,
+    shown: &[SessionId],
+) -> RailFrame {
     let inner = width.saturating_sub(2);
     let RailPlan {
         rows: plan,
         focused_row,
         collapsed,
-    } = plan_rail(app, density);
+    } = plan_rail_without(app, density, shown);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
     let mut targets: Vec<Option<SessionId>> = Vec::with_capacity(height);
     // Sessions and agents whose titled row is on screen.
+    // Every session and agent with a row inside the window.
+    let mut window: Vec<SessionId> = Vec::new();
     let mut painted: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
@@ -656,6 +707,13 @@ pub(super) fn sidebar_at(
                 None
             }
         });
+        match row {
+            RailRow::Session(RailEntry { id, .. })
+            | RailRow::Detail(RailEntry { id, .. })
+            | RailRow::Agent(id)
+            | RailRow::AgentDetail(id) => window.push(id),
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(..) => {}
+        }
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),
             RailRow::Header(group, count) => {
@@ -793,6 +851,7 @@ pub(super) fn sidebar_at(
         rows,
         named,
         targets,
+        window,
     }
 }
 
