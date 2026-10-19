@@ -15,7 +15,11 @@ pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefi
         Some(Need::Approval) => ("◇", warning()),
         Some(Need::Failed) => ("✕", failure()),
         Some(Need::FinishedUnread) => ("●", accent()),
-        None if !view.live.awaiting_approval.is_empty() => (spinner(app.animation_tick), info()),
+        None if !view.live.awaiting_approval.is_empty()
+            || session.running_side_question.is_some() =>
+        {
+            (spinner(app.animation_tick), info())
+        }
         None => match session.status {
             SessionStatus::Idle => match session.last_outcome.as_ref() {
                 Some(qq_protocol::RunOutcome::Completed) => ("●", muted()),

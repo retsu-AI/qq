@@ -1035,7 +1035,17 @@ impl App {
             // A side view over this session keeps showing side questions.
             let side_view =
                 matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == focused_id);
-            if !side_view
+            // An audit is never shown: a snapshot that names one (it was the
+            // newest root) focuses the newest non-audit session instead.
+            if self.under_audit(focused_id) {
+                if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
+                    let target = self.first_listed_root();
+                    self.set_view(View::Transcript(target));
+                    if let Some(target) = target {
+                        self.set_focus(target);
+                    }
+                }
+            } else if !side_view
                 && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
             {
                 self.set_focus(focused_id);
@@ -1043,7 +1053,7 @@ impl App {
                 self.set_focus_clock(focused_id);
             }
         } else if self.focused().is_none()
-            && let Some(first) = self.sessions.roots().first().copied()
+            && let Some(first) = self.first_listed_root()
         {
             self.set_focus(first);
         }
@@ -1183,7 +1193,14 @@ impl App {
                 StateEffect::RequestSnapshot(request) => {
                     effects.push(Effect::Send(ClientRequest::Snapshot(request)));
                 }
-                StateEffect::Refocus(target) => self.set_view(View::Transcript(target)),
+                StateEffect::Refocus(target) => {
+                    // The store picks a neighbour in tree order, which can be
+                    // an audit about to become a root; never show one.
+                    let target = target
+                        .filter(|id| !self.under_audit(*id))
+                        .or_else(|| self.first_listed_root());
+                    self.set_view(View::Transcript(target));
+                }
                 StateEffect::AdoptCreated(session_id) => self.adopt_created_session(session_id),
                 StateEffect::SubmitDraft { session_id, text } => {
                     effects.extend(self.submit_text(session_id, text));
@@ -3304,10 +3321,11 @@ impl App {
         })
     }
 
-    /// Whether `id` or an ancestor is an audit session. Bounded by the tree
-    /// depth.
+    /// Whether `id` or a loaded ancestor is an audit session. Walks parent
+    /// links (not the root index, whose depth is zero inside a component
+    /// whose top parent is not loaded), bounded by the session count.
     fn under_audit(&self, mut id: SessionId) -> bool {
-        for _ in 0..=self.sessions.depth(id) {
+        for _ in 0..=self.sessions.len() {
             let Some(session) = self.sessions.get(&id) else {
                 return false;
             };
@@ -3320,6 +3338,17 @@ impl App {
             }
         }
         false
+    }
+
+    /// The newest root that is not an audit: where focus goes when the
+    /// session it would land on is hidden.
+    fn first_listed_root(&self) -> Option<SessionId> {
+        self.sessions.thread_order().iter().copied().find(|id| {
+            self.sessions
+                .get(id)
+                .is_some_and(|session| session.summary.parent_id.is_none())
+                && !self.under_audit(*id)
+        })
     }
 
     /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,

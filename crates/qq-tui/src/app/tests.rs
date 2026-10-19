@@ -2832,6 +2832,13 @@ fn the_session_picker_left_and_ctrl_a_work_while_searching() {
         2,
         "search cleared, collapsed"
     );
+    // From an expanded session, Left on a found agent keeps it expanded.
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.session_picker_selected(), Some(root));
+    assert_eq!(app.filtered_sessions().len(), 4, "still expanded");
     let _ = child;
     // Ctrl-A toggles with nothing matched.
     app.handle_terminal_event(Event::Paste("zzz".to_owned()));

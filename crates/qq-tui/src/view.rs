@@ -106,7 +106,23 @@ pub(crate) fn listed_sessions(app: &App) -> usize {
     if roots >= 2 {
         return roots;
     }
-    roots + orphans(app).len()
+    // Count orphans only as far as the threshold, without ordering them.
+    if app.sessions.thread_order().len() == app.sessions.len() {
+        return roots;
+    }
+    roots
+        + app
+            .sessions
+            .values()
+            .filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !app.sessions.contains_key(&parent))
+                    && !is_audit(session)
+            })
+            .take(2 - roots)
+            .count()
 }
 
 /// Whether the sessions rail is on screen at `width` under `prefs`. Shared
