@@ -6196,6 +6196,57 @@ fn a_release_at_another_cell_without_a_drag_selects_and_copies() {
 }
 
 #[test]
+fn a_wrapped_paragraph_dragged_in_the_real_transcript_copies_as_one_line() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let summary = fixtures::session_summary(SESSION);
+    let paragraph = "the quick brown fox jumps over the lazy dog and keeps on running far away";
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![summary.clone()],
+        focused: Some(SessionSnapshot {
+            messages: vec![completed_message(1, paragraph.to_owned())],
+            ..fixtures::session_snapshot(summary)
+        }),
+        ..fixtures::workspace_snapshot()
+    }));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 40, 24));
+    let first = rows
+        .iter()
+        .position(|row| row.contains("the quick"))
+        .unwrap();
+    let last = rows.iter().rposition(|row| row.contains("away")).unwrap();
+    assert!(last > first, "the paragraph wraps: {rows:#?}");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        u16::try_from(first).unwrap(),
+    ));
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        39,
+        u16::try_from(last).unwrap(),
+    ));
+    let effects = app.handle_terminal_event(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        39,
+        u16::try_from(last).unwrap(),
+    ));
+    let selection = effects
+        .iter()
+        .find_map(|effect| match effect {
+            crate::effect::Effect::CopySelection(selection) => Some(*selection),
+            _ => None,
+        })
+        .expect("release copies");
+    // The frame the loop reads, with the selection painted on it.
+    let drawn = renderer.frame_and_commit(&mut app, 40, 24);
+    let copied = selection.text(&drawn);
+    assert_eq!(copied.text, paragraph, "{copied:?}");
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

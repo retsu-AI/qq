@@ -495,6 +495,7 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                         );
                         continuation
                     };
+                    assembled.wrapped = row.wrapped;
                     for span in row.spans {
                         assembled.push(span.text, span.style);
                     }

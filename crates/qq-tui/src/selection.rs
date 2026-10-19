@@ -184,7 +184,14 @@ impl Selection {
             let Some(line) = lines.get_mut(row) else {
                 continue;
             };
-            let mut painted = Line::default();
+            // `cells` turns the indent into leading blank cells, so the
+            // painted row has none; its wrap and chrome carry over.
+            let mut painted = Line {
+                indent: 0,
+                wrapped: line.wrapped,
+                chrome: line.chrome,
+                spans: Vec::new(),
+            };
             for (start, end, grapheme, style) in cells(line) {
                 let style = if start < to && end > from {
                     selection(style)

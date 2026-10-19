@@ -163,6 +163,9 @@ pub(crate) fn indent_lines(
         .into_iter()
         .map(|line| {
             let mut indented = Line::styled(prefix, prefix_style);
+            // How the row continues, and its chrome after the new prefix.
+            indented.wrapped = line.wrapped;
+            indented.chrome = line.chrome;
             // A row's own margin (`Line::indent`) sits after the prefix, so
             // it becomes cells here rather than being dropped.
             if line.indent > 0 {
@@ -183,7 +186,12 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
     if width <= 3 {
         return Line::styled(".".repeat(width), muted());
     }
-    let mut output = Line::default();
+    let mut output = Line {
+        indent: 0,
+        wrapped: line.wrapped,
+        chrome: line.chrome,
+        spans: Vec::new(),
+    };
     let mut used = 0_usize;
     let content_width = width - 3;
     for span in line.spans {
