@@ -5334,6 +5334,114 @@ fn a_running_side_question_keeps_the_spinner_animating() {
 }
 
 #[test]
+fn a_side_question_tick_redraws_and_unread_outcomes_survive_a_delegate_hold() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x84; 16]));
+    assert!(app.advance_animation(), "the spinner frame is drawn");
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = None;
+    // An unseen failure, then a later run held by a delegate.
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+        let hold = ToolCallId::from_bytes([0x83; 16]);
+        view.live.awaiting_approval.insert(hold);
+        view.live.with_delegate.insert(hold);
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert_eq!(app.sessions_needing_attention(), [ids[0]]);
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.group, RailGroup::NeedsYou);
+}
+
+#[test]
+fn a_legacy_session_sums_its_agents_direct_spend() {
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        summary.accounting = None;
+        summary.estimated_cost_usd_nanos = Some(if index == 0 { 10_000_000 } else { 20_000_000 });
+        if index == 1 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        }
+    });
+    {
+        let summary = &mut app.sessions.get_mut(&root).unwrap().summary;
+        summary.accounting = None;
+        summary.estimated_cost_usd_nanos = Some(5_000_000);
+    }
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, Some(35_000_000), "own + agent + audit");
+    let _ = ids;
+}
+
+#[test]
+fn deleting_onto_an_audit_fetches_the_fallback_and_a_revealed_audit_moves_focus() {
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+        summary.updated_at_ms = 999;
+    });
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.focus_session(root);
+    let effects = app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    assert_eq!(app.focused(), Some(other));
+    let requested: Vec<_> = effects
+        .into_requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            ClientRequest::Snapshot(snapshot) => snapshot.focused_session_id,
+            _ => None,
+        })
+        .collect();
+    assert!(!requested.contains(&ids[0]), "no fetch for the audit");
+    assert!(
+        app.sessions[&other].is_warm() || requested.contains(&other),
+        "the fallback is fetched: {requested:?}"
+    );
+
+    // An orphan task is focused; its parent arrives and is an audit.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        ..fixtures::session_summary(missing)
+    };
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(audit),
+        },
+    )));
+    assert_ne!(app.focused(), Some(ids[0]), "a hidden session is not shown");
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its
@@ -5578,8 +5686,10 @@ fn a_waiting_approval_is_named_once_per_frame_outside_its_transcript() {
 }
 
 #[test]
-fn approvals_collapsed_off_the_rail_are_named_on_the_rule_instead() {
-    // Five waiting agents under an unfocused session: the rail names three.
+fn needs_collapsed_under_a_rail_pointer_are_not_repeated_on_the_rule() {
+    // Five waiting agents under an unfocused session: the rail names three
+    // and its `+2 need you` row points at the rest, so the rule adds no
+    // second pointer and offers only the answer chords.
     let (mut app, _, ids) = app_with_fanout(5);
     for (index, id) in ids.iter().enumerate() {
         app.sessions
@@ -5591,15 +5701,64 @@ fn approvals_collapsed_off_the_rail_are_named_on_the_rule_instead() {
     }
     app.focus_session(SessionId::from_bytes([0x11; 16]));
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
-    // The rail names three; the rule names the first collapsed one and
-    // counts the rest. None is named twice.
-    for index in 0..4 {
+    for index in 0..3 {
         let name = format!("agent {index}");
         let count: usize = rows.iter().map(|row| row.matches(&name).count()).sum();
         assert_eq!(count, 1, "{name} named once: {rows:#?}");
     }
+    assert!(
+        rows.iter().any(|row| row.contains("+2 need you")),
+        "{rows:#?}"
+    );
     let rule = &rows[rows.len() - 3];
-    assert!(rule.contains("agent 3 +1 need approval"), "{rule}");
+    assert!(!rule.contains("need approval"), "no second pointer: {rule}");
+    assert!(rule.contains("M-A/M-D answer"), "{rule}");
+}
+
+#[test]
+fn a_notice_counts_failures_beside_approvals_and_a_finish_behind_a_side_view_is_named() {
+    // One session: an agent waits on the human and another failed unseen,
+    // with a notice on the rule.
+    let (mut app, root, ids) = app_with_fanout(2);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x84; 16]));
+    {
+        let view = app.sessions.get_mut(&ids[1]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    app.set_info_for_test("theme saved");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("✕ 1"),
+        "{rule}"
+    );
+
+    // A finish of the followed session while `/goal` is open is unseen.
+    let (mut app, root, _) = app_with_fanout(0);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.focus_session(root);
+    app.sessions.get_mut(&root).unwrap().goal = Some(fixtures::goal_snapshot(root));
+    app.set_view(View::Goal(root));
+    {
+        let view = app.sessions.get_mut(&root).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        view.finished_unread = true;
+    }
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
+    assert!(rule.contains("Fan out finished"), "{rule}");
 }
 
 fn mouse_at(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> TerminalEvent {
@@ -6028,6 +6187,48 @@ fn the_approval_chords_survive_a_long_status_and_delegate_holds_are_not_answerab
         KeyModifiers::ALT,
     )));
     assert!(effects.into_requests().is_empty(), "nothing approved");
+}
+
+#[test]
+fn alt_a_answers_the_escalated_call_not_an_earlier_delegate_owned_one() {
+    let (mut app, _, child, run_id, human_call) = app_with_child_awaiting_approval();
+    // An earlier call in the same session is still the delegate's.
+    let delegated = ToolCallId::from_bytes([0x3f; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: 4,
+        ..fixtures::envelope(
+            3,
+            child,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    run_id,
+                    call_ordinal: 0,
+                    provider_call_id: "d".to_owned(),
+                    arguments: r#"{"command":"ls"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    ..fixtures::tool_call(delegated, child, "shell")
+                },
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
+            },
+        )
+    }));
+    let view = app.sessions.get_mut(&child).unwrap();
+    view.live.with_delegate.insert(delegated);
+    if let Some(calls) = view.tool_calls.as_mut() {
+        calls.sort_by_key(|call| call.id != delegated);
+    }
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::ALT,
+    )));
+    let requests = format!("{:?}", effects.into_requests());
+    assert!(requests.contains(&format!("{human_call:?}")), "{requests}");
+    assert!(!requests.contains(&format!("{delegated:?}")), "{requests}");
 }
 
 #[test]

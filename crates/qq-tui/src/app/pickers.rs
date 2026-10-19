@@ -1264,8 +1264,10 @@ impl App {
                 // keep the agent listed, so collapsing alone may not move
                 // the cursor, and a search may hide the session row, so
                 // `Left` from a found agent clears the search to show it,
-                // leaving the session's expansion as it was.
-                if !*every_agent && picker.query.is_empty() {
+                // leaving the session's expansion as it was. Outside a search
+                // it collapses the session even under `Ctrl-A`, so turning
+                // `Ctrl-A` off later leaves it collapsed.
+                if picker.query.is_empty() {
                     expanded.remove(&root);
                 }
                 picker.query.clear();

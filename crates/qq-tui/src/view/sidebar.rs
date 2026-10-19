@@ -169,10 +169,15 @@ pub(super) fn agent_need(session: &SessionView) -> Option<Need> {
     if human_waiting(session) {
         return Some(Need::Approval);
     }
-    match session.need() {
-        Some(Need::Approval) | None => None,
-        Some(need @ (Need::Failed | Need::FinishedUnread)) => Some(need),
+    // `need()` reports any waiting hold first; with every hold owned by a
+    // delegate, an unseen outcome from an earlier run still needs the user.
+    if !session.finished_unread {
+        return None;
     }
+    Some(match session.summary.last_outcome {
+        Some(qq_protocol::RunOutcome::Failed { .. }) => Need::Failed,
+        _ => Need::FinishedUnread,
+    })
 }
 
 /// Agents whose session is not loaded (a bounded snapshot can carry a child
@@ -222,6 +227,34 @@ struct Pending {
     own: Group,
     needs_you: bool,
     agents: Option<Vec<SessionId>>,
+    /// The session's summary predates inclusive accounting: its cost is its
+    /// own direct alias plus each loaded agent's (audits included).
+    legacy_cost: bool,
+}
+
+/// A summary's own spend in nanos: inclusive when it has accounting, the
+/// direct compatibility alias otherwise.
+fn own_cost(session: &SessionView) -> Option<u64> {
+    session
+        .summary
+        .accounting
+        .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
+        .unwrap_or(session.summary.estimated_cost_usd_nanos)
+}
+
+/// Add a loaded agent's direct spend to a legacy session's sum.
+fn add_legacy_cost(pending: &mut Pending, agent: &SessionView) {
+    if !pending.legacy_cost {
+        return;
+    }
+    let direct = agent
+        .summary
+        .accounting
+        .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
+        .unwrap_or(agent.summary.estimated_cost_usd_nanos);
+    if let Some(direct) = direct.filter(|nanos| *nanos > 0) {
+        pending.entry.cost = Some(pending.entry.cost.unwrap_or(0).saturating_add(direct));
+    }
 }
 
 pub(super) fn rollup(app: &App) -> Rollup {
@@ -252,6 +285,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             own,
             needs_you,
             agents,
+            ..
         } = pending;
         // Most urgent first; tree order within a rank (stable sort).
         let start = entry.needs_start as usize;
@@ -276,12 +310,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             || session.summary.status == SessionStatus::Running
             || session.summary.queued_prompts > 0
             || (!is_focused && !session.live.tail.is_empty());
-        let cost = session
-            .summary
-            .accounting
-            .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
-            .unwrap_or(session.summary.estimated_cost_usd_nanos)
-            .filter(|nanos| *nanos > 0);
+        let cost = own_cost(session).filter(|nanos| *nanos > 0);
         let needs_start = u32::try_from(needs_start).unwrap_or(u32::MAX);
         Pending {
             entry: RailEntry {
@@ -298,6 +327,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             own: own_group(session),
             needs_you: false,
             agents: (focused_root == Some(id)).then(Vec::new),
+            legacy_cost: session.summary.accounting.is_none(),
         }
     };
     for &id in order {
@@ -312,9 +342,12 @@ pub(super) fn rollup(app: &App) -> Rollup {
         }
         if is_audit(session) {
             // An audit root (its parent was deleted) closes the session
-            // before it like any root, then is skipped with its subtree.
+            // before it like any root, then is skipped with its subtree. An
+            // audit agent's spend still counts toward a legacy session.
             if root && let Some(pending) = current.take() {
                 finish(pending, &mut rollup);
+            } else if let Some(pending) = current.as_mut() {
+                add_legacy_cost(pending, session);
             }
             audit_depth = Some(app.sessions.depth(id));
             continue;
@@ -330,6 +363,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
         let Some(pending) = current.as_mut() else {
             continue;
         };
+        add_legacy_cost(pending, session);
         pending.entry.agents += 1;
         if is_working(session) {
             pending.entry.agents_working += 1;
@@ -357,6 +391,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
+            add_legacy_cost(&mut pending, session);
             if is_audit(session) {
                 continue;
             }
@@ -419,7 +454,9 @@ pub(super) enum RailRow {
     Agent(SessionId),
     AgentDetail(SessionId),
     More(usize),
-    MoreWaiting(usize),
+    /// `+N need you` for the session's needs past the cap: a pointer on
+    /// screen for each of them, so the rule does not repeat them.
+    MoreWaiting(SessionId, usize),
 }
 
 /// Rows planned from one [`rollup`] and the index of the focused row: a row
@@ -469,9 +506,9 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             for agent in needs.by_ref().take(WAITING_AGENT_ROWS) {
                 agent_rows(&mut plan, agent);
             }
-            let rest = needs.count();
-            if rest > 0 {
-                plan.push(RailRow::MoreWaiting(rest));
+            let rest: Vec<SessionId> = needs.collect();
+            if !rest.is_empty() {
+                plan.push(RailRow::MoreWaiting(entry.id, rest.len()));
             }
             continue;
         };
@@ -498,6 +535,18 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
         }
     }
     (plan, focused_row)
+}
+
+/// The agents under `session` that need the user past
+/// [`WAITING_AGENT_ROWS`]: the ones a `+N need you` row stands for.
+fn collapsed_needs(app: &App, session: SessionId) -> Vec<SessionId> {
+    let rollup = rollup(app);
+    rollup
+        .sessions
+        .iter()
+        .find(|entry| entry.id == session)
+        .map(|entry| rollup.needs_under(entry).skip(WAITING_AGENT_ROWS).collect())
+        .unwrap_or_default()
 }
 
 /// The first planned row the rail draws at `height`: the window is centered
@@ -672,7 +721,7 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
                 line.push("  /agents", muted().italic());
                 truncate_line(line, width)
             }
-            RailRow::MoreWaiting(count) => {
+            RailRow::MoreWaiting(_, count) => {
                 let mut line = Line::styled(format!("│   +{count} need you"), warning());
                 if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
                     line.push(format!("  {chord}"), muted());
@@ -685,6 +734,10 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
             && rows.last().is_some_and(|line| titled(line, id))
         {
             named.push(id);
+        }
+        // The collapsed needs are pointed at by this row already.
+        if let RailRow::MoreWaiting(session, _) = row {
+            named.extend(collapsed_needs(app, session));
         }
     }
     while rows.len() < height {
