@@ -466,10 +466,9 @@ pub(super) fn sidebar(
     };
     for row in plan.into_iter().skip(start).take(height) {
         if let RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) = row
-            && app
-                .sessions
-                .get(&id)
-                .is_some_and(|session| !session.live.awaiting_approval.is_empty())
+            && app.sessions.get(&id).is_some_and(|session| {
+                agent_need(session).is_some() || !session.live.awaiting_approval.is_empty()
+            })
         {
             named.push(id);
         }

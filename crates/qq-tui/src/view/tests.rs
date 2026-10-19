@@ -5356,6 +5356,34 @@ fn approvals_collapsed_off_the_rail_are_named_on_the_rule_instead() {
 }
 
 #[test]
+fn a_lone_sessions_failed_agent_is_named_on_the_rule() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert!(!rows.iter().any(|row| row.contains("RECENT")), "no rail");
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("✕ agent 0 failed"), "{rule}");
+    // Narrow and long: the name truncates before the rule loses its point.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.title = "x".repeat(200);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 60, 24));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.starts_with(" ✕ xxx"), "{rule}");
+    assert!(rule.chars().count() <= 60, "{rule}");
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();

@@ -296,6 +296,12 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         .into_iter()
         // A side view hides its source transcript's approval block.
         .filter(|id| Some(*id) != app.view().transcript())
+        // A delegate still owns these; the human is not asked yet.
+        .filter(|id| {
+            app.sessions.get(id).is_some_and(|session| {
+                session.live.awaiting_approval.len() > session.live.with_delegate.len()
+            })
+        })
         .collect();
     let waiting: Vec<&str> = all_waiting
         .iter()
@@ -303,6 +309,49 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         .filter_map(|id| app.sessions.get(id))
         .map(|session| session.summary.title.as_str())
         .collect();
+    // Agents that failed or finished unseen and whose row is not on screen:
+    // a session's own state shows on its rail row or the strip, but an
+    // agent's has nowhere else to appear.
+    let unseen: Vec<(&str, bool)> = if waiting.is_empty() {
+        app.sessions_needing_attention()
+            .into_iter()
+            .filter(|id| Some(*id) != app.focused())
+            .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+            .filter_map(|id| app.sessions.get(&id))
+            .filter(|session| session.summary.parent_id.is_some())
+            .filter_map(|session| match super::sidebar::agent_need(session) {
+                Some(qq_client::state::Need::Failed) => {
+                    Some((session.summary.title.as_str(), true))
+                }
+                Some(qq_client::state::Need::FinishedUnread) => {
+                    Some((session.summary.title.as_str(), false))
+                }
+                Some(qq_client::state::Need::Approval) | None => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let [(first, failed), rest @ ..] = unseen.as_slice() {
+        left.push(if left.is_empty() { " " } else { "  " }, muted());
+        let (glyph, verb, style) = if *failed {
+            ("✕ ", "failed", failure())
+        } else {
+            ("● ", "finished", accent())
+        };
+        left.push(glyph, style.bold());
+        left.push(
+            if rest.is_empty() {
+                format!("{first} {verb}")
+            } else {
+                format!("{first} {verb} +{} need you", rest.len())
+            },
+            style,
+        );
+        if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+            left.push(format!("  {chord} jump"), muted());
+        }
+    }
     if !waiting.is_empty() {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
