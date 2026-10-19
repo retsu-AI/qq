@@ -1,7 +1,7 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
                                                                                             │ NEEDS YOU  2
  ▌ YOU                                                                                      │ ● Refactor          1 new
- ▌ plan the release                                                                         │ ○ Session 0         ↳1 ◐1
+ ▌ plan the release                                                                         │ ○ Session 0            ↳1
                                                                                             │ ↳ ◇ Deploy helper
    QQ                                                                                       │     ◇ approve run
    Drafted the checklist.                                                                   │

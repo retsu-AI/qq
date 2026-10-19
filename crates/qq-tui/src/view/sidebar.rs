@@ -144,14 +144,18 @@ pub(super) fn human_waiting(session: &SessionView) -> bool {
     session.live.awaiting_approval.len() > session.live.with_delegate.len()
 }
 
-/// Whether `session` is doing work: running, queued, answering a side
-/// question, or waiting on an approval delegate.
-fn is_working(session: &SessionView) -> bool {
+/// Whether `session` is doing work: running or queued (unless it is blocked
+/// on the human's approval), answering a side question, or waiting on an
+/// approval delegate.
+pub(super) fn is_working(session: &SessionView) -> bool {
+    if human_waiting(session) {
+        return false;
+    }
     matches!(
         session.summary.status,
         SessionStatus::Running | SessionStatus::Queued
     ) || session.summary.running_side_question.is_some()
-        || (!session.live.with_delegate.is_empty() && !human_waiting(session))
+        || !session.live.with_delegate.is_empty()
 }
 
 /// Why an agent needs the user, if it does. Like [`SessionView::need`],
