@@ -22,6 +22,7 @@ use qq_provider::SecretRef;
 mod backend;
 mod codex;
 mod oauth;
+mod request;
 mod state;
 mod xai;
 

@@ -660,6 +660,15 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
 
 #[tokio::test]
 async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict() {
+    checkpoint_without_exact_projection_fails_closed(true).await;
+}
+
+#[tokio::test]
+async fn ab2_started_checkpoint_without_verdict_or_projection_fails_closed() {
+    checkpoint_without_exact_projection_fails_closed(false).await;
+}
+
+async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -669,22 +678,35 @@ async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict(
         connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
         Ok(())
     }).await.unwrap();
-    store
-        .record_checkpoint(
-            &claimed,
-            super::super::streaming::CheckpointRecord {
-                correlation: "checkpoint-proof".to_owned(),
-                phase: qq_protocol::CheckpointPhase::ToolResult,
-                tool_call_id: Some(ids[0]),
-                outcome: qq_protocol::CheckpointOutcome::Contradicted,
-                confidence_basis_points: Some(10_000),
-                feedback: "the result contradicts the task".to_owned(),
-                spend: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+    if reviewed {
+        store
+            .record_checkpoint(
+                &claimed,
+                super::super::streaming::CheckpointRecord {
+                    correlation: "checkpoint-proof".to_owned(),
+                    phase: qq_protocol::CheckpointPhase::ToolResult,
+                    tool_call_id: Some(ids[0]),
+                    outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                    confidence_basis_points: Some(10_000),
+                    feedback: "the result contradicts the task".to_owned(),
+                    spend: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    } else {
+        // The process died after the review started and before its verdict.
+        store
+            .record_checkpoint_started(
+                &claimed,
+                "checkpoint-proof".to_owned(),
+                qq_protocol::CheckpointPhase::ToolResult,
+                Some(ids[0]),
+            )
+            .await
+            .unwrap();
+    }
     store
         .finish_run(
             &claimed,
@@ -836,5 +858,185 @@ async fn ab2_oversized_checkpoint_feedback_persists_the_corrective_request() {
         if failure.message.contains("exact tool-result projection"))));
     assert_eq!(requests.lock().unwrap().len(), 2);
     assert!(!*runtime.inner.failed.borrow());
+    runtime.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_a_reviewed_run_awaiting_tool_approval_keeps_the_session_usable() {
+    reviewed_run_ended_while_awaiting_tool_approval(false).await;
+}
+
+#[tokio::test]
+async fn restarting_during_a_reviewed_runs_tool_approval_keeps_the_session_usable() {
+    reviewed_run_ended_while_awaiting_tool_approval(true).await;
+}
+
+async fn reviewed_run_ended_while_awaiting_tool_approval(restart: bool) {
+    struct Supported;
+    impl CheckpointReviewer for Supported {
+        fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
+            Box::pin(std::future::ready(CheckpointVerdict {
+                spend: qq_protocol::CheckpointSpend::default(),
+                confidence: Some(1.0),
+                outcome: CheckpointOutcome::Supported,
+                feedback: String::new(),
+            }))
+        }
+    }
+    struct Loader(Arc<StdMutex<Vec<ModelRequest>>>, StdMutex<usize>);
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let mut loads = self.1.lock().unwrap();
+            let script = if *loads == 0 {
+                vec![(
+                    "write_file",
+                    r#"{"path":"note.txt","content":"changed\n"}"#.to_owned(),
+                )]
+            } else {
+                Vec::new()
+            };
+            *loads += 1;
+            let provider = ScriptedRunProvider {
+                requests: Arc::clone(&self.0),
+                script,
+                turn: StdMutex::new(0),
+            };
+            Box::pin(async move {
+                let runtime = Runtime::new(provider, "test-model", 256)
+                    .unwrap()
+                    .with_checkpoint_reviewer(Arc::new(Supported));
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(Loader(Arc::clone(&requests), StdMutex::new(0))),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run_id = submit_prompt_to(&runtime, session_id, "edit the note").await;
+    collect_until_approval_requested(&mut events).await;
+    let runtime = if restart {
+        runtime.close().await.unwrap();
+        let reopened = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader(Arc::clone(&requests), StdMutex::new(1))),
+        )
+        .await
+        .unwrap();
+        let (_, after) = resolve_workspace(&reopened, directory.path()).await;
+        events = reopened
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after,
+            })
+            .unwrap();
+        reopened
+    } else {
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CancelRun { run_id },
+            )
+            .await
+            .unwrap();
+        let cancelled = collect_through_finished(&mut events).await;
+        assert!(
+            cancelled.iter().any(|event| matches!(
+                &event.event,
+                SessionEvent::RunFinished {
+                    outcome: RunOutcome::Cancelled,
+                    ..
+                }
+            )),
+            "{cancelled:?}"
+        );
+        runtime
+    };
+    let reviewed: bool = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT json_type(plan_descriptor_json,'$.checkpoint') NOT IN ('null') FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(reviewed, "the cancelled run must be a reviewed run");
+    let before = requests.lock().unwrap().len();
+    submit_prompt_to(&runtime, session_id, "continue").await;
+    let continued = collect_through_finished(&mut events).await;
+    assert!(
+        continued.iter().any(|event| matches!(
+            &event.event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        )),
+        "ending a held reviewed run must not make the conversation unusable: {continued:?}"
+    );
+    assert_eq!(requests.lock().unwrap().len(), before + 1);
+    {
+        let requests = requests.lock().unwrap();
+        let messages = requests[before].messages();
+        let original_prompt = messages
+            .iter()
+            .position(|message| message == &Message::user("edit the note"))
+            .expect("continuation must retain the original user prompt");
+        let call = messages
+            .iter()
+            .position(|message| {
+                message.role() == Role::Assistant
+                    && message.content().iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::ToolCall { id, name, .. }
+                                if id == "call_0" && name == "write_file"
+                        )
+                    })
+            })
+            .expect("continuation must retain the assistant's write_file call_0");
+        let result = messages
+            .iter()
+            .position(|message| {
+                message.role() == Role::User
+                    && message.content().iter().any(|block| matches!(
+                        block,
+                        ContentBlock::ToolResult { call_id, content, is_error: true }
+                            if call_id == "call_0"
+                                && matches!(content.as_str(),
+                                    "Tool execution did not start before the run was cancelled."
+                                    | "Tool execution did not start before the run was interrupted.")
+                    ))
+            })
+            .expect("continuation must retain call_0's explicit cancelled/interrupted error result");
+        let continuation = messages
+            .iter()
+            .position(|message| message == &Message::user("continue"))
+            .expect("continuation must include the new user prompt");
+        assert!(
+            original_prompt < call && call < result && result < continuation,
+            "continuation must preserve prompt, call, interrupted result, then new prompt: {messages:?}"
+        );
+    }
     runtime.close().await.unwrap();
 }

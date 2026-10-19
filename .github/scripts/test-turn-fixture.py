@@ -9,6 +9,66 @@ from pathlib import Path
 
 
 class FixtureTests(unittest.TestCase):
+
+    def test_h0_dispatch_refuses_changed_budgets_outside_pinned_legacy_contract(self):
+        import os
+        import textwrap
+        workflow = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
+        start = workflow.index("          baseline = json.loads(Path('baseline/benchmarks/perf/budgets-v1.json')")
+        end = workflow.index("          PYTHON", start)
+        code = textwrap.dedent(workflow[start:end])
+        original = Path.cwd()
+        baseline_sha = os.environ.get("BASELINE_SHA")
+        try:
+            os.chdir(self.root)
+            os.environ["BASELINE_SHA"] = "a" * 40
+            for arm in ["baseline", "candidate"]:
+                path = Path(arm) / "benchmarks/perf"
+                path.mkdir(parents=True)
+                (path / "budgets-v1.json").write_text(json.dumps({"fixture_version": 5, "metrics": [{"metric": "provider_retry_amplification_milli", "maximum_p95": 6300}]}))
+            exec(code, {"json": json, "Path": Path, "os": os})
+            candidate = Path("candidate/benchmarks/perf/budgets-v1.json")
+            changed = json.loads(candidate.read_text())
+            changed["metrics"][0]["maximum_p95"] = 7000
+            candidate.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(SystemExit, "unchanged budgets"):
+                exec(code, {"json": json, "Path": Path, "os": os})
+        finally:
+            os.chdir(original)
+            if baseline_sha is None:
+                os.environ.pop("BASELINE_SHA", None)
+            else:
+                os.environ["BASELINE_SHA"] = baseline_sha
+
+    def test_benchmark_arm_comparison_rejects_debuginfo_mismatch(self):
+        import textwrap
+        workflow = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
+        start = workflow.index("              for key in (")
+        end = workflow.index("          PYTHON", start)
+        code = textwrap.dedent(workflow[start:end])
+        profile = {"debug_assertions": False, "overflow_checks": False, "test": False, "debuginfo": 0}
+        exec(code, {"baseline": {"profile": profile}, "profile": profile.copy()})
+        for key in profile:
+            candidate = profile.copy()
+            candidate[key] = 2 if key == "debuginfo" else True
+            with self.subTest(setting=key), self.assertRaisesRegex(SystemExit, key):
+                exec(code, {"baseline": {"profile": profile}, "profile": candidate})
+
+    def test_workflow_optimization_fallback_matches_build_and_validation(self):
+        workflow = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
+        build_line = next(line for line in workflow.splitlines() if "final_opt=$(python3" in line)
+        build = build_line.split("print(", 1)[1].rsplit(")", 2)[0]
+        validation_line = next(line for line in workflow.splitlines() if "expected_opt = str(" in line)
+        validation = validation_line.split("str(", 1)[1].rsplit(")", 1)[0]
+        for release, expected in [
+            ({}, "3"),
+            ({"opt-level": "s"}, "s"),
+            ({"opt-level": 2}, "2"),
+            ({"opt-level": "s", "package": {"qq-core": {"opt-level": "z"}}}, "z"),
+        ]:
+            with self.subTest(release=release):
+                self.assertEqual(str(eval(build, {"p": release})), expected)
+                self.assertEqual(str(eval(validation, {"release": release})), expected)
     def setUp(self):
         spec = importlib.util.spec_from_file_location(
             "fixture", Path(__file__).with_name("turn-fixture.py"))
