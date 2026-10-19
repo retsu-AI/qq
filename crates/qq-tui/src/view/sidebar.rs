@@ -454,7 +454,9 @@ pub(super) enum RailRow {
     Agent(SessionId),
     AgentDetail(SessionId),
     More(usize),
-    MoreWaiting(usize),
+    /// `+N need you` for the session's needs past the cap: a pointer on
+    /// screen for each of them, so the rule does not repeat them.
+    MoreWaiting(SessionId, usize),
 }
 
 /// Rows planned from one [`rollup`] and the index of the focused row: a row
@@ -504,9 +506,9 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             for agent in needs.by_ref().take(WAITING_AGENT_ROWS) {
                 agent_rows(&mut plan, agent);
             }
-            let rest = needs.count();
-            if rest > 0 {
-                plan.push(RailRow::MoreWaiting(rest));
+            let rest: Vec<SessionId> = needs.collect();
+            if !rest.is_empty() {
+                plan.push(RailRow::MoreWaiting(entry.id, rest.len()));
             }
             continue;
         };
@@ -533,6 +535,18 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
         }
     }
     (plan, focused_row)
+}
+
+/// The agents under `session` that need the user past
+/// [`WAITING_AGENT_ROWS`]: the ones a `+N need you` row stands for.
+fn collapsed_needs(app: &App, session: SessionId) -> Vec<SessionId> {
+    let rollup = rollup(app);
+    rollup
+        .sessions
+        .iter()
+        .find(|entry| entry.id == session)
+        .map(|entry| rollup.needs_under(entry).skip(WAITING_AGENT_ROWS).collect())
+        .unwrap_or_default()
 }
 
 /// The first planned row the rail draws at `height`: the window is centered
@@ -698,7 +712,7 @@ pub(super) fn sidebar(
                 line.push("  /agents", muted().italic());
                 truncate_line(line, width)
             }
-            RailRow::MoreWaiting(count) => {
+            RailRow::MoreWaiting(_, count) => {
                 let mut line = Line::styled(format!("│   +{count} need you"), warning());
                 if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
                     line.push(format!("  {chord}"), muted());
@@ -711,6 +725,10 @@ pub(super) fn sidebar(
             && rows.last().is_some_and(|line| titled(line, id))
         {
             named.push(id);
+        }
+        // The collapsed needs are pointed at by this row already.
+        if let RailRow::MoreWaiting(session, _) = row {
+            named.extend(collapsed_needs(app, session));
         }
     }
     while rows.len() < height {

@@ -163,36 +163,54 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         left.push(format!(" {prefix}{status} "), style.bold());
         // A notice takes the left side; attention elsewhere keeps a compact
         // pointer on the right so a sticky error never hides a need: the
-        // answer chords for approvals, else a count of unseen failures and
-        // finishes with the jump chord.
+        // answer chords for approvals, and a count of unseen failures and
+        // finishes with the jump chord, together when both exist.
         let waiting = !app
             .sessions_awaiting_approval()
             .into_iter()
             .all(|id| Some(id) == app.view().transcript());
-        if waiting {
-            return rule_keeping_right(left, approval_chords(app), width);
-        }
         let others: Vec<SessionId> = app
             .sessions_needing_attention()
             .into_iter()
-            .filter(|id| Some(*id) != app.focused())
+            .filter(|id| Some(*id) != app.view().transcript())
             .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+            .filter(|id| {
+                app.sessions.get(id).is_some_and(|session| {
+                    matches!(
+                        super::sidebar::agent_need(session),
+                        Some(
+                            qq_client::state::Need::Failed | qq_client::state::Need::FinishedUnread
+                        )
+                    )
+                })
+            })
             .collect();
+        let mut right = if waiting {
+            approval_chords(app)
+        } else {
+            Line::default()
+        };
         if !others.is_empty() {
             let failed = others.iter().any(|id| {
                 app.sessions.get(id).is_some_and(|session| {
                     super::sidebar::agent_need(session) == Some(qq_client::state::Need::Failed)
                 })
             });
-            let mut right = Line::default();
+            if !right.is_empty() {
+                right.push("  ", muted());
+            }
             right.push(
                 format!("{} {}", if failed { "✕" } else { "●" }, others.len()),
                 if failed { failure() } else { accent() },
             );
-            if let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+            if !waiting
+                && let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval)
+            {
                 right.push(format!("  {}", compact_chord(&jump)), warning());
                 right.push(" jump", muted());
             }
+        }
+        if !right.is_empty() {
             return rule_keeping_right(left, right, width);
         }
         return rule_with(left, Line::default(), width);
@@ -340,11 +358,13 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
     // Sessions and agents that failed or finished unseen whose rail row is
     // not on screen (rail hidden, Compact, collapsed or scrolled out): the
     // strip only counts them, so the rule names them. Counted alongside
-    // approvals, so every unpainted item is named or counted.
+    // approvals, so every unpainted item is named or counted. Only the
+    // transcript on screen is excluded: a finish behind `/goal` or `/btw`
+    // has not been seen.
     let unseen: Vec<(&str, bool)> = app
         .sessions_needing_attention()
         .into_iter()
-        .filter(|id| Some(*id) != app.focused())
+        .filter(|id| Some(*id) != app.view().transcript())
         .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
         .filter_map(|id| app.sessions.get(&id))
         .filter_map(|session| match super::sidebar::agent_need(session) {
