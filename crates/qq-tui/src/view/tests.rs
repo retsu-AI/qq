@@ -2863,8 +2863,9 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
     );
 }
 
-#[test]
-fn spawned_children_render_under_their_spawn_call_and_never_fold() {
+/// A focused parent whose running `spawn_agent` call created `survey
+/// callers`, among four quiet reads; the rail is hidden.
+fn app_with_spawned_child() -> (App, SessionId) {
     let mut app = app_with_messages(1);
     let parent = app.focused().unwrap();
     let run_id = RunId::from_bytes([2; 16]);
@@ -2876,8 +2877,6 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         None,
         false,
     );
-    // Four quiet reads plus the spawn call: without the child this run
-    // would fold into one counted line at collapsed detail.
     let mut calls = vec![spawn_call.clone()];
     for byte in 0x22..0x26 {
         calls.push(tool_call_snapshot(
@@ -2919,6 +2918,14 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         )
     }));
     app.layout.rail = crate::view::PanePref::Hidden;
+    (app, child_id)
+}
+
+#[test]
+fn spawned_children_render_under_their_spawn_call_and_never_fold() {
+    // Four quiet reads plus the spawn call: without the child this run
+    // would fold into one counted line at collapsed detail.
+    let (mut app, child_id) = app_with_spawned_child();
 
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows
@@ -6085,6 +6092,100 @@ fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_no
     assert!(!named.contains(&root), "title truncated away: not named");
     let (_, named) = sidebar(&app, 60, 30, RailDensity::Compact);
     assert!(named.contains(&root), "title visible: named");
+}
+
+#[test]
+fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names() {
+    // A session titled `30` beside an `↳30` badge on a rail so narrow the
+    // title is squeezed out: the badge's digits do not make the title
+    // visible.
+    let (mut app, root, ids) = app_with_fanout(30);
+    app.sessions.get_mut(&root).unwrap().summary.title = "30 and more".to_owned();
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x83; 16]));
+    app.sessions
+        .get_mut(&root)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x82; 16]));
+    app.sessions.get_mut(&root).unwrap().unread = 99_999;
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let (_, named) = sidebar(&app, 14, 30, RailDensity::Compact);
+    assert!(!named.contains(&root), "title not shown: not named");
+
+    // Five waiting agents. With the whole rail on screen the `+2 need you`
+    // row points at the collapsed two; in a window that starts below the
+    // session's title row it does not say whose they are.
+    let (mut app, root, ids) = app_with_fanout(5);
+    for (index, id) in ids.iter().enumerate() {
+        app.sessions
+            .get_mut(id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x70 + index as u8; 16]));
+    }
+    // Focus an agent so the window centres below the session's row.
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let full = sidebar(&app, 40, 40, RailDensity::Compact).1;
+    assert!(full.contains(&ids[4]), "collapsed and pointed at: {full:?}");
+    // `Other` is focused and lists after `Fan out` (NEEDS YOU first), so a
+    // window of two rows centred on it starts below `Fan out`'s title row
+    // but can still reach the `+2` row only when the title is in view. A
+    // window that shows the `+2` row without the title must not name them.
+    let plan = plan_rail(&app, RailDensity::Compact);
+    let title = plan
+        .rows
+        .iter()
+        .position(|row| matches!(row, RailRow::Session(entry) if entry.id == root))
+        .unwrap();
+    let more = plan
+        .rows
+        .iter()
+        .position(|row| matches!(row, RailRow::MoreWaiting(..)))
+        .unwrap();
+    assert!(more > title + 1, "the agents sit between them");
+    let named = sidebar_at(
+        &app,
+        40,
+        more - title,
+        RailDensity::Compact,
+        Some(title + 1),
+    )
+    .1;
+    assert!(
+        !named.contains(&ids[4]),
+        "title clipped: the +2 is anonymous"
+    );
+    let _ = root;
+}
+
+#[test]
+fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
+    // The spawn-call fixture: `survey callers` has a live card under the
+    // parent's `Spawn` row; it now waits on the human.
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "the card names it: {rows:#?}"
+    );
+    let rule = &rows[rows.len() - 3];
+    assert!(
+        !rule.contains("survey callers") && !rule.contains("needs approval"),
+        "the rule does not repeat it: {rule}"
+    );
 }
 
 #[test]

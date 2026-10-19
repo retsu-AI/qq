@@ -2,6 +2,9 @@ use super::*;
 use layout::Tier;
 use qq_client::state::{Group, Need};
 
+/// The title is the third span `session_line` builds (prefix, marker, title).
+const TITLE_SPAN: usize = 2;
+
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
     let view = &app.sessions[&session_id];
     let session = &view.summary;
@@ -459,15 +462,25 @@ pub(super) enum RailRow {
     AgentDetail(SessionId),
     More(usize),
     /// `+N need you` for the session's needs past the cap: a pointer on
-    /// screen for each of them, so the rule does not repeat them.
-    MoreWaiting(SessionId, usize),
+    /// screen for each of them, so the rule does not repeat them while the
+    /// session's own row is on screen too. Indexes the plan's collapsed
+    /// list.
+    MoreWaiting(SessionId, usize, usize),
 }
 
 /// Rows planned from one [`rollup`] and the index of the focused row: a row
 /// per session, the focused session's agents under it (capped at
 /// [`FOCUSED_AGENT_ROWS`]), and every agent waiting on the user under its
-/// own session.
-pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize) {
+/// own session. `collapsed` holds the needs each `+N need you` row stands
+/// for, so the frame need not walk the tree again.
+pub(super) struct RailPlan {
+    pub rows: Vec<RailRow>,
+    pub focused_row: usize,
+    pub collapsed: Vec<Vec<SessionId>>,
+}
+
+pub(super) fn plan_rail(app: &App, density: RailDensity) -> RailPlan {
+    let mut collapsed: Vec<Vec<SessionId>> = Vec::new();
     let rollup = rollup(app);
     let focused = app.focused();
     let mut plan: Vec<RailRow> = Vec::with_capacity(rollup.sessions.len() * 2 + 8);
@@ -512,7 +525,8 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             }
             let rest: Vec<SessionId> = needs.collect();
             if !rest.is_empty() {
-                plan.push(RailRow::MoreWaiting(entry.id, rest.len()));
+                plan.push(RailRow::MoreWaiting(entry.id, rest.len(), collapsed.len()));
+                collapsed.push(rest);
             }
             continue;
         };
@@ -538,19 +552,11 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             plan.push(RailRow::More(ranked.len() - FOCUSED_AGENT_ROWS));
         }
     }
-    (plan, focused_row)
-}
-
-/// The agents under `session` that need the user past
-/// [`WAITING_AGENT_ROWS`]: the ones a `+N need you` row stands for.
-fn collapsed_needs(app: &App, session: SessionId) -> Vec<SessionId> {
-    let rollup = rollup(app);
-    rollup
-        .sessions
-        .iter()
-        .find(|entry| entry.id == session)
-        .map(|entry| rollup.needs_under(entry).skip(WAITING_AGENT_ROWS).collect())
-        .unwrap_or_default()
+    RailPlan {
+        rows: plan,
+        focused_row,
+        collapsed,
+    }
 }
 
 /// The first planned row the rail draws at `height`: the window is centered
@@ -577,14 +583,32 @@ pub(super) fn sidebar(
     height: usize,
     density: RailDensity,
 ) -> (Vec<Line>, Vec<SessionId>) {
+    sidebar_at(app, width, height, density, None)
+}
+
+/// [`sidebar`] with the window's first planned row given, for tests of a
+/// clipped window; `None` centres it on the focused row.
+pub(super) fn sidebar_at(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+    window_start: Option<usize>,
+) -> (Vec<Line>, Vec<SessionId>) {
     let inner = width.saturating_sub(2);
-    let (plan, focused_row) = plan_rail(app, density);
+    let RailPlan {
+        rows: plan,
+        focused_row,
+        collapsed,
+    } = plan_rail(app, density);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
+    // Sessions and agents whose titled row is on screen.
+    let mut painted: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
     }
-    let start = rail_window_start(plan.len(), focused_row, height);
+    let start = window_start.unwrap_or_else(|| rail_window_start(plan.len(), focused_row, height));
     let select = |line: &mut Line| {
         pad_line(line, width);
         for span in &mut line.spans[1..] {
@@ -600,13 +624,22 @@ pub(super) fn sidebar(
             })
         };
         let titled = |line: &Line, id: SessionId| {
+            // The title span itself kept enough of the title to read (two
+            // characters, or the whole of a shorter title): a badge that
+            // happens to contain the title's text does not count, and a
+            // title squeezed down to its ellipsis is gone. The selected row
+            // merges its prefix and marker, so the title is found by
+            // content after the marker span.
             let title = &app.sessions[&id].summary.title;
-            let head: String = title.chars().take(3).collect();
-            head.is_empty()
-                || line
-                    .spans
-                    .iter()
-                    .any(|span| span.text.contains(head.as_str()))
+            let want: String = title.chars().take(2).collect();
+            if want.is_empty() {
+                return true;
+            }
+            line.spans
+                .iter()
+                .skip(1)
+                .take(TITLE_SPAN)
+                .any(|span| span.text.starts_with(want.as_str()))
         };
         let row_target = match row {
             RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) => Some(id),
@@ -716,7 +749,7 @@ pub(super) fn sidebar(
                 line.push("  /agents", muted().italic());
                 truncate_line(line, width)
             }
-            RailRow::MoreWaiting(_, count) => {
+            RailRow::MoreWaiting(_, count, _) => {
                 let mut line = Line::styled(format!("│   +{count} need you"), warning());
                 if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
                     line.push(format!("  {chord}"), muted());
@@ -725,14 +758,19 @@ pub(super) fn sidebar(
             }
         });
         if let Some(id) = row_target
-            && needs(id)
             && rows.last().is_some_and(|line| titled(line, id))
         {
-            named.push(id);
+            painted.push(id);
+            if needs(id) {
+                named.push(id);
+            }
         }
-        // The collapsed needs are pointed at by this row already.
-        if let RailRow::MoreWaiting(session, _) = row {
-            named.extend(collapsed_needs(app, session));
+        // The collapsed needs are pointed at by this row, but only while the
+        // session's own titled row is on screen to say whose they are.
+        if let RailRow::MoreWaiting(session, _, index) = row
+            && painted.contains(&session)
+        {
+            named.extend(collapsed[index].iter().copied());
         }
     }
     while rows.len() < height {
