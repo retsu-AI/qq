@@ -119,7 +119,9 @@ Rail rows:
   later run waits on a delegate). Such an agent lifts its session into
   NEEDS YOU; a focused agent still lifts it (focusing clears an unseen
   finish, never an approval). Answering in place (`Alt-A`/`Alt-D`) picks a
-  call the human owns, never one a delegate is deciding.
+  call the human owns, never one a delegate is deciding; an `ask_user`
+  hold is never answered with a yes or no: the chord focuses its session so
+  the question block collects the answers.
 - Agent rows are bounded per session and painted in rank order. Under an
   unfocused session, at most `WAITING_AGENT_ROWS` (3) agents that need the
   user get a `↳` row (approval waits first, then failures, then unseen
@@ -136,8 +138,10 @@ Rail rows:
   was deleted and which therefore became a root. One audit-filtered
   attention list (human-owned approvals, then unseen failures, then unseen
   finishes) feeds every attention surface. Startup, reconnect, and the
-  refocus after a deletion pick a non-audit session (the newest non-audit
-  root, or the empty prompt when only audits exist), never an audit.
+  refocus after a deletion pick a non-audit session (the newest displayed
+  non-audit session, which may be an agent listed because its parent is not
+  loaded; the empty prompt only when nothing else is listed), never an
+  audit.
 - An agent whose session is not loaded (a bounded snapshot can carry a child
   without its parent) is listed as a session of its own until the parent
   arrives, so its attention is never dropped. Audit ancestry is decided over
@@ -217,7 +221,10 @@ tests otherwise unchanged.
   the title span itself keeps cells; a badge that happens to contain the
   title's text does not count. A spawned child's live card under the
   focused parent's spawn call names that child too, so the rule does not
-  repeat it, but only while the card is inside the transcript's viewport;
+  repeat it, but only while the card's title row is painted inside the
+  transcript's viewport (a viewport that keeps only the card's status row
+  names nothing); the card is identified by the child's id carried through
+  the layout, not by matching its title text;
   and the rail does not list that child again under the focused session
   while its card is on screen. A collapsed group counts as pointed at only
   while its `+N need you` row itself is painted (a window can keep the
@@ -308,6 +315,8 @@ transcript cache changes. Cells are grapheme clusters as the terminal
 draws them for the scripts a transcript carries: a ZWJ emoji, a base with
 its marks, a regional-indicator flag pair, an emoji with its modifier, and
 an Indic consonant joined to the next by a virama are each one cell group.
+The wrappers break rows on the same boundaries, so a cluster that
+crosses the pane edge moves to the next row whole and never straddles two.
 Full UAX #29 segmentation would add a crate, which this plan's non-goals
 rule out; the remaining rare clusters (Hangul jamo sequences, prepended
 concatenation marks) are a recorded limit. Each frame row carries how it
