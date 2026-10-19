@@ -25,6 +25,7 @@
   --danger-soft: rgb(242 113 107 / 0.1);
   /* Filled destructive buttons with white text. */
   --danger-solid: #c42b1c;
+  --popover-shadow: 0 12px 32px rgb(0 0 0 / 0.35);
   --diff-add: rgb(78 201 138 / 0.12);
   --diff-del: rgb(242 113 107 / 0.12);
   /* Syntax colors for code blocks and diffs. */
@@ -60,6 +61,7 @@
   --danger: #d64545;
   --danger-soft: rgb(214 69 69 / 0.08);
   --danger-solid: #c53030;
+  --popover-shadow: 0 10px 28px rgb(15 23 42 / 0.12), 0 2px 6px rgb(15 23 42 / 0.06);
   --diff-add: rgb(31 157 97 / 0.12);
   --diff-del: rgb(214 69 69 / 0.1);
   --syn-keyword: #8839ef;
@@ -104,6 +106,7 @@
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
   --color-danger-solid: var(--danger-solid);
+  --shadow-popover: var(--popover-shadow);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
@@ -337,6 +340,55 @@ body {
 }
 .animate-qq-pulse {
   animation: qq-pulse 1.4s ease-in-out infinite;
+}
+
+/* Entrances: short enough to read as responsive, not decorative. */
+@keyframes qq-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+@keyframes qq-pop-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes qq-pop-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes qq-slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+@keyframes qq-fade {
+  from {
+    opacity: 0;
+  }
+}
+.animate-pop {
+  animation: qq-pop 110ms ease-out;
+}
+.animate-pop-up {
+  animation: qq-pop-up 120ms ease-out;
+}
+.animate-pop-down {
+  animation: qq-pop-down 120ms ease-out;
+}
+.animate-slide-in {
+  animation: qq-slide-in 160ms ease-out;
+}
+dialog[open] {
+  animation: qq-pop 140ms ease-out;
+}
+dialog[open]::backdrop {
+  animation: qq-fade 140ms ease-out;
 }
 
 @keyframes qq-caret {
