@@ -2,19 +2,23 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import clsx from "clsx";
-import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
+import { ArrowDown, FileDiff, KeyRound, Loader2 } from "lucide-react";
 import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
+import { collectChanges, type FileChange } from "../lib/changes";
+import { updatePreferences, usePreferences } from "../lib/preferences";
 import { activityLabel, cost, modelLabel, tokens } from "../lib/format";
 import type {
   PendingFile,
   ProjectState,
   Transcript as TranscriptData,
 } from "../lib/types";
+import { ChangesPanel } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
@@ -60,24 +64,56 @@ export function SessionPane({
     return <Landing project={project} />;
   }
 
+  return <SessionView project={project} transcript={transcript} />;
+}
+
+function SessionView({
+  project,
+  transcript,
+}: {
+  project: ProjectState;
+  transcript: TranscriptData;
+}) {
+  const { changesPanel } = usePreferences();
+  const changes = useMemo(
+    () => collectChanges(transcript.items),
+    [transcript.items],
+  );
+  const toggleChanges = () =>
+    updatePreferences({ changesPanel: !changesPanel });
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {project.connection !== "live" && (
-        <div
-          role="status"
-          className="border-b border-line bg-warn-soft px-5 py-2 text-warn"
-        >
-          {project.connection === "replaying"
-            ? "Catching up with saved history…"
-            : "Disconnected. Sending is paused while QQ reconnects."}
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col">
+        {project.connection !== "live" && (
+          <div
+            role="status"
+            className="border-b border-line bg-warn-soft px-5 py-2 text-warn"
+          >
+            {project.connection === "replaying"
+              ? "Catching up with saved history…"
+              : "Disconnected. Sending is paused while QQ reconnects."}
+          </div>
+        )}
+        <Header
+          project={project}
+          transcript={transcript}
+          changes={changes}
+          changesOpen={changesPanel}
+          toggleChanges={toggleChanges}
+        />
+        <TranscriptScroller project={project} transcript={transcript} />
+        <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
+          <NoticeLine project={project} />
+          <Composer project={project} transcript={transcript} />
         </div>
-      )}
-      <Header project={project} transcript={transcript} />
-      <TranscriptScroller project={project} transcript={transcript} />
-      <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
-        <NoticeLine project={project} />
-        <Composer project={project} transcript={transcript} />
       </div>
+      {changesPanel && (
+        <ChangesPanel
+          key={transcript.session_id}
+          changes={changes}
+          close={toggleChanges}
+        />
+      )}
     </div>
   );
 }
@@ -147,9 +183,15 @@ function ConnectProvider() {
 function Header({
   project,
   transcript,
+  changes,
+  changesOpen,
+  toggleChanges,
 }: {
   project: ProjectState;
   transcript: TranscriptData;
+  changes: FileChange[];
+  changesOpen: boolean;
+  toggleChanges: () => void;
 }) {
   const running = transcript.status !== "idle";
   const limit = transcript.context_window;
@@ -208,6 +250,25 @@ function Header({
           {cost(transcript.cost_usd_nanos)}
         </span>
       )}
+      <button
+        onClick={toggleChanges}
+        aria-pressed={changesOpen}
+        title={`${changesOpen ? "Hide" : "Show"} changes (Ctrl Shift D)`}
+        className={clsx(
+          "-mr-2 flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px]",
+          changesOpen
+            ? "bg-active text-fg"
+            : "text-muted hover:bg-hover hover:text-fg",
+        )}
+      >
+        <FileDiff className="h-3.5 w-3.5" />
+        Changes
+        {changes.length > 0 && (
+          <span className="rounded-full bg-accent-soft px-1.5 text-[11px] font-medium text-accent">
+            {changes.length}
+          </span>
+        )}
+      </button>
     </header>
   );
 }

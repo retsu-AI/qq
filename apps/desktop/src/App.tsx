@@ -115,13 +115,16 @@ export function App() {
   const canBack = history.current.index > 0;
   const canForward = history.current.index < history.current.stack.length - 1;
 
+  const toggleChanges = () =>
+    updatePreferences({ changesPanel: !getPreferences().changesPanel });
+
   const newSession = () => {
     if (project) void api.newSession(project.project_id);
   };
 
   // Global shortcuts. Ctrl N new session, Ctrl O open project, Ctrl , settings,
   // Ctrl K commands, Ctrl B sidebar, Ctrl +/-/0 zoom, Alt ←/→ history,
-  // Ctrl Shift A next session that needs you.
+  // Ctrl Shift A next session that needs you, Ctrl Shift D changes panel.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
@@ -161,6 +164,9 @@ export function App() {
       } else if (key === "n" && !event.shiftKey && project) {
         handled();
         newSession();
+      } else if (key === "d" && event.shiftKey) {
+        handled();
+        toggleChanges();
       } else if (key === "a" && event.shiftKey && project) {
         handled();
         const next = project.sessions.find(
@@ -244,6 +250,13 @@ export function App() {
           label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
           shortcut: "Ctrl B",
           onSelect: toggleSidebar,
+        },
+        {
+          label: preferences.changesPanel
+            ? "Hide changes panel"
+            : "Show changes panel",
+          shortcut: "Ctrl Shift D",
+          onSelect: toggleChanges,
         },
         {
           label: "Back",

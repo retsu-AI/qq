@@ -11,14 +11,16 @@ import {
 } from "lucide-react";
 import { api } from "../lib/api";
 import { duration, isTerminal } from "../lib/format";
-import { toolSubject, toolVerb } from "../lib/tools";
+import { summarizeTools, toolSubject, toolVerb } from "../lib/tools";
 import type { Tool } from "../lib/types";
 import { ApprovalCard } from "./ApprovalCard";
 import { Diff } from "./Diff";
 
-/** Completed calls beyond this fold behind a summary line. */
-const FOLD_AFTER = 4;
-
+/**
+ * A run of consecutive tool calls. Settled calls without a diff fold behind
+ * one summary line ("Ran 3 commands, read 2 files"); running calls, held
+ * approvals and edits with a diff stay visible.
+ */
 export function ToolGroup({
   tools,
   projectId,
@@ -28,29 +30,73 @@ export function ToolGroup({
   projectId: string;
   sessionId: string;
 }) {
-  const settled = tools.filter((tool) => isTerminal(tool.state) && !tool.diff);
-  const foldable = settled.length > FOLD_AFTER;
+  const folded = tools.filter(
+    (tool) => isTerminal(tool.state) && !tool.diff && !tool.approval,
+  );
+  const foldable = folded.length > 1;
   const [expanded, setExpanded] = useState(false);
-  const hidden = foldable && !expanded ? new Set(settled.slice(0, -2).map((t) => t.id)) : new Set<string>();
+  const failed = folded.filter(
+    (tool) => tool.is_error || tool.state === "failed",
+  ).length;
+  const elapsed = folded.reduce(
+    (total, tool) => total + (tool.duration_ms ?? 0),
+    0,
+  );
+  const hidden = new Set(
+    foldable && !expanded ? folded.map((tool) => tool.id) : [],
+  );
 
   return (
     <div className="space-y-1">
       {foldable && (
         <button
           onClick={() => setExpanded((v) => !v)}
-          className="flex items-center gap-1.5 py-0.5 text-[12.5px] text-muted hover:text-fg"
+          aria-expanded={expanded}
+          className="group/summary flex max-w-full items-center gap-2 rounded-md py-0.5 text-left text-[13px] text-muted hover:text-fg"
         >
-          <ChevronRight className={clsx("h-3.5 w-3.5 transition-transform", expanded && "rotate-90")} />
-          {expanded ? "Hide" : "Show"} {settled.length - 2} earlier tool calls
+          {failed > 0 ? (
+            <CircleX className="h-3.5 w-3.5 shrink-0 text-danger" />
+          ) : (
+            <CircleCheck className="h-3.5 w-3.5 shrink-0 text-faint" />
+          )}
+          <span className="truncate">
+            {summarizeTools(folded.map((tool) => tool.name))}
+          </span>
+          {failed > 0 && (
+            <span className="shrink-0 text-[11.5px] text-danger">
+              · {failed} failed
+            </span>
+          )}
+          {elapsed > 0 && (
+            <span className="shrink-0 text-[11.5px] text-faint">
+              · {duration(elapsed)}
+            </span>
+          )}
+          <ChevronRight
+            className={clsx(
+              "h-3.5 w-3.5 shrink-0 text-faint transition-transform",
+              expanded && "rotate-90",
+            )}
+          />
         </button>
       )}
       {tools
         .filter((tool) => !hidden.has(tool.id))
         .map((tool) =>
           tool.approval ? (
-            <ApprovalCard key={tool.id} tool={tool} projectId={projectId} sessionId={sessionId} />
+            <ApprovalCard
+              key={tool.id}
+              tool={tool}
+              projectId={projectId}
+              sessionId={sessionId}
+            />
           ) : (
-            <ToolRow key={tool.id} tool={tool} projectId={projectId} />
+            <div
+              key={tool.id}
+              className={clsx(foldable && folded.includes(tool) && "pl-5")}
+            >
+              <ToolRow tool={tool} projectId={projectId} />
+            </div>
           ),
         )}
     </div>
