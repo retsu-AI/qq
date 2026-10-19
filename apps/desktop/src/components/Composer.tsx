@@ -17,9 +17,18 @@ import {
   Shield,
   SlidersHorizontal,
   Square,
+  X,
 } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api } from "../lib/api";
-import { modelLabel, modelShort, providerName } from "../lib/format";
+import { dropMentions, insertMentions } from "../lib/drop";
+import {
+  cost,
+  modelLabel,
+  modelShort,
+  providerName,
+  tokens,
+} from "../lib/format";
 import { showProviders } from "../lib/store";
 import { drafts } from "../lib/drafts";
 import {
@@ -72,12 +81,42 @@ export function Composer({
   const [mode, setMode] = useState<SendMode>("queue");
   const running = transcript ? transcript.status !== "idle" : false;
   const mentions = useMentionMenu(project.project_id, ref);
+  const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
     setError(null);
+    setNote(null);
     mentions.close();
     ref.current?.focus();
   }, [key]);
+
+  // Files dropped anywhere on the window are mentioned at the caret.
+  const dragging = useFileDrop((paths) => {
+    const el = ref.current;
+    const { mentions: dropped, skipped } = dropMentions(project.path, paths);
+    const current = drafts.get(key);
+    const caret = el && document.activeElement === el ? el.selectionStart : current.length;
+    const next = insertMentions(current, caret, dropped);
+    drafts.set(key, next.text);
+    const outside = skipped.filter((s) => s.reason === "outside").length;
+    const spaced = skipped.filter((s) => s.reason === "spaces").length;
+    setNote(
+      [
+        outside
+          ? `${outside} file${outside === 1 ? " is" : "s are"} outside this project and can't be mentioned.`
+          : "",
+        spaced
+          ? `${spaced} path${spaced === 1 ? " has" : "s have"} spaces, which mentions can't contain.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ") || null,
+    );
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(next.caret, next.caret);
+    });
+  });
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -154,7 +193,18 @@ export function Composer({
           onChoose={choose}
         />
       )}
-      <div className="rounded-2xl border border-line-strong bg-raised shadow-[0_1px_0_rgba(0,0,0,0.2)] transition-colors focus-within:border-accent/60 focus-within:ring-1 focus-within:ring-accent/25">
+      <div
+        className={clsx(
+          "relative rounded-2xl border bg-raised shadow-[0_1px_0_rgba(0,0,0,0.2)] transition-colors focus-within:border-accent/60 focus-within:ring-1 focus-within:ring-accent/25",
+          dragging ? "border-accent ring-2 ring-accent/30" : "border-line-strong",
+        )}
+      >
+        {dragging && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center gap-2 rounded-2xl bg-raised/90 text-[13px] text-accent">
+            <FileText className="h-4 w-4" /> Drop to mention files from this
+            project
+          </div>
+        )}
         <textarea
           ref={ref}
           value={text}
@@ -245,6 +295,22 @@ export function Composer({
             {error}
           </p>
         )}
+        {note && (
+          <p
+            role="status"
+            className="mx-3 mb-1 flex items-start gap-2 rounded-md bg-hover px-3 py-1.5 text-[12.5px] text-muted"
+          >
+            <span className="flex-1">{note}</span>
+            <button
+              type="button"
+              aria-label="Dismiss"
+              onClick={() => setNote(null)}
+              className="text-faint hover:text-fg"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </p>
+        )}
         <div className="flex items-center gap-0.5 px-2 pb-2">
           <button
             type="button"
@@ -274,6 +340,7 @@ export function Composer({
           {transcript && <ModePicker project={project} transcript={transcript} />}
           {transcript && <SessionOptions project={project} transcript={transcript} />}
           <div className="flex-1" />
+          {transcript && <ContextMeter transcript={transcript} />}
           {running && (
             <Dropdown<SendMode>
               label="When I send during a run"
@@ -340,6 +407,92 @@ export function Composer({
         </div>
       </div>
     </div>
+  );
+}
+
+/** True while files are dragged over the window; calls `onDrop` with paths. */
+function useFileDrop(onDrop: (paths: string[]) => void): boolean {
+  const [dragging, setDragging] = useState(false);
+  const handler = useRef(onDrop);
+  handler.current = onDrop;
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    let webview: ReturnType<typeof getCurrentWebview>;
+    try {
+      webview = getCurrentWebview();
+    } catch {
+      // Outside the desktop shell (the render fixture) there is no webview.
+      return;
+    }
+    webview
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "enter") setDragging(payload.paths.length > 0);
+        else if (payload.type === "leave") setDragging(false);
+        else if (payload.type === "drop") {
+          setDragging(false);
+          if (payload.paths.length) handler.current(payload.paths);
+        }
+      })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  return dragging;
+}
+
+/** Context used as a ring, with tokens and session cost on hover. */
+function ContextMeter({ transcript }: { transcript: Transcript }) {
+  const limit = transcript.context_window;
+  const used = transcript.context_tokens;
+  const spent =
+    transcript.cost_usd_nanos != null && transcript.cost_usd_nanos > 0
+      ? cost(transcript.cost_usd_nanos)
+      : "";
+  if (!limit || used == null) return null;
+  const fraction = Math.min(1, used / limit);
+  const percent = Math.round(fraction * 100);
+  const radius = 6.5;
+  const circumference = 2 * Math.PI * radius;
+  const tone =
+    percent > 85 ? "text-danger" : percent > 65 ? "text-warn" : "text-accent";
+  const label = `${percent}% of context used: ${tokens(used)} of ${tokens(limit)} tokens${spent ? `. Session cost ${spent}` : ""}`;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={`${label}${percent > 65 ? ". Compact the session from Ctrl K to free space." : ""}`}
+      className="mr-1 flex h-8 items-center gap-1.5 px-1 text-[11.5px] text-faint"
+    >
+      <svg viewBox="0 0 16 16" className="h-4 w-4 -rotate-90">
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="none"
+          strokeWidth="2"
+          className="stroke-line-strong"
+        />
+        <circle
+          cx="8"
+          cy="8"
+          r={radius}
+          fill="none"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeDasharray={`${fraction * circumference} ${circumference}`}
+          className={clsx("stroke-current", tone)}
+        />
+      </svg>
+      {percent}%{spent && <span>· {spent}</span>}
+    </span>
   );
 }
 
