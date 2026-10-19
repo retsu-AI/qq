@@ -4927,3 +4927,173 @@ fn goal_configuration_rejects_invalid_bounds_and_requires_workspace_trust() {
         Err(ConfigError::TrustRequired { .. })
     ));
 }
+
+/// Every built-in HTTP provider patch shape a user can write today. AP7
+/// (ADR-0064) replaces the per-provider variants with a provider table;
+/// these documents must keep parsing to the same providers and hashing to
+/// the same trust digest so already-trusted project files stay trusted.
+const BUILTIN_PATCH_DOCUMENTS: [&str; 9] = [
+    r#"(version: 1, providers: {"openai": OpenAi(api_key: Env("MY_OPENAI_KEY"))})"#,
+    r#"(version: 1, providers: {"openai": OpenAi(api_key: Stored("openai/work"), models: {"m": (name: "M")})})"#,
+    r#"(version: 1, providers: {"openai-codex": OpenAiCodex(profile: "work")})"#,
+    r#"(version: 1, providers: {"openai-codex": OpenAiCodex(profile: Clear)})"#,
+    r#"(version: 1, providers: {"anthropic": Anthropic(api_key: Env("A_KEY"))})"#,
+    r#"(version: 1, providers: {"google": Google(api_key: Stored("google/work"))})"#,
+    r#"(version: 1, providers: {"xai": XAi(profile: "work")})"#,
+    r#"(version: 1, providers: {"xai": XAi(api_key: Env("X_KEY"), profile: "work")})"#,
+    r#"(version: 1, providers: {"openai": Remove})"#,
+];
+
+/// The trust digests of [`BUILTIN_PATCH_DOCUMENTS`], recorded from the
+/// per-variant representation before AP7.
+const BUILTIN_PATCH_DIGESTS: [&str; 9] = [
+    "206e1448f30dde87534e6a4b278d535e442d06229759614248dd9d2e3a09631d",
+    "5e8e0d7bb05617439d91718c29e3125a248d4849cafcfefc733be35344042d4b",
+    "7065b85c67038db8bc44dc22ebdfaa3130a46ba0e2be6678936926250adc7349",
+    "0664848b4a54147cd1f844bcf41ce34ceb053ab552058bd25bf6f42179723324",
+    "2e4a2ab14dfcf22462716b5178d11d86113abb55833c466d6b98cfb76fa00179",
+    "6a6dd2604c8765d64b861d82a9a897ffe3e80d053f24aa7d865641737c222665",
+    "75d1a8c0479da73b6a3e0454fba02d6efd8f80896580bfd353f8e4ebe5840360",
+    "a11b40da61aecfcd19983d3c6dedb267a1e5dab385c52422ca1dd9152ec175e9",
+    "09ebd67285af55137513c2efe5c996237ba5f4f536d4f206ac8b476fd977a021",
+];
+
+#[test]
+fn builtin_provider_patches_keep_their_trust_digests() {
+    let source = SourceIdentity::virtual_source(SourceKind::Inline, "digest pin");
+    let digests: Vec<String> = BUILTIN_PATCH_DOCUMENTS
+        .iter()
+        .map(|document| {
+            document::Document::parse(document, &source)
+                .unwrap()
+                .sensitive_digest()
+                .unwrap()
+                .expect("provider patches are trust-sensitive")
+        })
+        .collect();
+    assert_eq!(digests, BUILTIN_PATCH_DIGESTS);
+}
+
+/// Each built-in accepts only its own credential fields; anything else is
+/// a parse error, not silently ignored.
+#[test]
+fn builtin_provider_patches_reject_fields_they_do_not_have() {
+    for (provider, patch) in [
+        ("openai", r#"OpenAi(profile: "work")"#),
+        ("openai-codex", r#"OpenAiCodex(api_key: Env("K"))"#),
+        ("anthropic", r#"Anthropic(profile: "work")"#),
+        ("google", r#"Google(profile: "work")"#),
+        ("xai", r#"XAi(region: "us-east-1")"#),
+        ("openai", r#"OpenAi(unknown: 1)"#),
+    ] {
+        let tree = TempTree::new();
+        let document = format!("(version: 1, providers: {{\"{provider}\": {patch}}})");
+        let error = tree
+            .loader()
+            .load(&tree.request().with_explicit_content(document.clone()))
+            .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Parse { .. }),
+            "{document}: {error:?}"
+        );
+    }
+}
+
+/// The built-in presets each patch layers over, as observable on the loaded
+/// snapshot: endpoint, mode, protocol, credential and usage.
+#[test]
+fn builtin_provider_patches_layer_over_their_presets() {
+    let tree = TempTree::new();
+    let snapshot = tree
+        .loader()
+        .load(&tree.request().with_explicit_content(
+            r#"(
+                version: 1,
+                providers: {
+                    "openai": OpenAi(api_key: Env("MY_OPENAI_KEY")),
+                    "openai-codex": OpenAiCodex(profile: "work"),
+                    "anthropic": Anthropic(api_key: Env("A_KEY")),
+                    "google": Google(api_key: Stored("google/work")),
+                    "xai": XAi(api_key: Env("X_KEY"), profile: "work"),
+                },
+            )"#,
+        ))
+        .unwrap();
+    let http = |id: &str| {
+        let provider = snapshot.providers().get(id).unwrap();
+        let Some(ProviderAccess::Http(access)) = provider.access() else {
+            panic!("{id} is HTTP");
+        };
+        (provider.kind(), provider.usage(), access.clone())
+    };
+
+    let (kind, usage, access) = http("openai");
+    assert_eq!((kind, usage), (ProviderKind::OpenAi, UsageType::Metered));
+    assert_eq!(access.endpoint(), "https://api.openai.com/v1/responses");
+    assert_eq!(access.api(), ProviderApi::OpenAiResponses);
+    assert_eq!(
+        access.auth(),
+        &HttpCredential::ApiKey {
+            explicit: Some(SecretRef::Env("MY_OPENAI_KEY".to_owned())),
+            stored_name: "openai/default",
+            environment_variable: "OPENAI_API_KEY",
+            alternate_variables: &[],
+            audience: "https://api.openai.com",
+        }
+    );
+
+    let (kind, usage, access) = http("openai-codex");
+    assert_eq!(
+        (kind, usage),
+        (ProviderKind::OpenAiCodex, UsageType::Subscription)
+    );
+    assert_eq!(
+        access.endpoint(),
+        "https://chatgpt.com/backend-api/codex/responses"
+    );
+    assert_eq!(
+        access.auth(),
+        &HttpCredential::OpenAiCodex {
+            profile: Some("work".to_owned())
+        }
+    );
+
+    let (kind, _, access) = http("anthropic");
+    assert_eq!(kind, ProviderKind::Anthropic);
+    assert_eq!(access.api(), ProviderApi::AnthropicMessages);
+    assert!(matches!(
+        access.auth(),
+        HttpCredential::ApiKey {
+            stored_name: "anthropic/default",
+            environment_variable: "ANTHROPIC_API_KEY",
+            ..
+        }
+    ));
+
+    let (kind, _, access) = http("google");
+    assert_eq!(kind, ProviderKind::Google);
+    assert_eq!(access.endpoint_mode(), EndpointMode::Base);
+    assert!(matches!(
+        access.auth(),
+        HttpCredential::ApiKey {
+            explicit: Some(SecretRef::Stored(name)),
+            environment_variable: "GEMINI_API_KEY",
+            alternate_variables,
+            ..
+        } if name == "google/work" && *alternate_variables == ["GOOGLE_API_KEY"]
+    ));
+
+    let (kind, usage, access) = http("xai");
+    assert_eq!(
+        (kind, usage),
+        (ProviderKind::XAi, UsageType::CredentialDependent)
+    );
+    assert_eq!(access.api(), ProviderApi::OpenAiChatCompletions);
+    assert_eq!(
+        access.auth(),
+        &HttpCredential::XAi {
+            api_key: Some(SecretRef::Env("X_KEY".to_owned())),
+            profile: Some("work".to_owned()),
+        }
+    );
+}
