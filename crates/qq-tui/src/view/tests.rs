@@ -5861,6 +5861,60 @@ fn a_too_small_frame_leaves_nothing_clickable() {
 }
 
 #[test]
+fn workspace_views_copy_from_the_inset_and_stale_rail_targets_are_ignored() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    // `/attention` has no message rail: its first cells are content.
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    app.execute(Command::ShowAttention);
+    let mut renderer = FrameRenderer::default();
+    let frame = renderer.frame_and_commit(&mut app, 100, 24);
+    let rows = frame_rows(&frame);
+    let row = u16::try_from(
+        rows.iter()
+            .position(|row| row.contains("NEEDS YOU"))
+            .unwrap(),
+    )
+    .unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 0, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 40, row));
+    let selection = app.selection.unwrap();
+    let copied = selection.text(&frame);
+    assert!(
+        copied.text.trim_start().starts_with("NEEDS YOU"),
+        "the header is copied whole: {copied:?}"
+    );
+
+    // A Shift-press clears a visible QQ selection and repaints.
+    let effects = app.handle_terminal_event(TerminalEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row,
+        modifiers: KeyModifiers::SHIFT,
+    }));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws());
+
+    // A rail row whose session was deleted after the frame focuses nothing.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let agent_row =
+        u16::try_from(rows.iter().position(|row| row.contains("agent 1")).unwrap()).unwrap();
+    app.sessions.remove(&ids[1]);
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        u16::try_from(rail_x + 4).unwrap(),
+        agent_row,
+    ));
+    assert_eq!(app.focused(), before);
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

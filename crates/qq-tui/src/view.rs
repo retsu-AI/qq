@@ -419,9 +419,15 @@ impl FrameRenderer {
                 width: slot.area.width,
                 height: body_height,
             });
-            // Prose starts after the measure inset and the 3-column
-            // message rail (`   ` / ` ▌ `); a copy keeps text from there.
-            geometry.text_x = slot.area.x + slot.inset + 3;
+            // Prose starts after the measure inset and, on a transcript, the
+            // 3-column message rail (`   ` / ` ▌ `); workspace views put
+            // their content right after the inset. A copy keeps text from
+            // there.
+            let rail = match shown_view(app, app.pane(), inline_detail) {
+                View::Transcript(_) => 3,
+                View::Attention | View::Changes | View::Goal(_) | View::SideQuestions(_) => 0,
+            };
+            geometry.text_x = slot.area.x + slot.inset + rail;
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);

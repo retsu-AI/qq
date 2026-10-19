@@ -1555,7 +1555,8 @@ impl App {
                 MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
             )
         {
-            return Effects::none();
+            // An old QQ highlight would sit over the terminal's own selection.
+            return Effects::changed_now(self.selection.take().is_some());
         }
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -1571,7 +1572,13 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let cleared = self.selection.take().is_some();
-                if let Some(target) = self.geometry.rail_target(column, row) {
+                // The hit map is from the drawn frame; a session deleted since
+                // then is no longer a target.
+                if let Some(target) = self
+                    .geometry
+                    .rail_target(column, row)
+                    .filter(|target| self.sessions.contains_key(target))
+                {
                     let mut effects = self.focus_session(target);
                     effects.push(Effect::Redraw(Redraw::Immediate));
                     return effects;

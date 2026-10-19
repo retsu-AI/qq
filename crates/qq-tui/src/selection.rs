@@ -134,9 +134,9 @@ impl Selection {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for (row, from, to) in self.rows() {
             if let Some(line) = lines.get(row) {
-                for (start, end, character, _) in cells(line) {
+                for (start, end, grapheme, _) in cells(line) {
                     if start < to && end > from {
-                        character.hash(&mut hasher);
+                        grapheme.hash(&mut hasher);
                     }
                 }
             }
@@ -185,13 +185,13 @@ impl Selection {
                 continue;
             };
             let mut painted = Line::default();
-            for (start, end, character, style) in cells(line) {
+            for (start, end, grapheme, style) in cells(line) {
                 let style = if start < to && end > from {
                     selection(style)
                 } else {
                     style
                 };
-                painted.push(character.to_string(), style);
+                painted.push(grapheme, style);
             }
             // Selected cells past the row's last character still show.
             let width = line.width();
@@ -218,19 +218,12 @@ impl Selection {
             .map(|(row, from, to)| {
                 let mut text = String::new();
                 if let Some(line) = lines.get(row) {
-                    for (start, end, character, _) in cells(line) {
+                    for (start, end, grapheme, _) in cells(line) {
                         if start < self.text_x {
                             continue;
                         }
-                        // A zero-width mark (start == end) belongs to the
-                        // glyph before it.
-                        let selected = if start == end {
-                            start > from && start <= to
-                        } else {
-                            start < to && end > from
-                        };
-                        if selected {
-                            text.push(character);
+                        if start < to && end > from {
+                            text.push_str(&grapheme);
                         }
                     }
                 }
@@ -248,6 +241,18 @@ impl Selection {
             while !text.is_char_boundary(cut) {
                 cut -= 1;
             }
+            // Back up to a grapheme boundary: never end on a joiner or before
+            // a mark that belongs to the last kept character.
+            while cut > 0 {
+                let next = text[cut..].chars().next();
+                let prev = text[..cut].chars().next_back();
+                let splits = next.is_some_and(continues_grapheme)
+                    || prev.is_some_and(|character| character == ZWJ);
+                if !splits {
+                    break;
+                }
+                cut -= prev.map_or(1, char::len_utf8);
+            }
             text.truncate(cut);
             truncated = true;
         }
@@ -263,17 +268,38 @@ impl Selection {
     }
 }
 
-/// Each character of `line` with the columns it occupies (`start..end`;
-/// equal for a zero-width mark) and its style; the line's indent reads as
-/// leading blank cells.
-fn cells(line: &Line) -> Vec<(usize, usize, char, Style)> {
-    let mut out = Vec::with_capacity(line.indent + 64);
-    out.extend((0..line.indent).map(|column| (column, column + 1, ' ', normal())));
+const ZWJ: char = '\u{200D}';
+
+/// Whether `character` continues the grapheme before it rather than starting
+/// one: a zero-width mark, a variation selector, an emoji skin-tone modifier,
+/// or a ZWJ (and so the character a ZWJ joins). Covers what a transcript
+/// realistically shows without a segmentation dependency.
+fn continues_grapheme(character: char) -> bool {
+    character == ZWJ
+        || matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{1F3FB}'..='\u{1F3FF}')
+        || (UnicodeWidthChar::width(character) == Some(0) && !character.is_control())
+}
+
+/// Each grapheme of `line` with the columns it occupies (`start..end`) and
+/// its style, as one cell group: a ZWJ sequence, a base with its marks, or
+/// an emoji with its modifier is copied and painted whole. The line's indent
+/// reads as leading blank cells.
+fn cells(line: &Line) -> Vec<(usize, usize, String, Style)> {
+    let mut out: Vec<(usize, usize, String, Style)> = Vec::with_capacity(line.indent + 64);
+    out.extend((0..line.indent).map(|column| (column, column + 1, " ".to_owned(), normal())));
     let mut column = line.indent;
+    let mut joined = false;
     for span in &line.spans {
         for character in span.text.chars() {
+            let attaches = (continues_grapheme(character) || joined) && out.len() > line.indent;
+            if attaches && let Some(last) = out.last_mut() {
+                last.2.push(character);
+                joined = character == ZWJ;
+                continue;
+            }
+            joined = false;
             let width = UnicodeWidthChar::width(character).unwrap_or_default();
-            out.push((column, column + width, character, span.style));
+            out.push((column, column + width, character.to_string(), span.style));
             column += width;
         }
     }
@@ -454,6 +480,39 @@ mod tests {
         let mut painted = lines.clone();
         click.paint(&mut painted);
         assert_eq!(painted, lines);
+    }
+
+    #[test]
+    fn joined_emoji_are_one_selectable_glyph_and_a_large_copy_cuts_between_graphemes() {
+        let lines = vec![Line::styled("a👩\u{200D}💻b", normal())];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 1,
+        };
+        // A drag over the emoji's first cell copies the whole sequence.
+        let mut selection = Selection::start(area, 0, 1, 0).unwrap();
+        selection.extend(1, 0);
+        assert_eq!(selection.text(&lines).text, "👩\u{200D}💻");
+        // A selection larger than the bound never ends inside a grapheme.
+        let row = "é".repeat(400) + &"👩\u{200D}💻".repeat(200);
+        let wide = Area {
+            x: 0,
+            y: 0,
+            width: 1024,
+            height: 512,
+        };
+        let lines: Vec<Line> = (0..512)
+            .map(|_| Line::styled(row.clone(), normal()))
+            .collect();
+        let mut selection = Selection::start(wide, 0, 0, 0).unwrap();
+        selection.extend(1023, 511);
+        let copied = selection.text(&lines);
+        assert!(copied.truncated && copied.text.len() <= MAX_COPY_BYTES);
+        let last = copied.text.chars().next_back().unwrap();
+        assert_ne!(last, ZWJ, "never ends on a joiner");
+        assert!(!continues_grapheme(last) || last == '💻');
     }
 
     #[test]
