@@ -95,6 +95,12 @@ lockfile remain independent of desktop dependencies.
   menus and caption buttons; `capabilities/window.json` grants exactly the window
   calls it uses. All pickers use the themed `Dropdown.tsx` instead of `<select>`,
   whose popup Windows draws outside the app theme.
+- Fenced code is highlighted with the `highlight.js` core and a fixed set of
+  bundled languages (`src/lib/highlight.ts`); colors are theme tokens. The
+  Changes panel (`ChangesPanel.tsx`) is derived in the UI from the diffs already
+  carried on completed edit tool calls (`src/lib/changes.ts`), so it needs no
+  native command. `tests/render.html?demo` renders a sample conversation with
+  tools, an edit and code for checking these views without an engine.
 - Ctrl K opens implemented desktop commands, including child sessions,
   compaction, rollback and empty-session pruning. Ctrl , opens settings,
   shortcuts, connection diagnostics and reported external-tool status.

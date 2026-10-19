@@ -4,6 +4,8 @@ export interface Preferences {
   theme: "system" | "light" | "dark";
   fontSize: number;
   notifications: boolean;
+  /** The session's Changes panel is shown. */
+  changesPanel: boolean;
 }
 
 export const MIN_FONT_SIZE = 12;
@@ -29,6 +31,7 @@ export function parsePreferences(json: string | null): Preferences {
         ? value.fontSize
         : 14,
     notifications: value.notifications === true,
+    changesPanel: value.changesPanel === true,
   };
 }
 

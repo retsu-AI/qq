@@ -17,6 +17,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ["Command palette", "Ctrl K"],
   ["Settings", "Ctrl ,"],
   ["Toggle sidebar", "Ctrl B"],
+  ["Show or hide changes", "Ctrl Shift D"],
   ["Back / forward", "Alt ← / Alt →"],
   ["Zoom in / out / reset", "Ctrl + / Ctrl - / Ctrl 0"],
   ["Next session that needs you", "Ctrl Shift A"],

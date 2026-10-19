@@ -5,7 +5,7 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { Sidebar } from "../src/components/Sidebar";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
-import type { ProjectState } from "../src/lib/types";
+import type { Item, ProjectState } from "../src/lib/types";
 import "../src/styles.css";
 
 const count = Math.min(
@@ -93,6 +93,125 @@ const project: ProjectState = {
     })),
   },
 };
+// `?demo`: one realistic conversation (tools, an edit, code and a failed run)
+// in place of the generated rows.
+if (new URLSearchParams(location.search).has("demo")) {
+  const tool = (
+    id: string,
+    name: string,
+    args: object,
+    extra: Partial<Extract<Item, { kind: "tool" }>> = {},
+  ): Item => ({
+    kind: "tool",
+    id,
+    run_id: "run1",
+    name,
+    arguments: JSON.stringify(args),
+    state: "completed",
+    result: "ok",
+    is_error: false,
+    diff: null,
+    live_output: null,
+    duration_ms: 420,
+    settled: null,
+    child_session: null,
+    approval: null,
+    ...extra,
+  });
+  const edit = [
+    "--- a/src/lib/retry.rs",
+    "+++ b/src/lib/retry.rs",
+    "@@ -10,7 +10,9 @@ use std::time::Duration;",
+    " pub fn backoff(attempt: u32) -> Duration {",
+    "-    Duration::from_millis(100 * attempt as u64)",
+    "+    // Exponential, capped at five seconds.",
+    "+    let millis = 100u64.saturating_mul(1 << attempt.min(6));",
+    "+    Duration::from_millis(millis.min(5_000))",
+    " }",
+    " ",
+    " #[cfg(test)]",
+  ].join("\n");
+  project.transcript!.items = [
+    {
+      kind: "user",
+      id: "u1",
+      text: "Make the retry backoff exponential and cap it.",
+      state: "complete",
+      steering: false,
+    },
+    {
+      kind: "reasoning",
+      id: "r1",
+      text: "Find the backoff helper, then check the tests.",
+      streaming: false,
+    },
+    tool("t1", "search", { pattern: "fn backoff" }),
+    tool("t2", "read_file", { path: "src/lib/retry.rs" }),
+    tool("t3", "shell", { command: "cargo test -p retry" }),
+    tool("t4", "edit_file", { path: "src/lib/retry.rs" }, {
+      diff: { path: "src/lib/retry.rs", diff: edit },
+    }),
+    tool("t5", "shell", { command: "cargo test -p retry" }),
+    tool("t6", "shell", { command: "cargo clippy -p retry" }, {
+      is_error: true,
+      result: "warning: unused import",
+    }),
+    {
+      kind: "assistant",
+      id: "a1",
+      text: [
+        "Backoff is now exponential and capped at **5 s**:",
+        "",
+        "```rust",
+        "pub fn backoff(attempt: u32) -> Duration {",
+        "    // Exponential, capped at five seconds.",
+        "    let millis = 100u64.saturating_mul(1 << attempt.min(6));",
+        '    Duration::from_millis(millis.min(5_000)) // "ms"',
+        "}",
+        "```",
+        "",
+        "Call it from TypeScript with `await retry(3)`:",
+        "",
+        "```ts",
+        "export async function retry(times: number): Promise<void> {",
+        "  for (let i = 0; i < times; i++) await sleep(2 ** i * 100);",
+        "}",
+        "```",
+      ].join("\n"),
+      refusal: "",
+      state: "complete",
+      truncated: false,
+    },
+    {
+      kind: "run_end",
+      id: "e1",
+      outcome: { type: "completed" },
+      duration_ms: 18_400,
+      usage: null,
+      cost_usd_nanos: null,
+      tool_calls: 6,
+    },
+    {
+      kind: "user",
+      id: "u2",
+      text: "Now update the docs.",
+      state: "complete",
+      steering: false,
+    },
+    {
+      kind: "run_end",
+      id: "e2",
+      outcome: {
+        type: "failed",
+        failure: { kind: "provider", message: "The provider closed the stream." },
+      },
+      duration_ms: 2_100,
+      usage: null,
+      cost_usd_nanos: null,
+      tool_calls: 0,
+    },
+  ];
+}
 if (new URLSearchParams(location.search).has("approval"))
   project.transcript!.items.push({
     kind: "tool",

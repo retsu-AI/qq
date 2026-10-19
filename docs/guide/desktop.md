@@ -62,6 +62,17 @@ Rendering mounts a bounded window of the native retained snapshot. Older history
 outside that snapshot is not deleted, but a new paging protocol is not provided.
 Diffs, tool output, reasoning and child-session links retain their existing controls.
 
+Code blocks in replies are syntax highlighted and have a Copy button. Hover a
+message to copy it; your own messages can also be put back in the composer to
+edit, and Retry sends a prompt again as a new turn (history is kept, nothing is
+replaced). A failed run offers Retry next to its error. Finished tool calls fold
+into one summary line, such as "Ran 3 commands, read 2 files"; select it to see
+each call. Edits stay visible with their diff.
+
+Changes (the header button, or Ctrl Shift D) opens a side panel listing every file
+the session's file tools edited, with added and removed line counts and each
+diff. Files changed by shell commands are not tracked there.
+
 ## Window, menus and settings
 
 The title bar holds back/forward through recently viewed sessions (Alt ←/→),
@@ -80,7 +91,8 @@ rollback, pruning empty idle sessions, provider setup and settings. Compaction
 changes model context while leaving the displayed transcript intact. The desktop
 palette exposes implemented desktop actions; it does not execute arbitrary CLI text.
 
-Ctrl N starts a new session, and Ctrl Shift A moves to a session needing attention.
+Ctrl N starts a new session, Ctrl Shift A moves to a session needing attention,
+and Ctrl Shift D shows or hides the Changes panel.
 Opening QQ again focuses the existing window and forwards project-folder arguments.
 Closing a project disconnects its client without deleting server history.
 

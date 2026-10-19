@@ -25,6 +25,14 @@
   --danger-soft: rgb(242 113 107 / 0.1);
   --diff-add: rgb(78 201 138 / 0.12);
   --diff-del: rgb(242 113 107 / 0.12);
+  /* Syntax colors for code blocks and diffs. */
+  --syn-keyword: #c792ea;
+  --syn-string: #a5d6a7;
+  --syn-number: #f5a97f;
+  --syn-comment: #6b7079;
+  --syn-function: #82aaff;
+  --syn-type: #ffcb6b;
+  --syn-attr: #89ddff;
   color-scheme: dark;
 }
 
@@ -51,6 +59,13 @@
   --danger-soft: rgb(214 69 69 / 0.08);
   --diff-add: rgb(31 157 97 / 0.12);
   --diff-del: rgb(214 69 69 / 0.1);
+  --syn-keyword: #8839ef;
+  --syn-string: #2e7d32;
+  --syn-number: #c2410c;
+  --syn-comment: #8b919b;
+  --syn-function: #1d4ed8;
+  --syn-type: #a16207;
+  --syn-attr: #0e7490;
   color-scheme: light;
 }
 
@@ -214,6 +229,78 @@ body {
   font-size: 12.5px;
   line-height: 1.55;
 }
+/* Fenced code: the frame is the block, so the inner pre is bare. */
+.prose-qq .code-block {
+  margin: 0.75em 0;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.prose-qq .code-block pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 10px 14px 12px;
+}
+.prose-qq .code-block pre code {
+  user-select: text;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-meta .hljs-keyword,
+.hljs-literal {
+  color: var(--syn-keyword);
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-symbol,
+.hljs-template-tag {
+  color: var(--syn-string);
+}
+.hljs-number,
+.hljs-variable.constant_ {
+  color: var(--syn-number);
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+.hljs-title.function_,
+.hljs-title,
+.hljs-section {
+  color: var(--syn-function);
+}
+.hljs-type,
+.hljs-title.class_,
+.hljs-class .hljs-title {
+  color: var(--syn-type);
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-property,
+.hljs-name,
+.hljs-selector-class,
+.hljs-selector-id,
+.hljs-tag {
+  color: var(--syn-attr);
+}
+.hljs-deletion {
+  color: var(--danger);
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
 .prose-qq blockquote {
   border-left: 3px solid var(--border-strong);
   padding-left: 0.8em;
@@ -254,7 +341,8 @@ body {
   }
 }
 .streaming-caret::after,
-.prose-qq.is-streaming > :last-child:not(pre):not(ul):not(ol):not(table)::after {
+.prose-qq.is-streaming
+  > :last-child:not(pre):not(.code-block):not(ul):not(ol):not(table)::after {
   content: "";
   display: inline-block;
   width: 7px;

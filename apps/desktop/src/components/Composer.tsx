@@ -82,8 +82,21 @@ export function Composer({
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
-    el.style.height = "0px";
-    el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
+    const fit = () => {
+      el.style.height = "0px";
+      el.style.height = `${Math.min(el.scrollHeight, 280)}px`;
+    };
+    fit();
+    // Wrapping depends on width, which can settle after the first layout
+    // (a side panel opening, the window resizing).
+    let width = el.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      fit();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [text]);
 
   const submit = async () => {

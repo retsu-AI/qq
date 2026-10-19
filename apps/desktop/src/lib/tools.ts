@@ -59,3 +59,30 @@ export function toolSubject(name: string, raw: string): string {
 export function isShell(name: string): boolean {
   return name === "shell";
 }
+
+const ACTIVITY: Record<string, [string, string, string]> = {
+  shell: ["Ran", "command", "commands"],
+  read_file: ["Read", "file", "files"],
+  write_file: ["Wrote", "file", "files"],
+  edit_file: ["Edited", "file", "files"],
+  search: ["Searched", "pattern", "patterns"],
+  tree: ["Listed", "folder", "folders"],
+  fetch: ["Fetched", "page", "pages"],
+  spawn_agent: ["Delegated", "task", "tasks"],
+};
+
+/** "Ran 3 commands, read 2 files" for a run of settled tool calls. */
+export function summarizeTools(names: string[]): string {
+  const counts = new Map<string, number>();
+  for (const name of names) {
+    const key = name in ACTIVITY ? name : "other";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const parts = [...counts].map(([key, count]) => {
+    const [verb, one, many] = ACTIVITY[key] ?? ["Used", "tool", "tools"];
+    return `${verb} ${count} ${count === 1 ? one : many}`;
+  });
+  return parts
+    .map((part, index) => (index === 0 ? part : part[0].toLowerCase() + part.slice(1)))
+    .join(", ");
+}
