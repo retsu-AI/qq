@@ -32,7 +32,7 @@ Merged since `v0.1.7` (`dc41c332`), reconciled against main `7750ec7f`:
 
 | Gate | State | Needs |
 | --- | --- | --- |
-| G-flake: `goal_model_audit_late_and_stale_confirmation_cannot_achieve` intermittently returns `ShutdownTimedOut` (1/30 under `--stress-count 30`; failed main CI on `a9bff3ef` and `7750ec7f`) | Fix in review: [#366](https://github.com/retsu-AI/qq/pull/366), test fixture only (the held loader ignored cancellation); 40/40 stress iterations pass | Merge #366 |
+| G-flake: `goal_model_audit_late_and_stale_confirmation_cannot_achieve` intermittently returns `ShutdownTimedOut` (1/30 under `--stress-count 30`; failed main CI on `a9bff3ef` and `7750ec7f`) | Closed: [#366](https://github.com/retsu-AI/qq/pull/366) merged as `ed2b9d6c` (test fixture only: the held loader ignored cancellation; 40/40 stress iterations pass) | — |
 | G-host: `headless::tests::closing_goal_host_drains_accepted_work_without_admitting_successors`, `compaction::maximum_goal_is_verbatim_immediately_after_three_in_run_summaries` and `soak::stopping_a_pending_summarizer_preserves_measured_turns_and_unknown_totals` time out deterministically on a loaded local host; hosted CI passes them | Open | Confirm on a quiet host, or file as AF6 timing-sensitivity follow-ups |
 | G-333: reviewed-run recovery | Closed: merged as `7750ec7f` | — |
 | G-size: minimal (43.87 MB vs 41 MB) and full (48.67 MB vs 48 MB) release binaries over budget; v0.1.7 was under both (see ledger) | Open | Maintainer decision: reduce size, or explicitly accept the gap as ENG-834 did for v0.1.7. Budgets are not widened |
