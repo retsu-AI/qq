@@ -916,4 +916,90 @@ mod tests {
         );
         assert_eq!(request.header("x-goog-api-key"), None);
     }
+
+    struct FedrampCodexCredentials;
+
+    impl crate::RequestCredentialProvider for FedrampCodexCredentials {
+        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
+            Box::pin(async {
+                crate::RequestCredential::codex("echoed-codex-token", "echoed-codex-account", true)
+            })
+        }
+    }
+
+    /// A rejection body that echoes both Codex secrets reaches the caller
+    /// with each one redacted, while the non-secret `true` metadata value,
+    /// which also appears in ordinary JSON, survives intact.
+    #[tokio::test]
+    async fn request_time_codex_rejections_redact_every_secret_but_not_metadata() {
+        let server = LoopbackServer::respond(
+            401,
+            "application/json",
+            r#"{"error":{"message":"bad token echoed-codex-token for echoed-codex-account (fedramp=true)"}}"#,
+        );
+        let provider = ProviderCompiler::new()
+            .unwrap()
+            .compile_for_canary(ProviderRecipe::http(HttpProviderRecipe::new(
+                EndpointSpec::exact(format!("{}/v1/responses", server.base_url), true),
+                HttpProtocol::OpenAiResponses,
+                HttpAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                    FedrampCodexCredentials,
+                )),
+            )))
+            .unwrap();
+        let events = provider
+            .stream(ModelRequest::new(
+                "gpt-test",
+                vec![Message::user("ping")],
+                64,
+            ))
+            .collect::<Vec<_>>()
+            .await;
+        let request = server.capture();
+        assert_eq!(request.header("x-openai-fedramp"), Some("true"));
+
+        let [Err(error)] = events.as_slice() else {
+            panic!("expected one rejection, got {events:?}");
+        };
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains("echoed-codex-token"), "{rendered}");
+        assert!(!rendered.contains("echoed-codex-account"), "{rendered}");
+        assert!(
+            rendered.contains("(fedramp=true)"),
+            "metadata must not be redacted: {rendered}"
+        );
+    }
+
+    /// Headers a request-time Codex credential owns cannot also be set as
+    /// static headers: the duplicate is rejected at compile time instead of
+    /// being overwritten or removed per attempt.
+    #[test]
+    fn request_time_codex_protects_its_headers_from_static_configuration() {
+        for name in [
+            "chatgpt-account-id",
+            "originator",
+            "x-openai-fedramp",
+            "authorization",
+        ] {
+            let error = ProviderCompiler::new()
+                .unwrap()
+                .compile(ProviderRecipe::http(
+                    HttpProviderRecipe::new(
+                        EndpointSpec::exact("http://127.0.0.1:1/v1/responses", true),
+                        HttpProtocol::OpenAiResponses,
+                        HttpAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                            StaticCodexCredentials,
+                        )),
+                    )
+                    .with_headers(vec![(name.to_owned(), "static-value".to_owned())]),
+                ))
+                .err()
+                .unwrap_or_else(|| panic!("static `{name}` must be rejected"));
+            assert!(
+                matches!(&error, ProviderError::Configuration(message)
+                    if message == &format!("static header `{name}` is controlled by the provider")),
+                "{name}: {error:?}"
+            );
+        }
+    }
 }
