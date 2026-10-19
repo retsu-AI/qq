@@ -33,7 +33,7 @@ construction.rs        protocol/auth compatibility and adapter selection
 http.rs                HTTP client, header safety, retry, bounds, redaction
 exchange.rs            shared HTTP-to-SSE exchange driver
 aws.rs                 AWS config, credential lease, SigV4, region rules
-request_auth.rs        request-time bearer/Codex credentials and authorizer
+request_auth.rs        request-time credential header sets and authorizer
 providers.rs           private adapter module declarations
 providers/
   support.rs           protocol-side error and accounting kit
@@ -58,6 +58,17 @@ once into protocol-owned headers and an optional request authorizer. Mantle's
 SigV4 authorizer is an internal field on `HttpConstructionSpec`, so public
 recipes cannot manufacture Mantle-only capability. `EndpointKind` beside
 `EndpointSpec` is the sole Base/Exact representation.
+
+A request-time credential (`RequestCredential`) is a list of prebuilt,
+validated headers, each marked secret or metadata. Secret values are added
+to the attempt's redactions; metadata such as `originator: qq` and
+`x-openai-fedramp: true` is sent but never redacted. The recipe's intent
+names the headers a credential may and must set (bearer: `Authorization`;
+Codex: `Authorization`, `chatgpt-account-id`, `originator`, optionally
+`x-openai-fedramp`). Anything else, a duplicate, more than eight headers or
+more than 64 KiB of values fails the attempt before a header is applied.
+Optional names are cleared first, so a credential that drops one does not
+inherit it.
 
 ## Shared HTTP Execution And Adapter Kit
 
