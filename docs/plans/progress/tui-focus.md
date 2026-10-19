@@ -160,3 +160,13 @@ whole terminal row.
   sessions_200 27.9 → 27.9 (+0.4 %); children_20 57.3 → 40.8 (−28.9 %);
   resize_horizontal 30.3 → 30.2 (−0.3 %). All seven within 5 % or faster;
   the earlier +3–10 % sessions_200 readings were sequential-run drift.
+
+### 2026-10-19 — F6 full render gate
+
+Base = #360 head, candidate = #363 head, two release binaries interleaved 4×
+pinned to one core, load ≈1.5, medians
+(`target/qq-perf/tui-focus-F6-2026-10-19/interleaved-core3.txt`): steady
+21.1 → 21.4 µs (+1.4 %); streaming_focused 33.6 → 33.4 (−0.7 %);
+run_on_32kb 447.6 → 446.1 (−0.3 %); golden_path 39.3 → 39.4 (+0.3 %);
+sessions_200 34.2 → 34.2 (−0.3 %); children_20 39.1 → 39.5 (+1.2 %);
+resize_horizontal 29.9 → 29.7 (−0.7 %). All seven within 5 %.
