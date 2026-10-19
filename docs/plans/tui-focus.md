@@ -109,13 +109,21 @@ Rail rows:
   NEEDS YOU, and RECENT rows keep their state glyphs (`●` seen finish, `◌`
   stopped, `○` never run) so done and idle stay distinguishable.
 - One row per session with a `↳N` agent badge (and `◐N` while any work).
-- Agent rows are bounded per session. Under an unfocused session, at most
-  `WAITING_AGENT_ROWS` (3) waiting agents get a `↳` row (each with its
-  approval status row), then `+N waiting  Ctrl-G`. Under the focused session,
-  at most `FOCUSED_AGENT_ROWS` (6) agent rows: the focused agent first, then
-  waiting agents, then quiet agents in tree order; the rest collapse to
-  `+N more  /agents`. A focused agent is therefore always on the rail when
-  the rail is shown.
+- An agent **needs the user** when it has an approval waiting, or failed or
+  finished while unseen (the same `Need` the client computes for any
+  session). Such an agent lifts its session into NEEDS YOU.
+- Agent rows are bounded per session and painted in rank order. Under an
+  unfocused session, at most `WAITING_AGENT_ROWS` (3) agents that need the
+  user get a `↳` row (approval waits first, then failures, then unseen
+  finishes; tree order within a rank; an approval wait adds its status row),
+  then `+N need you  Ctrl-G`. Under the focused session, at most
+  `FOCUSED_AGENT_ROWS` (6) agent rows: the focused agent first, then agents
+  that need the user in the same rank order, then quiet agents in tree order;
+  the rest collapse to `+N more  /agents`. A focused agent is therefore
+  always on the rail when the rail is shown.
+- Audit agents (and anything under them) are never listed or counted, on
+  the rail, the strip, the layout's session count, or the picker, including
+  an audit whose parent was deleted and which therefore became a root.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
@@ -123,12 +131,15 @@ Rail rows:
   waiting agent by the composer-rule notice (F4–F5 keeps that notice
   whenever the rail is not on screen), so neither is ever invisible.
 
-Acceptance: unit tests for the roll-up (state rises, counts, inclusive cost
-with a hidden agent's spend, audit skipped, strip and rail agree); view
-tests for the rail shape, both caps, ordering, and the focused agent past the
+Acceptance: unit tests for the roll-up (state rises for approval, failure
+and unseen finish; counts; inclusive cost with a hidden agent's spend; audit
+subtrees and orphaned audit roots skipped; strip and rail agree); view tests
+for the rail shape, both caps, rank ordering, and the focused agent past the
 cap; a `fanout` golden scene (sessions with many agents, several waiting) at
-the five golden sizes; `sessions_200_with_sidebar` and
-`children_20_with_sidebar` benches within 5 % of baseline or faster.
+the five golden sizes; `sessions_200_with_sidebar` and a
+`children_20_with_sidebar` bench whose fixture is one session with twenty
+streaming agents (recorded on the stack base with the same fixture) within
+5 % of baseline or faster.
 
 ### F3: picker
 
@@ -147,17 +158,21 @@ the five golden sizes; `sessions_200_with_sidebar` and
 
 Acceptance: app tests for default rows, expand/collapse, search hits,
 `Ctrl-A`, focus-preserving refresh, and the agent-to-session cursor
-fallback; existing `/agents` tests unchanged.
+fallback; an audit case showing no audit row (nor anything under one) in
+`/sessions`, an agent search, `Ctrl-A`, or `/agents`; existing `/agents`
+tests otherwise unchanged.
 
 ### F4–F5: one place per fact, panes on demand
 
-- The composer-rule notice naming another session's (or agent's) waiting
-  approval is shown exactly when the rail is **not** on screen: Compact, a
-  single session under `Auto`, or the rail hidden. The strip's `◇ N` is an
-  anonymous count, a pointer and not a naming, so the named notice stays
-  beside it. When the rail is on screen its `↳ ◇` row names the approval and
-  the rule omits the notice (the in-place `Alt-A`/`Alt-D` chords move to the
-  rule's hint side while any approval waits).
+- The composer-rule notice names waiting approvals the rail does not paint.
+  When the rail is **not** on screen (Compact, a single session under
+  `Auto`, or the rail hidden) that is every waiting approval; the strip's
+  `◇ N` is an anonymous count, a pointer and not a naming, so the notice
+  stays beside it. When the rail is on screen its `↳ ◇` rows name the
+  approvals they paint and the notice names only the rest: approvals
+  collapsed into a `+N need you` row or scrolled out of the rail's window.
+  With none left over the rule omits the notice and leads with the in-place
+  `Alt-A`/`Alt-D` and `Ctrl-G` chords.
 - `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2 · ◇ 1
   /agents`.
 - Inspector `Auto` shows only when it has content (an expanded call or a
@@ -165,8 +180,9 @@ fallback; existing `/agents` tests unchanged.
 - The top row omits a known zero cost.
 
 Acceptance: view tests that each waiting approval is *named* exactly once per
-frame outside its own transcript (rail row or rule notice, never both) at
-Compact, Regular with the rail shown, and Regular with the rail hidden;
+frame outside its own transcript (a rail row or the rule notice, never both)
+at Compact, Regular with the rail shown, Regular with the rail hidden, and
+with more waiting agents under one session than `WAITING_AGENT_ROWS`;
 inspector `Auto` hidden with nothing expanded and shown with an expansion;
 goldens moved deliberately.
 
