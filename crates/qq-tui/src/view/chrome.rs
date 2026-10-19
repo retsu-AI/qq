@@ -147,11 +147,12 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
 /// needs while typing. A transient notice takes the left side while it
 /// lasts; otherwise a running session shows its activity, elapsed time, and
 /// time to first token. Approvals waiting in other sessions are named here
-/// when the rail is not on screen, so they never stall silently; with the
-/// rail up its `↳ ◇` row names them and the rule carries only the answer
+/// unless the rail painted their row (`rail_named`, `None` when the rail is
+/// off-screen), so each is named exactly once and none stalls silently;
+/// with every waiting approval on the rail the rule carries only the answer
 /// chords. Context-sensitive key hints from the command table sit right, so
 /// the composer needs no hint row of its own.
-pub(super) fn composer_rule(app: &App, width: usize, rail_visible: bool) -> Line {
+pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[SessionId]>) -> Line {
     let mut left = Line::default();
     if let Some((status, level)) = app.visible_status() {
         let (prefix, style) = match level {
@@ -290,15 +291,19 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_visible: bool) -> Line
     {
         left.push(" queued", muted());
     }
-    let waiting: Vec<&str> = app
+    let all_waiting: Vec<SessionId> = app
         .sessions_awaiting_approval()
         .into_iter()
         // A side view hides its source transcript's approval block.
         .filter(|id| Some(*id) != app.view().transcript())
-        .filter_map(|id| app.sessions.get(&id))
+        .collect();
+    let waiting: Vec<&str> = all_waiting
+        .iter()
+        .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+        .filter_map(|id| app.sessions.get(id))
         .map(|session| session.summary.title.as_str())
         .collect();
-    if !waiting.is_empty() && !rail_visible {
+    if !waiting.is_empty() {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
         left.push(
@@ -325,9 +330,9 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_visible: bool) -> Line
     }
 
     let mut right = Line::default();
-    // With the rail naming the waiting approvals, the rule keeps only the
+    // With the rail naming every waiting approval, the rule keeps only the
     // chords that answer or reach them, ahead of the ordinary hints.
-    if !waiting.is_empty() && rail_visible {
+    if !all_waiting.is_empty() && waiting.is_empty() {
         let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
         let approve = app.chord_label(crate::commands::Command::ApproveBackground);
         let deny = app.chord_label(crate::commands::Command::DenyBackground);

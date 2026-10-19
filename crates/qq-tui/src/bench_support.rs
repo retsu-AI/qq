@@ -36,12 +36,35 @@ impl BenchHarness {
         Self::with_options(size, sessions, messages, TuiOptions::default())
     }
 
+    /// One focused root session with `messages` loaded and `agents` agent
+    /// sessions under it (indexes 1..=agents), for the many-agents benches.
+    #[must_use]
+    pub fn with_agents(size: (u16, u16), agents: u8, messages: u8) -> Self {
+        Self::build(size, agents + 1, messages, TuiOptions::default(), true)
+    }
+
     /// `new`, with the TUI options (themes, settings) supplied by the caller.
     #[must_use]
     pub fn with_options(size: (u16, u16), sessions: u8, messages: u8, options: TuiOptions) -> Self {
+        Self::build(size, sessions, messages, options, false)
+    }
+
+    fn build(
+        size: (u16, u16),
+        sessions: u8,
+        messages: u8,
+        options: TuiOptions,
+        agents: bool,
+    ) -> Self {
         assert!(sessions >= 1, "at least one session is required");
         let summaries: Vec<SessionSummary> = (0..sessions)
-            .map(|index| summary(session_id(index), SessionStatus::Idle))
+            .map(|index| {
+                let mut summary = summary(session_id(index), SessionStatus::Idle);
+                if agents && index > 0 {
+                    summary.parent_id = Some(session_id(0));
+                }
+                summary
+            })
             .collect();
         let focused = SessionSnapshot {
             side_questions: Vec::new(),

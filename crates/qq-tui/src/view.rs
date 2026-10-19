@@ -87,6 +87,21 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
+/// Sessions the rail and the strip list: roots that are not audit agents
+/// orphaned by a deleted parent. The layout's `Auto` rail and strip count
+/// these, never agents.
+pub(crate) fn listed_sessions(app: &App) -> usize {
+    app.sessions
+        .roots()
+        .iter()
+        .filter(|id| {
+            app.sessions.get(id).is_some_and(|session| {
+                session.summary.purpose != qq_protocol::SessionPurpose::Audit
+            })
+        })
+        .count()
+}
+
 /// Whether the sessions rail is on screen at `width` under `prefs`. Shared
 /// with the app so event visibility and the toggle command agree with the
 /// frame.
@@ -254,7 +269,7 @@ impl FrameRenderer {
             chrome_rows,
             app.layout,
             layout::LayoutDemand {
-                sessions: app.sessions.roots().len(),
+                sessions: listed_sessions(app),
                 inspector_content: inspector_has_content(app, app.pane()),
             },
         );
@@ -338,9 +353,12 @@ impl FrameRenderer {
                 inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
             ));
         }
+        let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
+            let (rows, named) = sidebar(app, rail.width, body_height, density);
+            rail_named = Some(named);
+            columns.push((rail.x, rows));
         }
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
@@ -392,7 +410,7 @@ impl FrameRenderer {
             lines.push(strip);
         }
         lines.extend(draft_lines);
-        lines.push(composer_rule(app, width, layout.rail_visible()));
+        lines.push(composer_rule(app, width, rail_named.as_deref()));
         let composer_top = lines.len();
         lines.extend(composer_lines);
         lines.extend(std::iter::repeat_n(Line::default(), padding_rows));

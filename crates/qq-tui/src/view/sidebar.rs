@@ -1,7 +1,5 @@
 use super::*;
 use layout::Tier;
-use std::ops::Range;
-
 use qq_client::state::{Group, Need};
 
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
@@ -102,26 +100,28 @@ pub(super) struct RailEntry {
 
 /// Every session grouped NEEDS YOU, WORKING, RECENT (tree order, newest
 /// session first, within a group), how many each group holds, the agents
-/// waiting on the user, and where the focused session's tree sits in
-/// `thread_order`. One O(sessions) walk.
+/// that need the user, and the focused session's agents. One O(sessions)
+/// walk; audit agents, their subtrees, and audit roots are skipped.
 #[derive(Debug, Default)]
 pub(super) struct Rollup {
     pub sessions: Vec<RailEntry>,
     pub counts: [usize; 3],
-    /// `(session, agent)` for every agent with an approval waiting, in tree
-    /// order.
-    pub waiting: Vec<(SessionId, SessionId)>,
-    /// The session whose tree holds the focused session, and the range of
-    /// `thread_order` its agents occupy.
-    pub focused_tree: Option<(SessionId, Range<usize>)>,
+    /// `(session, agent, need)` for every agent that needs the user, sorted
+    /// by session tree order then by need (approval, failure, unseen
+    /// finish) then tree order.
+    pub needs: Vec<(SessionId, SessionId, Need)>,
+    /// The session whose tree holds the focused session, and its non-audit
+    /// agents in tree order.
+    pub focused_tree: Option<(SessionId, Vec<SessionId>)>,
 }
 
 impl Rollup {
-    fn waiting_under(&self, session: SessionId) -> impl Iterator<Item = SessionId> + '_ {
-        self.waiting
+    /// Agents under `session` that need the user, most urgent first.
+    pub(super) fn needs_under(&self, session: SessionId) -> impl Iterator<Item = SessionId> + '_ {
+        self.needs
             .iter()
-            .filter(move |(root, _)| *root == session)
-            .map(|(_, agent)| *agent)
+            .filter(move |(root, _, _)| *root == session)
+            .map(|(_, agent, _)| *agent)
     }
 }
 
@@ -132,43 +132,44 @@ fn is_audit(session: &SessionView) -> bool {
 }
 
 /// The session being accumulated by [`rollup`]: its entry, its own group,
-/// where its agents start in `thread_order`, and whether one waits.
+/// whether any agent needs the user, and (only for the focused tree) its
+/// agents.
 struct Pending {
     entry: RailEntry,
     own: Group,
-    start: usize,
-    waiting: bool,
+    needs_you: bool,
+    agents: Option<Vec<SessionId>>,
 }
 
 pub(super) fn rollup(app: &App) -> Rollup {
     let focused = app.focused();
+    let focused_root = focused.and_then(|id| app.sessions.root_of(id));
     let order = app.sessions.thread_order();
     let mut buckets: [Vec<RailEntry>; 3] = Default::default();
     let mut rollup = Rollup::default();
     let mut current: Option<Pending> = None;
     let mut audit_depth: Option<usize> = None;
-    let mut focused_root: Option<SessionId> = None;
-    let mut finish =
-        |pending: Pending, end: usize, focused_root: Option<SessionId>, rollup: &mut Rollup| {
-            let Pending {
-                entry,
-                own,
-                start,
-                waiting,
-            } = pending;
-            let group = if own == Group::NeedsYou || waiting {
-                RailGroup::NeedsYou
-            } else if own == Group::Working || entry.agents_working > 0 {
-                RailGroup::Working
-            } else {
-                RailGroup::Recent
-            };
-            if focused_root == Some(entry.id) {
-                rollup.focused_tree = Some((entry.id, start..end));
-            }
-            buckets[group as usize].push(RailEntry { group, ..entry });
+    let mut finish = |pending: Pending, rollup: &mut Rollup| {
+        let Pending {
+            entry,
+            own,
+            needs_you,
+            agents,
+        } = pending;
+        let group = if own == Group::NeedsYou || needs_you {
+            RailGroup::NeedsYou
+        } else if own == Group::Working || entry.agents_working > 0 {
+            RailGroup::Working
+        } else {
+            RailGroup::Recent
         };
-    for (position, &id) in order.iter().enumerate() {
+        if let Some(agents) = agents {
+            rollup.focused_tree = Some((entry.id, agents));
+        }
+        buckets[group as usize].push(RailEntry { group, ..entry });
+    };
+    let mut first_need = 0;
+    for &id in order {
         let session = &app.sessions[&id];
         let root = session.summary.parent_id.is_none();
         // Everything below an audit agent is bookkeeping too.
@@ -178,14 +179,24 @@ pub(super) fn rollup(app: &App) -> Rollup {
             }
             audit_depth = None;
         }
+        if is_audit(session) {
+            // An audit root (its parent was deleted) closes the session
+            // before it like any root, then is skipped with its subtree.
+            if root && let Some(pending) = current.take() {
+                finish(pending, &mut rollup);
+            }
+            audit_depth = Some(app.sessions.depth(id));
+            continue;
+        }
         if root {
             if let Some(pending) = current.take() {
-                finish(pending, position, focused_root, &mut rollup);
+                finish(pending, &mut rollup);
             }
+            // Agents of the previous session that need the user, most
+            // urgent first; tree order is kept within a rank (stable sort).
+            rollup.needs[first_need..].sort_by_key(|(_, _, need)| *need);
+            first_need = rollup.needs.len();
             let is_focused = focused == Some(id);
-            if is_focused {
-                focused_root = Some(id);
-            }
             // Must agree with `live_status_line`; the planner relies on it.
             let live = !session.live.awaiting_approval.is_empty()
                 || session.summary.status == SessionStatus::Running
@@ -208,8 +219,8 @@ pub(super) fn rollup(app: &App) -> Rollup {
                     agents_working: 0,
                 },
                 own: session.group(),
-                start: position + 1,
-                waiting: false,
+                needs_you: false,
+                agents: (focused_root == Some(id)).then(Vec::new),
             });
             continue;
         }
@@ -217,26 +228,26 @@ pub(super) fn rollup(app: &App) -> Rollup {
         let Some(pending) = current.as_mut() else {
             continue;
         };
-        if focused == Some(id) {
-            focused_root = Some(pending.entry.id);
-        }
-        if is_audit(session) {
-            audit_depth = Some(app.sessions.depth(id));
-            continue;
-        }
         pending.entry.agents += 1;
         match session.summary.status {
             SessionStatus::Running | SessionStatus::Queued => pending.entry.agents_working += 1,
             SessionStatus::Idle => {}
         }
-        if !session.live.awaiting_approval.is_empty() {
-            pending.waiting = true;
-            rollup.waiting.push((pending.entry.id, id));
+        // The focused agent has seen its own finish.
+        if focused != Some(id)
+            && let Some(need) = session.need()
+        {
+            pending.needs_you = true;
+            rollup.needs.push((pending.entry.id, id, need));
+        }
+        if let Some(agents) = pending.agents.as_mut() {
+            agents.push(id);
         }
     }
     if let Some(pending) = current.take() {
-        finish(pending, order.len(), focused_root, &mut rollup);
+        finish(pending, &mut rollup);
     }
+    rollup.needs[first_need..].sort_by_key(|(_, _, need)| *need);
     rollup.counts = [buckets[0].len(), buckets[1].len(), buckets[2].len()];
     rollup.sessions = Vec::with_capacity(rollup.counts.iter().sum());
     for bucket in buckets {
@@ -291,7 +302,6 @@ pub(super) enum RailRow {
 pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize) {
     let rollup = rollup(app);
     let focused = app.focused();
-    let order = app.sessions.thread_order();
     let mut plan: Vec<RailRow> = Vec::with_capacity(rollup.sessions.len() * 2 + 8);
     let mut focused_row = 0;
     let mut current: Option<RailGroup> = None;
@@ -321,51 +331,43 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             .focused_tree
             .as_ref()
             .filter(|(root, _)| *root == entry.id);
-        let Some((_, range)) = tree else {
-            let mut waiting = rollup.waiting_under(entry.id);
-            for agent in waiting.by_ref().take(WAITING_AGENT_ROWS) {
-                plan.push(RailRow::Agent(agent));
-                plan.push(RailRow::AgentDetail(agent));
+        let agent_rows = |plan: &mut Vec<RailRow>, id: SessionId| {
+            plan.push(RailRow::Agent(id));
+            if !app.sessions[&id].live.awaiting_approval.is_empty() {
+                plan.push(RailRow::AgentDetail(id));
             }
-            let rest = waiting.count();
+        };
+        let Some((_, agents)) = tree else {
+            let mut needs = rollup.needs_under(entry.id);
+            for agent in needs.by_ref().take(WAITING_AGENT_ROWS) {
+                agent_rows(&mut plan, agent);
+            }
+            let rest = needs.count();
             if rest > 0 {
                 plan.push(RailRow::MoreWaiting(rest));
             }
             continue;
         };
-        // The focused session's agents, at most `FOCUSED_AGENT_ROWS`: the
-        // focused agent first, then waiting agents, then quiet agents, each
-        // kept in tree order on screen.
-        let agents: Vec<SessionId> = order[range.clone()]
-            .iter()
-            .copied()
-            .filter(|id| !app.sessions.get(id).is_some_and(is_audit))
-            .collect();
-        let rank = |id: SessionId| {
-            if focused == Some(id) {
-                0
-            } else if !app.sessions[&id].live.awaiting_approval.is_empty() {
-                1
-            } else {
-                2
-            }
-        };
-        let mut chosen: Vec<usize> = (0..agents.len()).collect();
-        chosen.sort_by_key(|&index| rank(agents[index]));
-        chosen.truncate(FOCUSED_AGENT_ROWS);
-        chosen.sort_unstable();
-        for &index in &chosen {
-            let id = agents[index];
+        // The focused session's agents, at most `FOCUSED_AGENT_ROWS`, painted
+        // in rank order: the focused agent, then agents that need the user
+        // (most urgent first), then quiet agents in tree order.
+        let mut ranked: Vec<SessionId> = Vec::with_capacity(agents.len());
+        ranked.extend(focused.filter(|id| agents.contains(id)));
+        ranked.extend(rollup.needs_under(entry.id));
+        ranked.extend(
+            agents
+                .iter()
+                .copied()
+                .filter(|id| Some(*id) != focused && app.sessions[id].need().is_none()),
+        );
+        for &id in ranked.iter().take(FOCUSED_AGENT_ROWS) {
             if focused == Some(id) {
                 focused_row = plan.len();
             }
-            plan.push(RailRow::Agent(id));
-            if !app.sessions[&id].live.awaiting_approval.is_empty() {
-                plan.push(RailRow::AgentDetail(id));
-            }
+            agent_rows(&mut plan, id);
         }
-        if chosen.len() < agents.len() {
-            plan.push(RailRow::More(agents.len() - chosen.len()));
+        if ranked.len() > FOCUSED_AGENT_ROWS {
+            plan.push(RailRow::More(ranked.len() - FOCUSED_AGENT_ROWS));
         }
     }
     (plan, focused_row)
@@ -385,12 +387,20 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
 /// glyph, name, agent count, and unread badge; at
 /// [`RailDensity::Detailed`] a second muted row carries the live tail and
 /// the session's cost. Agents appear only under the focused session and
-/// when they wait on the user. The focused row sits on the selection
-/// background. Always `height` rows so it zips against the body.
-pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> Vec<Line> {
+/// when they need the user. The focused row sits on the selection
+/// background. Always `height` rows so it zips against the body. Also
+/// returns the sessions and agents with a waiting approval whose row was
+/// painted, so the composer rule names only the rest.
+pub(super) fn sidebar(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+) -> (Vec<Line>, Vec<SessionId>) {
     let inner = width.saturating_sub(2);
     let (plan, focused_row) = plan_rail(app, density);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
+    let mut named: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
     }
@@ -402,6 +412,14 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         }
     };
     for row in plan.into_iter().skip(start).take(height) {
+        if let RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) = row
+            && app
+                .sessions
+                .get(&id)
+                .is_some_and(|session| !session.live.awaiting_approval.is_empty())
+        {
+            named.push(id);
+        }
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),
             RailRow::Header(group, count) => {
@@ -507,7 +525,7 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
                 truncate_line(line, width)
             }
             RailRow::MoreWaiting(count) => {
-                let mut line = Line::styled(format!("│   +{count} waiting"), warning());
+                let mut line = Line::styled(format!("│   +{count} need you"), warning());
                 if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
                     line.push(format!("  {chord}"), muted());
                 }
@@ -519,7 +537,7 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         rows.push(Line::styled("│", border()));
     }
     rows.truncate(height);
-    rows
+    (rows, named)
 }
 
 /// One row above the composer when the rail is hidden and more than one

@@ -1086,6 +1086,11 @@ impl App {
                 audit_depth = None;
             }
             if session.summary.purpose == qq_protocol::SessionPurpose::Audit {
+                // An audit root (its parent was deleted) also ends the
+                // previous session's agents.
+                if session.summary.parent_id.is_none() {
+                    root = None;
+                }
                 audit_depth = Some(depth);
                 continue;
             }
