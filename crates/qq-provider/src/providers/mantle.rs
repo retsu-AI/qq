@@ -187,6 +187,7 @@ fn construct_mantle_provider(
             auth,
             authorizer,
             headers: Vec::new(),
+            body_shape: crate::ResponsesBodyShape::Standard,
         },
     )
     .map(|provider| provider.with_retry_mode(retry_mode))

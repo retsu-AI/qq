@@ -9,7 +9,8 @@ use serde_json::value::RawValue;
 
 use crate::{
     ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderStream, ProviderUsage, Role, SharedRequestCredentialProvider, ToolSpec,
+    ProviderEvent, ProviderStream, ProviderUsage, ResponsesBodyShape, Role,
+    SharedRequestCredentialProvider, ToolSpec,
     credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
     http::{
@@ -100,20 +101,29 @@ impl OpenAi {
     ) -> Result<Self, ProviderError> {
         let endpoint = validate_endpoint(exact_endpoint, allow_http)?;
         let client = support::client_for_endpoint(&endpoint)?;
+        let body_shape = if matches!(auth, ResponsesAuth::Codex { .. }) {
+            ResponsesBodyShape::Codex
+        } else {
+            ResponsesBodyShape::Standard
+        };
         Self::with_client_and_auth(
             client,
             endpoint,
             ResponsesConstructionAuth::Static(auth),
             static_headers,
+            body_shape,
         )
         .map(Self::single_shot)
     }
 
+    /// `body_shape` is the recipe's explicit Responses body; the auth intent
+    /// no longer selects it.
     pub(crate) fn with_client_and_auth(
         client: reqwest::Client,
         endpoint: reqwest::Url,
         auth: ResponsesConstructionAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
+        body_shape: ResponsesBodyShape,
     ) -> Result<Self, ProviderError> {
         // Headers a request-time Codex credential owns are protected from
         // static configuration exactly as a static Codex credential's are.
@@ -122,30 +132,23 @@ impl OpenAi {
             ResponsesConstructionAuth::RequestTimeCodex(_)
                 | ResponsesConstructionAuth::Static(ResponsesAuth::Codex { .. })
         );
-        let (auth, authorizer, request_kind) = match auth {
-            ResponsesConstructionAuth::Static(auth) => {
-                let request_kind = if matches!(&auth, ResponsesAuth::Codex { .. }) {
-                    ResponsesRequestKind::Codex
-                } else {
-                    ResponsesRequestKind::Standard
-                };
-                (auth, RequestAuthorizer::default(), request_kind)
-            }
+        let request_kind = match body_shape {
+            ResponsesBodyShape::Standard => ResponsesRequestKind::Standard,
+            ResponsesBodyShape::Codex => ResponsesRequestKind::Codex,
+        };
+        let (auth, authorizer) = match auth {
+            ResponsesConstructionAuth::Static(auth) => (auth, RequestAuthorizer::default()),
             ResponsesConstructionAuth::RequestTimeBearer(credentials) => (
                 ResponsesAuth::NoAuth,
                 RequestAuthorizer::request_time_bearer(credentials),
-                ResponsesRequestKind::Standard,
             ),
             ResponsesConstructionAuth::RequestTimeCodex(credentials) => (
                 ResponsesAuth::NoAuth,
                 RequestAuthorizer::request_time_codex(credentials),
-                ResponsesRequestKind::Codex,
             ),
-            ResponsesConstructionAuth::MantleSigV4(authorizer) => (
-                ResponsesAuth::NoAuth,
-                authorizer,
-                ResponsesRequestKind::Standard,
-            ),
+            ResponsesConstructionAuth::MantleSigV4(authorizer) => {
+                (ResponsesAuth::NoAuth, authorizer)
+            }
         };
         let (headers, redactions) = build_headers_for(auth, codex_headers, static_headers)?;
 

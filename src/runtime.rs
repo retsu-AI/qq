@@ -40,7 +40,7 @@ use qq_protocol::{
 };
 use qq_provider::{
     BedrockAuth as ProviderBedrockAuth, EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe,
-    ProviderCompiler, ProviderError, ProviderRecipe, SecretRef,
+    ProviderCompiler, ProviderError, ProviderRecipe, ResponsesBodyShape, SecretRef,
 };
 use qq_server::{
     CommandFuture, DelegationFuture, ModelsFuture, ProfilesFuture, ServerHandler,
@@ -1937,10 +1937,11 @@ impl RuntimeFactory {
                 limit: max_output_tokens,
             });
         }
+        // The codec, not the credential, decides whether the output limit
+        // reaches the wire: the Codex body omits `max_output_tokens`.
         let codex = matches!(
             access,
-            ProviderAccess::Http(access)
-                if matches!(access.auth(), HttpCredential::OpenAiCodex { .. })
+            ProviderAccess::Http(access) if responses_body_shape(access) == ResponsesBodyShape::Codex
         );
         // Explicit cache breakpoints exist only where the wire has them: the
         // Anthropic Messages and Bedrock Converse codecs mark the system
@@ -2143,7 +2144,9 @@ impl RuntimeFactory {
             EndpointMode::Exact => EndpointSpec::exact(access.endpoint(), allow_http),
         };
         let recipe = ProviderRecipe::http(
-            HttpProviderRecipe::new(endpoint, protocol, auth).with_headers(headers),
+            HttpProviderRecipe::new(endpoint, protocol, auth)
+                .with_headers(headers)
+                .with_body_shape(responses_body_shape(access)),
         );
         Ok((recipe, descriptor))
     }
@@ -3745,6 +3748,12 @@ fn provider_request_shape_identity(
                     update_digest(&mut digest, b"request-time-bearer");
                 }
             }
+            // The body shape is digested in its own right, so two routes that
+            // send different Responses bodies can never share an identity.
+            // The `request-time-codex` marker above already implies the Codex
+            // body, so only a Codex body on any other credential adds bytes:
+            // every existing route keeps its version 1 digest.
+            digest_body_shape(&mut digest, access.auth(), responses_body_shape(access));
         }
         ProviderAccess::AmazonBedrock { region, auth } => {
             let region = region.as_deref()?;
@@ -3764,6 +3773,41 @@ fn provider_request_shape_identity(
             .expect("provider request-shape version must be non-zero"),
         digest: qq_protocol::ContentHash::from_bytes(digest.finalize().into()),
     })
+}
+
+/// The Responses body a configured HTTP route sends. Only the built-in OpenAI
+/// Codex route uses the Codex body. The recipe, the output-limit capability
+/// and the request-shape identity all read the shape from here.
+fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
+    match access.auth() {
+        HttpCredential::OpenAiCodex { .. } => ResponsesBodyShape::Codex,
+        HttpCredential::Configured(_)
+        | HttpCredential::ApiKey { .. }
+        | HttpCredential::XAi { .. } => ResponsesBodyShape::Standard,
+    }
+}
+
+/// Adds the Responses body shape to a request-shape digest. A Codex body on
+/// the OpenAI Codex credential is already implied by its `request-time-codex`
+/// marker, and a standard body on any other credential is the version 1
+/// default, so neither adds bytes and every existing digest is unchanged;
+/// any other pairing is digested explicitly.
+fn digest_body_shape(digest: &mut Sha256, auth: &HttpCredential, shape: ResponsesBodyShape) {
+    let implied = match auth {
+        HttpCredential::OpenAiCodex { .. } => ResponsesBodyShape::Codex,
+        HttpCredential::Configured(_)
+        | HttpCredential::ApiKey { .. }
+        | HttpCredential::XAi { .. } => ResponsesBodyShape::Standard,
+    };
+    if shape != implied {
+        update_digest(
+            digest,
+            match shape {
+                ResponsesBodyShape::Standard => b"standard-body",
+                ResponsesBodyShape::Codex => b"codex-body",
+            },
+        );
+    }
 }
 
 fn bedrock_auth_shape(auth: &BedrockAuth) -> &'static [u8] {
@@ -10386,5 +10430,80 @@ mod tests {
         assert!(final_claim.contains("final candidate"));
         assert!(final_instructions.contains("completion claim"));
         assert!(!final_instructions.contains("error result is supported"));
+    }
+
+    /// The recipe body shape and the output-limit capability come from one
+    /// function of the route, so they cannot disagree: only the OpenAI Codex
+    /// route sends the Codex body, and every other credential sends the
+    /// standard body whatever its auth scheme.
+    #[test]
+    fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
+        let access = |auth| {
+            HttpAccess::new(
+                "https://example.test/v1",
+                EndpointMode::Base,
+                ProviderApi::OpenAiResponses,
+                auth,
+                BTreeMap::new(),
+            )
+        };
+        for (auth, expected) in [
+            (
+                HttpCredential::OpenAiCodex { profile: None },
+                ResponsesBodyShape::Codex,
+            ),
+            (
+                HttpCredential::XAi {
+                    api_key: None,
+                    profile: None,
+                },
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::Bearer(qq_config::SecretRef::Env(
+                    "TOKEN".to_owned(),
+                ))),
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::NoAuth),
+                ResponsesBodyShape::Standard,
+            ),
+        ] {
+            assert_eq!(
+                responses_body_shape(&access(auth.clone())),
+                expected,
+                "{auth:?}"
+            );
+        }
+    }
+
+    /// The body shape reaches the request-shape digest: the same route with
+    /// a different body never shares an identity, while the shape each
+    /// credential has always used adds nothing, so version 1 digests stand.
+    #[test]
+    fn the_responses_body_shape_is_part_of_the_request_shape_digest() {
+        let digest = |auth: &HttpCredential, shape| {
+            let mut digest = Sha256::new();
+            update_digest(&mut digest, b"route");
+            digest_body_shape(&mut digest, auth, shape);
+            digest.finalize()
+        };
+        let bare = {
+            let mut digest = Sha256::new();
+            update_digest(&mut digest, b"route");
+            digest.finalize()
+        };
+        let codex = HttpCredential::OpenAiCodex { profile: None };
+        let bearer = HttpCredential::Configured(ProviderAuth::NoAuth);
+
+        assert_eq!(digest(&codex, ResponsesBodyShape::Codex), bare);
+        assert_eq!(digest(&bearer, ResponsesBodyShape::Standard), bare);
+        assert_ne!(digest(&codex, ResponsesBodyShape::Standard), bare);
+        assert_ne!(digest(&bearer, ResponsesBodyShape::Codex), bare);
+        assert_ne!(
+            digest(&codex, ResponsesBodyShape::Standard),
+            digest(&bearer, ResponsesBodyShape::Codex)
+        );
     }
 }
