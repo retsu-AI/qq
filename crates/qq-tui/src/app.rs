@@ -1368,6 +1368,11 @@ impl App {
         self.set_notice(text, NoticeLevel::Info);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_info_for_test(&mut self, text: &str) {
+        self.set_info(text.to_owned());
+    }
+
     fn set_warning(&mut self, text: String) {
         self.set_notice(text, NoticeLevel::Warning);
     }

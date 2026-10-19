@@ -161,6 +161,15 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
             crate::app::NoticeLevel::Error => ("error: ", failure()),
         };
         left.push(format!(" {prefix}{status} "), style.bold());
+        // A notice takes the left side, but approvals waiting elsewhere keep
+        // their answer and jump chords on the right.
+        let waiting = !app
+            .sessions_awaiting_approval()
+            .into_iter()
+            .all(|id| Some(id) == app.view().transcript());
+        if waiting {
+            return rule_keeping_right(left, approval_chords(app), width);
+        }
         return rule_with(left, Line::default(), width);
     }
     // Standing guidance for a client that cannot create a session yet: it
@@ -296,12 +305,6 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         .into_iter()
         // A side view hides its source transcript's approval block.
         .filter(|id| Some(*id) != app.view().transcript())
-        // A delegate still owns these; the human is not asked yet.
-        .filter(|id| {
-            app.sessions.get(id).is_some_and(|session| {
-                session.live.awaiting_approval.len() > session.live.with_delegate.len()
-            })
-        })
         .collect();
     let waiting: Vec<&str> = all_waiting
         .iter()
@@ -309,17 +312,16 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         .filter_map(|id| app.sessions.get(id))
         .map(|session| session.summary.title.as_str())
         .collect();
-    // Agents that failed or finished unseen and whose row is not on screen:
-    // a session's own state shows on its rail row or the strip, but an
-    // agent's has nowhere else to appear. Counted alongside approvals, so
-    // every off-rail item is named or counted.
+    // Sessions and agents that failed or finished unseen whose rail row is
+    // not on screen (rail hidden, Compact, collapsed or scrolled out): the
+    // strip only counts them, so the rule names them. Counted alongside
+    // approvals, so every unpainted item is named or counted.
     let unseen: Vec<(&str, bool)> = app
         .sessions_needing_attention()
         .into_iter()
         .filter(|id| Some(*id) != app.focused())
         .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
         .filter_map(|id| app.sessions.get(&id))
-        .filter(|session| session.summary.parent_id.is_some())
         .filter_map(|session| match super::sidebar::agent_need(session) {
             Some(qq_client::state::Need::Failed) => Some((session.summary.title.as_str(), true)),
             Some(qq_client::state::Need::FinishedUnread) => {
@@ -387,23 +389,7 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
     let mut keep_right = false;
     if !all_waiting.is_empty() && waiting.is_empty() {
         keep_right = true;
-        let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
-        let approve = app.chord_label(crate::commands::Command::ApproveBackground);
-        let deny = app.chord_label(crate::commands::Command::DenyBackground);
-        if let (Some(approve), Some(deny)) = (approve, deny) {
-            right.push(
-                format!("{}/{}", compact_chord(&approve), compact_chord(&deny)),
-                warning(),
-            );
-            right.push(" answer", muted());
-        }
-        if let Some(jump) = jump {
-            if !right.is_empty() {
-                right.push("  ", muted());
-            }
-            right.push(compact_chord(&jump), warning());
-            right.push(" jump", muted());
-        }
+        right = approval_chords(app);
     }
     for (command, label) in hints_for(app) {
         // `?` on an empty composer opens help too, and is the cheaper key
@@ -436,6 +422,30 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         return rule_keeping_right(left, right, width);
     }
     rule_with(left, right, width)
+}
+
+/// `M-A/M-D answer  ^G jump`: the in-place controls for approvals waiting
+/// in other sessions.
+fn approval_chords(app: &App) -> Line {
+    let mut right = Line::default();
+    let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
+    let approve = app.chord_label(crate::commands::Command::ApproveBackground);
+    let deny = app.chord_label(crate::commands::Command::DenyBackground);
+    if let (Some(approve), Some(deny)) = (approve, deny) {
+        right.push(
+            format!("{}/{}", compact_chord(&approve), compact_chord(&deny)),
+            warning(),
+        );
+        right.push(" answer", muted());
+    }
+    if let Some(jump) = jump {
+        if !right.is_empty() {
+            right.push("  ", muted());
+        }
+        right.push(compact_chord(&jump), warning());
+        right.push(" jump", muted());
+    }
+    right
 }
 
 /// [`rule_with`] for a right side that must stay (the in-place approval

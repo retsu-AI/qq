@@ -925,24 +925,12 @@ impl TranscriptCache {
                 .collect();
             if !children.is_empty() {
                 // One summary row: the rail and `/agents` list the agents;
-                // the transcript only says they exist and what they do.
+                // the transcript only says they exist and how many work.
+                // No `◇` count: a waiting agent is named on the rail or
+                // the rule and pointed at by the strip already.
                 let working = children
                     .iter()
-                    .filter(|child| {
-                        matches!(
-                            app.sessions[*child].summary.status,
-                            SessionStatus::Running | SessionStatus::Queued
-                        )
-                    })
-                    .count();
-                let waiting = children
-                    .iter()
-                    .filter(|child| {
-                        // Only approvals the human is asked for; a
-                        // delegate-owned hold is still work.
-                        let live = &app.sessions[*child].live;
-                        live.awaiting_approval.len() > live.with_delegate.len()
-                    })
+                    .filter(|child| super::sidebar::is_working(&app.sessions[*child]))
                     .count();
                 let mut line = Line::styled(
                     format!("  ↳ {}", count_noun(children.len(), "agent", "agents")),
@@ -953,9 +941,6 @@ impl TranscriptCache {
                         format!(" · {} {working}", spinner(app.animation_tick)),
                         info(),
                     );
-                }
-                if waiting > 0 {
-                    line.push(format!(" · ◇ {waiting}"), warning());
                 }
                 line.push("  /agents", muted().italic());
                 body.push_line(Line::default());

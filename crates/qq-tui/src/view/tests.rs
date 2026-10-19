@@ -5555,6 +5555,71 @@ fn the_approval_chords_survive_a_long_status_and_delegate_holds_are_not_answerab
 }
 
 #[test]
+fn unpainted_session_failures_and_scrolled_agents_are_named_on_the_rule() {
+    let failed = |app: &mut App, id: SessionId| {
+        let view = app.sessions.get_mut(&id).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    };
+    // Compact: an unfocused session failed unseen; the strip only counts it.
+    let (mut app, root, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    failed(&mut app, other);
+    app.focus_session(root);
+    app.layout.rail = PanePref::Auto;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("✕ Other failed"), "{rule}");
+    // A short rail: a failed agent's row is scrolled out of the window.
+    let (mut app, root, ids) = app_with_fanout(30);
+    failed(&mut app, ids[29]);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Shown;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 12));
+    let named: usize = rows.iter().map(|row| row.matches("agent 29").count()).sum();
+    assert_eq!(named, 1, "named once, on the rail or the rule: {rows:#?}");
+    let _ = root;
+}
+
+#[test]
+fn the_approval_chords_stay_beside_a_notice() {
+    let (mut app, _) = app_with_every_rail_group();
+    app.set_info_for_test("theme saved");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("theme saved"), "{rule}");
+    assert!(rule.contains("M-A/M-D answer"), "{rule}");
+}
+
+#[test]
+fn the_related_agents_row_counts_work_by_the_rails_rules_and_names_no_approval() {
+    let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
+    app.sessions.get_mut(&child_id).unwrap().summary.spawned_by = None;
+    app.sessions.get_mut(&child_id).unwrap().summary.status = SessionStatus::Idle;
+    app.sessions
+        .get_mut(&child_id)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x90; 16]));
+    app.focus_session(parent);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let related = rows
+        .iter()
+        .find(|row| row.contains("↳ 1 agent"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(related.contains("1") && !related.contains('◇'), "{related}");
+    assert!(
+        related.contains(" · "),
+        "the side question counts as work: {related}"
+    );
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();

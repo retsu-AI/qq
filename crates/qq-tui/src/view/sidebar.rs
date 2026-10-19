@@ -146,7 +146,7 @@ pub(super) fn human_waiting(session: &SessionView) -> bool {
 
 /// Whether `session` is doing work: running, queued, answering a side
 /// question, or waiting on an approval delegate.
-fn is_working(session: &SessionView) -> bool {
+pub(super) fn is_working(session: &SessionView) -> bool {
     matches!(
         session.summary.status,
         SessionStatus::Running | SessionStatus::Queued

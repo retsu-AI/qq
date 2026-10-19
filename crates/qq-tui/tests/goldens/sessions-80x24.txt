@@ -7,7 +7,7 @@
    Drafted the checklist.
    ✓ 0.0s · ttft 0.0s
 
-  ↳ 1 agent · ◐ 1 · ◇ 1  /agents
+  ↳ 1 agent · ◐ 1  /agents
 
 
 
@@ -19,6 +19,6 @@
 
 
  7 sessions  ◐ 2  ◇ 2 (Ctrl-G)  ● 3 new
- ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ───────────────
+ ◇ Deploy helper needs approval +1 need you  Ctrl-G jump  Alt-A/Alt-D an... ────
  › Ask QQ...
 
