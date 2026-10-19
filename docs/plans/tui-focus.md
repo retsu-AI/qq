@@ -109,9 +109,12 @@ Rail rows:
   NEEDS YOU, and RECENT rows keep their state glyphs (`●` seen finish, `◌`
   stopped, `○` never run) so done and idle stay distinguishable.
 - One row per session with a `↳N` agent badge (and `◐N` while any work).
-- An agent **needs the user** when it has an approval waiting, or failed or
-  finished while unseen (the same `Need` the client computes for any
-  session). Such an agent lifts its session into NEEDS YOU.
+- An agent **needs the user** when it has an approval waiting *on the
+  human* (`awaiting_approval` minus the delegate-owned `with_delegate`
+  holds; a delegate-owned hold counts as working until it escalates), or
+  failed or finished while unseen. Such an agent lifts its session into
+  NEEDS YOU; a focused agent still lifts it (focusing clears an unseen
+  finish, never an approval).
 - Agent rows are bounded per session and painted in rank order. Under an
   unfocused session, at most `WAITING_AGENT_ROWS` (3) agents that need the
   user get a `↳` row (approval waits first, then failures, then unseen
@@ -121,25 +124,37 @@ Rail rows:
   that need the user in the same rank order, then quiet agents in tree order;
   the rest collapse to `+N more  /agents`. A focused agent is therefore
   always on the rail when the rail is shown.
-- Audit agents (and anything under them) are never listed or counted, on
-  the rail, the strip, the layout's session count, or the picker, including
-  an audit whose parent was deleted and which therefore became a root.
+- Audit agents (and anything under them) are never listed, counted, or
+  reachable by tree navigation (`Alt-Down`/`Alt-Left`/`Alt-Right` skip
+  them), on the rail, the strip, the layout's session count, or the picker,
+  including an audit whose parent was deleted and which therefore became a
+  root.
+- An agent whose session is not loaded (a bounded snapshot can carry a child
+  without its parent) is listed as a session of its own until the parent
+  arrives, so its attention is never dropped.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
-  it). The focused agent is then named by the top-row breadcrumb, and a
-  waiting agent by the composer-rule notice (F4–F5 keeps that notice
-  whenever the rail is not on screen), so neither is ever invisible.
+  it). The focused agent is then named by the top-row breadcrumb, and an
+  agent that needs the user (approval, failure or unseen finish) by the
+  composer-rule notice (F4–F5 keeps that notice whenever its row is not on
+  screen), so none is ever invisible.
+- Row planning is linear in sessions: the roll-up groups the needs per
+  session once and the planner reads each session's slice.
 
 Acceptance: unit tests for the roll-up (state rises for approval, failure
-and unseen finish; counts; inclusive cost with a hidden agent's spend; audit
-subtrees and orphaned audit roots skipped; strip and rail agree); view tests
-for the rail shape, both caps, rank ordering, and the focused agent past the
-cap; a `fanout` golden scene (sessions with many agents, several waiting) at
-the five golden sizes; `sessions_200_with_sidebar` and a
-`children_20_with_sidebar` bench whose fixture is one session with twenty
-streaming agents (recorded on the stack base with the same fixture) within
-5 % of baseline or faster.
+and unseen finish; a delegate-owned hold stays WORKING until escalation; a
+focused waiting agent still lifts its session; counts; inclusive cost with a
+hidden agent's spend; audit subtrees and orphaned audit roots skipped; a
+child without a loaded parent listed; strip and rail agree); view tests for
+the rail shape, both caps, rank ordering, and the focused agent past the cap;
+navigation skipping an audit child; a `fanout` golden scene (sessions with
+many agents, several waiting) at the five golden sizes;
+`sessions_200_with_sidebar` and a `children_20_with_sidebar` bench whose
+fixture is one session with twenty streaming agents that stay agents while
+they stream (recorded on the stack base with the same fixture) within 5 % of
+baseline or faster. Background deltas from an agent whose row is not on
+screen schedule no redraw.
 
 ### F3: picker
 
@@ -154,7 +169,9 @@ streaming agents (recorded on the stack base with the same fixture) within
   listed. When the highlighted agent's row stops being listed (the query is
   cleared, `Ctrl-A` is toggled off, or its session collapses), the cursor
   moves to that agent's session row; when the session itself is gone, to
-  the nearest remaining row.
+  the nearest remaining row. `Left` on an agent row always moves the cursor
+  to its session row (and collapses it when not searching). `Ctrl-A` works
+  even when the current search matches nothing.
 
 Acceptance: app tests for default rows, expand/collapse, search hits,
 `Ctrl-A`, focus-preserving refresh, and the agent-to-session cursor
@@ -164,38 +181,51 @@ tests otherwise unchanged.
 
 ### F4–F5: one place per fact, panes on demand
 
-- The composer-rule notice names waiting approvals the rail does not paint.
-  When the rail is **not** on screen (Compact, a single session under
-  `Auto`, or the rail hidden) that is every waiting approval; the strip's
-  `◇ N` is an anonymous count, a pointer and not a naming, so the notice
-  stays beside it. When the rail is on screen its `↳ ◇` rows name the
-  approvals they paint and the notice names only the rest: approvals
-  collapsed into a `+N need you` row or scrolled out of the rail's window.
-  With none left over the rule omits the notice and leads with the in-place
-  `Alt-A`/`Alt-D` and `Ctrl-G` chords.
+- The composer-rule notice names attention the rail does not paint: agents
+  and sessions with an approval waiting on the human, then (single-session or
+  rail-hidden only) agents that failed or finished unseen. When the rail is
+  **not** on screen (Compact, a single session under `Auto`, or the rail
+  hidden) that is all of them; the strip's `◇ N` is an anonymous count, a
+  pointer and not a naming, so the notice stays beside it. When the rail is
+  on screen its rows name what they paint and the notice names only the
+  rest: rows collapsed into a `+N need you` row or scrolled out of the
+  rail's window. The notice is one row, so it names the most urgent one
+  (approval, then failure, then unseen finish; tree order within a rank) and
+  counts the rest (`◇ Deploy helper +3 need you`), truncating the name
+  before the count; `Ctrl-G` walks them and `/attention` lists them all.
+  With nothing left over the rule omits the notice and leads with the
+  in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords.
 - `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2 · ◇ 1
   /agents`.
 - Inspector `Auto` shows only when it has content (an expanded call or a
   workspace view); `Shown` still pins it.
 - The top row omits a known zero cost.
 
-Acceptance: view tests that each waiting approval is *named* exactly once per
+Acceptance: view tests that each waiting item is named at most once per
 frame outside its own transcript (a rail row or the rule notice, never both)
-at Compact, Regular with the rail shown, Regular with the rail hidden, and
-with more waiting agents under one session than `WAITING_AGENT_ROWS`;
-inspector `Auto` hidden with nothing expanded and shown with an expansion;
-goldens moved deliberately.
+and that every item is either named or counted, at Compact, Regular with the
+rail shown, Regular with the rail hidden, with more waiting agents under one
+session than `WAITING_AGENT_ROWS`, at a narrow width with a long title, and
+for a single session whose agent failed or finished unseen; inspector `Auto`
+hidden with nothing expanded and shown with an expansion; goldens moved
+deliberately.
 
 ### F6: clickable rail and scoped selection
 
 Mouse capture stays on so the wheel keeps scrolling the transcript. QQ owns
 selection:
 
-- **Click** on a rail session or agent row focuses it.
+- **Click** on a rail session or agent row focuses it. The hit map is the
+  row → session list committed with the drawn frame, never recomputed from
+  current state, so a click focuses the row under the pointer even when an
+  update reordered the rail since that frame was drawn.
 - **Drag** that starts inside a transcript pane selects text in that pane
   only. The selection is clamped to the pane's columns and to body rows, so
   the rail, inspector, borders, top row and composer are never included.
-  The selected cells repaint on the `selection` background.
+  It is a linear (stream) selection like a terminal's: from the earlier
+  endpoint to the end of its row, whole rows between, and the start of the
+  later endpoint's row through it, whichever way the drag went. The
+  selected cells repaint on the `selection` background.
 - **Release** copies the selected text to the system clipboard with OSC 52
   (the transport Codex and most modern terminals and multiplexers support)
   and shows `copied N lines`. Each row is the pane's text with the measure
@@ -209,10 +239,11 @@ coordinates) and resolved against the last committed frame, so no
 transcript cache changes. Copy payloads are bounded (`MAX_COPY_BYTES`, 1 MiB
 before encoding); a larger selection copies the first part and says so.
 
-Acceptance: app tests for click-to-focus, drag clamped to the pane, the copy
-effect's text (inset and rail excluded), clearing rules, and the bound;
-terminal test for the OSC 52 bytes; frame test that only selected cells take
-the selection style.
+Acceptance: app tests for click-to-focus (including a rail reordered between
+draw and click), drag clamped to the pane, forward and reverse partial-row
+copies, the copy effect's text (inset and rail excluded), clearing rules,
+and the bound; terminal test for the OSC 52 bytes; frame test that only
+selected cells take the selection style.
 
 ## Non-goals
 
