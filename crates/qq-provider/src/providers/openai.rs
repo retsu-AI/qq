@@ -735,7 +735,7 @@ pub(crate) fn decode_event(
                 redactions,
             ),
             None => ProviderError::ResponseFailed {
-                kind: openai_error_kind(code.as_deref()),
+                kind: openai_error_kind(code.as_deref(), message.as_deref()),
                 message: sanitize_message(
                     message
                         .as_deref()
@@ -750,7 +750,10 @@ pub(crate) fn decode_event(
 
 fn response_failed_from_api_error(error: ApiError, redactions: &[String]) -> ProviderError {
     ProviderError::ResponseFailed {
-        kind: openai_error_kind(error.code.as_deref().or(error.error_type.as_deref())),
+        kind: openai_error_kind(
+            error.code.as_deref().or(error.error_type.as_deref()),
+            error.message.as_deref(),
+        ),
         message: sanitize_message(
             error
                 .message
@@ -789,12 +792,21 @@ fn provider_usage(usage: ResponsesUsage) -> Result<ProviderUsage, ProviderError>
     })
 }
 
-fn openai_error_kind(code: Option<&str>) -> ProviderErrorKind {
+fn openai_error_kind(code: Option<&str>, message: Option<&str>) -> ProviderErrorKind {
     match code {
         Some("invalid_api_key" | "authentication_error") => ProviderErrorKind::Authentication,
-        Some("rate_limit_exceeded" | "insufficient_quota") => ProviderErrorKind::RateLimited,
+        Some("rate_limit_exceeded" | "insufficient_quota" | "slow_down") => {
+            ProviderErrorKind::RateLimited
+        }
         Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
-        Some("server_error" | "service_unavailable") => ProviderErrorKind::Unavailable,
+        Some(
+            "server_error" | "service_unavailable" | "server_is_overloaded" | "overloaded_error",
+        ) => ProviderErrorKind::Unavailable,
+        // Codex reports overload after HTTP 200 with codes that vary or are
+        // absent; the message is the only stable signal that a retry is safe.
+        _ if message.is_some_and(|message| message.contains("overloaded")) => {
+            ProviderErrorKind::Unavailable
+        }
         _ => ProviderErrorKind::Response,
     }
 }
@@ -1170,6 +1182,20 @@ mod tests {
         let undecodable = decode_event(r#"{"type":"response.completed","response":[]}"#, &[])
             .unwrap_err()
             .to_string();
+        // Observed from Codex after HTTP 200; must be retried, not fail the run.
+        let overloaded = [
+            r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"message":"Our servers are currently overloaded. Please try again later."}}}"#,
+            r#"{"type":"error","message":"Our servers are currently overloaded. Please try again later."}"#,
+        ];
+        for payload in overloaded {
+            let error = decode_event(payload, &[]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                crate::ProviderErrorKind::Unavailable,
+                "{payload}"
+            );
+        }
 
         assert_eq!(error.to_string(), "provider response failed: rate limited");
         assert_eq!(error.kind(), crate::ProviderErrorKind::RateLimited);
