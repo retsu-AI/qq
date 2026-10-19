@@ -130,10 +130,16 @@ Rail rows:
   `Alt-A`/`Alt-D`, or the `/attention` list, including an audit whose parent
   was deleted and which therefore became a root. One audit-filtered
   attention list (human-owned approvals, then unseen failures, then unseen
-  finishes) feeds every attention surface.
+  finishes) feeds every attention surface. Startup, reconnect, and the
+  refocus after a deletion pick a non-audit session (the newest non-audit
+  root, or the empty prompt when only audits exist), never an audit.
 - An agent whose session is not loaded (a bounded snapshot can carry a child
   without its parent) is listed as a session of its own until the parent
-  arrives, so its attention is never dropped.
+  arrives, so its attention is never dropped. Audit ancestry is decided over
+  the loaded ancestors only: an agent under a loaded audit is hidden, and
+  the server keeps an audit's descendants out of user-facing snapshots
+  unless the audit itself is included (the TUI has no other lineage
+  marker), so a missing-parent task agent is treated as a task.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
@@ -155,8 +161,9 @@ many agents, several waiting) at the five golden sizes;
 `sessions_200_with_sidebar` and a `children_20_with_sidebar` bench whose
 fixture is one session with twenty streaming agents that stay agents while
 they stream (recorded on the stack base with the same fixture) within 5 % of
-baseline or faster. Background deltas from an agent whose row is not on
-screen schedule no redraw.
+baseline or faster. Background deltas from an agent that no committed
+surface shows (no rail row, no live card under the focused parent's spawn
+call) schedule no redraw; a focused parent's spawned child still redraws.
 
 ### F3: picker
 
@@ -172,8 +179,11 @@ screen schedule no redraw.
   cleared, `Ctrl-A` is toggled off, or its session collapses), the cursor
   moves to that agent's session row; when the session itself is gone, to
   the nearest remaining row. `Left` on an agent row always moves the cursor
-  to its session row (and collapses it when not searching). `Ctrl-A` works
-  even when the current search matches nothing.
+  to its session row (and collapses it when not searching). A search that
+  matches only an agent may hide its session row, so `Left` from a found
+  agent clears the search, keeps the session's expansion as it was, and
+  lands on the session row. `Ctrl-A` works even when the current search
+  matches nothing.
 
 Acceptance: app tests for default rows, expand/collapse, search hits,
 `Ctrl-A`, focus-preserving refresh, and the agent-to-session cursor
@@ -196,7 +206,12 @@ tests otherwise unchanged.
   counts the rest (`◇ Deploy helper +3 need you`), truncating the name
   before the count; `Ctrl-G` walks them and `/attention` lists them all.
   With nothing left over the rule omits the notice and leads with the
-  in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords.
+  in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords. A transient notice (info,
+  warning, error) takes the left side while it lasts; any unpainted
+  attention then keeps a compact pointer on the right (`◇ 2  ^G` or
+  `✕ 1  ^G`) next to the answer chords, so a sticky error never hides a
+  need. A rail row counts as naming its session only when the title
+  survives the row's badges.
 - `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2
   /agents`, counting working agents by the rail's definition (running,
   queued, a side question, or a delegate deciding). It carries no `◇` count:
@@ -249,15 +264,23 @@ selection:
 
 The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
 coordinates) and resolved against the last committed frame, so no
-transcript cache changes. Copy payloads are bounded (`MAX_COPY_BYTES`, 1 MiB
-before encoding); a larger selection copies the first part and says so.
+transcript cache changes. Cells are grapheme clusters (a ZWJ emoji or a
+base with its marks is one cell group). Each row drops only its own
+non-text prefix (the measure inset, plus the 3-column message rail on
+message rows; workspace views have no rail). Copy payloads are bounded
+(`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
+first part, cut back to a grapheme boundary, and says so. A click focuses a
+rail target only while that session still exists. A modified press clears
+any QQ selection before handing the drag to the terminal.
 
 Acceptance: app tests for click-to-focus (including a rail reordered between
-draw and click), drag clamped to the pane, forward and reverse partial-row
-copies, forward and reverse copies whose endpoints land inside a wide glyph,
-the copy effect's text (inset and rail excluded), clearing rules (a click
-leaves no highlight), and the bound; terminal test for the OSC 52 bytes;
-frame test that only selected cells take the selection style.
+draw and click, and a deleted target), drag clamped to the pane, forward and
+reverse partial-row copies, forward and reverse copies whose endpoints land
+inside a wide glyph or a joined emoji, a `/goal` header copied whole, the
+copy effect's text (inset and rail excluded), clearing rules (a click leaves
+no highlight; a Shift-drag clears an old one), and the bound with a
+grapheme straddling it; terminal test for the OSC 52 bytes; frame test that
+only selected cells take the selection style.
 
 ## Non-goals
 

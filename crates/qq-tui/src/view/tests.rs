@@ -5197,6 +5197,84 @@ fn attention_routes_skip_audits() {
 }
 
 #[test]
+fn an_audit_inside_an_orphan_tree_hides_its_descendants_from_attention() {
+    // agent 0 is an audit whose parent is not loaded; agent 1 is its task
+    // child and waits on the human.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        } else {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    app.sessions.remove(&root);
+    app.sessions
+        .get_mut(&ids[1])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x87; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert!(app.sessions_needing_attention().is_empty());
+    assert!(app.sessions_awaiting_approval().is_empty());
+}
+
+#[test]
+fn a_side_question_session_shows_the_spinner_on_its_own_row() {
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.sessions
+        .get_mut(&other)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x86; 16]));
+    let rail = rail_rows(&mut app, 120, 40);
+    let row = rail
+        .iter()
+        .find(|row| row.contains("Other"))
+        .unwrap_or_else(|| panic!("{rail:#?}"));
+    assert!(!row.contains("○ Other"), "not drawn idle: {row}");
+}
+
+#[test]
+fn focus_never_lands_on_an_audit_root_at_startup_or_after_a_deletion() {
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+        summary.updated_at_ms = 999;
+    });
+    let other = SessionId::from_bytes([0x11; 16]);
+    // Deleting the focused root refocuses on a neighbour: the audit child
+    // comes first in tree order, so the filter must skip it.
+    app.focus_session(root);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    assert_ne!(app.focused(), Some(ids[0]), "never the audit");
+    assert_eq!(app.focused(), Some(other));
+    // A snapshot whose focused body is the (now root) audit focuses the
+    // newest non-audit root instead.
+    let mut fresh = App::new(TuiOptions::default());
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        updated_at_ms: 999,
+        ..fixtures::session_summary(ids[0])
+    };
+    let plain = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(other)
+    };
+    fresh.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit.clone(), plain],
+        focused: Some(fixtures::session_snapshot(audit)),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(fresh.focused(), Some(other));
+}
+
+#[test]
 fn orphan_attention_reaches_ctrl_g_and_held_agents_are_not_working() {
     // agent 0's parent is not loaded; its child agent 1 waits on the human.
     let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
