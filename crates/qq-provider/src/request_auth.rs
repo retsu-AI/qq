@@ -79,6 +79,8 @@ struct CredentialHeader {
 impl RequestCredential {
     pub fn bearer(token: impl Into<String>) -> Result<Self, RequestCredentialError> {
         let token = token.into();
+        // `Bearer ` plus the token.
+        check_credential_size(7 + token.len())?;
         let mut credential = Self::empty();
         credential.push_bearer(token)?;
         Ok(credential)
@@ -89,9 +91,13 @@ impl RequestCredential {
         account_id: impl Into<String>,
         is_fedramp: bool,
     ) -> Result<Self, RequestCredentialError> {
+        let access_token = access_token.into();
+        let account_id = account_id.into();
+        // `Bearer ` plus the token, the account ID, `qq` and `true`.
+        check_credential_size(7 + access_token.len() + account_id.len() + 2 + 4)?;
         let mut credential = Self::empty();
-        credential.push_bearer(access_token.into())?;
-        credential.push_secret(CHATGPT_ACCOUNT_ID, account_id.into())?;
+        credential.push_bearer(access_token)?;
+        credential.push_secret(CHATGPT_ACCOUNT_ID, account_id)?;
         credential.push_metadata(ORIGINATOR, HeaderValue::from_static("qq"));
         if is_fedramp {
             credential.push_metadata(X_OPENAI_FEDRAMP, HeaderValue::from_static("true"));
@@ -152,6 +158,17 @@ impl std::fmt::Debug for RequestCredential {
 
 fn validate_credential_value(value: &str) -> Result<(), RequestCredentialError> {
     if value.is_empty() || HeaderValue::from_str(value).is_err() {
+        return Err(RequestCredentialError::Invalid);
+    }
+    Ok(())
+}
+
+/// Rejects a credential whose header values would exceed the per-credential
+/// bound before any of them is built. Application re-checks as defence in
+/// depth, but an oversized stored or environment credential is invalid, not
+/// a configuration mismatch.
+fn check_credential_size(value_bytes: usize) -> Result<(), RequestCredentialError> {
+    if value_bytes > MAX_CREDENTIAL_HEADER_BYTES {
         return Err(RequestCredentialError::Invalid);
     }
     Ok(())
@@ -690,11 +707,30 @@ mod tests {
     }
 
     #[test]
-    fn credential_header_bytes_are_bounded() {
-        let large = "x".repeat(MAX_CREDENTIAL_HEADER_BYTES);
+    fn oversized_credentials_are_invalid_before_any_header_is_built() {
+        assert!(RequestCredential::bearer("x".repeat(MAX_CREDENTIAL_HEADER_BYTES - 7)).is_ok());
+        assert!(matches!(
+            RequestCredential::bearer("x".repeat(MAX_CREDENTIAL_HEADER_BYTES - 6)),
+            Err(RequestCredentialError::Invalid)
+        ));
+        // Neither Codex value is too large alone; together they are.
+        let half = "x".repeat(MAX_CREDENTIAL_HEADER_BYTES / 2);
+        assert!(matches!(
+            RequestCredential::codex(half.clone(), half, false),
+            Err(RequestCredentialError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn application_still_bounds_header_bytes() {
+        let oversized = credential(vec![CredentialHeader {
+            name: AUTHORIZATION,
+            value: HeaderValue::from_str(&"x".repeat(MAX_CREDENTIAL_HEADER_BYTES + 1)).unwrap(),
+            secret: None,
+        }]);
         let error = apply_request_credential(
             &mut request(),
-            RequestCredential::bearer(large).unwrap(),
+            oversized,
             RequestCredentialKindExpected::Bearer,
         )
         .unwrap_err();

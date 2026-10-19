@@ -115,6 +115,13 @@ impl OpenAi {
         auth: ResponsesConstructionAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, ProviderError> {
+        // Headers a request-time Codex credential owns are protected from
+        // static configuration exactly as a static Codex credential's are.
+        let codex_headers = matches!(
+            &auth,
+            ResponsesConstructionAuth::RequestTimeCodex(_)
+                | ResponsesConstructionAuth::Static(ResponsesAuth::Codex { .. })
+        );
         let (auth, authorizer, request_kind) = match auth {
             ResponsesConstructionAuth::Static(auth) => {
                 let request_kind = if matches!(&auth, ResponsesAuth::Codex { .. }) {
@@ -140,7 +147,7 @@ impl OpenAi {
                 ResponsesRequestKind::Standard,
             ),
         };
-        let (headers, redactions) = build_headers(auth, static_headers)?;
+        let (headers, redactions) = build_headers_for(auth, codex_headers, static_headers)?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
@@ -271,12 +278,25 @@ impl Provider for OpenAi {
     }
 }
 
+#[cfg(test)]
 fn build_headers(
     auth: ResponsesAuth,
     static_headers: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
+    let codex_headers = matches!(&auth, ResponsesAuth::Codex { .. });
+    build_headers_for(auth, codex_headers, static_headers)
+}
+
+/// `codex_headers` protects the Codex credential's headers from static
+/// configuration; it is set for both the static and the request-time Codex
+/// intents, since the latter adds them only per attempt.
+fn build_headers_for(
+    auth: ResponsesAuth,
+    codex_headers: bool,
+    static_headers: impl IntoIterator<Item = (String, String)>,
+) -> Result<(HeaderMap, Vec<String>), ProviderError> {
     let mut redactions = Vec::new();
-    let codex_auth = matches!(&auth, ResponsesAuth::Codex { .. });
+    let codex_auth = codex_headers;
     let mut auth_headers = HeaderMap::new();
     match auth {
         ResponsesAuth::NoAuth => {}
