@@ -1,4 +1,10 @@
-import { memo, useMemo, useState } from "react";
+import {
+  isValidElement,
+  memo,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import clsx from "clsx";
 import ReactMarkdown from "react-markdown";
@@ -11,7 +17,12 @@ import {
   CircleX,
   CornerDownRight,
   OctagonX,
+  Pencil,
+  RotateCcw,
 } from "lucide-react";
+import { api } from "../lib/api";
+import { drafts } from "../lib/drafts";
+import { languageOf } from "../lib/highlight";
 import {
   cost,
   duration,
@@ -24,27 +35,43 @@ import type {
   ProjectState,
   Transcript as TranscriptData,
 } from "../lib/types";
+import { CodeBlock, CopyButton } from "./CodeBlock";
 import { ToolGroup } from "./ToolCall";
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
 type Block =
-  | { kind: "item"; item: Item }
+  | {
+      kind: "item";
+      item: Item;
+      /** The latest user message before this item, for Retry. */
+      prompt: string | null;
+    }
   | { kind: "tools"; id: string; tools: ToolItem[] };
 
 /** Consecutive tool calls render as one group. */
 function blocks(items: Item[]): Block[] {
   const out: Block[] = [];
+  let prompt: string | null = null;
   for (const item of items) {
     const last = out[out.length - 1];
+    if (item.kind === "user") prompt = item.text;
     if (item.kind === "tool") {
       if (last?.kind === "tools" && last.tools.length < 32)
         last.tools.push(item);
       else out.push({ kind: "tools", id: `tools-${item.id}`, tools: [item] });
     } else {
-      out.push({ kind: "item", item });
+      out.push({ kind: "item", item, prompt });
     }
   }
   return out;
+}
+
+/** What a message's hover actions need from the session. */
+interface Actions {
+  projectId: string;
+  sessionId: string;
+  /** Sending is possible now: live and no run in progress. */
+  canSend: boolean;
 }
 
 export function Transcript({
@@ -57,6 +84,11 @@ export function Transcript({
   scrollElement: HTMLDivElement | null;
 }) {
   const rows = useMemo(() => blocks(transcript.items), [transcript.items]);
+  const actions: Actions = {
+    projectId: project.project_id,
+    sessionId: transcript.session_id,
+    canSend: project.connection === "live" && transcript.status === "idle",
+  };
   const [focusedKey, setFocusedKey] = useState<string | number | null>(null);
   const keyFor = (index: number) => rows[index].kind === "tools" ? rows[index].id : rows[index].item.id;
   const focusedRow = focusedKey === null ? -1 : rows.findIndex((_, index) => keyFor(index) === focusedKey);
@@ -113,7 +145,12 @@ export function Transcript({
                 sessionId={transcript.session_id}
               />
             ) : (
-              <ItemView key={block.item.id} item={block.item} />
+              <ItemView
+                key={block.item.id}
+                item={block.item}
+                prompt={block.prompt}
+                actions={actions}
+              />
             )}
           </div>
         );
@@ -122,11 +159,19 @@ export function Transcript({
   );
 }
 
-function ItemView({ item }: { item: Item }) {
+function ItemView({
+  item,
+  prompt,
+  actions,
+}: {
+  item: Item;
+  prompt: string | null;
+  actions: Actions;
+}) {
   switch (item.kind) {
     case "user":
       return (
-        <div className="flex justify-end">
+        <div className="group/message flex flex-col items-end">
           <div
             className={clsx(
               "max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-active px-4 py-2.5 selectable",
@@ -143,11 +188,21 @@ function ItemView({ item }: { item: Item }) {
               <div className="mt-1 text-[11px] text-muted">Queued</div>
             )}
           </div>
+          <MessageActions>
+            <CopyButton text={item.text} label="Copy message" />
+            <ActionButton
+              label="Edit in composer"
+              onClick={() => editInComposer(actions.sessionId, item.text)}
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </ActionButton>
+            <RetryButton text={item.text} actions={actions} />
+          </MessageActions>
         </div>
       );
     case "assistant":
       return (
-        <div>
+        <div className="group/message">
           <Markdown text={item.text} streaming={item.state === "streaming"} />
           {item.refusal && (
             <p className="mt-2 rounded-md bg-warn-soft px-3 py-2 text-[13px] text-warn">
@@ -159,15 +214,111 @@ function ItemView({ item }: { item: Item }) {
               Output reached the model's length limit.
             </p>
           )}
+          {item.state !== "streaming" && item.text && (
+            <MessageActions>
+              <CopyButton text={item.text} label="Copy response" />
+              {prompt && <RetryButton text={prompt} actions={actions} />}
+            </MessageActions>
+          )}
         </div>
       );
     case "reasoning":
       return <Reasoning text={item.text} streaming={item.streaming} />;
     case "run_end":
-      return <RunEnd item={item} />;
+      return <RunEnd item={item} prompt={prompt} actions={actions} />;
     case "tool":
       return null;
   }
+}
+
+/** Puts `text` in this session's composer draft and focuses it. */
+function editInComposer(sessionId: string, text: string) {
+  drafts.set(sessionId, text);
+  requestAnimationFrame(() => {
+    const composer = document.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Message"]',
+    );
+    composer?.focus();
+    composer?.setSelectionRange(text.length, text.length);
+  });
+}
+
+/** Shown under a message on hover or keyboard focus. */
+function MessageActions({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-1 flex h-6 items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover/message:opacity-100">
+      {children}
+    </div>
+  );
+}
+
+function ActionButton({
+  label,
+  onClick,
+  disabled,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[11.5px] text-muted hover:bg-hover hover:text-fg disabled:pointer-events-none disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** Sends `text` again as a new turn; QQ keeps history, so nothing is replaced. */
+function RetryButton({
+  text,
+  actions,
+  children,
+}: {
+  text: string;
+  actions: Actions;
+  children?: ReactNode;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const retry = async () => {
+    setSending(true);
+    setError(null);
+    try {
+      await api.submitPrompt(actions.projectId, actions.sessionId, text);
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setSending(false);
+    }
+  };
+  return (
+    <>
+      <ActionButton
+        label={
+          actions.canSend ? "Send this prompt again" : "Retry when the run ends"
+        }
+        disabled={!actions.canSend || sending}
+        onClick={() => void retry()}
+      >
+        <RotateCcw className="h-3.5 w-3.5" />
+        {children}
+      </ActionButton>
+      {error && (
+        <span role="alert" className="text-[11.5px] text-danger">
+          {error}
+        </span>
+      )}
+    </>
+  );
 }
 
 const Markdown = memo(function Markdown({
@@ -185,6 +336,20 @@ const Markdown = memo(function Markdown({
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          pre: ({ children }) => {
+            const code = isValidElement<{
+              className?: string;
+              children?: ReactNode;
+            }>(children)
+              ? children.props
+              : null;
+            return (
+              <CodeBlock
+                code={String(code?.children ?? "").replace(/\n$/, "")}
+                language={languageOf(code?.className)}
+              />
+            );
+          },
           a: ({ href, children }) => (
             <a
               href={href}
@@ -240,7 +405,15 @@ function Reasoning({ text, streaming }: { text: string; streaming: boolean }) {
   );
 }
 
-function RunEnd({ item }: { item: Extract<Item, { kind: "run_end" }> }) {
+function RunEnd({
+  item,
+  prompt,
+  actions,
+}: {
+  item: Extract<Item, { kind: "run_end" }>;
+  prompt: string | null;
+  actions: Actions;
+}) {
   const label = outcomeLabel(item.outcome);
   const detail = outcomeDetail(item.outcome);
   const ok = item.outcome?.type === "completed";
@@ -270,6 +443,11 @@ function RunEnd({ item }: { item: Extract<Item, { kind: "run_end" }> }) {
         )}
         <span className={clsx(failed && "text-danger")}>{label}</span>
         {parts.length > 0 && <span>· {parts.join(" · ")}</span>}
+        {failed && prompt && (
+          <RetryButton text={prompt} actions={actions}>
+            Retry
+          </RetryButton>
+        )}
       </div>
       {detail && (
         <p className="mt-1.5 rounded-md bg-danger-soft px-3 py-2 text-[12.5px] text-danger selectable">

@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parsePreferences } from "../src/lib/preferences.ts";
 test("preference migration defaults and invalid values remain usable", () => {
-  const defaults = { theme: "system", fontSize: 14, notifications: false };
+  const defaults = {
+    theme: "system",
+    fontSize: 14,
+    notifications: false,
+    changesPanel: false,
+  };
   for (const source of [
     null,
     "broken",
@@ -11,6 +16,11 @@ test("preference migration defaults and invalid values remain usable", () => {
   ]) {
     assert.deepEqual(parsePreferences(source), defaults);
   }
-  const saved = { theme: "dark", fontSize: 18, notifications: true };
+  const saved = {
+    theme: "dark",
+    fontSize: 18,
+    notifications: true,
+    changesPanel: true,
+  };
   assert.deepEqual(parsePreferences(JSON.stringify(saved)), saved);
 });
