@@ -8,6 +8,7 @@ import type {
   ProjectInfo,
   Provider,
 } from "./types";
+import type { GitStatusDto } from "./generated";
 
 export const api = {
   sessionAction: (
@@ -17,6 +18,32 @@ export const api = {
   ) => invoke<void>("session_action", { projectId, sessionId, action }),
   completeMention: (projectId: string, query: string) =>
     invoke<string[]>("complete_mention", { projectId, query }),
+  submitSideQuestion: (
+    projectId: string,
+    sessionId: string,
+    question: string,
+    newThread: boolean,
+  ) =>
+    invoke<void>("submit_side_question", {
+      projectId,
+      sessionId,
+      question,
+      newThread,
+    }),
+  cancelSideQuestion: (projectId: string, sessionId: string) =>
+    invoke<void>("cancel_side_question", { projectId, sessionId }),
+  gitStatus: (projectId: string, withPr: boolean) =>
+    invoke<GitStatusDto>("git_status", { projectId, withPr }),
+  /** Stages everything and commits; resolves to the short commit id. */
+  gitCommit: (projectId: string, message: string, push: boolean) =>
+    invoke<string>("git_commit", { projectId, message, push }),
+  gitPush: (projectId: string) => invoke<void>("git_push", { projectId }),
+  /** Pushes and opens a pull request; resolves to its URL. */
+  gitCreatePr: (projectId: string, title: string, body: string, draft: boolean) =>
+    invoke<string>("git_create_pr", { projectId, title, body, draft }),
+  /** Resolves to the editor's name. `path` is project-relative. */
+  openInEditor: (projectId: string, path?: string) =>
+    invoke<string>("open_in_editor", { projectId, path: path ?? null }),
   setNotificationsEnabled: (enabled: boolean) =>
     invoke<void>("set_notifications_enabled", { enabled }),
   launchPaths: () => invoke<string[]>("launch_paths"),

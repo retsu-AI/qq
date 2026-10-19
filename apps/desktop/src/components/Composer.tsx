@@ -9,14 +9,17 @@ import clsx from "clsx";
 import {
   ArrowUp,
   AtSign,
+  BookOpen,
   Brain,
   ChevronDown,
   FileText,
   Folder,
   Loader2,
+  MessagesSquare,
   Shield,
   SlidersHorizontal,
   Square,
+  TerminalSquare,
   X,
 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -38,7 +41,18 @@ import {
   type ActiveMention,
   type Suggestion,
 } from "../lib/mentions";
+import { showSidePanel } from "../lib/side-panel";
+import {
+  findSlash,
+  insertSlash,
+  parseSideCommand,
+  slashSuggestions,
+  type SlashSkill,
+} from "../lib/slash";
 import type { ApprovalMode, ProjectState, Transcript } from "../lib/types";
+
+/** The token being completed: an `@` mention or a leading `/command`. */
+type ActiveToken = ActiveMention & { slash?: boolean };
 import { Dropdown, type DropdownOption } from "./Dropdown";
 
 type SendMode = "queue" | "steer" | "interrupt";
@@ -80,7 +94,16 @@ export function Composer({
   const [error, setError] = useState<string | null>(null);
   const [mode, setMode] = useState<SendMode>("queue");
   const running = transcript ? transcript.status !== "idle" : false;
-  const mentions = useMentionMenu(project.project_id, ref);
+  const sideRunning = transcript?.side_questions.some(
+    (side) => side.state === "running",
+  ) ?? false;
+  const mentions = useMentionMenu(project.project_id, ref, {
+    skills: project.skills,
+    side: {
+      available: Boolean(transcript) && project.can_side_question,
+      running: sideRunning,
+    },
+  });
   const [note, setNote] = useState<string | null>(null);
 
   useEffect(() => {
@@ -143,6 +166,35 @@ export function Composer({
     if (!value || pending || project.connection !== "live") return;
     setError(null);
     mentions.close();
+    const side = parseSideCommand(value);
+    if (side) {
+      if (!transcript || !project.can_side_question) {
+        setError(
+          transcript
+            ? "This engine does not answer side questions."
+            : "Side questions need a session: send a first message.",
+        );
+        return;
+      }
+      const sessionId = transcript.session_id;
+      try {
+        await drafts.submit(key, async () => {
+          if (side.kind === "ask")
+            await api.submitSideQuestion(
+              project.project_id,
+              sessionId,
+              side.question,
+              side.newThread,
+            );
+          else if (side.kind === "cancel")
+            await api.cancelSideQuestion(project.project_id, sessionId);
+        });
+        if (side.kind !== "cancel") showSidePanel(sessionId);
+      } catch (error) {
+        setError(String(error));
+      }
+      return;
+    }
     try {
       await drafts.submit(key, (value) =>
         api.submitPrompt(
@@ -169,7 +221,9 @@ export function Composer({
     const el = ref.current;
     const active = mentions.active;
     if (!el || !active) return;
-    const next = insertMention(text, el.selectionStart, active, suggestion.value);
+    const next = active.slash
+      ? insertSlash(text, el.selectionStart, suggestion.value)
+      : insertMention(text, el.selectionStart, active, suggestion.value);
     drafts.set(key, next.text);
     // Apply the caret after React writes the new value.
     requestAnimationFrame(() => {
@@ -192,6 +246,7 @@ export function Composer({
           query={mentions.active?.query ?? ""}
           onHover={mentions.setHighlight}
           onChoose={choose}
+          slash={Boolean(mentions.active?.slash)}
         />
       )}
       <div
@@ -336,6 +391,29 @@ export function Composer({
           >
             <AtSign className="h-4 w-4" />
           </button>
+          {transcript && project.can_side_question && (
+            <button
+              type="button"
+              title="Ask a side question without interrupting the run (/btw)"
+              aria-label="Ask a side question"
+              disabled={pending}
+              onClick={() => {
+                const el = ref.current;
+                // Turns the current draft into a side question.
+                const body = text.replace(/^\/(btw|ask|btw-new)\b\s*/, "");
+                const next = `/btw ${body}`;
+                drafts.set(key, next);
+                showSidePanel(transcript.session_id);
+                requestAnimationFrame(() => {
+                  el?.focus();
+                  el?.setSelectionRange(next.length, next.length);
+                });
+              }}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-muted hover:bg-hover hover:text-fg disabled:opacity-50"
+            >
+              <MessagesSquare className="h-4 w-4" />
+            </button>
+          )}
           <ModelPicker project={project} transcript={transcript} />
           {transcript && <EffortPicker project={project} transcript={transcript} />}
           {transcript && <ModePicker project={project} transcript={transcript} />}
@@ -504,16 +582,31 @@ function ContextMeter({ transcript }: { transcript: Transcript }) {
 function useMentionMenu(
   projectId: string,
   textarea: React.RefObject<HTMLTextAreaElement | null>,
+  slash: { skills: SlashSkill[]; side: { available: boolean; running: boolean } },
 ) {
-  const [active, setActive] = useState<ActiveMention | null>(null);
+  const [active, setActive] = useState<ActiveToken | null>(null);
   const [dismissed, setDismissed] = useState<number | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
   const [loading, setLoading] = useState(false);
   const [highlight, setHighlight] = useState(0);
   const sequence = useRef(0);
 
+  // `/` completes from the capabilities already in hand: no request.
+  const slashKey = [
+    slash.side.available,
+    slash.side.running,
+    ...slash.skills.map((skill) => skill.name),
+  ].join("|");
   useEffect(() => {
-    if (!active) return;
+    if (!active?.slash) return;
+    sequence.current++;
+    setSuggestions(slashSuggestions(active.query, slash.skills, slash.side));
+    setHighlight(0);
+    setLoading(false);
+  }, [active?.slash, active?.query, slashKey]);
+
+  useEffect(() => {
+    if (!active || active.slash) return;
     const request = ++sequence.current;
     setLoading(true);
     const timer = window.setTimeout(() => {
@@ -534,17 +627,22 @@ function useMentionMenu(
         });
     }, COMPLETION_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [projectId, active?.start, active?.query]);
+  }, [projectId, active?.start, active?.query, active?.slash]);
 
   const update = (text: string, caret: number) => {
-    const found = findMention(text, caret);
+    const command = findSlash(text, caret);
+    const found: ActiveToken | null = command
+      ? { ...command, slash: true }
+      : findMention(text, caret);
     if (!found || (dismissed !== null && found.start === dismissed)) {
       if (!found) setDismissed(null);
       setActive(null);
       return;
     }
     setActive((previous) =>
-      previous?.start === found.start && previous.query === found.query
+      previous?.start === found.start &&
+      previous.query === found.query &&
+      Boolean(previous.slash) === Boolean(found.slash)
         ? previous
         : found,
     );
@@ -590,9 +688,12 @@ function MentionMenu({
   onHover,
   onChoose,
   below,
+  slash,
 }: {
   /** Open under the composer: there is no room above it. */
   below: boolean;
+  /** Completing a `/command` rather than an `@` mention. */
+  slash: boolean;
   suggestions: Suggestion[];
   loading: boolean;
   highlight: number;
@@ -611,14 +712,14 @@ function MentionMenu({
       ref={list}
       id="mention-menu"
       role="listbox"
-      aria-label="Mention suggestions"
+      aria-label={slash ? "Command suggestions" : "Mention suggestions"}
       className={clsx(
         "absolute left-0 right-0 z-40 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-popover",
         below ? "animate-pop-down top-full mt-2" : "animate-pop-up bottom-full mb-2",
       )}
     >
       <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-faint">
-        <span>Mention</span>
+        <span>{slash ? "Commands" : "Mention"}</span>
         <span className="font-normal normal-case tracking-normal">
           ↑↓ choose · Enter insert · Esc close
         </span>
@@ -630,14 +731,20 @@ function MentionMenu({
               <Loader2 className="h-3.5 w-3.5 animate-spin" /> Searching files…
             </>
           ) : (
-            <>No files match “{query}”</>
+            <>
+              No {slash ? "commands" : "files"} match “{query}”
+            </>
           )}
         </div>
       )}
       {suggestions.map((suggestion, index) => {
-        const slash = suggestion.value.replace(/\/$/, "").lastIndexOf("/");
-        const directory = slash >= 0 ? suggestion.value.slice(0, slash + 1) : "";
-        const name = slash >= 0 ? suggestion.value.slice(slash + 1) : suggestion.value;
+        const cut = slash ? -1 : suggestion.value.replace(/\/$/, "").lastIndexOf("/");
+        const directory = cut >= 0 ? suggestion.value.slice(0, cut + 1) : "";
+        const name = slash
+          ? `/${suggestion.value}`
+          : cut >= 0
+            ? suggestion.value.slice(cut + 1)
+            : suggestion.value;
         return (
           <div
             key={`${suggestion.kind}:${suggestion.value}`}
@@ -653,7 +760,13 @@ function MentionMenu({
               index === highlight && "bg-hover",
             )}
           >
-            {suggestion.kind === "dir" ? (
+            {suggestion.kind === "builtin" ? (
+              <MessagesSquare className="h-3.5 w-3.5 shrink-0 text-accent" />
+            ) : suggestion.kind === "command" ? (
+              <TerminalSquare className="h-3.5 w-3.5 shrink-0 text-accent" />
+            ) : suggestion.kind === "skill" ? (
+              <BookOpen className="h-3.5 w-3.5 shrink-0 text-accent" />
+            ) : suggestion.kind === "dir" ? (
               <Folder className="h-3.5 w-3.5 shrink-0 text-accent" />
             ) : suggestion.kind === "special" ? (
               <AtSign className="h-3.5 w-3.5 shrink-0 text-accent" />
@@ -665,7 +778,7 @@ function MentionMenu({
               {directory && <span className="ml-2 text-faint">{directory}</span>}
             </span>
             {suggestion.hint && (
-              <span className="ml-auto shrink-0 text-[12px] text-muted">
+              <span className="ml-auto min-w-0 shrink truncate pl-3 text-[12px] text-muted">
                 {suggestion.hint}
               </span>
             )}

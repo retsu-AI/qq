@@ -327,7 +327,7 @@ function RetryButton({
   );
 }
 
-const Markdown = memo(function Markdown({
+export const Markdown = memo(function Markdown({
   text,
   streaming,
 }: {

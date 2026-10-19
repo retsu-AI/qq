@@ -1,15 +1,18 @@
 import { useState } from "react";
 import clsx from "clsx";
-import { ChevronRight, FileCode2, X } from "lucide-react";
+import { ChevronRight, Code2, FileCode2, X } from "lucide-react";
+import { openInEditor } from "../lib/editor";
 import type { FileChange } from "../lib/changes";
 import { CopyButton } from "./CodeBlock";
 import { Diff } from "./Diff";
 
 /** The files this session's edits changed, each with its diffs. */
 export function ChangesPanel({
+  projectId,
   changes,
   close,
 }: {
+  projectId: string;
   changes: FileChange[];
   close: () => void;
 }) {
@@ -108,6 +111,15 @@ export function ChangesPanel({
                     <span className="shrink-0 font-mono text-[11.5px] text-danger">
                       −{file.removed}
                     </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void openInEditor(projectId, file.path)}
+                    aria-label={`Open ${name} in editor`}
+                    title="Open in editor"
+                    className="flex h-6 items-center rounded-md px-1.5 text-muted opacity-0 hover:bg-active hover:text-fg focus-visible:opacity-100 group-hover/file:opacity-100"
+                  >
+                    <Code2 className="h-3.5 w-3.5" />
                   </button>
                   <CopyButton
                     text={file.path}

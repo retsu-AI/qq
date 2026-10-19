@@ -50,6 +50,11 @@ const project: ProjectState = {
   can_interrupt: true,
   profiles: ["default", "reviewer"],
   tool_hosts: [],
+  skills: [
+    { name: "ship", kind: "command", description: "Cut a release branch" },
+    { name: "review", kind: "skill", description: "Repository review checklist" },
+  ],
+  can_side_question: true,
   focused: "s0",
   sessions: Array.from({ length: 512 }, (_, index) => ({
     id: `s${index}`,
@@ -84,6 +89,7 @@ const project: ProjectState = {
     context_window: 128000,
     cost_usd_nanos: 0,
     queued_prompts: 0,
+    side_questions: [],
     items: Array.from({ length: count }, (_, index) => ({
       kind: "assistant",
       id: `m${index}`,
@@ -132,6 +138,15 @@ if (new URLSearchParams(location.search).has("demo")) {
     " ",
     " #[cfg(test)]",
   ].join("\n");
+  project.transcript!.side_questions = [
+    {
+      id: "sq1",
+      thread_id: "sq1",
+      question: "Which file defines the retry limit?",
+      answer: "`src/lib/retry.rs`, in `backoff`. The cap is `5_000` ms.",
+      state: "completed",
+    },
+  ];
   project.transcript!.items = [
     {
       kind: "user",
