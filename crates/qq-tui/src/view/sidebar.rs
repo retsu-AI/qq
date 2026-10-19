@@ -433,7 +433,16 @@ pub(super) fn rollup(app: &App) -> Rollup {
     }
     rollup.counts = [buckets[0].len(), buckets[1].len(), buckets[2].len()];
     rollup.sessions = Vec::with_capacity(rollup.counts.iter().sum());
-    for bucket in buckets {
+    for mut bucket in buckets {
+        // Roots arrive newest first, then orphans newest first: merge the
+        // two by freshness (stable, so ties keep roots ahead).
+        bucket.sort_by_key(|entry| {
+            std::cmp::Reverse(
+                app.sessions
+                    .get(&entry.id)
+                    .map_or(0, |session| session.summary.updated_at_ms),
+            )
+        });
         rollup.sessions.extend(bucket);
     }
     rollup
