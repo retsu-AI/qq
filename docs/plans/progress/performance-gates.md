@@ -250,3 +250,14 @@
 - #315 repair merged as 21332992; release acceptance of the known H0 gap
   did not turn failed A/B or A/A receipts into passes. Top row now separates
   shipped repair from remaining quiet-host qualification. Dated evidence stays unchanged.
+
+## 2026-10-18 — v0.1.8 candidate size regression (diagnostic)
+
+- Local locked release builds, loaded host, file length only (not hosted H0):
+  v0.1.7 `dc41c332` minimal/full 40,957,104/45,026,544 bytes, under the
+  41,000,000/48,000,000 ceilings. Main `7750ec7f` 43,866,448/48,667,088,
+  over both (+2,909,344/+3,640,544). Main `a9bff3ef` (goals stack, before
+  #329 tracing and the ENG-1066 auth refactor) was already 43,041,968 minimal.
+- CI's `release build size` job reports size only and does not enforce the
+  ceilings, so neither regression failed CI. No ceiling is widened; the fix
+  or explicit acceptance is v0.1.8 pre-bump gate G-size (`../release-0.1.8.md`).

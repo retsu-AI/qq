@@ -85,8 +85,8 @@ may append a **request** row; only root changes a request's status.
 | 0059 | The declared tools and the prompt state a run's real authority; a read-only root is told it cannot act (supersedes ADR-0054 § 5's read-only-root clause) | action-bias AB4 (ENG-1037) | Proposed ADR implemented in #304; no longer merely reserved; formal status remains Proposed in the decision record |
 | 0060 | Bind process context before classifying progress; immutable explicit host image approvals and atomic receipts | action-bias AB1 (ENG-1038) | Proposed 2026-10-14: `docs/adr/0060-process-context-for-progress.md` |
 | 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
-
-| 0063 | Opt-in metadata-only structured tracing with bounded asynchronous JSON output | developer-experience AF5 (ENG-1028) | Reserved for AF5 before design |
+| 0062 | Use full LTO and balanced release size optimization | ENG-834 performance-gate repair | Accepted 2026-10-15 in #315: `docs/adr/0062-full-lto-executable-size-profile.md` |
+| 0063 | Opt-in metadata-only structured tracing with bounded asynchronous JSON output | developer-experience AF5 (ENG-1028) | Proposed; implemented in #329 (`46769b9d`): `docs/adr/0063-opt-in-structured-tracing.md` |
 | 0064 | Built-in providers are rows in one table; per-provider config, CLI and credential branches derive from it | auth-providers AP7 (ENG-1066) | Proposed 2026-10-19: `docs/adr/0064-builtin-provider-table.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
@@ -958,7 +958,8 @@ Root reserves store schema49 for nullable runs.goal_paid_owner_run_id on initial
   change in existing ledgers, preserving their historical entries.
 - Reviewed main `3b763ea1`: #306/#282/#311 merged; goals, desktop and #315
   remain unmerged. Missing performance/live evidence stays open. Release
-  scope and handoff: `../release-0.1.7.md`; evidence: `release-0.1.7.md`.
+  scope and handoff lived in the retired `release-0.1.7` plan and ledger
+  (removed 2026-10-18; recover with `git log -- docs/plans/release-0.1.7.md`).
 - ADR-0059 is an implemented proposal, not an empty reservation; add the
   missing ADR-0061 allocation. Formal acceptance is not inferred from merge.
   No version/contract bump, tag, generated changelog or guide-pin change.
@@ -983,3 +984,17 @@ Root reserves store schema49 for nullable runs.goal_paid_owner_run_id on initial
 ### 2026-10-16 — ENG-1064 surface ownership
 
 - Root alone owns `/tmp/qq-goal-delivery-20261015/g4`, branch feat/eng-1064-goal-surfaces stacked on ENG-1063. Own TUI/forms/CLI/foreground, protocol35 fixtures, guide/design and verify feature copies. Preserve descriptor15/schema58 and G3 crash holds. G5 will use a separate isolated workspace and subscription-only openai-codex/gpt-6.1-sol, with no paid API fallback.
+
+### 2026-10-18 — v0.1.7 publication receipt and v0.1.8 preparation
+
+- v0.1.7 publication (ENG-1054 R017-publish) verified: tag `v0.1.7` →
+  `dc41c332` (#318) on main; the `Release` workflow for the tag succeeded;
+  the GitHub release carries the four `.tar.gz` archives, the Windows `.zip`
+  and `SHA256SUMS`; `retsu-AI/homebrew-qq` `Formula/qq.rb` declares
+  `version "0.1.7"`; guide pins moved in #321 (`55936a1e`).
+- `sh install.sh --dir <tmp>` (latest route, Linux x86_64) installed a binary
+  reporting `qq 0.1.7 (dc41c33 2026-10-15)` and `protocol 32, capabilities 1,
+  descriptor 15, store schema 50`. The Homebrew install itself was not run.
+- Retired `docs/plans/release-0.1.7.md` and its ledger with their navigation
+  rows; history recovers them. v0.1.8 preparation is owned by
+  `../release-0.1.8.md` and `release-0.1.8.md`.

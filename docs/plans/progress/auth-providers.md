@@ -11,7 +11,7 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP4 | State and backends split out of `lib.rs` | Shipped (`b1c66be4`) | #347 | |
 | AP4b | Request-credential perf fixtures | Shipped (`2f585b0d`) | #351 | Baseline recorded (30 samples, MAD ≤ 12%); `fixture_version` 6 |
 | AP5 | One request-credential provider + bench | Shipped (`9341fc49`) | #353 | xAI OAuth gains the epoch/expiry cache; warm requests no longer serialise |
-| AP6 | Header-set request credentials | In review | `refactor/eng-1066-ap6a-header-credentials`, `refactor/eng-1066-ap6b-body-shape` | Two PRs: header sets; explicit body shape and Google request-time auth. Request-shape identity unchanged (shape is a function of the digested credential variant) |
+| AP6 | Header-set request credentials | Shipped (`a1c972f8`, `5f7d6117`) | #359, #361 | Header sets; explicit body shape (digested); Google request-time bearer and API key |
 | AP7a | Provider table, ADR-0064, CLI/init derivation | In review | `refactor/eng-1066-ap7-provider-table` | Table rows; RON variants, field rejection and trust digests pinned unchanged |
 | AP7b | `HttpCredential::Builtin` collapse; runtime/catalog/doctor/harness and root stored names from the table | Planned | | Request-shape identity bytes kept per row (ADR-0064 §4) |
 | AP8 | Provider-neutral OAuth grants | Planned | | |

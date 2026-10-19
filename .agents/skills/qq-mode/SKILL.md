@@ -12,22 +12,19 @@ disagree on process, this skill wins; on Rust style or architecture,
 
 ## Non-negotiables
 
-1. **Pick a playbook first.** Match the task to one row below, open the
-   file, and copy its numbered steps into your todo list verbatim as the
-   first items. The final "run opening-a-pr" step is one item; expand it when
-   you reach it. A step you skip stays in the list as `skip: <reason>`.
+1. **Pick a playbook** that matches the task and follow its steps where they
+   help. Skip steps that don't apply; the user's request is the scope.
 2. **Every claim of "works" carries evidence from the real artifact.** A test
    name and its pass, `cargo xtask check` output, a `cargo xtask smoke`
    scenario, or a `verify-qq` drive. "It compiles" and "the change is small"
    are not evidence. Label anything you did not observe as *inferred* or
    *guess* in the same sentence.
-3. **Iterate on the narrowest check; finish on the gate.**
+3. **Iterate on the narrowest check; run the gate once at the end.**
    - While editing: `cargo nextest run -p <crate> -E 'test(/<name>/)'`.
-   - Before every commit you push: `cargo xtask check`.
-   - User-visible behavior: `cargo xtask smoke` (and the matching
-     `verify-qq` feature when no scenario covers it).
-   - The merge queue runs `cargo xtask check --full` once it is enabled;
-     until then, run it yourself before merging anything narrower.
+   - Before pushing: `cargo xtask check`, once.
+   - User-visible behavior: `cargo xtask smoke`.
+   - Perf, release builds, and `--full` belong to CI unless the task is
+     specifically about them. Never `sleep` to wait on a command.
 4. **Read failures from the report, not the scrollback.**
    `target/qq-check/last.json` lists each failing test, its first panic
    lines, and the exact rerun command. Smoke failures keep their evidence in
@@ -36,10 +33,8 @@ disagree on process, this skill wins; on Rust style or architecture,
 5. **Fix the cause, not the gate.** Never weaken an assertion, add a sleep,
    add `#[ignore]`, raise `SLEEP_CEILING`, or add `#[allow(...)]` to get
    green. If a gate is wrong, fix the gate in its own commit and say why.
-6. **Encode repeated corrections.** The second time you or a reviewer
-   correct the same mistake, add a rule to `cargo xtask lint`
-   (`xtask/src/lint.rs`), a type, or a test, and a row to the
-   `AGENTS.md` § Rules → enforcers table. Prose is the last resort.
+6. **Encode repeated corrections** in a lint rule or test when the same
+   mistake recurs. Prose is the last resort.
 
 ## Playbooks
 
@@ -84,12 +79,12 @@ the principle in your reply when it changed a decision.
 ## Autonomy
 
 - Proceed without asking on reversible work: edits, tests, local commits,
-  branches, worktrees, Linear comments, opening a draft PR.
+  branches, worktrees.
 - **Always stop and ask before:** force-pushing a shared branch, tagging or
-  releasing, deleting user data or sessions, editing another agent's ledger
-  or worktree, changing `PROTOCOL_VERSION` or the store schema without a
-  plan that names it, or bumping a workspace dependency.
-- Reserve ADR numbers in `docs/plans/progress/root.md` before writing one.
+  releasing, deleting user data or sessions, editing another agent's
+  worktree, or bumping a workspace dependency.
+- When the user asks "can I merge?", answer yes or no in the first word,
+  with the single blocker if no. Budgets and bot emoji are not blockers.
 - Work in your own worktree when another agent is active
   (`git worktree add .worktrees/<name> -b <branch> origin/main`). Do not
   share `CARGO_TARGET_DIR` with a worktree whose builds you depend on at the

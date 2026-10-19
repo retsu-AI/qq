@@ -13,9 +13,9 @@ outcomes and acceptance, not a second description of shipped behavior.
 2. **Make it easy to use and change.** [Developer experience](developer-experience.md)
    owns missing guide references, contributor feedback and remaining test audits.
    This can run alongside runtime work on disjoint paths.
-3. **Deliver bounded durable goals.** [Goals](goals.md) owns G0/AC4 → G2 →
-   G3 → G4 → G5. Preserve check authority, budget and recovery acceptance;
-   an implementation checkpoint is not whole-plan delivery.
+3. **Deliver bounded durable goals.** [Goals](goals.md): G0/AC4 → G2 → G3 →
+   G4 → G5 have shipped; ADR-0049 acceptance and resource/performance
+   qualification remain. An implementation checkpoint is not whole-plan delivery.
 4. **Optimize from evidence.** [Terminal-Bench](terminal-bench.md) owns
    paid tool/delegation evaluations and their default decisions;
    [token efficiency](token-efficiency.md) owns cross-cutting accounting and
@@ -36,7 +36,7 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | --- | --- |
 | [reliability](reliability.md) | AC/AP recovery and embedding residuals, AP5 productivity, AB6 action bias, CX5 compaction, integrated seven-day reliability |
 | [developer experience](developer-experience.md) | GE1–GE9 guide work; AF5 tracing, remaining AF6 audits, AF9 lessons, AF10 evaluation; merge-queue operator follow-up |
-| [goals](goals.md) | Detailed durable goal/loop-guard/check-authority specification and G0/G2–G5 delivery |
+| [goals](goals.md) | Durable goal/loop-guard/check-authority specification; G0/G2–G5 shipped; ADR-0049 acceptance and resource/performance qualification remain |
 | [tool layer](tool-layer.md) | T13 tool ablations, T14 selective index, T11 images; T10 terminal only on trajectory evidence |
 | [Terminal-Bench](terminal-bench.md) | R6 tool experiment method, R7/D6b delegation economics/defaults, remaining R8, TB-pilot and benchmark integrity |
 | [token efficiency](token-efficiency.md) | Remaining TE1 accounting and TE2–TE8 experiments; consumes D6b/T13/cache receipts |
@@ -45,7 +45,7 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [Jev](jev.md) | Remaining JV3–JV13 precision, hold lifecycle, receipts, UX and qualification |
 | [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W/S/U/D/M work |
 | [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
-| [v0.1.7 publication](release-0.1.7.md) | Remaining tag/assets/checksum/install/Homebrew verification receipt; bump and guide pins shipped |
+| [v0.1.8 preparation](release-0.1.8.md) | Pre-bump gates, contract deltas and the draft Upgrading block for the v0.1.8 bump PR |
 | [LSP diagnostics](lsp-diagnostics.md) | Unscheduled proposal; no active delivery inferred |
 | [auth providers](auth-providers.md) | AP0–AP4 behaviour-preserving qq-auth refactor; AP4b perf fixtures; AP5–AP8 provider-neutral credentials, configuration and OAuth grants; API-key presets and permitted OAuth grants |
 
@@ -61,9 +61,10 @@ in [root](progress/root.md); do not rewrite accepted ADRs during cleanup.
 - `agent-feedback`, `guide-expansion` → **developer experience**.
 - `supervised-delegation` → **Terminal-Bench R7/D6b**; continuation and
   supervised-write contracts already live in design.
-- v0.1.7 preparation is reduced to [publication verification](release-0.1.7.md):
-  #318 and #321 are merged, but remote asset/install completion needs a receipt.
-  The release procedure remains [the runbook](../runbooks/release.md).
+- v0.1.7 publication was verified on 2026-10-18 (receipt in
+  [root](progress/root.md)); its temporary plan and ledger are retired.
+  v0.1.8 preparation lives in [release-0.1.8](release-0.1.8.md). The release
+  procedure remains [the runbook](../runbooks/release.md).
 
 
 Existing slice IDs and issues survive consolidation. Old ledgers are marked

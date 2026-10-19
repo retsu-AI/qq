@@ -20,9 +20,26 @@ struct Model {
 }
 impl RuntimeLoader for Loader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        self.load_with_progress(request, RuntimeLoadProgress::default())
+    }
+
+    fn load_with_progress(
+        &self,
+        request: RuntimeLoadRequest,
+        progress: RuntimeLoadProgress,
+    ) -> RuntimeLoadFuture {
         let ordinal = self.prepared.load(Ordering::SeqCst);
         if ordinal >= 2 && self.scenario != "allowance" {
-            return Box::pin(std::future::pending());
+            // Later goal runs never reach a provider. The driver may queue one
+            // before shutdown; shutdown awaits preparation, so it must stop
+            // when cancelled rather than hang.
+            return Box::pin(async move {
+                progress.cancelled().await;
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Server,
+                    message: "preparation stopped".to_owned(),
+                })
+            });
         }
         self.prepared.fetch_add(1, Ordering::SeqCst);
         let model = Model {
