@@ -5778,6 +5778,80 @@ fn ninth_review_round_on_the_rail() {
 }
 
 #[test]
+fn tenth_review_round_on_the_rail() {
+    // 1. A side question in an orphan's descendant animates while the
+    //    orphan's rail row is painted.
+    let missing = SessionId::from_bytes([0x80; 16]);
+    let top = SessionSummary {
+        parent_id: Some(missing),
+        updated_at_ms: 5,
+        ..fixtures::session_summary(SessionId::from_bytes([0x81; 16]))
+    };
+    let below = SessionSummary {
+        parent_id: Some(top.id),
+        ..fixtures::session_summary(SessionId::from_bytes([0x82; 16]))
+    };
+    let older_root = SessionSummary {
+        updated_at_ms: 1,
+        ..fixtures::session_summary(SessionId::from_bytes([0x83; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![top.clone(), below.clone(), older_root.clone()],
+        focused: Some(fixtures::session_snapshot(older_root.clone())),
+        ..fixtures::workspace_snapshot()
+    }));
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    app.status = None;
+    app.rail_painted = Some(vec![top.id, older_root.id]);
+    app.sessions
+        .get_mut(&below.id)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x84; 16]));
+    assert!(app.has_activity(), "the orphan's badge spins");
+
+    // 3. The newer orphan lists ahead of the older root in the same group,
+    //    and ranks first among equal needs.
+    app.sessions
+        .get_mut(&below.id)
+        .unwrap()
+        .summary
+        .running_side_question = None;
+    let listed: Vec<SessionId> = rollup(&app).sessions.iter().map(|entry| entry.id).collect();
+    assert_eq!(listed, [top.id, older_root.id], "newest first");
+    for id in [top.id, older_root.id] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x85; 16]));
+    }
+    assert_eq!(app.sessions_needing_attention(), [top.id, older_root.id]);
+
+    // 2. A workspace view over an orphan whose parent arrives as an audit
+    //    stops returning to it.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x86; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    app.execute(Command::ShowAttention);
+    assert_eq!(app.view_return(), Some(ids[0]));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_ne!(app.view_return(), Some(ids[0]));
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its
