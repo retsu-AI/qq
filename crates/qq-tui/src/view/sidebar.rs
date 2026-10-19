@@ -15,7 +15,11 @@ pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefi
         Some(Need::Approval) => ("◇", warning()),
         Some(Need::Failed) => ("✕", failure()),
         Some(Need::FinishedUnread) => ("●", accent()),
-        None if !view.live.awaiting_approval.is_empty() => (spinner(app.animation_tick), info()),
+        None if !view.live.awaiting_approval.is_empty()
+            || session.running_side_question.is_some() =>
+        {
+            (spinner(app.animation_tick), info())
+        }
         None => match session.status {
             SessionStatus::Idle => match session.last_outcome.as_ref() {
                 Some(qq_protocol::RunOutcome::Completed) => ("●", muted()),
@@ -539,13 +543,26 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         }
     };
     for row in plan.into_iter().skip(start).take(height) {
-        if let RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) = row
-            && app.sessions.get(&id).is_some_and(|session| {
+        // A row names its session only when the title survives the badges:
+        // a fully truncated title leaves the rule to name it.
+        let needs = |id: SessionId| {
+            app.sessions.get(&id).is_some_and(|session| {
                 agent_need(session).is_some() || !session.live.awaiting_approval.is_empty()
             })
-        {
-            named.push(id);
-        }
+        };
+        let titled = |line: &Line, id: SessionId| {
+            let title = &app.sessions[&id].summary.title;
+            let head: String = title.chars().take(3).collect();
+            head.is_empty()
+                || line
+                    .spans
+                    .iter()
+                    .any(|span| span.text.contains(head.as_str()))
+        };
+        let row_target = match row {
+            RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) => Some(id),
+            _ => None,
+        };
         targets.push(match row {
             RailRow::Session(entry) | RailRow::Detail(entry) => Some(entry.id),
             RailRow::Agent(id) | RailRow::AgentDetail(id) => Some(id),
@@ -663,6 +680,12 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
                 truncate_line(line, width)
             }
         });
+        if let Some(id) = row_target
+            && needs(id)
+            && rows.last().is_some_and(|line| titled(line, id))
+        {
+            named.push(id);
+        }
     }
     while rows.len() < height {
         rows.push(Line::styled("│", border()));

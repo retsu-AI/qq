@@ -1263,8 +1263,9 @@ impl App {
                 // Always land on the session row: a search or `Ctrl-A` can
                 // keep the agent listed, so collapsing alone may not move
                 // the cursor, and a search may hide the session row, so
-                // `Left` from a found agent clears the search to show it.
-                if !*every_agent {
+                // `Left` from a found agent clears the search to show it,
+                // leaving the session's expansion as it was.
+                if !*every_agent && picker.query.is_empty() {
                     expanded.remove(&root);
                 }
                 picker.query.clear();

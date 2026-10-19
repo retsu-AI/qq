@@ -5210,6 +5210,84 @@ fn attention_routes_skip_audits() {
 }
 
 #[test]
+fn an_audit_inside_an_orphan_tree_hides_its_descendants_from_attention() {
+    // agent 0 is an audit whose parent is not loaded; agent 1 is its task
+    // child and waits on the human.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        } else {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    app.sessions.remove(&root);
+    app.sessions
+        .get_mut(&ids[1])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x87; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert!(app.sessions_needing_attention().is_empty());
+    assert!(app.sessions_awaiting_approval().is_empty());
+}
+
+#[test]
+fn a_side_question_session_shows_the_spinner_on_its_own_row() {
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.sessions
+        .get_mut(&other)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x86; 16]));
+    let rail = rail_rows(&mut app, 120, 40);
+    let row = rail
+        .iter()
+        .find(|row| row.contains("Other"))
+        .unwrap_or_else(|| panic!("{rail:#?}"));
+    assert!(!row.contains("○ Other"), "not drawn idle: {row}");
+}
+
+#[test]
+fn focus_never_lands_on_an_audit_root_at_startup_or_after_a_deletion() {
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+        summary.updated_at_ms = 999;
+    });
+    let other = SessionId::from_bytes([0x11; 16]);
+    // Deleting the focused root refocuses on a neighbour: the audit child
+    // comes first in tree order, so the filter must skip it.
+    app.focus_session(root);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    assert_ne!(app.focused(), Some(ids[0]), "never the audit");
+    assert_eq!(app.focused(), Some(other));
+    // A snapshot whose focused body is the (now root) audit focuses the
+    // newest non-audit root instead.
+    let mut fresh = App::new(TuiOptions::default());
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        updated_at_ms: 999,
+        ..fixtures::session_summary(ids[0])
+    };
+    let plain = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(other)
+    };
+    fresh.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit.clone(), plain],
+        focused: Some(fixtures::session_snapshot(audit)),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(fresh.focused(), Some(other));
+}
+
+#[test]
 fn orphan_attention_reaches_ctrl_g_and_held_agents_are_not_working() {
     // agent 0's parent is not loaded; its child agent 1 waits on the human.
     let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
@@ -5963,6 +6041,47 @@ fn the_related_agents_row_counts_work_by_the_rails_rules_and_names_no_approval()
         related.contains(" · "),
         "the side question counts as work: {related}"
     );
+}
+
+#[test]
+fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_nothing() {
+    // One session (no rail, no strip) whose agent failed unseen, and a
+    // sticky notice on the rule.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    app.set_info_for_test("theme saved");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("theme saved"), "{rule}");
+    assert!(rule.contains("✕ 1") && rule.contains("^G jump"), "{rule}");
+
+    // A narrow rail whose badges leave no room for a waiting session's
+    // title does not report that session as named, so the rule names it.
+    let (mut app, root, _) = app_with_fanout(30);
+    {
+        let view = app.sessions.get_mut(&root).unwrap();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x85; 16]));
+        view.unread = 99_999;
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let named = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact).named;
+    assert!(!named.contains(&root), "title truncated away: not named");
+    let named = sidebar(&app, 60, 30, RailDensity::Compact).named;
+    assert!(named.contains(&root), "title visible: named");
 }
 
 #[test]
