@@ -13,7 +13,7 @@ export interface ActiveMention {
 export interface Suggestion {
   /** Inserted after the `@`. */
   value: string;
-  kind: "file" | "dir" | "special";
+  kind: "file" | "dir" | "special" | "builtin" | "command" | "skill";
   hint?: string;
 }
 

@@ -86,6 +86,25 @@ Changes (the header button, or Ctrl Shift D) opens a side panel listing every fi
 the session's file tools edited, with added and removed line counts and each
 diff. Files changed by shell commands are not tracked there.
 
+Type `/` at the start of a message to pick one of the workspace's commands or
+skills (`.qq/commands/<name>.md`, `.qq/skills/<name>/SKILL.md`); it is sent as
+`/name` and resolved by the runtime, as in the TUI. `/btw QUESTION` (or the
+speech-bubble button) asks a side question while the agent keeps working: the
+answer appears above the composer and never becomes part of the run.
+`/btw-new` starts a fresh side thread and `/btw-cancel` stops the running one.
+The same limits as the TUI apply (read-only file tools, 8 model turns, 120 s).
+
+The header's code button (or Ctrl Shift E) opens the project in VS Code,
+Cursor, Windsurf or Zed, whichever is found first on `PATH`; the Changes panel
+opens single files the same way.
+
+The Git chip in the header shows the branch, how many files changed, commits
+to push or pull, and the branch's pull request when the GitHub CLI (`gh`) finds
+one. Its menu commits everything (optionally pushing), pushes or publishes the
+branch, and creates a pull request with `gh`, each after a confirmation. Status
+refreshes every 15 seconds, on window focus and when a run settles; Git hooks
+and credential helpers run as usual, and prompts are disabled so nothing hangs.
+
 ## Window, menus and settings
 
 The title bar holds back/forward through recently viewed sessions (Alt ←/→),

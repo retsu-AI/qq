@@ -14,6 +14,8 @@ import {
   zoom,
 } from "./lib/preferences";
 import { Sidebar } from "./components/Sidebar";
+import { ToastView } from "./components/ToastView";
+import { openInEditor } from "./lib/editor";
 import { SessionPane } from "./components/SessionPane";
 import { Welcome } from "./components/Welcome";
 import { Providers } from "./components/Providers";
@@ -136,7 +138,7 @@ export function App() {
   // Global shortcuts. Ctrl N new session, Ctrl O open project, Ctrl , settings,
   // Ctrl K commands, Ctrl B sidebar, Ctrl F find session, Ctrl +/-/0 zoom,
   // Alt ←/→ history, Ctrl Shift A next session that needs you, Ctrl Shift D
-  // changes panel.
+  // changes panel, Ctrl Shift E open in editor.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
@@ -179,6 +181,9 @@ export function App() {
       } else if (key === "n" && !event.shiftKey && project) {
         handled();
         newSession();
+      } else if (key === "e" && event.shiftKey && project) {
+        handled();
+        void openInEditor(project.project_id);
       } else if (key === "d" && event.shiftKey) {
         handled();
         toggleChanges();
@@ -211,6 +216,12 @@ export function App() {
           label: "Open project…",
           shortcut: "Ctrl O",
           onSelect: () => void pickProject(),
+        },
+        {
+          label: "Open in editor",
+          shortcut: "Ctrl Shift E",
+          onSelect: () => project && void openInEditor(project.project_id),
+          disabled: !project,
         },
         {
           label: "Close project",
@@ -380,6 +391,7 @@ export function App() {
         />
       )}
       {aboutOpen && <About close={() => setAboutOpen(false)} />}
+      <ToastView />
     </div>
   );
 }
