@@ -4997,6 +4997,11 @@ fn delegate_holds_stay_working_and_a_focused_waiting_agent_still_lifts_its_sessi
         live.awaiting_approval.insert(hold);
         live.with_delegate.insert(hold);
     }
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    assert!(
+        !rail.contains("◇ agent 0") && !rail.contains("approve"),
+        "a delegate-owned hold reads as work, not an approval: {rail}"
+    );
     app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
     app.focus_session(SessionId::from_bytes([0x11; 16]));
     let entry = |app: &App| {
@@ -5050,6 +5055,23 @@ fn an_agent_whose_session_is_not_loaded_is_listed_as_a_session() {
     assert_eq!(listed_sessions(&app), 2);
     let rail = rail_rows(&mut app, 120, 40).join("\n");
     assert!(rail.contains("agent 0"), "{rail}");
+}
+
+#[test]
+fn a_side_question_counts_as_agent_work() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x95; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!((entry.group, entry.agents_working), (RailGroup::Working, 1));
 }
 
 #[test]
