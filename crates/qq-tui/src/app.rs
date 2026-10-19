@@ -3388,7 +3388,9 @@ impl App {
             return true;
         }
         let mut id = session.summary.id;
-        for _ in 0..=self.sessions.depth(id) {
+        // Loaded parent links up to a missing parent: `depth` is zero outside
+        // `thread_order`, so an orphan component is walked by its links.
+        for _ in 0..=self.sessions.len() {
             if self.view().session() == Some(id) || painted.contains(&id) {
                 return true;
             }
@@ -3397,8 +3399,8 @@ impl App {
                 .get(&id)
                 .and_then(|view| view.summary.parent_id)
             {
-                Some(parent) => id = parent,
-                None => break,
+                Some(parent) if self.sessions.contains_key(&parent) => id = parent,
+                _ => break,
             }
         }
         false
@@ -3587,6 +3589,11 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // The session a workspace view returns to (and that `/goal`, `/btw`
+        // act on while it is open) is replaced too.
+        if self.view_return.is_some_and(|id| self.under_audit(id)) {
+            self.view_return = self.first_listed_root();
+        }
         // The followed session, so a `/goal` or `/btw` view over a session
         // now known to sit under an audit moves too.
         let Some(focused) = self.view().session() else {
@@ -3612,8 +3619,30 @@ impl App {
         // Every loaded session, `thread_order` first and then orphan trees,
         // ranked by the human-aware need: an approval only while the human
         // is asked, else an unseen failure or finish (which a later run
-        // waiting on a delegate does not hide).
-        let mut ranked: Vec<(qq_client::state::Need, usize, SessionId)> = self
+        // waiting on a delegate does not hide). Within a rank, components
+        // (a root's tree, an orphan's tree) go newest first, as the rail
+        // lists them, and tree order holds inside one.
+        let top_updated = |mut id: SessionId| {
+            for _ in 0..=self.sessions.len() {
+                match self
+                    .sessions
+                    .get(&id)
+                    .and_then(|view| view.summary.parent_id)
+                {
+                    Some(parent) if self.sessions.contains_key(&parent) => id = parent,
+                    _ => break,
+                }
+            }
+            self.sessions
+                .get(&id)
+                .map_or(0, |view| view.summary.updated_at_ms)
+        };
+        let mut ranked: Vec<(
+            qq_client::state::Need,
+            std::cmp::Reverse<u64>,
+            usize,
+            SessionId,
+        )> = self
             .sessions
             .thread_order()
             .iter()
@@ -3621,10 +3650,13 @@ impl App {
             .chain(self.orphan_trees())
             .enumerate()
             .filter(|(_, id)| !self.under_audit(*id))
-            .filter_map(|(position, id)| self.attention_need(id).map(|need| (need, position, id)))
+            .filter_map(|(position, id)| {
+                self.attention_need(id)
+                    .map(|need| (need, std::cmp::Reverse(top_updated(id)), position, id))
+            })
             .collect();
         ranked.sort();
-        ranked.into_iter().map(|(_, _, id)| id).collect()
+        ranked.into_iter().map(|(_, _, _, id)| id).collect()
     }
 
     /// Why the human is needed by `id`, if they are: like

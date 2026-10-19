@@ -468,15 +468,24 @@ impl FrameRenderer {
                 })
                 .flatten()
                 .collect();
-            carded.extend(
-                calls
+            // A title shared by several children is ambiguous: they count as
+            // carded only when every one of their cards is drawn, so an
+            // off-screen namesake is still named (at worst twice, never not
+            // at all).
+            let children: Vec<SessionId> = calls
+                .iter()
+                .filter_map(|call| app.sessions.child_spawned_by(call.id))
+                .collect();
+            let title_of = |child: &SessionId| app.sessions[child].summary.title.as_str();
+            carded.extend(children.iter().copied().filter(|child| {
+                let title = title_of(child);
+                let drawn = card_spans.iter().filter(|span| **span == title).count();
+                let namesakes = children
                     .iter()
-                    .filter_map(|call| app.sessions.child_spawned_by(call.id))
-                    .filter(|child| {
-                        let title = app.sessions[child].summary.title.as_str();
-                        card_spans.contains(&title)
-                    }),
-            );
+                    .filter(|other| title_of(other) == title)
+                    .count();
+                drawn >= namesakes
+            }));
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);

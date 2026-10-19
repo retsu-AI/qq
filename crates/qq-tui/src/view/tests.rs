@@ -5838,6 +5838,80 @@ fn ninth_review_round_on_the_rail() {
 }
 
 #[test]
+fn tenth_review_round_on_the_rail() {
+    // 1. A side question in an orphan's descendant animates while the
+    //    orphan's rail row is painted.
+    let missing = SessionId::from_bytes([0x80; 16]);
+    let top = SessionSummary {
+        parent_id: Some(missing),
+        updated_at_ms: 5,
+        ..fixtures::session_summary(SessionId::from_bytes([0x81; 16]))
+    };
+    let below = SessionSummary {
+        parent_id: Some(top.id),
+        ..fixtures::session_summary(SessionId::from_bytes([0x82; 16]))
+    };
+    let older_root = SessionSummary {
+        updated_at_ms: 1,
+        ..fixtures::session_summary(SessionId::from_bytes([0x83; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![top.clone(), below.clone(), older_root.clone()],
+        focused: Some(fixtures::session_snapshot(older_root.clone())),
+        ..fixtures::workspace_snapshot()
+    }));
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    app.status = None;
+    app.rail_painted = Some(vec![top.id, older_root.id]);
+    app.sessions
+        .get_mut(&below.id)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x84; 16]));
+    assert!(app.has_activity(), "the orphan's badge spins");
+
+    // 3. The newer orphan lists ahead of the older root in the same group,
+    //    and ranks first among equal needs.
+    app.sessions
+        .get_mut(&below.id)
+        .unwrap()
+        .summary
+        .running_side_question = None;
+    let listed: Vec<SessionId> = rollup(&app).sessions.iter().map(|entry| entry.id).collect();
+    assert_eq!(listed, [top.id, older_root.id], "newest first");
+    for id in [top.id, older_root.id] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x85; 16]));
+    }
+    assert_eq!(app.sessions_needing_attention(), [top.id, older_root.id]);
+
+    // 2. A workspace view over an orphan whose parent arrives as an audit
+    //    stops returning to it.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x86; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    app.execute(Command::ShowAttention);
+    assert_eq!(app.view_return(), Some(ids[0]));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_ne!(app.view_return(), Some(ids[0]));
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its
@@ -7059,6 +7133,100 @@ fn a_drawn_card_does_not_card_a_child_whose_title_it_contains() {
         .find(|row| row.contains('─'))
         .unwrap_or_else(|| panic!("{rows:#?}"));
     assert!(rule.contains("survey needs approval"), "{rule}");
+}
+
+#[test]
+fn a_drawn_card_does_not_card_an_off_screen_namesake() {
+    // A second `survey callers` is spawned by a call the transcript does
+    // not draw: one drawn card cannot tell the two apart, so the rule still
+    // names the title.
+    let (mut app, child) = app_with_spawned_child();
+    let parent = app.focused().unwrap();
+    let hidden_call = ToolCallSnapshot {
+        run_id: RunId::from_bytes([0x99; 16]),
+        ..tool_call_snapshot(
+            0x27,
+            "spawn_agent",
+            r#"{"task":"survey callers"}"#,
+            ToolCallState::Running,
+            None,
+            false,
+        )
+    };
+    app.sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(hidden_call.clone());
+    let twin = SessionId::from_bytes([0x33; 16]);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        twin,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                parent_id: Some(parent),
+                spawned_by: Some(qq_protocol::SpawnOrigin {
+                    run_id: hidden_call.run_id,
+                    tool_call_id: Some(hidden_call.id),
+                    depth: 1,
+                }),
+                title: "survey callers".to_owned(),
+                ..fixtures::session_summary(twin)
+            }),
+        },
+    )));
+    app.sessions
+        .get_mut(&twin)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let _ = child;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    let cards = rows
+        .iter()
+        .filter(|row| row.contains("↳") && row.contains("survey callers"))
+        .count();
+    assert_eq!(cards, 1, "one card drawn: {rows:#?}");
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey callers needs approval"), "{rule}");
+}
+
+#[test]
+fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
+    // A waiting session titled `◇ deploy` on a narrow rail whose badges
+    // clip its title away: the `◇ ` marker must not read as the title.
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    {
+        let view = app.sessions.get_mut(&other).unwrap();
+        view.summary.title = "◇ deploy the whole thing".to_owned();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x87; 16]));
+        view.unread = 999_999_999;
+    }
+    app.layout.rail = PanePref::Shown;
+    app.focus_session(SessionId::from_bytes([0x10; 16]));
+    let (rows, named, _) = super::sidebar::sidebar_without(
+        &app,
+        layout::RAIL_MIN_WIDTH,
+        30,
+        super::sidebar::RailDensity::Compact,
+        &[],
+    );
+    let texts = frame_rows(&rows);
+    let row = texts
+        .iter()
+        .find(|row| row.contains("999999999"))
+        .unwrap_or_else(|| panic!("{texts:#?}"));
+    assert!(!row.contains("deploy"), "the title is clipped: {row}");
+    assert!(!named.contains(&other), "{texts:#?}");
 }
 
 #[test]
