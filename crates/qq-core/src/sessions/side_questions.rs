@@ -1,8 +1,10 @@
 use super::*;
+
 use crate::tools::output::escaped_len;
 use std::collections::hash_map::Entry;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::Notify;
+use tracing::Instrument as _;
 
 /// In-memory side tasks (admitting, executing or settling) across the runtime.
 const MAX_SIDE_TASKS: usize = 64;
@@ -229,6 +231,7 @@ impl SessionRuntime {
 
     /// Executes a committed launch to durable settlement, including after a
     /// panic.
+    #[tracing::instrument(target = "qq::diagnostic", name = "run", skip_all, fields(run_ordinal = crate::runtime::next_diagnostic_run()))]
     pub(super) async fn run_launched_side_question(
         &self,
         launch: SideLaunch,
@@ -339,27 +342,32 @@ impl SessionRuntime {
                 request,
                 messages,
             };
-            let outcome =
-                AssertUnwindSafe(runtime.execute_side_question(launch, cancellation, started))
-                    .catch_unwind()
-                    .await;
-            let (result, fallback) = match outcome {
-                Ok(Ok(answer)) => (Ok(answer), None),
-                Ok(Err(error)) => (Err(error), Some(qq_protocol::SideQuestionState::Failed)),
-                Err(_) => (
-                    Err(SessionRuntimeError::Unavailable),
-                    Some(qq_protocol::SideQuestionState::Interrupted),
-                ),
-            };
-            if let Some(state) = fallback
-                && runtime
-                    .settle_side_question(id, state, false, limit)
-                    .await
-                    .is_err()
-            {
-                runtime.inner.failed.send_replace(true);
+            let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
+            async {
+                let outcome =
+                    AssertUnwindSafe(runtime.execute_side_question(launch, cancellation, started))
+                        .catch_unwind()
+                        .await;
+                let (result, fallback) = match outcome {
+                    Ok(Ok(answer)) => (Ok(answer), None),
+                    Ok(Err(error)) => (Err(error), Some(qq_protocol::SideQuestionState::Failed)),
+                    Err(_) => (
+                        Err(SessionRuntimeError::Unavailable),
+                        Some(qq_protocol::SideQuestionState::Interrupted),
+                    ),
+                };
+                if let Some(state) = fallback
+                    && runtime
+                        .settle_side_question(id, state, false, limit)
+                        .await
+                        .is_err()
+                {
+                    runtime.inner.failed.send_replace(true);
+                }
+                let _ = reply.send(result);
             }
-            let _ = reply.send(result);
+            .instrument(run_span)
+            .await;
         });
         drop(lifecycle);
         match response.await {
@@ -406,6 +414,25 @@ impl SessionRuntime {
     }
 
     async fn execute_side_question(
+        &self,
+        launch: SideLaunch,
+        cancellation: RunCancellation,
+        started: tokio::time::Instant,
+    ) -> Result<SideAnswer, SessionRuntimeError> {
+        let existing = tracing::Span::current();
+        let run_span = if existing.metadata().is_some_and(|metadata| {
+            metadata.target() == "qq::diagnostic" && metadata.name() == "run"
+        }) {
+            existing
+        } else {
+            tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run())
+        };
+        self.execute_side_question_inner(launch, cancellation, started)
+            .instrument(run_span)
+            .await
+    }
+
+    async fn execute_side_question_inner(
         &self,
         launch: SideLaunch,
         cancellation: RunCancellation,

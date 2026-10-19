@@ -16,13 +16,11 @@ use thiserror::Error;
 use super::{
     AuthError, CredentialBackend, CredentialStore, MissingCredentialRemedies, Secret, oauth,
     oauth::OAuthProvider,
+    request::{CachedRequestCredentials, RequestCredentialSource, Resolution, Reuse},
 };
 use qq_protocol::CredentialEpoch;
 use qq_provider::SecretRef;
-use qq_provider::{
-    RequestCredential, RequestCredentialError, RequestCredentialFuture, RequestCredentialProvider,
-    SharedRequestCredentialProvider,
-};
+use qq_provider::{RequestCredential, RequestCredentialError, SharedRequestCredentialProvider};
 
 pub(super) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 use super::OPENAI_CODEX_CREDENTIAL_ENDPOINT as CREDENTIAL_ENDPOINT;
@@ -1156,7 +1154,7 @@ impl CodexCredential {
 
 impl CredentialStore {
     pub fn codex_request_credentials(&self, profile: &str) -> SharedRequestCredentialProvider {
-        SharedRequestCredentialProvider::new(CodexRequestCredentials::new(self, profile))
+        SharedRequestCredentialProvider::new(CodexRequestCredentials::for_profile(self, profile))
     }
 
     pub fn resolve_codex(&self, profile: &str) -> Result<CodexCredential, AuthError> {
@@ -1272,81 +1270,70 @@ impl CredentialStore {
     }
 }
 
-pub(super) struct CodexRequestCredentials {
-    pub(super) store: CredentialStore,
-    pub(super) profile: String,
-    pub(super) cache: tokio::sync::Mutex<Option<CachedCodexCredential>>,
+/// OpenAI Codex as a [`RequestCredentialSource`]: every resolution comes
+/// from the stored OAuth credential, so it is always cached until its epoch
+/// moves or its refresh deadline passes.
+pub(super) struct CodexSource {
+    profile: String,
     remedies: MissingCredentialRemedies,
 }
 
+pub(super) type CodexRequestCredentials = CachedRequestCredentials<CodexSource>;
+
 impl CodexRequestCredentials {
-    pub(super) fn new(store: &CredentialStore, profile: &str) -> Self {
+    pub(super) fn for_profile(store: &CredentialStore, profile: &str) -> Self {
         // Remedy text is authored here, once, so the request path never
         // formats provider-specific guidance. Codex has no API-key variable.
-        Self {
-            store: store.clone(),
-            profile: profile.to_owned(),
-            cache: tokio::sync::Mutex::new(None),
-            remedies: MissingCredentialRemedies::new(
-                "openai-codex",
-                profile,
-                &["qq auth login openai-codex"],
-                None,
-            ),
-        }
+        CachedRequestCredentials::new(
+            store,
+            CodexSource {
+                profile: profile.to_owned(),
+                remedies: MissingCredentialRemedies::new(
+                    "openai-codex",
+                    profile,
+                    &["qq auth login openai-codex"],
+                    None,
+                ),
+            },
+        )
     }
 }
 
-#[derive(Clone)]
-pub(super) struct CachedCodexCredential {
-    pub(super) credential: CodexCredential,
-    pub(super) epoch: CredentialEpoch,
-    pub(super) refresh_after: u64,
-}
+impl RequestCredentialSource for CodexSource {
+    type Credential = CodexCredential;
 
-impl RequestCredentialProvider for CodexRequestCredentials {
-    fn credential(&self) -> RequestCredentialFuture<'_> {
-        Box::pin(async move {
-            let mut cache = self.cache.lock().await;
-            let cached_state = cache
-                .as_ref()
-                .map(|cached| (cached.epoch, cached.refresh_after));
-            let profile = self.profile.clone();
-            let resolved = self
-                .store
-                .load_request_credential(move |store| {
-                    let now = unix_time()?;
-                    let epoch = store.epoch()?;
-                    let cache_valid = cached_state.is_some_and(|(cached_epoch, refresh_after)| {
-                        cached_epoch == epoch && now < refresh_after
-                    });
-                    if cache_valid {
-                        return Ok(None);
-                    }
-                    if cached_state.is_some() {
-                        store.resolve_codex_with_epoch_fresh(&profile).map(Some)
-                    } else {
-                        store.resolve_codex_with_epoch(&profile).map(Some)
-                    }
-                })
-                .await?
-                .map_err(|error| map_request_credential_error(error, &self.remedies))?;
-            let Some((credential, epoch)) = resolved else {
-                let credential = &cache
-                    .as_ref()
-                    .expect("a cache hit requires a cached Codex credential")
-                    .credential;
-                return request_credential(credential);
-            };
-            let refresh_after = credential.refresh_after();
-            let request_credential = request_credential(&credential)?;
-            *cache = Some(CachedCodexCredential {
-                credential,
+    fn resolve(
+        &self,
+        store: &CredentialStore,
+        reload: bool,
+    ) -> Result<Resolution<CodexCredential>, AuthError> {
+        let (credential, epoch) = if reload {
+            store.resolve_codex_with_epoch_fresh(&self.profile)?
+        } else {
+            store.resolve_codex_with_epoch(&self.profile)?
+        };
+        let refresh_after = credential.refresh_after();
+        Ok(Resolution {
+            credential,
+            reuse: Some(Reuse {
                 epoch,
                 refresh_after,
-            });
-            Ok(request_credential)
+            }),
         })
+    }
+
+    fn request_credential(
+        credential: &CodexCredential,
+    ) -> Result<RequestCredential, RequestCredentialError> {
+        request_credential(credential)
+    }
+
+    fn map_error(&self, error: AuthError) -> RequestCredentialError {
+        map_request_credential_error(error, &self.remedies)
+    }
+
+    fn clock_unavailable() -> AuthError {
+        CodexAuthError::ClockUnavailable.into()
     }
 }
 

@@ -412,6 +412,11 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "structured-tracing",
+        proves: "QQ_LOG is opt-in; JSON spans cover run/turn/provider/tool/store without content",
+        run: |home| Box::pin(structured_tracing(home)),
+    },
+    Scenario {
         name: "ask-streams-text",
         proves: "`qq ask` streams the model's text to stdout and exits 0",
         run: |home| Box::pin(ask_streams_text(home)),
@@ -481,6 +486,106 @@ async fn ask_streams_text(home: &Home) -> Result<(), String> {
         "provider request did not carry the prompt: {}",
         &requests[0][..requests[0].len().min(300)]
     );
+    Ok(())
+}
+
+async fn structured_tracing(home: &Home) -> Result<(), String> {
+    let provider = home
+        .provider(vec![
+            Reply::ReadFile("inventory.rs"),
+            Reply::Text("SECRET_OUTPUT_SENTINEL"),
+        ])
+        .await
+        .map_err(|error| error.to_string())?;
+    let off = home.run(&provider.base_url, &["version"]).await?;
+    ensure!(off.status == Some(0), "version failed: {}", off.stderr);
+    let directory = if cfg!(target_os = "macos") {
+        home.root.join("Library/Application Support/dev.qq.qq/logs")
+    } else {
+        home.root.join("state/qq/logs")
+    };
+    ensure!(!directory.exists(), "logging created state without opt-in");
+
+    for argument in ["--help", "--version", "--not-a-valid-option"] {
+        let output = home
+            .command(&provider.base_url)
+            .env("QQ_LOG", "debug")
+            .arg(argument)
+            .output()
+            .await
+            .map_err(|error| error.to_string())?;
+        ensure!(
+            !output.status.success() && String::from_utf8_lossy(&output.stderr).contains("QQ_LOG"),
+            "invalid QQ_LOG bypassed validation for {argument}"
+        );
+        ensure!(
+            output.stdout.is_empty() && !directory.exists(),
+            "invalid QQ_LOG produced output or state for {argument}"
+        );
+    }
+
+    let qa_root = home.root.join("qa-fixture");
+    let mut qa = home.command(&provider.base_url);
+    qa.env("QQ_LOG", "info").arg("--tui-qa-root").arg(&qa_root);
+    let refused = qa.output().await.map_err(|error| error.to_string())?;
+    ensure!(
+        !refused.status.success()
+            && String::from_utf8_lossy(&refused.stderr).contains("unset QQ_LOG"),
+        "QA tracing was not explicitly refused"
+    );
+    ensure!(
+        !qa_root.exists() && !directory.exists(),
+        "QA tracing escaped or modified fixture root"
+    );
+    let mut command = home.command(&provider.base_url);
+    command
+        .env("QQ_LOG", "info")
+        .args(["run", "--format", "jsonl", "SECRET_PROMPT_SENTINEL"]);
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "traced run timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    if cfg!(not(unix)) {
+        ensure!(
+            !output.status.success() && !directory.exists(),
+            "unsupported platform created logs or succeeded"
+        );
+        return Ok(());
+    }
+    ensure!(
+        output.status.success(),
+        "traced run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut logs = String::new();
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        logs.push_str(
+            &fs::read_to_string(entry.map_err(|error| error.to_string())?.path())
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    ensure!(
+        !logs.contains("SECRET_")
+            && !logs.contains("inventory.rs")
+            && !logs.contains("pub struct Widget"),
+        "diagnostic content leak"
+    );
+    let records = jsonl(&logs)?;
+    for name in ["run", "turn", "provider", "tool", "store"] {
+        ensure!(
+            records.iter().any(
+                |record| record["span"]["name"] == name && record["fields"]["message"] == "new"
+            ),
+            "missing {name} span: {logs}"
+        );
+        ensure!(
+            records
+                .iter()
+                .any(|record| record["span"]["name"] == name
+                    && record["fields"]["message"] == "close"),
+            "missing {name} close"
+        );
+    }
     Ok(())
 }
 

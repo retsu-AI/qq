@@ -16,7 +16,7 @@ to the current owner's ledger; old slice IDs and tracker issues remain valid.
 | [TUI focus](tui-focus.md) | F1–F6 sessions-first and selection slices |
 | [Jev](jev.md) | JV precision/lifecycle/qualification |
 | [multi-surface](multi-surface-clients.md) | Remote readiness and clients |
-| [v0.1.7 release](release-0.1.7.md) | Publication verification receipt still pending; bump/guide pins merged |
+| [v0.1.8 release](release-0.1.8.md) | v0.1.8 preparation: gates and readiness receipts |
 | [auth providers](auth-providers.md) | AP slices: qq-auth/provider credential refactor |
 | [root](root.md) | Coordination, shared files, ADR allocation |
 | [decisions](decisions-needed.md) | Decisions and conservative defaults |
