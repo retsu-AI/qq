@@ -40,6 +40,9 @@ pub(crate) struct BuiltinHttpProvider {
     login: &'static [LoginMethod],
     /// The model `qq init` proposes for this provider.
     init_model: &'static str,
+    /// Position in `qq auth login`, its error message and `qq init`:
+    /// API-key providers first, the subscription last.
+    display_order: u8,
 }
 
 /// One way `qq auth login` obtains a built-in provider's credential.
@@ -81,32 +84,23 @@ pub enum BuiltinAudience {
     XAi,
 }
 
-/// The order `qq auth login`, its error message and `qq init` list the
-/// built-in providers: API-key providers first, the subscription last.
-const LOGIN_ORDER: [ProviderKind; 5] = [
-    ProviderKind::OpenAi,
-    ProviderKind::Anthropic,
-    ProviderKind::Google,
-    ProviderKind::XAi,
-    ProviderKind::OpenAiCodex,
-];
-
-/// Every built-in HTTP provider, in the order the CLI lists them.
+/// Every built-in HTTP provider, in the order the CLI lists them (each
+/// row's `display_order`). Every table row appears: there is no separate
+/// registry to keep in step with the table.
 pub fn builtin_providers() -> impl Iterator<Item = BuiltinProvider> {
-    LOGIN_ORDER
-        .iter()
-        .map(|kind| builtin_http(*kind).expect("every login provider has a table row"))
-        .map(|row| BuiltinProvider {
-            id: row.id,
-            audience: match row.credential {
-                BuiltinCredential::ApiKey { audience, .. } => BuiltinAudience::Table(audience),
-                BuiltinCredential::OpenAiCodex => BuiltinAudience::OpenAiCodex,
-                BuiltinCredential::XAi { .. } => BuiltinAudience::XAi,
-            },
-            environment_variable: row.credential.variables().next(),
-            login: row.login,
-            init_model: row.init_model,
-        })
+    let mut rows: Vec<&'static BuiltinHttpProvider> = BUILTIN_HTTP_PROVIDERS.iter().collect();
+    rows.sort_by_key(|row| row.display_order);
+    rows.into_iter().map(|row| BuiltinProvider {
+        id: row.id,
+        audience: match row.credential {
+            BuiltinCredential::ApiKey { audience, .. } => BuiltinAudience::Table(audience),
+            BuiltinCredential::OpenAiCodex => BuiltinAudience::OpenAiCodex,
+            BuiltinCredential::XAi { .. } => BuiltinAudience::XAi,
+        },
+        environment_variable: row.credential.variables().next(),
+        login: row.login,
+        init_model: row.init_model,
+    })
 }
 
 /// How a built-in HTTP provider is authenticated.
@@ -186,6 +180,7 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         },
         login: &[LoginMethod::ApiKey],
         init_model: "gpt-5.6",
+        display_order: 0,
     },
     BuiltinHttpProvider {
         kind: ProviderKind::OpenAiCodex,
@@ -201,6 +196,7 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
             LoginMethod::OpenAiCodexDevice,
         ],
         init_model: "gpt-5.6-luna",
+        display_order: 4,
     },
     BuiltinHttpProvider {
         kind: ProviderKind::Anthropic,
@@ -218,6 +214,7 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         },
         login: &[LoginMethod::ApiKey],
         init_model: "claude-sonnet-5",
+        display_order: 1,
     },
     BuiltinHttpProvider {
         kind: ProviderKind::Google,
@@ -235,6 +232,7 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         },
         login: &[LoginMethod::ApiKey],
         init_model: "gemini-2.5-flash",
+        display_order: 2,
     },
     BuiltinHttpProvider {
         kind: ProviderKind::XAi,
@@ -249,6 +247,7 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         },
         login: &[LoginMethod::ApiKey, LoginMethod::XAiOAuth],
         init_model: "grok-4.6",
+        display_order: 3,
     },
 ];
 
@@ -361,4 +360,35 @@ fn http(
         auth,
         BTreeMap::new(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every table row reaches the CLI and `qq init`, exactly once, in
+    /// display order: adding a row is enough to list a provider.
+    #[test]
+    fn every_table_row_is_listed_once_in_display_order() {
+        let listed: Vec<&str> = builtin_providers().map(|provider| provider.id).collect();
+        let mut rows: Vec<&BuiltinHttpProvider> = BUILTIN_HTTP_PROVIDERS.iter().collect();
+        rows.sort_by_key(|row| row.display_order);
+        assert_eq!(listed, rows.iter().map(|row| row.id).collect::<Vec<_>>());
+        assert_eq!(listed.len(), BUILTIN_HTTP_PROVIDERS.len());
+        let mut orders: Vec<u8> = BUILTIN_HTTP_PROVIDERS
+            .iter()
+            .map(|row| row.display_order)
+            .collect();
+        orders.sort_unstable();
+        orders.dedup();
+        assert_eq!(
+            orders.len(),
+            BUILTIN_HTTP_PROVIDERS.len(),
+            "display orders are unique"
+        );
+        assert_eq!(
+            listed,
+            ["openai", "anthropic", "google", "xai", "openai-codex"]
+        );
+    }
 }
