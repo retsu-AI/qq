@@ -97,7 +97,12 @@ async fn compact_in_run(
     let goal_notice = request.goal_notice;
     let started = inner
         .store
-        .start_in_run_compaction(prompt_run, resolved_model, turn_cutoff)
+        .start_in_run_compaction_target(
+            prompt_run,
+            resolved_model,
+            turn_cutoff,
+            request.inherited_prefix,
+        )
         .await;
     let (compaction, started_event) = match started {
         Ok(Some(started)) => started,
@@ -155,9 +160,11 @@ async fn compact_in_run(
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.
     let mut messages = request.transcript;
-    messages.push(Message::user(format!(
-        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}"
-    )));
+    messages.push(Message::user(if request.inherited_prefix {
+        COMPACTION_INSTRUCTION.to_owned()
+    } else {
+        format!("{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}")
+    }));
     let paid =
         super::GoalPaidInput::new(&inner.store, &compaction, resolved_model.pricing.as_ref());
     let ceiling = super::context::summarizer_output_tokens(

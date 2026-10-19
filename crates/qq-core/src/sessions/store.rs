@@ -2226,11 +2226,23 @@ impl Store {
 
     /// Starts the internal run of an in-run compaction for a `running`
     /// prompt run. Never takes the session's active-run slot.
+    #[cfg(test)]
     pub(super) async fn start_in_run_compaction(
         &self,
         prompt_run: &ClaimedRun,
         resolved_model: &Arc<ResolvedModel>,
         turn_cutoff: u32,
+    ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
+        self.start_in_run_compaction_target(prompt_run, resolved_model, turn_cutoff, false)
+            .await
+    }
+
+    pub(super) async fn start_in_run_compaction_target(
+        &self,
+        prompt_run: &ClaimedRun,
+        resolved_model: &Arc<ResolvedModel>,
+        turn_cutoff: u32,
+        inherited_prefix: bool,
     ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
         let store_id = self.store_id;
         let prompt_run = prompt_run.clone();
@@ -2242,6 +2254,7 @@ impl Store {
                 &prompt_run,
                 &resolved_model,
                 turn_cutoff,
+                inherited_prefix,
             )
         })
         .await

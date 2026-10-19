@@ -1178,13 +1178,14 @@ impl Runtime {
         let mut total_usage = Some(TokenUsage::default());
         let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
+        let mut fold = runtime::SummaryFold::default();
         // One turn of calls is answered with rejections so the model can
         // still write the summary; a second fails the step.
         let mut rejected_call_turn = false;
         let static_bytes = paid_output_cap.as_ref().map(|_| {
             (system.len() as u64).saturating_add(runtime::tool_schema_measurement(&tools).bytes)
         });
-        loop {
+        'requests: loop {
             let input_tokens = static_bytes.map(|static_bytes|
                 static_bytes.saturating_add(measure_messages(&messages)));
             yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
@@ -1302,12 +1303,21 @@ impl Runtime {
                     // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
                         let rejected_before_work = matches!(&error,
-                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::Configuration(_)
+                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. } | qq_provider::ProviderError::Configuration(_)
                             | qq_provider::ProviderError::CredentialsUnavailable(_))
                             && text.is_empty() && calls.is_empty() && replay.is_none()
                             && !reasoning_seen;
                         let kind = run_failure_kind(error.kind());
                         let message = error.to_string();
+                        if rejected_before_work
+                            && kind == RunFailureKind::ProviderContextExceeded
+                            && ordinal < 64
+                            && fold.split(&mut messages)
+                        {
+                            summary.clear();
+                            continuations = 0;
+                            continue 'requests;
+                        }
                         if rejected_before_work {
                             yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message });
                             return;
@@ -1415,6 +1425,11 @@ impl Runtime {
             }
             summary.push_str(&text);
             let Some(reason) = truncated else {
+                if let Some(next) = fold.advance(summary.clone()) {
+                    messages = next;
+                    summary.clear();
+                    continue;
+                }
                 yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
             if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {

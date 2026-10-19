@@ -3071,7 +3071,9 @@ async fn execute_started_run(
                         for block in message.content() {
                             if let ContentBlock::Text { text } = block {
                                 if !summary_text.is_empty() && !summary_continues_truncated_turn {
-                                    summary_text.push('\n');
+                                    // A later non-continuation reply supersedes a
+                                    // completed partial fold, rather than joining it.
+                                    summary_text.clear();
                                 }
                                 summary_text.push_str(text);
                                 summary_continues_truncated_turn = false;

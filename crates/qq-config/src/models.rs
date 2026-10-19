@@ -422,6 +422,30 @@ const MODELS: &[ModelDefinition] = &[
     model! { catalogs: XAI_API, wire: "grok-4.3", canonical: "xai/grok-4.3", name: "Grok 4.3", reasoning: true, efforts: XAI_EFFORTS, limits: 131_072 / 32_768, pricing: None, api: ProviderApi::OpenAiChatCompletions },
 ];
 
+/// Only the context limit is portable across gateway aliases, not pricing
+/// or wire capabilities. Explicit deployment configuration takes precedence.
+pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
+    let model = model
+        .strip_prefix("us.")
+        .or_else(|| model.strip_prefix("eu."))
+        .or_else(|| model.strip_prefix("apac."))
+        .or_else(|| model.strip_prefix("global."))
+        .unwrap_or(model);
+    let anthropic = model.strip_prefix("anthropic.");
+    MODELS
+        .iter()
+        .filter(|definition| {
+            definition.wire_id == model
+                || definition.canonical_id == model
+                || anthropic.is_some_and(|id| {
+                    definition.catalogs & ANTHROPIC_API != 0 && definition.wire_id == id
+                })
+        })
+        // Access routes may differ; never promise the largest known limit.
+        .map(|definition| definition.context_tokens)
+        .min()
+}
+
 pub(crate) fn builtin_models(catalog: BuiltinCatalog) -> BTreeMap<String, ModelMetadata> {
     MODELS
         .iter()
@@ -465,6 +489,25 @@ pub(crate) fn builtin_models(catalog: BuiltinCatalog) -> BTreeMap<String, ModelM
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_context_limits_recognize_only_known_aliases() {
+        for id in [
+            "claude-opus-5-5",
+            "anthropic/claude-opus-5-5",
+            "anthropic.claude-opus-5-5",
+            "us.anthropic.claude-opus-5-5",
+            "eu.anthropic.claude-opus-5-5",
+            "apac.anthropic.claude-opus-5-5",
+            "global.anthropic.claude-opus-5-5",
+        ] {
+            assert_eq!(gateway_context_window(id), Some(1_000_000), "{id}");
+        }
+        assert_eq!(gateway_context_window("gpt-6.1-sol"), Some(272_000));
+        for id in ["unknown", "my-claude-opus-5-5", "claude-opus-5-5-custom"] {
+            assert_eq!(gateway_context_window(id), None, "{id}");
+        }
+    }
 
     #[test]
     fn gpt6_sol_and_luna_have_current_api_limits_and_no_minimal_effort() {

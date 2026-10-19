@@ -610,6 +610,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             crate::runtime::InRunCompactionRequest {
                 transcript: vec![Message::user("work")],
                 turn_cutoff: 1,
+                inherited_prefix: false,
                 system: Arc::from(""),
                 tools: Arc::from([]),
                 retained_bytes: 0,

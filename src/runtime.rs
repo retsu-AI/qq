@@ -718,7 +718,10 @@ impl RuntimeFactory {
             name: metadata
                 .and_then(|metadata| metadata.name())
                 .map(str::to_owned),
-            context_window: metadata.and_then(|metadata| metadata.context_window()),
+            context_window: snapshot
+                .providers
+                .get(route.provider())
+                .and_then(|provider| provider.model_context_window(route.model())),
             reasoning_efforts: metadata
                 .map(|metadata| metadata.reasoning_efforts().to_vec())
                 .unwrap_or_default(),
@@ -807,7 +810,7 @@ impl RuntimeFactory {
                     provider: provider_id.clone(),
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
-                    context_window: metadata.context_window(),
+                    context_window: provider.model_context_window(model_id),
                     reasoning_efforts: discovered
                         .get(provider_id)
                         .and_then(|models| models.iter().find(|model| &model.id == model_id))
@@ -838,7 +841,7 @@ impl RuntimeFactory {
                         provider: provider_id.clone(),
                         model: model.id.clone(),
                         name: model.name.clone(),
-                        context_window: None,
+                        context_window: provider.model_context_window(&model.id),
                         reasoning_efforts: model.efforts.clone().unwrap_or_default(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
@@ -865,7 +868,7 @@ impl RuntimeFactory {
                 provider: route.provider().to_owned(),
                 model: route.model().to_owned(),
                 name: None,
-                context_window: metadata.and_then(|metadata| metadata.context_window()),
+                context_window: provider.model_context_window(route.model()),
                 reasoning_efforts: metadata
                     .map(|metadata| metadata.reasoning_efforts().to_vec())
                     .unwrap_or_default(),
@@ -1977,7 +1980,7 @@ impl RuntimeFactory {
             organization: snapshot.organization().map(str::to_owned),
             credential_profile,
             max_output_tokens,
-            context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
+            context_window: provider.model_context_window(snapshot.model().model()),
             pricing: metadata
                 .and_then(qq_config::ModelMetadata::pricing)
                 .cloned()
@@ -5801,6 +5804,44 @@ mod tests {
             128
         );
         assert_eq!(resolve("name: \"Unknown\"", 128).max_output_tokens, 128);
+    }
+
+    #[test]
+    fn litellm_bedrock_alias_keeps_automatic_compaction_enabled() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        for (model, configured, expected) in [
+            ("us.anthropic.claude-opus-5-5", "", Some(1_000_000)),
+            (
+                "us.anthropic.claude-opus-5-5",
+                "context_window: 200000,",
+                Some(200_000),
+            ),
+            ("unknown-deployment", "", None),
+        ] {
+            let request = LoadRequest::new(fixture.path("work")).with_explicit_content(format!(
+                r#"(
+                        version: 1,
+                        model: "gateway/{model}",
+                        providers: {{
+                            "gateway": LiteLlm(
+                                connection: (
+                                    base_url: "http://127.0.0.1:1/v1",
+                                    api: OpenAiChatCompletions,
+                                    auth: NoAuth,
+                                ),
+                                models: {{"{model}": (name: "Gateway model", {configured})}},
+                            ),
+                        }},
+                    )"#
+            ));
+            let snapshot = factory.load(&request).unwrap();
+            let resolved = factory.resolved_model_for_snapshot(&snapshot).unwrap();
+            assert_eq!(resolved.context_window, expected, "{model}: {configured}");
+            assert_eq!(resolved.provider_model, model);
+            assert_eq!(resolved.max_output_tokens, 16_384);
+            assert!(resolved.pricing.is_none());
+        }
     }
 
     #[test]

@@ -961,10 +961,17 @@ One durable run follows a guarded loop:
    a step fails, or `MAX_COMPACTION_STEPS` (32) is spent.
    `runs.context_compaction_attempted` counts the steps; a restart resumes
    from the durable marker. A single unit larger than the budget is still
-   sent (the estimate is conservative); if the provider rejects it the
-   prompt fails naming that unit and its size, distinct from a spent step
-   count. Manual `/compact` on an oversized transcript takes one bounded
-   step per command. Within a run, before a later turn is refused for the
+   sent (the estimate is conservative). If a summarizer request is rejected
+   before work for context overflow, it folds the complete transcript as inert
+   text in smaller UTF-8-safe portions. Every remaining portion stays queued;
+   each successful partial summary is folded with the next portion, and no
+   marker commits until all portions have been consumed. At most 32 splits
+   are allowed; an irreducible fixed prefix or exhausted fold fails without
+   replacing history. Manual `/compact` uses the same recovery.
+   Known gateway model aliases inherit the smallest bundled context limit
+   unless the deployment explicitly configures a limit; unknown names remain
+   unknown. No pricing or wire capabilities are inferred from an alias.
+   Within a run, before a later turn is refused for the
    window, the loop first stubs its own read-only results older than the
    recency window in memory (the same rewrite assembly applies between
    runs) and re-plans. Both that decision and the in-run compaction below
@@ -984,6 +991,12 @@ One durable run follows a guarded loop:
    the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
+ when a provider rejects a request before work
+   and there are no own turns to replace, it can instead compact the inherited
+   session prefix. That owned helper commits an unscoped session marker only
+   through the ordinal before the active prompt; the active prompt, its goal
+   notice, current turns and queued future prompts stay verbatim. The live
+   prefix is replaced only after commit, matching session-marker replay.
    with the next turns. Each in-run compaction opens a new *window* for the
    run's harness bounds (ADR-0048 § 1): the marker's transaction re-bases
    the run's 4 MiB context reservation to the retained request plus the
