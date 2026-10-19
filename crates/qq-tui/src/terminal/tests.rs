@@ -239,78 +239,6 @@ fn terminal_input_modes_enable_and_restore_keyboard_mouse_and_paste() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_drag_in_the_transcript_writes_its_text_to_the_clipboard_with_osc52() {
-    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-    let mut harness = Harness::new(64);
-    let task = harness.spawn(App::new(TuiOptions::default()));
-    harness.update(ClientUpdate::Snapshot(snapshot(
-        1,
-        vec![MessageSnapshot {
-            state: MessageState::Complete,
-            ..assistant_message(1, "copy me please")
-        }],
-    )));
-    harness.settle().await;
-    let drawn = frame_text(harness.frames.frames().last().expect("a frame"));
-    assert!(drawn.contains("copy me please"), "{drawn}");
-    // The 100 × 30 frame: find the row of the text in the last full frame.
-    let mut renderer = crate::view::FrameRenderer::default();
-    let mut probe = App::new(TuiOptions::default());
-    probe.apply_client_update(ClientUpdate::Snapshot(snapshot(
-        1,
-        vec![MessageSnapshot {
-            state: MessageState::Complete,
-            ..assistant_message(1, "copy me please")
-        }],
-    )));
-    let rows: Vec<String> = renderer
-        .frame_and_commit(&mut probe, 100, 30)
-        .iter()
-        .map(|line| {
-            let mut row = " ".repeat(line.indent);
-            row.extend(line.spans.iter().map(|span| span.text.as_str()));
-            row
-        })
-        .collect();
-    let row = u16::try_from(rows.iter().position(|row| row.contains("copy me")).unwrap()).unwrap();
-    let column = u16::try_from(rows[usize::from(row)].find("copy").unwrap()).unwrap();
-    let mouse = |kind, column| {
-        Ok(Event::Mouse(MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        }))
-    };
-    harness
-        .events
-        .send(mouse(MouseEventKind::Down(MouseButton::Left), column))
-        .unwrap();
-    harness
-        .events
-        .send(mouse(MouseEventKind::Drag(MouseButton::Left), column + 6))
-        .unwrap();
-    harness
-        .events
-        .send(mouse(MouseEventKind::Up(MouseButton::Left), column + 6))
-        .unwrap();
-    harness.settle().await;
-    let written: Vec<u8> = harness.frames.frames().concat();
-    // "copy me" in base64.
-    let expected = b"\x1b]52;c;Y29weSBtZQ==\x07";
-    assert!(
-        written
-            .windows(expected.len())
-            .any(|window| window == expected),
-        "{}",
-        frame_text(&written)
-    );
-    assert!(frame_text(&written).contains("copied 1 line"));
-    harness.quit();
-    task.await.expect("loop task").expect("loop exits cleanly");
-}
-
-#[tokio::test(start_paused = true)]
 async fn loop_draws_first_frame_then_only_when_state_changes() {
     let mut harness = Harness::new(64);
     let task = harness.spawn(App::new(TuiOptions::default()));
@@ -873,4 +801,76 @@ async fn a_trust_answer_for_changed_files_redraws_the_prompt_with_the_new_conten
         app.pending_trust[0].declarations,
         ["MCP evil → evil".to_owned()]
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drag_in_the_transcript_writes_its_text_to_the_clipboard_with_osc52() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut harness = Harness::new(64);
+    let task = harness.spawn(App::new(TuiOptions::default()));
+    harness.update(ClientUpdate::Snapshot(snapshot(
+        1,
+        vec![MessageSnapshot {
+            state: MessageState::Complete,
+            ..assistant_message(1, "copy me please")
+        }],
+    )));
+    harness.settle().await;
+    let drawn = frame_text(harness.frames.frames().last().expect("a frame"));
+    assert!(drawn.contains("copy me please"), "{drawn}");
+    // The 100 × 30 frame: find the row of the text in the last full frame.
+    let mut renderer = crate::view::FrameRenderer::default();
+    let mut probe = App::new(TuiOptions::default());
+    probe.apply_client_update(ClientUpdate::Snapshot(snapshot(
+        1,
+        vec![MessageSnapshot {
+            state: MessageState::Complete,
+            ..assistant_message(1, "copy me please")
+        }],
+    )));
+    let rows: Vec<String> = renderer
+        .frame_and_commit(&mut probe, 100, 30)
+        .iter()
+        .map(|line| {
+            let mut row = " ".repeat(line.indent);
+            row.extend(line.spans.iter().map(|span| span.text.as_str()));
+            row
+        })
+        .collect();
+    let row = u16::try_from(rows.iter().position(|row| row.contains("copy me")).unwrap()).unwrap();
+    let column = u16::try_from(rows[usize::from(row)].find("copy").unwrap()).unwrap();
+    let mouse = |kind, column| {
+        Ok(Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }))
+    };
+    harness
+        .events
+        .send(mouse(MouseEventKind::Down(MouseButton::Left), column))
+        .unwrap();
+    harness
+        .events
+        .send(mouse(MouseEventKind::Drag(MouseButton::Left), column + 6))
+        .unwrap();
+    harness
+        .events
+        .send(mouse(MouseEventKind::Up(MouseButton::Left), column + 6))
+        .unwrap();
+    harness.settle().await;
+    let written: Vec<u8> = harness.frames.frames().concat();
+    // "copy me" in base64.
+    let expected = b"\x1b]52;c;Y29weSBtZQ==\x07";
+    assert!(
+        written
+            .windows(expected.len())
+            .any(|window| window == expected),
+        "{}",
+        frame_text(&written)
+    );
+    assert!(frame_text(&written).contains("copied 1 line"));
+    harness.quit();
+    task.await.expect("loop task").expect("loop exits cleanly");
 }
