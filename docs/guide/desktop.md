@@ -20,11 +20,15 @@ Retry connection button; Settings exposes connection and tool-host details.
 
 ## Sessions and run controls
 
-Search sessions in the sidebar. Names and archive flags marked **locally** are
-desktop preferences; other QQ clients still see canonical session names/history.
-Archive is reversible under Archived locally. Working sessions and sessions that
-need you continue to surface. Delete permanently removes an idle server session
-after confirmation; cancel an active run first.
+Search sessions in the sidebar (Ctrl F; Esc clears). Each session's ⋯ menu
+renames it, archives it, or deletes it; double-click a name to rename it in
+place. Names and archive flags marked **locally** are desktop preferences; other
+QQ clients still see canonical session names/history. The archive button beside
+search lists archived sessions, where Restore reverses it. Working sessions and
+sessions that need you continue to surface. Delete permanently removes an idle
+server session after confirmation; cancel an active run first. The project name
+at the top of the sidebar switches, opens and closes projects, and shows how many
+sessions in other projects need you.
 
 While an agent works, choose how the next message is delivered:
 
