@@ -7,7 +7,8 @@ import {
   useState,
 } from "react";
 import clsx from "clsx";
-import { ArrowDown, FileDiff, KeyRound, Loader2 } from "lucide-react";
+import { ArrowDown, Code2, FileDiff, KeyRound, Loader2 } from "lucide-react";
+import { openInEditor } from "../lib/editor";
 import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
 import { collectChanges, type FileChange } from "../lib/changes";
@@ -20,6 +21,8 @@ import type {
 } from "../lib/types";
 import { ChangesPanel } from "./ChangesPanel";
 import { Composer } from "./Composer";
+import { GitStrip } from "./GitStrip";
+import { SideQuestions } from "./SideQuestions";
 import { Starters } from "./Starters";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
@@ -104,6 +107,7 @@ function SessionView({
         />
         <TranscriptScroller project={project} transcript={transcript} />
         <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
+          <SideQuestions project={project} transcript={transcript} />
           <NoticeLine project={project} />
           <Composer project={project} transcript={transcript} />
         </div>
@@ -111,6 +115,7 @@ function SessionView({
       {changesPanel && (
         <ChangesPanel
           key={transcript.session_id}
+          projectId={project.project_id}
           changes={changes}
           close={toggleChanges}
         />
@@ -224,6 +229,19 @@ function Header({
       >
         {modelLabel(transcript.model, project.models)}
       </span>
+      <GitStrip
+        projectId={project.project_id}
+        sessionTitle={transcript.title}
+        refreshKey={`${transcript.session_id}:${transcript.status}:${transcript.items.length}`}
+      />
+      <button
+        onClick={() => void openInEditor(project.project_id)}
+        aria-label="Open in editor"
+        title="Open the project in your editor (Ctrl Shift E)"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-fg"
+      >
+        <Code2 className="h-3.5 w-3.5" />
+      </button>
       <button
         onClick={toggleChanges}
         aria-pressed={changesOpen}

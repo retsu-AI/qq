@@ -8,8 +8,9 @@ use std::{collections::HashMap, path::Path};
 
 use qq_client::state::{Group, ModelOption, SessionStore, SessionView};
 use qq_protocol::{
-    ApprovalMode, MessageRole, MessageSnapshot, MessageState, RunActivity, RunId, RunOutcome,
-    SessionId, SessionStatus, TokenUsage, ToolCallSnapshot, ToolCallState,
+    ApprovalMode, GuidanceKind, MessageRole, MessageSnapshot, MessageState, RunActivity, RunId,
+    RunOutcome, SessionId, SessionStatus, SideQuestionState, SkillSummary, TokenUsage,
+    ToolCallSnapshot, ToolCallState,
 };
 use serde::Serialize;
 #[cfg(test)]
@@ -122,7 +123,53 @@ pub struct ProjectStateDto {
         )
     )]
     pub tool_hosts: Vec<qq_protocol::ToolHostSummary>,
+    /// The workspace's commands and skills, invoked as `/name`.
+    pub skills: Vec<SkillDto>,
+    /// The server answers side questions during a run.
+    pub can_side_question: bool,
     pub notice: Option<NoticeDto>,
+}
+
+/// One indexed command or skill document.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
+pub struct SkillDto {
+    pub name: String,
+    #[cfg_attr(test, ts(type = "\"command\" | \"skill\""))]
+    pub kind: &'static str,
+    pub description: String,
+}
+
+impl SkillDto {
+    pub fn from_summary(summary: &SkillSummary) -> Self {
+        Self {
+            name: summary.name.clone(),
+            kind: match summary.kind {
+                GuidanceKind::Command => "command",
+                GuidanceKind::Skill => "skill",
+            },
+            description: summary.description.clone(),
+        }
+    }
+}
+
+/// A question answered beside the run, never part of its context.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
+pub struct SideQuestionDto {
+    #[cfg_attr(test, ts(type = "string"))]
+    pub id: RunId,
+    #[cfg_attr(test, ts(type = "string"))]
+    pub thread_id: RunId,
+    pub question: String,
+    pub answer: String,
+    #[cfg_attr(
+        test,
+        ts(
+            type = "\"running\" | \"completed\" | \"failed\" | \"cancelled\" | \"timed_out\" | \"interrupted\""
+        )
+    )]
+    pub state: SideQuestionState,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -154,6 +201,8 @@ pub struct TranscriptDto {
     pub cost_usd_nanos: Option<u64>,
     pub queued_prompts: u16,
     pub items: Vec<ItemDto>,
+    /// Oldest first; the server keeps a bounded recent window.
+    pub side_questions: Vec<SideQuestionDto>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -330,6 +379,17 @@ pub fn transcript(store: &SessionStore, id: SessionId) -> Option<TranscriptDto> 
         cost_usd_nanos: summary.estimated_cost_usd_nanos,
         queued_prompts: summary.queued_prompts,
         items,
+        side_questions: view
+            .side_questions
+            .iter()
+            .map(|side| SideQuestionDto {
+                id: side.id,
+                thread_id: side.thread_id,
+                question: side.question.clone(),
+                answer: side.answer.clone(),
+                state: side.state,
+            })
+            .collect(),
     })
 }
 
@@ -507,6 +567,10 @@ mod tests {
             ModelDto::decl(),
             SessionRowDto::decl(),
             ProjectStateDto::decl(),
+            SkillDto::decl(),
+            SideQuestionDto::decl(),
+            crate::git::GitStatusDto::decl(),
+            crate::git::PullRequestDto::decl(),
             TranscriptDto::decl(),
             ItemDto::decl(),
             ToolDto::decl(),

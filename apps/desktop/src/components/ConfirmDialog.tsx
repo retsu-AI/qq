@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import clsx from "clsx";
 
 /** A themed replacement for `confirm()`, whose dialog Windows draws unstyled. */
 export function ConfirmDialog({
@@ -7,7 +8,10 @@ export function ConfirmDialog({
   confirmLabel,
   onConfirm,
   close,
+  tone = "danger",
 }: {
+  /** `danger` for destructive actions, `primary` for outward but safe ones. */
+  tone?: "danger" | "primary";
   title: string;
   children: ReactNode;
   confirmLabel: string;
@@ -63,7 +67,10 @@ export function ConfirmDialog({
           <button
             onClick={() => void confirm()}
             disabled={busy}
-            className="h-8 rounded-lg bg-danger-solid px-3 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+            className={clsx(
+              "h-8 rounded-lg px-3 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-60",
+              tone === "danger" ? "bg-danger-solid" : "bg-solid",
+            )}
           >
             {confirmLabel}
           </button>

@@ -95,6 +95,11 @@ lockfile remain independent of desktop dependencies.
   menus and caption buttons; `capabilities/window.json` grants exactly the window
   calls it uses. All pickers use the themed `Dropdown.tsx` instead of `<select>`,
   whose popup Windows draws outside the app theme.
+- `git.rs` runs `git` and `gh` directly (no shell), with prompts disabled,
+  a deadline, no console window and one commit/push/PR at a time;
+  `editor.rs` finds an editor on `PATH` and only opens paths inside the
+  project. Side questions and the `/` menu use the shared protocol
+  (`SubmitSideQuestion`, capability skill entries); nothing is reimplemented.
 - `tauri-plugin-window-state` saves size, position and maximized state (not
   visibility, so a first launch with nothing saved still shows the window).
 - Fenced code is highlighted with the `highlight.js` core and a fixed set of

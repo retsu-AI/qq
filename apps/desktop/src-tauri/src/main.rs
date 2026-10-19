@@ -3,7 +3,9 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+mod editor;
 mod engine;
+mod git;
 mod input;
 mod project;
 mod settings;
@@ -258,6 +260,119 @@ fn cancel_run(
     session_id: String,
 ) -> Result<(), String> {
     state.send(&project_id, UiCommand::Cancel(parse_session(&session_id)?))
+}
+
+/// Side questions are short by nature; the server applies its own limits.
+const MAX_SIDE_QUESTION_BYTES: usize = 16 * 1024;
+
+#[tauri::command]
+fn submit_side_question(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: String,
+    question: String,
+    new_thread: bool,
+) -> Result<(), String> {
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("write a question first".to_owned());
+    }
+    if question.len() > MAX_SIDE_QUESTION_BYTES {
+        return Err("side questions are limited to 16 KiB".to_owned());
+    }
+    state.send(
+        &project_id,
+        UiCommand::SideQuestion {
+            session_id: parse_session(&session_id)?,
+            question: question.to_owned(),
+            new_thread,
+        },
+    )
+}
+
+#[tauri::command]
+fn cancel_side_question(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: String,
+) -> Result<(), String> {
+    state.send(
+        &project_id,
+        UiCommand::CancelSideQuestion(parse_session(&session_id)?),
+    )
+}
+
+/// One commit, push or pull request at a time across the app; a second click
+/// waits rather than racing the first.
+static GIT_ACTIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tauri::command]
+async fn git_status(
+    state: State<'_, AppState>,
+    project_id: String,
+    with_pr: bool,
+) -> Result<git::GitStatusDto, String> {
+    let root = state.project(&project_id)?.path;
+    git::status(&root, with_pr)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Stages everything and commits; pushes too when `push` is set. Returns the
+/// short commit id.
+#[tauri::command]
+async fn git_commit(
+    state: State<'_, AppState>,
+    project_id: String,
+    message: String,
+    push: bool,
+) -> Result<String, String> {
+    let root = state.project(&project_id)?.path;
+    let _guard = GIT_ACTIONS.lock().await;
+    let id = git::commit(&root, &message)
+        .await
+        .map_err(|error| error.to_string())?;
+    if push {
+        git::push(&root)
+            .await
+            .map_err(|error| format!("committed {id}, but the push failed: {error}"))?;
+    }
+    Ok(id)
+}
+
+#[tauri::command]
+async fn git_push(state: State<'_, AppState>, project_id: String) -> Result<(), String> {
+    let root = state.project(&project_id)?.path;
+    let _guard = GIT_ACTIONS.lock().await;
+    git::push(&root).await.map_err(|error| error.to_string())
+}
+
+/// Pushes the branch and opens a pull request with `gh`. Returns its URL.
+#[tauri::command]
+async fn git_create_pr(
+    state: State<'_, AppState>,
+    project_id: String,
+    title: String,
+    body: String,
+    draft: bool,
+) -> Result<String, String> {
+    let root = state.project(&project_id)?.path;
+    let _guard = GIT_ACTIONS.lock().await;
+    git::create_pr(&root, &title, &body, draft)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Opens the project, or `path` inside it, in the first installed editor.
+/// Returns the editor's name for the confirmation.
+#[tauri::command]
+fn open_in_editor(
+    state: State<'_, AppState>,
+    project_id: String,
+    path: Option<String>,
+) -> Result<&'static str, String> {
+    let root = state.project(&project_id)?.path;
+    editor::open(&root, path.as_deref()).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -575,6 +690,13 @@ fn main() {
             session_action,
             set_notifications_enabled,
             complete_mention,
+            submit_side_question,
+            cancel_side_question,
+            open_in_editor,
+            git_status,
+            git_commit,
+            git_push,
+            git_create_pr,
             select_model,
             delete_session,
             auth_providers,

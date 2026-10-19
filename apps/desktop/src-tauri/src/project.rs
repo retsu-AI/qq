@@ -26,8 +26,8 @@ use qq_client::{
 use qq_protocol::{
     ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, CommandRequest,
     Correlation, InputPart, ModelSelection, RunLimits, ServerCapabilities, SessionCommand,
-    SessionEvent, SessionEventEnvelope, SessionId, ToolCallId, ToolCallSnapshot, WorkspaceId,
-    WorkspaceSnapshot,
+    SessionCommandKind, SessionEvent, SessionEventEnvelope, SessionId, ToolCallId,
+    ToolCallSnapshot, WorkspaceId, WorkspaceSnapshot,
 };
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -35,7 +35,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     engine::Engine,
-    view::{self, ConnectionDto, ModelDto, NoticeDto, ProjectStateDto},
+    view::{self, ConnectionDto, ModelDto, NoticeDto, ProjectStateDto, SkillDto},
 };
 
 /// Webview frame budget for coalesced state pushes.
@@ -90,6 +90,15 @@ pub enum UiCommand {
         mode: SubmitMode,
     },
     Cancel(SessionId),
+    /// Ask beside the run without touching its context. `new_thread` starts
+    /// a fresh side thread instead of continuing the last one.
+    SideQuestion {
+        session_id: SessionId,
+        question: String,
+        new_thread: bool,
+    },
+    /// Cancel the session's running side question, not its run.
+    CancelSideQuestion(SessionId),
     Approve {
         session_id: SessionId,
         tool_call_id: ToolCallId,
@@ -679,6 +688,33 @@ impl Project {
                     PendingIntent::Other,
                 );
             }
+            UiCommand::SideQuestion {
+                session_id,
+                question,
+                new_thread,
+            } => self.command(
+                client,
+                SessionCommand::SubmitSideQuestion {
+                    session_id,
+                    question,
+                    new_thread,
+                },
+                PendingIntent::Other,
+            ),
+            UiCommand::CancelSideQuestion(session_id) => {
+                let Some(side_question_id) = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|session| session.summary.running_side_question)
+                else {
+                    return;
+                };
+                self.command(
+                    client,
+                    SessionCommand::CancelSideQuestion { side_question_id },
+                    PendingIntent::Other,
+                );
+            }
             UiCommand::Approve {
                 session_id,
                 tool_call_id,
@@ -1023,6 +1059,23 @@ impl Project {
                 .and_then(|caps| caps.workspace_tools.as_ref())
                 .map(|tools| tools.hosts.clone())
                 .unwrap_or_default(),
+            skills: self
+                .capabilities
+                .as_ref()
+                .and_then(|caps| caps.workspace_tools.as_ref())
+                .map(|tools| {
+                    tools
+                        .skills
+                        .entries
+                        .iter()
+                        .map(SkillDto::from_summary)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            can_side_question: self.capabilities.as_ref().is_some_and(|caps| {
+                caps.commands
+                    .contains(&SessionCommandKind::SubmitSideQuestion)
+            }),
             notice: self.notice.as_ref().map(|notice| NoticeDto {
                 level: match notice.level {
                     NoticeLevel::Info => "info",
