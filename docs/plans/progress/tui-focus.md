@@ -8,8 +8,8 @@ bench reports live under `target/qq-perf/tui-focus-<slice>-<date>/`
 | --- | --- | --- | --- | --- |
 | P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In review | `docs/eng-1068-tui-focus-plan`, [#354](https://github.com/retsu-AI/qq/pull/354) | Stack base |
 | F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | In review | `feat/eng-1069-tui-session-rail` | On P0 (#354) |
-| F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | In review | `feat/eng-1070-tui-session-picker` | On F1–F2 (#356) |
-| F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | Planned | | On F3 |
+| F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | In review | `feat/eng-1070-tui-session-picker`, [#358](https://github.com/retsu-AI/qq/pull/358) | On F1–F2 (#356) |
+| F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | In review | `feat/eng-1071-tui-one-place` | On F3 (#358) |
 | F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | Planned | | On F4–F5 |
 
 ## Entries
@@ -60,3 +60,22 @@ whole terminal row.
   `the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_session`);
   2 updated. Goldens unchanged (no golden scene opens the picker).
 - No hot-path change (picker rows are built on open and on tree change).
+
+### 2026-10-18 — F4–F5 receipt
+
+- `compute_layout` takes `LayoutDemand { sessions, inspector_content }`;
+  `Auto` shows the inspector from Wide only while an expanded call of the
+  focused pane's session or a workspace view needs it. `Shown` still pins it.
+- `composer_rule(app, width, rail_visible)`: the named approval notice shows
+  only when the rail is off-screen; with the rail up the rule leads with
+  `M-A/M-D answer  ^G jump`.
+- `related sessions` is one row `↳ N agents · ◐ n · ◇ n  /agents`; the top
+  row omits a known zero cost.
+- Tests: 2 new (`a_waiting_approval_is_named_once_per_frame_outside_its_transcript`,
+  `the_top_row_omits_a_known_zero_cost`), layout test extended (empty Auto
+  hides, Shown pins), 5 updated. Goldens: 65 moved (no `$0.00`, no empty
+  inspector at 200+, summary row, rule chords).
+- Bench (`target/qq-perf/tui-focus-F4-2026-10-18/after.txt` vs F1 after):
+  steady 22.4 → 22.0 µs; with_sidebar 34.1 → 33.7; streaming_focused 35.5 →
+  35.3; run_on_32kb 438.5 → 420.9; golden_path 39.5 → 38.8; resize 30.6 →
+  30.4; resize_ultra 125.2 (F1 baseline) → 101.2 (no empty inspector).

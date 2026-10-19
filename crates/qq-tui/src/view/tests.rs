@@ -2814,9 +2814,18 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         "one session: nothing to list"
     );
     let rail_width = |width, prefs, sessions| {
-        layout::compute_layout(width, 24, 2, prefs, sessions)
-            .rail
-            .map_or(0, |rail| rail.width)
+        layout::compute_layout(
+            width,
+            24,
+            2,
+            prefs,
+            layout::LayoutDemand {
+                sessions,
+                inspector_content: false,
+            },
+        )
+        .rail
+        .map_or(0, |rail| rail.width)
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), 25);
@@ -2905,17 +2914,21 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         "{rows:?}"
     );
     assert!(
-        !rows.iter().any(|row| row.contains("related sessions")),
+        !rows.iter().any(|row| row.contains("↳ 1 agent")),
         "an inline child is not repeated below"
     );
 
-    // A child with no recorded call attaches nowhere in the transcript
-    // but still appears in related sessions.
+    // A child with no recorded call attaches nowhere in the transcript but
+    // is counted on one summary row below it.
     app.sessions.get_mut(&child_id).unwrap().summary.spawned_by = None;
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows.iter().position(|row| row.contains("Spawn")).unwrap();
     assert!(!rows[spawn_row + 1].contains("↳"));
-    assert!(rows.iter().any(|row| row.contains("related sessions")));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("↳ 1 agent") && row.contains("/agents")),
+        "{rows:#?}"
+    );
 }
 
 #[test]
@@ -5078,6 +5091,57 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
 }
 
 #[test]
+fn a_waiting_approval_is_named_once_per_frame_outside_its_transcript() {
+    // Deploy helper waits; the focused parent shows only its summary row.
+    let (mut app, _) = app_with_every_rail_group();
+    let named = |rows: &[String]| {
+        rows.iter()
+            .map(|row| row.matches("Deploy helper").count())
+            .sum::<usize>()
+    };
+    // Regular with the rail: the rail names it; the rule only offers chords.
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    let rule = &rows[rows.len() - 3];
+    assert!(!rule.contains("needs approval"), "{rule}");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("^G jump"),
+        "{rule}"
+    );
+    // Regular with the rail hidden: the strip counts, the rule names it.
+    app.layout.rail = PanePref::Hidden;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Deploy helper needs approval"))
+    );
+    // Compact: the same.
+    app.layout.rail = PanePref::Auto;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Deploy helper needs approval"))
+    );
+}
+
+#[test]
+fn the_top_row_omits_a_known_zero_cost() {
+    let mut app = app_with_messages(1);
+    let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
+    assert!(!top.contains('$'), "{top}");
+    let session = app.focused().unwrap();
+    app.sessions
+        .get_mut(&session)
+        .unwrap()
+        .summary
+        .estimated_cost_usd_nanos = Some(40_000_000);
+    let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
+    assert!(top.contains("$0.04"), "{top}");
+}
+
+#[test]
 fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
     let (mut app, _) = app_with_every_rail_group();
     app.layout.rail = PanePref::Shown;
@@ -5089,7 +5153,7 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
         "{rows:#?}"
     );
     assert!(
-        !rows.iter().any(|row| row.contains("agents")),
+        !rows.iter().any(|row| row.contains(" sessions  ")),
         "no strip: {rows:#?}"
     );
     // The narrow rail drops `new` from the badge and keeps the count.
@@ -5662,21 +5726,24 @@ fn transcript_and_inspector(frame: &[Line]) -> (String, String) {
 }
 
 #[test]
-fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
-    let (mut app, _) = app_with_expandable_read();
+fn the_inspector_shows_at_wide_only_with_content_and_the_toggle_cycles_it() {
+    let (mut app, call) = app_with_expandable_read();
     let mut renderer = FrameRenderer::default();
     let regular = renderer.frame_and_commit(&mut app, 120, 40);
     assert!(
         !frame_text(&regular).contains("INSPECTOR"),
         "Auto hides the inspector below Wide"
     );
+    // Nothing expanded: an empty Auto inspector gives its width back.
+    let empty = renderer.frame_and_commit(&mut app, 200, 60);
+    assert!(
+        !frame_text(&empty).contains("INSPECTOR"),
+        "empty Auto hides"
+    );
+    app.expanded_tool_calls.insert(call);
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
     let (_, inspector) = transcript_and_inspector(&wide);
     assert!(inspector.contains("INSPECTOR"), "{inspector}");
-    assert!(
-        inspector.contains("Nothing expanded — Ctrl-Up selects a tool row, Enter expands it"),
-        "empty hint names the real chord: {inspector}"
-    );
     for row in &wide[1..wide.len() - 3] {
         assert_eq!(
             row.width(),
@@ -5685,18 +5752,24 @@ fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
             frame_rows(std::slice::from_ref(row))
         );
     }
+    app.expanded_tool_calls.clear();
 
     // Alt-I: Auto → Hidden even at Wide; again → Shown, which wins over
-    // width; again → Hidden.
+    // width and keeps the empty hint; again → Hidden.
     let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
     app.handle_terminal_event(toggle.clone());
     assert_eq!(app.layout.inspector, PanePref::Hidden);
     assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
     app.handle_terminal_event(toggle.clone());
     assert_eq!(app.layout.inspector, PanePref::Shown);
+    let pinned = frame_text(&renderer.frame_and_commit(&mut app, 150, 40));
     assert!(
-        frame_text(&renderer.frame_and_commit(&mut app, 150, 40)).contains("INSPECTOR"),
+        pinned.contains("INSPECTOR"),
         "pinned: shown below Wide when the width can carve one"
+    );
+    assert!(
+        squash(&pinned).contains("Nothing expanded — Ctrl-Up selects a tool r"),
+        "a pinned empty inspector names the real chord: {pinned}"
     );
     app.handle_terminal_event(toggle);
     assert_eq!(app.layout.inspector, PanePref::Hidden);
@@ -5833,8 +5906,10 @@ fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise
     )));
     assert_eq!(app.focused(), Some(session_id));
     let back = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&back);
-    assert!(inspector.contains("Nothing expanded"), "{inspector}");
+    assert!(
+        !frame_text(&back).contains("INSPECTOR"),
+        "back on the transcript with nothing expanded, the inspector closes"
+    );
 }
 
 #[test]
@@ -6320,7 +6395,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
     goal.next_run_at_ms = 240_000;
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, false)]).join("");
     for expected in ["goal", "run 12/200", "17h left", "next 4m"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -6330,7 +6405,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         qq_protocol::RunId::from_bytes([0x71; 16]),
         qq_protocol::RunActivity::PreparingToolCall,
     ));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 80)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 80, false)]).join("");
     assert!(
         text.contains("17h left") && text.contains("next 4m"),
         "{text}"
@@ -6342,7 +6417,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         reason: GoalPauseReason::User,
     };
     goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, false)]).join("");
     assert!(text.contains("paused by you"), "{text}");
     assert!(text.contains("cancellation draining"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
@@ -6353,7 +6428,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .pending_run_id = None;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, false)]).join("");
     assert!(text.contains("/goal resume"), "{text}");
     app.sessions
         .get_mut(&session_id)
@@ -6362,7 +6437,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .status = GoalStatus::Achieved;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 40, false)]).join("");
     assert!(text.contains("goal") && text.contains("achieved"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
     assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
@@ -6377,7 +6452,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
             reason: "bad\u{1b}[2J\ninput".to_owned(),
         },
     };
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, false)]).join("");
     assert!(text.contains("blocked"), "{text}");
     assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text}");
 }

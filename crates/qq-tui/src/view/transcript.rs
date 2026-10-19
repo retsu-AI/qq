@@ -924,11 +924,37 @@ impl TranscriptCache {
                 })
                 .collect();
             if !children.is_empty() {
-                body.push_line(Line::default());
-                body.push_line(Line::styled("  related sessions", muted().bold()));
-                for child in children {
-                    body.push_line(session_line(app, child, width, "  ↳ "));
+                // One summary row: the rail and `/agents` list the agents;
+                // the transcript only says they exist and what they do.
+                let working = children
+                    .iter()
+                    .filter(|child| {
+                        matches!(
+                            app.sessions[*child].summary.status,
+                            SessionStatus::Running | SessionStatus::Queued
+                        )
+                    })
+                    .count();
+                let waiting = children
+                    .iter()
+                    .filter(|child| !app.sessions[*child].live.awaiting_approval.is_empty())
+                    .count();
+                let mut line = Line::styled(
+                    format!("  ↳ {}", count_noun(children.len(), "agent", "agents")),
+                    muted(),
+                );
+                if working > 0 {
+                    line.push(
+                        format!(" · {} {working}", spinner(app.animation_tick)),
+                        info(),
+                    );
                 }
+                if waiting > 0 {
+                    line.push(format!(" · ◇ {waiting}"), warning());
+                }
+                line.push("  /agents", muted().italic());
+                body.push_line(Line::default());
+                body.push_line(truncate_line(line, width));
             }
         }
         body

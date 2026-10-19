@@ -91,7 +91,37 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
 /// with the app so event visibility and the toggle command agree with the
 /// frame.
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
-    compute_layout(width, layout::MIN_HEIGHT, 0, prefs, sessions).rail_visible()
+    compute_layout(
+        width,
+        layout::MIN_HEIGHT,
+        0,
+        prefs,
+        layout::LayoutDemand {
+            sessions,
+            inspector_content: false,
+        },
+    )
+    .rail_visible()
+}
+
+/// Whether the inspector would hold anything for `pane`: a workspace view, or
+/// an expanded tool call of the pane's session. `Auto` hides an empty one.
+fn inspector_has_content(app: &App, pane: &TranscriptPane) -> bool {
+    match pane.view {
+        View::Attention | View::Changes => true,
+        View::Goal(_) | View::SideQuestions(_) => false,
+        View::Transcript(session) => {
+            !app.expanded_tool_calls.is_empty()
+                && session
+                    .and_then(|id| app.sessions.get(&id))
+                    .and_then(|session| session.tool_calls.as_deref())
+                    .is_some_and(|calls| {
+                        calls
+                            .iter()
+                            .any(|call| app.expanded_tool_calls.contains(&call.id))
+                    })
+        }
+    }
 }
 
 /// Frame assembly and the row diff against the previous frame. Retained
@@ -223,7 +253,10 @@ impl FrameRenderer {
             height,
             chrome_rows,
             app.layout,
-            app.sessions.roots().len(),
+            layout::LayoutDemand {
+                sessions: app.sessions.roots().len(),
+                inspector_content: inspector_has_content(app, app.pane()),
+            },
         );
         let body_height = layout.body.height;
         let mode = app.mode();
@@ -359,7 +392,7 @@ impl FrameRenderer {
             lines.push(strip);
         }
         lines.extend(draft_lines);
-        lines.push(composer_rule(app, width));
+        lines.push(composer_rule(app, width, layout.rail_visible()));
         let composer_top = lines.len();
         lines.extend(composer_lines);
         lines.extend(std::iter::repeat_n(Line::default(), padding_rows));

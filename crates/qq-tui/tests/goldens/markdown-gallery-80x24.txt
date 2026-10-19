@@ -1,4 +1,4 @@
- qq  Session 0                                           openai/gpt-test  $0.00
+ qq  Session 0                                                  openai/gpt-test
 
    ┃                                                                       rust
    ┃  fn main() {

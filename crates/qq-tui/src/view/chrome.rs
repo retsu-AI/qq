@@ -112,6 +112,8 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                         .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
                         .unwrap_or(session.estimated_cost_usd_nanos)
                 })
+                // A known zero says nothing; the cost appears once spent.
+                .filter(|nanos| *nanos > 0)
                 .map(|nanos| (format_cost(nanos), muted())),
             StatusItem::Workspace => {
                 (!app.workspace_path.is_empty()).then(|| (app.workspace_path.clone(), muted()))
@@ -145,9 +147,11 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
 /// needs while typing. A transient notice takes the left side while it
 /// lasts; otherwise a running session shows its activity, elapsed time, and
 /// time to first token. Approvals waiting in other sessions are named here
-/// too so they never stall silently. Context-sensitive key hints from the
-/// command table sit right, so the composer needs no hint row of its own.
-pub(super) fn composer_rule(app: &App, width: usize) -> Line {
+/// when the rail is not on screen, so they never stall silently; with the
+/// rail up its `↳ ◇` row names them and the rule carries only the answer
+/// chords. Context-sensitive key hints from the command table sit right, so
+/// the composer needs no hint row of its own.
+pub(super) fn composer_rule(app: &App, width: usize, rail_visible: bool) -> Line {
     let mut left = Line::default();
     if let Some((status, level)) = app.visible_status() {
         let (prefix, style) = match level {
@@ -294,7 +298,7 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         .filter_map(|id| app.sessions.get(&id))
         .map(|session| session.summary.title.as_str())
         .collect();
-    if !waiting.is_empty() {
+    if !waiting.is_empty() && !rail_visible {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
         left.push(
@@ -321,6 +325,27 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     }
 
     let mut right = Line::default();
+    // With the rail naming the waiting approvals, the rule keeps only the
+    // chords that answer or reach them, ahead of the ordinary hints.
+    if !waiting.is_empty() && rail_visible {
+        let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
+        let approve = app.chord_label(crate::commands::Command::ApproveBackground);
+        let deny = app.chord_label(crate::commands::Command::DenyBackground);
+        if let (Some(approve), Some(deny)) = (approve, deny) {
+            right.push(
+                format!("{}/{}", compact_chord(&approve), compact_chord(&deny)),
+                warning(),
+            );
+            right.push(" answer", muted());
+        }
+        if let Some(jump) = jump {
+            if !right.is_empty() {
+                right.push("  ", muted());
+            }
+            right.push(compact_chord(&jump), warning());
+            right.push(" jump", muted());
+        }
+    }
     for (command, label) in hints_for(app) {
         // `?` on an empty composer opens help too, and is the cheaper key
         // to discover; the hint names it while it works and falls back to

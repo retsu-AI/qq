@@ -1,4 +1,4 @@
- qq  Session 0                                           openai/gpt-test  $0.00
+ qq  Session 0                                                  openai/gpt-test
 
  ▌ YOU
  ▌ plan the release
@@ -7,8 +7,8 @@
    Drafted the checklist.
    ✓ 0.0s · ttft 0.0s
 
-  related sessions
-  ↳ ◇ Deploy helper
+  ↳ 1 agent · ◐ 1 · ◇ 1  /agents
+
 
 
 
