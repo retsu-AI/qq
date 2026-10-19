@@ -1591,13 +1591,11 @@ impl App {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 let cleared = self.selection.take().is_some();
-                // The hit map is from the drawn frame; a session deleted since
-                // then is no longer a target.
-                if let Some(target) = self
-                    .geometry
-                    .rail_target(column, row)
-                    .filter(|target| self.sessions.contains_key(target))
-                {
+                // The hit map is from the drawn frame; a session deleted, or
+                // revealed to be under an audit, since then is not a target.
+                if let Some(target) = self.geometry.rail_target(column, row).filter(|target| {
+                    self.sessions.contains_key(target) && !self.under_audit(*target)
+                }) {
                     let mut effects = self.focus_session(target);
                     effects.push(Effect::Redraw(Redraw::Immediate));
                     return effects;

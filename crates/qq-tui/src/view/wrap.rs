@@ -120,7 +120,7 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     // Every row but the last continues the same source line.
     let last = output.len().saturating_sub(1);
     for row in &mut output[..last] {
-        row.wrapped = true;
+        row.wrapped = crate::render::Wrap::Prose;
     }
     output
 }
@@ -135,10 +135,10 @@ pub(crate) fn wrap_line_chars(line: Line, width: usize) -> Vec<Line> {
         for (offset, character) in span.text.char_indices() {
             let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
             if current_width > 0 && current_width + character_width > width {
-                output
-                    .last_mut()
-                    .expect("output starts populated")
-                    .push(&span.text[start..offset], span.style);
+                let row = output.last_mut().expect("output starts populated");
+                row.push(&span.text[start..offset], span.style);
+                // The same literal line continues: a copy joins with nothing.
+                row.wrapped = crate::render::Wrap::Literal;
                 output.push(Line::default());
                 current_width = 0;
                 start = offset;
@@ -274,7 +274,8 @@ mod tests {
     fn indent_lines_keeps_a_rows_own_margin_after_the_prefix() {
         let row = Line {
             indent: 3,
-            wrapped: false,
+            wrapped: crate::render::Wrap::Break,
+            chrome: 0,
             spans: vec![Span {
                 text: "┃ body".to_owned(),
                 style: normal(),

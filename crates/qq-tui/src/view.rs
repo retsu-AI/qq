@@ -45,6 +45,8 @@ pub(crate) use layout::LayoutPrefs;
 #[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
 use layout::{TranscriptSlot, compute_layout};
+#[cfg(test)]
+pub(crate) use markdown::panel_rows as panel_rows_for_test;
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
@@ -54,11 +56,13 @@ use workspace::*;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;
-#[cfg(test)]
-pub(crate) use wrap::wrap_line as wrap_line_for_test;
 use wrap::{
     bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line, wrap_line,
     wrap_line_chars,
+};
+#[cfg(test)]
+pub(crate) use wrap::{
+    wrap_line as wrap_line_for_test, wrap_line_chars as wrap_line_chars_for_test,
 };
 
 /// Bounds on the cells one frame lays out. A 48-inch display at a small font
@@ -480,6 +484,7 @@ impl FrameRenderer {
                 let mut row = Line {
                     indent: first.indent,
                     wrapped: first.wrapped,
+                    chrome: first.chrome,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
                 };
                 row.spans.extend(first.spans);

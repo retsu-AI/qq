@@ -214,15 +214,17 @@ impl Selection {
     /// Bounded by [`MAX_COPY_BYTES`].
     pub(crate) fn text(&self, lines: &[Line]) -> Copied {
         // Each selected row's text and whether it soft-wraps into the next.
-        let mut rows: Vec<(String, bool)> = self
+        let mut rows: Vec<(String, crate::render::Wrap)> = self
             .rows()
             .map(|(row, from, to)| {
                 let mut text = String::new();
-                let mut wrapped = false;
+                let mut wrapped = crate::render::Wrap::Break;
                 if let Some(line) = lines.get(row) {
                     wrapped = line.wrapped;
+                    // Chrome cells start where the row's spans start.
+                    let chrome_end = line.indent + line.chrome;
                     for (start, end, grapheme, _) in cells(line) {
-                        if start < self.text_x {
+                        if start < self.text_x || start < chrome_end {
                             continue;
                         }
                         if start < to && end > from {
@@ -230,19 +232,34 @@ impl Selection {
                         }
                     }
                 }
-                text.truncate(text.trim_end().len());
+                // A literal wrap can break right after a space that belongs
+                // to the code line, and a literal row that wrapped is full,
+                // so it carries no padding: only other rows are trimmed.
+                if wrapped != crate::render::Wrap::Literal {
+                    text.truncate(text.trim_end().len());
+                }
                 (text, wrapped)
             })
             .collect();
         while rows.last().is_some_and(|(row, _)| row.is_empty()) {
             rows.pop();
         }
+        // Blank rows before the first text (a panel's padding row) too.
+        let first_text = rows
+            .iter()
+            .position(|(row, _)| !row.is_empty())
+            .unwrap_or(rows.len());
+        rows.drain(..first_text);
         // A soft wrap joins with a space (the wrap dropped the space it broke
         // on); a real line break stays a newline.
         let mut text = String::new();
         for (index, (row, _)) in rows.iter().enumerate() {
             if index > 0 {
-                text.push(if rows[index - 1].1 { ' ' } else { '\n' });
+                match rows[index - 1].1 {
+                    crate::render::Wrap::Break => text.push('\n'),
+                    crate::render::Wrap::Prose => text.push(' '),
+                    crate::render::Wrap::Literal => {}
+                }
             }
             text.push_str(row);
         }
@@ -567,7 +584,7 @@ mod tests {
         // A paragraph wrapped over two rows copies as one line; a real
         // break between rows stays a newline.
         let mut first = Line::styled("soft", normal());
-        first.wrapped = true;
+        first.wrapped = crate::render::Wrap::Prose;
         let lines = vec![first, Line::styled("wrap", normal())];
         let mut selection = Selection::start(area, 0, 0, 0).unwrap();
         selection.extend(9, 1);
@@ -579,8 +596,46 @@ mod tests {
         assert_eq!(selection.text(&lines).text, "hard\nbreak");
         // The prose wrapper marks every row but the last.
         let rows = crate::view::wrap_line_for_test(Line::styled("one two three", normal()), 5);
-        assert!(rows[..rows.len() - 1].iter().all(|row| row.wrapped));
-        assert!(!rows.last().unwrap().wrapped);
+        assert!(
+            rows[..rows.len() - 1]
+                .iter()
+                .all(|row| row.wrapped == crate::render::Wrap::Prose)
+        );
+        assert_eq!(rows.last().unwrap().wrapped, crate::render::Wrap::Break);
+        // A literal (code) line broken by width joins back with nothing.
+        let code = crate::view::wrap_line_chars_for_test(Line::styled("let x = 1;", normal()), 4);
+        assert!(code.len() > 1);
+        let lines = code;
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: lines.len(),
+        };
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(9, lines.len() - 1);
+        assert_eq!(selection.text(&lines).text, "let x = 1;");
+        // Through a real code panel: the `┏  ` / `↪  ` gutter and the
+        // padding are chrome, and the wrapped line copies back whole.
+        let panel = crate::view::panel_rows_for_test(
+            [Line::styled("let value = compute(1, 2);", normal())],
+            None,
+            16,
+        );
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: panel.len(),
+        };
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(15, panel.len() - 1);
+        assert_eq!(
+            selection.text(&panel).text,
+            "let value = compute(1, 2);",
+            "{:?}",
+            panel
+        );
     }
 
     #[test]

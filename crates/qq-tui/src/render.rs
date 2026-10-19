@@ -105,16 +105,30 @@ pub(crate) struct Line {
     /// shift free for rows shared with the width-keyed caches.
     pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
-    /// The row continues on the next row: a prose wrap, not a line break.
-    /// A copy joins it to the next row with a space instead of a newline.
-    pub(crate) wrapped: bool,
+    /// How the row continues into the next one: a real line break, a prose
+    /// wrap (a copy joins with a space, since the wrap dropped the space it
+    /// broke on), or a literal wrap of code or a table (joins with nothing).
+    pub(crate) wrapped: Wrap,
+    /// Display cells after the indent that are chrome, not text (a code
+    /// panel's `┃  ` gutter): a copy skips them.
+    pub(crate) chrome: usize,
+}
+
+/// See [`Line::wrapped`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Wrap {
+    #[default]
+    Break,
+    Prose,
+    Literal,
 }
 
 impl Line {
     pub(crate) fn styled(text: impl Into<String>, style: Style) -> Self {
         Self {
             indent: 0,
-            wrapped: false,
+            wrapped: Wrap::Break,
+            chrome: 0,
             spans: vec![Span {
                 text: text.into(),
                 style,

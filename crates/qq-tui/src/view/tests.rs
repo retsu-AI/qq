@@ -6158,6 +6158,23 @@ fn workspace_views_copy_from_the_inset_and_stale_rail_targets_are_ignored() {
         agent_row,
     ));
     assert_eq!(app.focused(), before);
+
+    // A drawn row whose session has since been found to sit under an audit
+    // (its missing parent arrived and is one) focuses nothing either.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let agent_row =
+        u16::try_from(rows.iter().position(|row| row.contains("agent 1")).unwrap()).unwrap();
+    let fan_out = app.sessions[&ids[1]].summary.parent_id.unwrap();
+    app.sessions.get_mut(&fan_out).unwrap().summary.purpose = qq_protocol::SessionPurpose::Audit;
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        u16::try_from(rail_x + 4).unwrap(),
+        agent_row,
+    ));
+    assert_eq!(app.focused(), before, "an audit's agent is never focused");
 }
 
 #[test]

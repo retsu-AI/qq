@@ -1191,6 +1191,7 @@ impl PanelStyles {
         let mut row = Line {
             indent,
             wrapped: content.wrapped,
+            chrome: CODE_PANEL_INSET,
             spans: Vec::with_capacity(content.spans.len() + 2),
         };
         // Rail glyph, its trailing space, and the padding cell in one span:
