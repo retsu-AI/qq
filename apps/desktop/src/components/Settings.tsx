@@ -13,6 +13,7 @@ import type { ProjectState } from "../lib/types";
 
 const SHORTCUTS: Array<[string, string]> = [
   ["New session", "Ctrl N"],
+  ["New worktree session", "Ctrl Shift N"],
   ["Open project", "Ctrl O"],
   ["Command palette", "Ctrl K"],
   ["Settings", "Ctrl ,"],

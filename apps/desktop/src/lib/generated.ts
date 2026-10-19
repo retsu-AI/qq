@@ -51,6 +51,16 @@ export type PullRequestDto = { number: number,
  */
 state: string, draft: boolean, title: string, url: string, };
 
+export type WorktreeDto = { 
+/**
+ * Checked-out branch; null when detached.
+ */
+branch: string | null, 
+/**
+ * The main checkout this worktree belongs to.
+ */
+main_path: string, main_name: string, };
+
 export type TranscriptDto = { session_id: string, title: string, loading: boolean, status: SessionStatus, activity: RunActivity | null, active_run_id: string | null, model: string | null, approval_mode: ApprovalMode, profile: string, reasoning_effort: string | null, approval_delegate: string | null, context_tokens: number | null, context_window: number | null, cost_usd_nanos: number | null, queued_prompts: number, items: Array<ItemDto>, 
 /**
  * Oldest first; the server keeps a bounded recent window.

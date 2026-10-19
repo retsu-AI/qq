@@ -72,6 +72,8 @@ struct ProjectInfo {
     id: String,
     path: String,
     name: String,
+    /// Set when the folder is a linked Git worktree.
+    worktree: Option<git::WorktreeDto>,
 }
 
 fn project_info(path: &std::path::Path) -> ProjectInfo {
@@ -79,6 +81,7 @@ fn project_info(path: &std::path::Path) -> ProjectInfo {
         id: project_id(path),
         path: view::display_path(path),
         name: view::display_name(path),
+        worktree: git::worktree_of(path),
     }
 }
 
@@ -165,6 +168,55 @@ fn close_project(state: State<'_, AppState>, project_id: String) -> Result<(), S
         .lock()
         .map_err(|_| "app state poisoned")?
         .remove(&project_id);
+    Ok(())
+}
+
+/// Creates a worktree for `branch` beside the project's repository and
+/// returns its folder, which the UI then opens as a project.
+#[tauri::command]
+async fn create_worktree(
+    state: State<'_, AppState>,
+    project_id: String,
+    branch: String,
+    base: Option<String>,
+) -> Result<String, String> {
+    let root = state.project(&project_id)?.path;
+    let _guard = GIT_ACTIONS.lock().await;
+    git::add_worktree(&root, &branch, base.as_deref())
+        .await
+        .map(|folder| view::display_path(&folder))
+        .map_err(|error| error.to_string())
+}
+
+/// Closes a worktree project and deletes its folder; the branch is kept.
+/// Without `force`, uncommitted changes make git refuse.
+#[tauri::command]
+async fn remove_worktree(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    project_id: String,
+    force: bool,
+) -> Result<(), String> {
+    // Only the path: a live handle would keep the project's actor running.
+    let path = state.project(&project_id)?.path;
+    if git::worktree_of(&path).is_none() {
+        return Err("this project is not a linked worktree".to_owned());
+    }
+    let _guard = GIT_ACTIONS.lock().await;
+    // Stop the project's actor first so nothing holds the folder open.
+    state
+        .projects
+        .lock()
+        .map_err(|_| "app state poisoned")?
+        .remove(&project_id);
+    git::remove_worktree(&path, force)
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut settings = state.settings.lock().map_err(|_| "settings poisoned")?;
+    settings
+        .recent_projects
+        .retain(|path| self::project_id(path) != project_id);
+    settings.save(&app);
     Ok(())
 }
 
@@ -697,6 +749,8 @@ fn main() {
             git_commit,
             git_push,
             git_create_pr,
+            create_worktree,
+            remove_worktree,
             select_model,
             delete_session,
             auth_providers,

@@ -571,6 +571,7 @@ mod tests {
             SideQuestionDto::decl(),
             crate::git::GitStatusDto::decl(),
             crate::git::PullRequestDto::decl(),
+            crate::git::WorktreeDto::decl(),
             TranscriptDto::decl(),
             ItemDto::decl(),
             ToolDto::decl(),

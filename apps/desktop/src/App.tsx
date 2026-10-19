@@ -15,6 +15,12 @@ import {
 } from "./lib/preferences";
 import { Sidebar } from "./components/Sidebar";
 import { ToastView } from "./components/ToastView";
+import { WorktreeDialog } from "./components/WorktreeDialog";
+import {
+  hideWorktreeDialog,
+  showWorktreeDialog,
+  useWorktreeDialog,
+} from "./lib/worktree-dialog";
 import { openInEditor } from "./lib/editor";
 import { SessionPane } from "./components/SessionPane";
 import { Welcome } from "./components/Welcome";
@@ -65,6 +71,8 @@ export function App() {
   const app = useApp();
   const project = activeProject(app);
   const preferences = usePreferences();
+  const worktreeFor = useWorktreeDialog();
+  const worktreeProject = app.open.find((p) => p.id === worktreeFor) ?? null;
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -138,7 +146,7 @@ export function App() {
   // Global shortcuts. Ctrl N new session, Ctrl O open project, Ctrl , settings,
   // Ctrl K commands, Ctrl B sidebar, Ctrl F find session, Ctrl +/-/0 zoom,
   // Alt ←/→ history, Ctrl Shift A next session that needs you, Ctrl Shift D
-  // changes panel, Ctrl Shift E open in editor.
+  // changes panel, Ctrl Shift E open in editor, Ctrl Shift N worktree session.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
@@ -181,6 +189,9 @@ export function App() {
       } else if (key === "n" && !event.shiftKey && project) {
         handled();
         newSession();
+      } else if (key === "n" && event.shiftKey && project) {
+        handled();
+        showWorktreeDialog(project.project_id);
       } else if (key === "e" && event.shiftKey && project) {
         handled();
         void openInEditor(project.project_id);
@@ -210,6 +221,12 @@ export function App() {
           label: "New session",
           shortcut: "Ctrl N",
           onSelect: newSession,
+          disabled: !project,
+        },
+        {
+          label: "New worktree session…",
+          shortcut: "Ctrl Shift N",
+          onSelect: () => project && showWorktreeDialog(project.project_id),
           disabled: !project,
         },
         {
@@ -391,6 +408,9 @@ export function App() {
         />
       )}
       {aboutOpen && <About close={() => setAboutOpen(false)} />}
+      {worktreeProject && (
+        <WorktreeDialog project={worktreeProject} close={hideWorktreeDialog} />
+      )}
       <ToastView />
     </div>
   );
