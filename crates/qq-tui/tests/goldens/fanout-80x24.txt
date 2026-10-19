@@ -1,0 +1,24 @@
+ qq  Session 0                                           openai/gpt-test  $0.00
+  ↳ ○ crate 01
+  ↳ ○ crate 02
+  ↳ ○ crate 03
+  ↳ ○ crate 04
+  ↳ ○ crate 05
+  ↳ ○ crate 06
+  ↳ ○ crate 07
+  ↳ ○ crate 08
+  ↳ ○ crate 09
+  ↳ ○ crate 10
+  ↳ ○ crate 11
+  ↳ ○ crate 12
+  ↳ ○ crate 13
+  ↳ ○ crate 14
+  ↳ ○ crate 15
+  ↳ ○ crate 16
+  ↳ ○ crate 17
+  ↳ ○ crate 18
+  ↳ ○ crate 19
+ 3 sessions  ◇ 1 (Ctrl-G)
+ ◇ publish step 0 +3 need approval  Ctrl-G jump  Alt-A/Alt-D answer ────────────
+ › Ask QQ...
+

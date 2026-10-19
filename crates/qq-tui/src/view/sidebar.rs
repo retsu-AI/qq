@@ -71,9 +71,13 @@ impl RailGroup {
 }
 
 /// Agent rows listed under the focused session before the rest collapse to
-/// a `+N more` row. Agents waiting on the user and the focused agent are
-/// always listed, so the cap only hides quiet agents.
+/// a `+N more` row: the focused agent first, then waiting agents, then quiet
+/// agents in tree order.
 pub(super) const FOCUSED_AGENT_ROWS: usize = 6;
+
+/// Waiting agents listed under an unfocused session before the rest collapse
+/// to a `+N waiting` row, so one wide fan-out cannot crowd out the list.
+pub(super) const WAITING_AGENT_ROWS: usize = 3;
 
 /// One session as the rail and the strip see it, with its agents rolled up.
 /// Produced by [`rollup`], the one pass both surfaces share; everything the
@@ -277,6 +281,7 @@ pub(super) enum RailRow {
     Agent(SessionId),
     AgentDetail(SessionId),
     More(usize),
+    MoreWaiting(usize),
 }
 
 /// Rows planned from one [`rollup`] and the index of the focused row: a row
@@ -317,34 +322,40 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             .as_ref()
             .filter(|(root, _)| *root == entry.id);
         let Some((_, range)) = tree else {
-            for agent in rollup.waiting_under(entry.id) {
+            let mut waiting = rollup.waiting_under(entry.id);
+            for agent in waiting.by_ref().take(WAITING_AGENT_ROWS) {
                 plan.push(RailRow::Agent(agent));
                 plan.push(RailRow::AgentDetail(agent));
             }
+            let rest = waiting.count();
+            if rest > 0 {
+                plan.push(RailRow::MoreWaiting(rest));
+            }
             continue;
         };
-        // The focused session's agents in tree order. Agents that wait on
-        // the user and the focused agent always get a row; quiet agents
-        // fill the rest of the cap.
+        // The focused session's agents, at most `FOCUSED_AGENT_ROWS`: the
+        // focused agent first, then waiting agents, then quiet agents, each
+        // kept in tree order on screen.
         let agents: Vec<SessionId> = order[range.clone()]
             .iter()
             .copied()
             .filter(|id| !app.sessions.get(id).is_some_and(is_audit))
             .collect();
-        let required = |id: SessionId| {
-            focused == Some(id) || !app.sessions[&id].live.awaiting_approval.is_empty()
-        };
-        let mut spare =
-            FOCUSED_AGENT_ROWS.saturating_sub(agents.iter().filter(|id| required(**id)).count());
-        let mut shown = 0;
-        for &id in &agents {
-            if !required(id) {
-                if spare == 0 {
-                    continue;
-                }
-                spare -= 1;
+        let rank = |id: SessionId| {
+            if focused == Some(id) {
+                0
+            } else if !app.sessions[&id].live.awaiting_approval.is_empty() {
+                1
+            } else {
+                2
             }
-            shown += 1;
+        };
+        let mut chosen: Vec<usize> = (0..agents.len()).collect();
+        chosen.sort_by_key(|&index| rank(agents[index]));
+        chosen.truncate(FOCUSED_AGENT_ROWS);
+        chosen.sort_unstable();
+        for &index in &chosen {
+            let id = agents[index];
             if focused == Some(id) {
                 focused_row = plan.len();
             }
@@ -353,8 +364,8 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
                 plan.push(RailRow::AgentDetail(id));
             }
         }
-        if shown < agents.len() {
-            plan.push(RailRow::More(agents.len() - shown));
+        if chosen.len() < agents.len() {
+            plan.push(RailRow::More(agents.len() - chosen.len()));
         }
     }
     (plan, focused_row)
@@ -493,6 +504,13 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
             RailRow::More(count) => {
                 let mut line = Line::styled(format!("│   +{count} more"), muted());
                 line.push("  /agents", muted().italic());
+                truncate_line(line, width)
+            }
+            RailRow::MoreWaiting(count) => {
+                let mut line = Line::styled(format!("│   +{count} waiting"), warning());
+                if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+                    line.push(format!("  {chord}"), muted());
+                }
                 truncate_line(line, width)
             }
         });

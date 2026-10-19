@@ -4843,6 +4843,67 @@ fn the_focused_session_lists_its_agents_up_to_the_cap() {
 }
 
 #[test]
+fn an_unfocused_session_lists_at_most_three_waiting_agents() {
+    // Five agents under the root wait on approvals; the other root is focused.
+    let (mut app, root, ids) = app_with_fanout(5);
+    for (index, id) in ids.iter().enumerate() {
+        let call = ToolCallId::from_bytes([0x90 + index as u8; 16]);
+        app.sessions
+            .get_mut(id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(call);
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let rollup = rollup(&app);
+    assert_eq!(rollup.waiting.len(), 5);
+    assert_eq!(
+        rollup.sessions[0].id, root,
+        "waiting agents lift their session"
+    );
+    assert_eq!(rollup.sessions[0].group, RailGroup::NeedsYou);
+    let rail = rail_rows(&mut app, 120, 40);
+    let listed = rail.iter().filter(|row| row.contains("↳ ◇ agent")).count();
+    assert_eq!(listed, WAITING_AGENT_ROWS, "{rail:#?}");
+    assert!(
+        rail.iter()
+            .any(|row| row.contains("+2 waiting") && row.contains("Ctrl-G")),
+        "{rail:#?}"
+    );
+    // Focusing the fan-out lists the waiting agents first within its cap.
+    app.focus_session(root);
+    let rail = rail_rows(&mut app, 120, 40);
+    let listed = rail.iter().filter(|row| row.contains("↳ ◇ agent")).count();
+    assert_eq!(listed, 5, "{rail:#?}");
+}
+
+#[test]
+fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
+    let (mut app, root, _) = app_with_fanout(2);
+    let summary = &mut app.sessions.get_mut(&root).unwrap().summary;
+    summary.estimated_cost_usd_nanos = Some(10_000_000);
+    summary.accounting = Some(SessionAccounting {
+        direct: AccountingTotal {
+            estimated_cost_usd_nanos: Some(10_000_000),
+            ..AccountingTotal::default()
+        },
+        inclusive: AccountingTotal {
+            estimated_cost_usd_nanos: Some(250_000_000),
+            ..AccountingTotal::default()
+        },
+    });
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, Some(250_000_000));
+    let rail = rail_rows(&mut app, 200, 60).join("\n");
+    assert!(rail.contains("$0.25"), "{rail}");
+}
+
+#[test]
 fn audit_agents_are_never_listed_or_counted() {
     let (mut app, root, _) = app_with_fanout_where(2, |index, summary| {
         if index == 1 {
