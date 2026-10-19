@@ -263,7 +263,7 @@ function MenuBar({ menus }: { menus: Menu[] }) {
                 event.preventDefault();
                 event.stopPropagation();
               }}
-              className="absolute left-0 top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-[0_12px_32px_rgba(0,0,0,0.35)] outline-none"
+              className="animate-pop-down absolute left-0 top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none"
             >
               {menu.items.map((item, itemIndex) =>
                 item === "separator" ? (

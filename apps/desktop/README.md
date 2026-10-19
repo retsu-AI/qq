@@ -95,6 +95,8 @@ lockfile remain independent of desktop dependencies.
   menus and caption buttons; `capabilities/window.json` grants exactly the window
   calls it uses. All pickers use the themed `Dropdown.tsx` instead of `<select>`,
   whose popup Windows draws outside the app theme.
+- `tauri-plugin-window-state` saves size, position and maximized state (not
+  visibility, so a first launch with nothing saved still shows the window).
 - Fenced code is highlighted with the `highlight.js` core and a fixed set of
   bundled languages (`src/lib/highlight.ts`); colors are theme tokens. The
   Changes panel (`ChangesPanel.tsx`) is derived in the UI from the diffs already

@@ -30,7 +30,7 @@ export function ChangesPanel({
     <aside
       aria-label="Changes"
       // Beside the conversation on wide windows, over it on narrow ones.
-      className="flex w-[min(460px,42vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(460px,85%)] max-[1100px]:shadow-2xl"
+      className="animate-slide-in flex w-[min(460px,42vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(460px,85%)] max-[1100px]:shadow-2xl"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
         <h2 className="text-[13.5px] font-medium">Changes</h2>

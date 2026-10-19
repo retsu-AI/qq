@@ -230,7 +230,7 @@ export function Dropdown<T extends string>({
           }}
           style={position}
           className={clsx(
-            "fixed z-50 overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-[0_12px_32px_rgba(0,0,0,0.35)] outline-none",
+            "animate-pop fixed z-50 overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none",
             menu ? "min-w-[180px]" : "min-w-[220px]",
           )}
         >

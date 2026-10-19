@@ -87,7 +87,8 @@ diff. Files changed by shell commands are not tracked there.
 The title bar holds back/forward through recently viewed sessions (Alt ←/→),
 the sidebar toggle (Ctrl B) and the File, Edit, View and Help menus (Alt F/E/V/H).
 View switches theme and zooms text (Ctrl +, Ctrl -, Ctrl 0). Drag the empty part
-of the bar to move the window; double-click it to maximize.
+of the bar to move the window; double-click it to maximize. The window reopens
+at the size and position it closed with, maximized if it was.
 
 Ctrl , opens theme, transcript/composer text size, optional notifications,
 keyboard shortcuts, connection diagnostics and reported external-tool status.

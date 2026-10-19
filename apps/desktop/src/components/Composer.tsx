@@ -608,7 +608,7 @@ function MentionMenu({
       id="mention-menu"
       role="listbox"
       aria-label="Mention suggestions"
-      className="absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-[0_12px_32px_rgba(0,0,0,0.35)]"
+      className="animate-pop-up absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-popover"
     >
       <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-faint">
         <span>Mention</span>
