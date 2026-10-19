@@ -20,6 +20,7 @@ import type {
 } from "../lib/types";
 import { ChangesPanel } from "./ChangesPanel";
 import { Composer } from "./Composer";
+import { Starters } from "./Starters";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
 
@@ -153,6 +154,9 @@ function Landing({ project }: { project: ProjectState }) {
             <>
               <NoticeLine project={project} />
               <Composer project={project} transcript={null} autoFocus />
+              <div className="mt-4">
+                <Starters draftKey={`new:${project.project_id}`} />
+              </div>
             </>
           )}
         </div>
