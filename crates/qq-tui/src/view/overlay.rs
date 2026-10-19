@@ -164,7 +164,10 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
                 && row.is_agent()
                 && let Some(root) = &row.root_title
             {
-                prefix.push_str(root);
+                // The session's name is context; the matched agent's title
+                // must stay readable, so the prefix gets at most a third.
+                let budget = (width / 3).max(8);
+                prefix.push_str(&preview(root, budget));
                 prefix.push_str(" › ");
             }
             let mut right = Line::default();

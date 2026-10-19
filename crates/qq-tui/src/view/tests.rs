@@ -2565,6 +2565,25 @@ fn the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_
 }
 
 #[test]
+fn a_found_agent_keeps_its_title_beside_a_long_session_name() {
+    let (mut app, root, _) = app_with_fanout(2);
+    app.sessions.get_mut(&root).unwrap().summary.title = "a very long session name ".repeat(6);
+    app.layout.rail = PanePref::Hidden;
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 60, 20));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("› "))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        row.contains("agent 1"),
+        "the matched title stays visible: {row:?}"
+    );
+    assert!(row.chars().count() <= 60, "{row:?}");
+}
+
+#[test]
 fn session_picker_renders_an_empty_search_result() {
     let mut app = app_with_messages(0);
     app.open_session_picker_with("missing", None, None);

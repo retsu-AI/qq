@@ -2844,6 +2844,32 @@ fn the_session_picker_left_and_ctrl_a_work_while_searching() {
 }
 
 #[test]
+fn the_session_picker_lists_orphan_agents_as_sessions_and_tracks_reparented_agents() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    // The root goes away: `child` is now an orphan session with
+    // `grandchild` under it.
+    app.sessions.remove(&root);
+    app.focus_session(other);
+    app.execute(Command::OpenSessions);
+    let listed = app.filtered_sessions();
+    assert!(
+        listed.contains(&child),
+        "the orphan is a session: {listed:?}"
+    );
+    assert!(!listed.contains(&grandchild), "its agent is collapsed");
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.filtered_sessions(), [grandchild], "search reaches it");
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(child),
+        "the cursor falls back to the agent's session as rebuilt"
+    );
+}
+
+#[test]
 fn the_session_picker_opens_a_focused_agents_session_expanded() {
     let (mut app, root, child, _, _) = app_with_agent_tree();
     app.focus_session(child);
