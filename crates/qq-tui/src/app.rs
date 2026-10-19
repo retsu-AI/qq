@@ -1191,15 +1191,27 @@ impl App {
                 } => self.apply_notice(session, level, text),
                 StateEffect::Attention(attention) => effects.push(Effect::Attention(attention)),
                 StateEffect::RequestSnapshot(request) => {
-                    effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                    // A body fetch for a session that will not be shown (an
+                    // audit the refocus below rejects) is not sent; the
+                    // replacement's own fetch follows.
+                    if request
+                        .focused_session_id
+                        .is_none_or(|id| !self.under_audit(id))
+                    {
+                        effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                    }
                 }
                 StateEffect::Refocus(target) => {
                     // The store picks a neighbour in tree order, which can be
-                    // an audit about to become a root; never show one.
-                    let target = target
-                        .filter(|id| !self.under_audit(*id))
-                        .or_else(|| self.first_listed_root());
-                    self.set_view(View::Transcript(target));
+                    // an audit about to become a root; never show one, and
+                    // fetch the replacement when its body is cold.
+                    match target.filter(|id| !self.under_audit(*id)) {
+                        Some(target) => self.set_view(View::Transcript(Some(target))),
+                        None => match self.first_listed_root() {
+                            Some(fallback) => effects.extend(self.focus_session(fallback)),
+                            None => self.set_view(View::Transcript(None)),
+                        },
+                    }
                 }
                 StateEffect::AdoptCreated(session_id) => self.adopt_created_session(session_id),
                 StateEffect::SubmitDraft { session_id, text } => {
@@ -1290,6 +1302,7 @@ impl App {
         if !already_loaded {
             effects.extend(self.reduce_event(&event));
         }
+        effects.extend(self.leave_hidden_focus());
         if let Some(command_id) = event.caused_by {
             if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
                 self.finish_goal_form(command_id, true);
@@ -3166,10 +3179,10 @@ impl App {
                 }
             }
         }
-        let active = self
-            .sessions
-            .values()
-            .any(|session| matches!(session.summary.status, qq_protocol::SessionStatus::Running));
+        let active = self.sessions.values().any(|session| {
+            matches!(session.summary.status, qq_protocol::SessionStatus::Running)
+                || session.summary.running_side_question.is_some()
+        });
         self.expire_status()
             || active
             || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
@@ -3346,46 +3359,65 @@ impl App {
         })
     }
 
+    /// When an update reveals that the focused transcript sits under an audit
+    /// (a missing parent arrived and is an audit), focus moves to the newest
+    /// non-audit root and its body is fetched.
+    fn leave_hidden_focus(&mut self) -> Effects {
+        let Some(focused) = self.view().transcript() else {
+            return Effects::none();
+        };
+        if !self.under_audit(focused) {
+            return Effects::none();
+        }
+        match self.first_listed_root() {
+            Some(fallback) => self.focus_session(fallback),
+            None => {
+                self.set_view(View::Transcript(None));
+                Effects::redraw(Redraw::Scheduled)
+            }
+        }
+    }
+
     /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,
     /// `/attention`, the rule): sessions that need the user, most urgent
     /// first and then in tree order. Approvals count only while the human is
     /// asked; audit sessions and their subtrees are excluded.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
-        let mut needing = self.sessions.needing_attention();
-        // Orphan trees are outside `thread_order`; merge them in by urgency
-        // after the store's entries of the same rank.
-        let orphans: Vec<(qq_client::state::Need, SessionId)> = self
-            .orphan_trees()
-            .filter_map(|id| self.sessions[&id].need().map(|need| (need, id)))
+        // Every loaded session, `thread_order` first and then orphan trees,
+        // ranked by the human-aware need: an approval only while the human
+        // is asked, else an unseen failure or finish (which a later run
+        // waiting on a delegate does not hide).
+        let mut ranked: Vec<(qq_client::state::Need, usize, SessionId)> = self
+            .sessions
+            .thread_order()
+            .iter()
+            .copied()
+            .chain(self.orphan_trees())
+            .enumerate()
+            .filter(|(_, id)| !self.under_audit(*id))
+            .filter_map(|(position, id)| self.attention_need(id).map(|need| (need, position, id)))
             .collect();
-        if !orphans.is_empty() {
-            let mut ranked: Vec<(qq_client::state::Need, usize, SessionId)> = needing
-                .iter()
-                .enumerate()
-                .filter_map(|(position, id)| {
-                    self.sessions[id].need().map(|need| (need, position, *id))
-                })
-                .collect();
-            let base = ranked.len();
-            ranked.extend(
-                orphans
-                    .into_iter()
-                    .enumerate()
-                    .map(|(position, (need, id))| (need, base + position, id)),
-            );
-            ranked.sort();
-            needing = ranked.into_iter().map(|(_, _, id)| id).collect();
+        ranked.sort();
+        ranked.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// Why the human is needed by `id`, if they are: like
+    /// [`SessionView::need`], but an approval counts only while the human is
+    /// asked, and an unseen outcome is still reported when every waiting
+    /// hold belongs to a delegate.
+    fn attention_need(&self, id: SessionId) -> Option<qq_client::state::Need> {
+        use qq_client::state::Need;
+        let session = self.sessions.get(&id)?;
+        if self.human_waiting(id) {
+            return Some(Need::Approval);
         }
-        needing
-            .into_iter()
-            .filter(|id| !self.under_audit(*id))
-            .filter(|id| {
-                self.human_waiting(*id)
-                    || self.sessions.get(id).is_some_and(|session| {
-                        !matches!(session.need(), Some(qq_client::state::Need::Approval))
-                    })
-            })
-            .collect()
+        if !session.finished_unread {
+            return None;
+        }
+        Some(match session.summary.last_outcome {
+            Some(qq_protocol::RunOutcome::Failed { .. }) => Need::Failed,
+            _ => Need::FinishedUnread,
+        })
     }
 
     /// The next session (after the focused one, wrapping) that needs the
