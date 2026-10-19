@@ -15,6 +15,7 @@ mod input;
 mod lazy_port;
 mod picker;
 mod render;
+mod selection;
 mod settings;
 mod terminal;
 mod theme;

@@ -382,27 +382,31 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
         .min(rows.saturating_sub(height))
 }
 
+/// One painted rail: its rows, the waiting sessions and agents whose rows
+/// were painted (the composer rule names only the rest), and the session a
+/// click on each row focuses.
+pub(super) struct RailFrame {
+    pub rows: Vec<Line>,
+    pub named: Vec<SessionId>,
+    pub targets: Vec<Option<SessionId>>,
+}
+
 /// Right-hand session list grouped by what the user should do about each
 /// session: NEEDS YOU, WORKING, RECENT. Each session takes one row of state
 /// glyph, name, agent count, and unread badge; at
 /// [`RailDensity::Detailed`] a second muted row carries the live tail and
 /// the session's cost. Agents appear only under the focused session and
 /// when they need the user. The focused row sits on the selection
-/// background. Always `height` rows so it zips against the body. Also
-/// returns the sessions and agents with a waiting approval whose row was
-/// painted, so the composer rule names only the rest.
-pub(super) fn sidebar(
-    app: &App,
-    width: usize,
-    height: usize,
-    density: RailDensity,
-) -> (Vec<Line>, Vec<SessionId>) {
+/// background. Always `height` rows so it zips against the body.
+pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> RailFrame {
     let inner = width.saturating_sub(2);
     let (plan, focused_row) = plan_rail(app, density);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
+    let mut targets: Vec<Option<SessionId>> = Vec::with_capacity(height);
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
+        targets.push(None);
     }
     let start = rail_window_start(plan.len(), focused_row, height);
     let select = |line: &mut Line| {
@@ -420,6 +424,11 @@ pub(super) fn sidebar(
         {
             named.push(id);
         }
+        targets.push(match row {
+            RailRow::Session(entry) | RailRow::Detail(entry) => Some(entry.id),
+            RailRow::Agent(id) | RailRow::AgentDetail(id) => Some(id),
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(_) => None,
+        });
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),
             RailRow::Header(group, count) => {
@@ -537,7 +546,12 @@ pub(super) fn sidebar(
         rows.push(Line::styled("│", border()));
     }
     rows.truncate(height);
-    (rows, named)
+    targets.resize(height, None);
+    RailFrame {
+        rows,
+        named,
+        targets,
+    }
 }
 
 /// One row above the composer when the rail is hidden and more than one

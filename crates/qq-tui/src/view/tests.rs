@@ -5236,6 +5236,151 @@ fn approvals_collapsed_off_the_rail_are_named_on_the_rule_instead() {
     assert!(rule.contains("agent 3 +1 need approval"), "{rule}");
 }
 
+fn mouse_at(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> TerminalEvent {
+    TerminalEvent::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clicking_a_rail_row_focuses_that_session_or_agent() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, root, ids) = app_with_fanout(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let row_of = |rows: &[String], label: &str| {
+        u16::try_from(rows.iter().position(|row| row.contains(label)).unwrap()).unwrap()
+    };
+    let column = u16::try_from(rail_x + 4).unwrap();
+    // The agent row under the focused session.
+    let agent = row_of(&rows, "agent 1");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        agent,
+    ));
+    assert_eq!(app.focused(), Some(ids[1]));
+    // Another session's row.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let other = row_of(&rows, "Other");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        other,
+    ));
+    assert_eq!(app.focused(), Some(SessionId::from_bytes([0x11; 16])));
+    // A group header focuses nothing.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let header = row_of(&rows, "RECENT");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        header,
+    ));
+    assert_eq!(app.focused(), Some(SessionId::from_bytes([0x11; 16])));
+    let _ = root;
+}
+
+#[test]
+fn a_drag_in_the_transcript_selects_only_its_text_and_copies_it_on_release() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let other = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(SessionId::from_bytes([0x11; 16]))
+    };
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        other.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(other),
+        },
+    )));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 30));
+    let first = rows.iter().position(|row| row.contains("row 0")).unwrap();
+    let last = rows.iter().position(|row| row.contains("row 2")).unwrap();
+    // Press at the left edge of `row 0`, drag past the rail to the right
+    // edge of the terminal on `row 2`'s line.
+    let down = mouse_at(MouseEventKind::Down(MouseButton::Left), 0, first as u16);
+    assert!(app.handle_terminal_event(down).split().0 || app.selection.is_some());
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        119,
+        last as u16,
+    ));
+    let effects = app.handle_terminal_event(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        119,
+        last as u16,
+    ));
+    let selection = effects
+        .iter()
+        .find_map(|effect| match effect {
+            crate::effect::Effect::CopySelection(selection) => Some(*selection),
+            _ => None,
+        })
+        .expect("release copies");
+    // Painted on the selection background, the rail untouched.
+    let frame = renderer.frame_and_commit(&mut app, 120, 30);
+    let background = crate::render::selection(crate::render::normal()).background;
+    assert!(
+        frame[first]
+            .spans
+            .iter()
+            .any(|span| span.style.background == background && span.text.contains("row 0")),
+        "{:?}",
+        frame[first]
+    );
+    // The copy reads the frame without the selection paint.
+    app.selection = None;
+    let plain = renderer.frame_and_commit(&mut app, 120, 30);
+    let copied = selection.text(&plain);
+    assert_eq!(copied.text, "row 0\n\nQQ\nrow 1\n\nQQ\nrow 2", "{copied:?}");
+    assert!(!copied.text.contains('│') && !copied.text.contains("Other"));
+    app.note_copied(&copied);
+    let rule = frame_rows(&renderer.frame_and_commit(&mut app, 120, 30)).join("\n");
+    assert!(rule.contains("copied"), "{rule}");
+    // Esc clears a selection without doing anything else.
+    app.selection = Some(selection);
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.selection.is_none());
+    // So does a wheel scroll.
+    app.selection = Some(selection);
+    app.handle_terminal_event(mouse_at(MouseEventKind::ScrollUp, 5, 5));
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn a_click_without_a_drag_selects_and_copies_nothing() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(1);
+    FrameRenderer::default().frame_and_commit(&mut app, 100, 24);
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 3));
+    let effects = app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 5, 3));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, crate::effect::Effect::CopySelection(_)))
+    );
+    assert!(app.selection.is_none());
+    // A press on the composer or the top row starts nothing.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 0));
+    assert!(app.selection.is_none());
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 22));
+    assert!(app.selection.is_none());
+}
+
 #[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);

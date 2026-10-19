@@ -9,8 +9,8 @@ bench reports live under `target/qq-perf/tui-focus-<slice>-<date>/`
 | P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In review | `docs/eng-1068-tui-focus-plan`, [#354](https://github.com/retsu-AI/qq/pull/354) | Stack base |
 | F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | In review | `feat/eng-1069-tui-session-rail` | On P0 (#354) |
 | F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | In review | `feat/eng-1070-tui-session-picker`, [#358](https://github.com/retsu-AI/qq/pull/358) | On F1–F2 (#356) |
-| F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | In review | `feat/eng-1071-tui-one-place` | On F3 (#358) |
-| F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | Planned | | On F4–F5 |
+| F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | In review | `feat/eng-1071-tui-one-place`, [#360](https://github.com/retsu-AI/qq/pull/360) | On F3 (#358) |
+| F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | In review | `feat/eng-1072-tui-select-copy` | On F4–F5 (#360) |
 
 ## Entries
 
@@ -102,3 +102,27 @@ whole terminal row.
   (collapsed under `+N need you` or scrolled out of the rail window), so each
   is named exactly once (`approvals_collapsed_off_the_rail_are_named_on_the_rule_instead`).
 - Layout session count uses `listed_sessions` (audit roots excluded).
+
+### 2026-10-18 — F6 receipt
+
+- `src/selection.rs`: `FrameGeometry` (transcript area, rail area, per-row
+  click target, committed by the renderer), `Selection` (screen-anchored,
+  clamped to the transcript pane), `paint` (after composition), `text`
+  (trailing spaces and shared inset removed, `MAX_COPY_BYTES` 1 MiB),
+  `osc52`. `sidebar` returns `RailFrame { rows, named, targets }`.
+- App: left press on a rail row focuses it; press in the transcript starts a
+  selection; drag extends; release emits `Effect::CopySelection`, which the
+  loop resolves against the last frame, writes OSC 52 and reports `copied N
+  lines`. Keys, wheel, resize and a new press clear; a click copies nothing.
+- `base64.workspace = true` in `crates/qq-tui/Cargo.toml` (already in
+  Cargo.lock; plan owned path).
+- Tests: 6 unit (`selection::tests`), 3 view
+  (`clicking_a_rail_row_focuses_that_session_or_agent`,
+  `a_drag_in_the_transcript_selects_only_its_text_and_copies_it_on_release`,
+  `a_click_without_a_drag_selects_and_copies_nothing`), 1 loop
+  (`a_drag_in_the_transcript_writes_its_text_to_the_clipboard_with_osc52`).
+  Goldens unchanged.
+- Bench A/B same host back to back (`target/qq-perf/tui-focus-F6-2026-10-18/{before,after}-ab.txt`,
+  load ≈16–20): steady 22.5 → 21.9 µs; with_sidebar 34.3 → 33.8;
+  streaming_focused 35.7 → 35.2; children_20 54.3 → 52.8; golden_path 40.6 →
+  39.8; sessions_200 30.6 → 30.4.

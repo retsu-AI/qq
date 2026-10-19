@@ -333,6 +333,16 @@ where
                     output.write_all(&bytes).await?;
                     output.flush().await?;
                 }
+                Effect::CopySelection(selection) => {
+                    let copied = selection.text(renderer.last_frame());
+                    if !copied.text.is_empty() {
+                        output
+                            .write_all(&crate::selection::osc52(&copied.text))
+                            .await?;
+                        output.flush().await?;
+                    }
+                    queue.extend(app.note_copied(&copied));
+                }
                 Effect::ResolveTrust(choice) => {
                     // The root writes the trust state (or admits the files
                     // for this process) off the executor and computes what

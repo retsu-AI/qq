@@ -230,6 +230,22 @@ agent listed. The cursor keeps its id across refreshes while that row is
 listed; when an agent row stops being listed the cursor moves to its session.
 Audit agents have no row.
 
+## Mouse
+
+Mouse capture is on so the wheel scrolls the transcript; the TUI owns
+clicks and selection (`src/selection.rs`). The renderer records the frame's
+`FrameGeometry` on commit: the transcript pane's cells and, per rail body
+row, the session that row focuses (`sidebar` returns it with the rows). A
+left press on a rail row focuses its target. A press in the transcript pane
+starts a `Selection` (screen-anchored cells, clamped to the pane on drag);
+the last frame repaints the selected cells on the `selection` background
+after composition, so no cache sees it. Release emits
+`Effect::CopySelection`; the loop reads the text from the last drawn frame
+(trailing spaces and the rows' shared inset removed, bounded by
+`MAX_COPY_BYTES`), writes OSC 52, and the rule reports the line count. Keys,
+the wheel, a resize and a new press clear the selection. A press released
+where it started copies nothing.
+
 ## Bounds
 
 A frame is laid out for at most 1024 × 512 cells (`view::MAX_RENDER_WIDTH`,

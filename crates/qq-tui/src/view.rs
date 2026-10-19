@@ -160,6 +160,9 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
+    /// What the mouse can act on in the last frame; handed to the app on
+    /// commit.
+    geometry: crate::selection::FrameGeometry,
 }
 
 impl FrameRenderer {
@@ -172,6 +175,15 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
+        if app.geometry != self.geometry {
+            app.geometry = std::mem::take(&mut self.geometry);
+        }
+    }
+
+    /// The rows of the last drawn frame, which a selection's text is read
+    /// from.
+    pub(crate) fn last_frame(&self) -> &[Line] {
+        &self.previous
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -354,12 +366,29 @@ impl FrameRenderer {
             ));
         }
         let mut rail_named: Option<Vec<SessionId>> = None;
+        let mut geometry = crate::selection::FrameGeometry::default();
+        if let Some(slot) = layout.transcripts.first() {
+            geometry.transcript = Some(crate::selection::Area {
+                x: slot.area.x,
+                y: slot.area.y,
+                width: slot.area.width,
+                height: body_height,
+            });
+        }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            let (rows, named) = sidebar(app, rail.width, body_height, density);
-            rail_named = Some(named);
-            columns.push((rail.x, rows));
+            let painted = sidebar(app, rail.width, body_height, density);
+            rail_named = Some(painted.named);
+            geometry.rail = Some(crate::selection::Area {
+                x: rail.x,
+                y: rail.y,
+                width: rail.width,
+                height: body_height,
+            });
+            geometry.rail_targets = painted.targets;
+            columns.push((rail.x, painted.rows));
         }
+        self.geometry = geometry;
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
         // transcript text once per pane on every frame.
@@ -423,7 +452,11 @@ impl FrameRenderer {
         {
             self.cursor = Some(CursorPosition { column, row });
         }
-        fit_height(lines, height)
+        let mut lines = fit_height(lines, height);
+        if let Some(selection) = &app.selection {
+            selection.paint(&mut lines);
+        }
+        lines
     }
 
     /// Render one pane's main area through the transcript cache into `slot`
