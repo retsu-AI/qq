@@ -75,8 +75,7 @@ pub use document::{
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
 };
 pub use providers::{
-    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_providers,
-    provider_credential_variables,
+    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_providers, provider_credential_variables,
 };
 
 /// All process-dependent inputs captured before a configuration load begins.
