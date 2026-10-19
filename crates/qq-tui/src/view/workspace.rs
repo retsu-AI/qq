@@ -17,7 +17,9 @@ pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
     }
     for session_id in needing {
         let view = &app.sessions[&session_id];
-        let Some(need) = view.need() else {
+        // The same human-aware reason the list was ranked by: a hold a
+        // delegate owns does not hide an unseen failure or finish.
+        let Some(need) = app.attention_need(session_id) else {
             continue;
         };
         let (glyph, style, label) = match need {
@@ -37,9 +39,10 @@ pub(super) fn attention_body(app: &App, width: usize) -> Vec<Line> {
                 .tool_calls
                 .as_ref()
                 .and_then(|calls| {
-                    calls
-                        .iter()
-                        .find(|call| call.state == ToolCallState::AwaitingApproval)
+                    calls.iter().find(|call| {
+                        call.state == ToolCallState::AwaitingApproval
+                            && !view.live.with_delegate.contains(&call.id)
+                    })
                 })
                 .map(|call| {
                     let row = ToolRow::derive(call);

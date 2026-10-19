@@ -389,14 +389,29 @@ pub(super) fn rollup(app: &App) -> Rollup {
         // A temporary session: its loaded descendants roll into it the
         // same way a root's do, depth-first in spawn order.
         let mut pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
-        let mut stack: Vec<SessionId> =
-            app.sessions.children_of(id).iter().rev().copied().collect();
-        while let Some(agent) = stack.pop() {
+        // `(agent, under an audit)`: an audit's subtree is never listed but
+        // its spend still counts toward a legacy session's total.
+        let mut stack: Vec<(SessionId, bool)> = app
+            .sessions
+            .children_of(id)
+            .iter()
+            .rev()
+            .map(|child| (*child, false))
+            .collect();
+        while let Some((agent, hidden)) = stack.pop() {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
             add_legacy_cost(&mut pending, session);
-            if is_audit(session) {
+            let hidden = hidden || is_audit(session);
+            stack.extend(
+                app.sessions
+                    .children_of(agent)
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, hidden)),
+            );
+            if hidden {
                 continue;
             }
             pending.entry.agents += 1;
@@ -410,7 +425,6 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if let Some(agents) = pending.agents.as_mut() {
                 agents.push(agent);
             }
-            stack.extend(app.sessions.children_of(agent).iter().rev().copied());
         }
         finish(pending, &mut rollup);
     }
@@ -554,11 +568,18 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
 /// [`RailDensity::Detailed`] a second muted row carries the live tail and
 /// the session's cost. Agents appear only under the focused session and
 /// when they wait on the user. The focused row sits on the selection
-/// background. Always `height` rows so it zips against the body.
-pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> Vec<Line> {
+/// background. Always `height` rows so it zips against the body. Also
+/// returns the sessions and agents whose rows the window painted.
+pub(super) fn sidebar(
+    app: &App,
+    width: usize,
+    height: usize,
+    density: RailDensity,
+) -> (Vec<Line>, Vec<SessionId>) {
     let inner = width.saturating_sub(2);
     let (plan, focused_row) = plan_rail(app, density);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
+    let mut painted: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
     }
@@ -570,6 +591,13 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         }
     };
     for row in plan.into_iter().skip(start).take(height) {
+        match row {
+            RailRow::Session(RailEntry { id, .. })
+            | RailRow::Detail(RailEntry { id, .. })
+            | RailRow::Agent(id)
+            | RailRow::AgentDetail(id) => painted.push(id),
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(_) => {}
+        }
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),
             RailRow::Header(group, count) => {
@@ -687,7 +715,7 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         rows.push(Line::styled("│", border()));
     }
     rows.truncate(height);
-    rows
+    (rows, painted)
 }
 
 /// One row above the composer when the rail is hidden and more than one
