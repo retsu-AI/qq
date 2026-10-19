@@ -191,8 +191,10 @@ The rail and the one-row strip both consume `rollup`. The rail plans rows
 from it and paints only the rows inside its scrolled window (centered on the
 focused row); the strip counts from the same pass, so `7 sessions ◐ 2 ◇ 2`
 on the strip and the headers on the rail always agree. The layout's `Auto`
-rail and strip count sessions (`SessionStore::roots`), so one conversation
-and its agents get neither.
+rail and strip count sessions with `view::listed_sessions`: non-audit roots
+plus orphan components (an agent whose session is not loaded counts as a
+session until its parent arrives), stopping at two since the layout only
+asks "more than one". One conversation and its agents get neither.
 
 Each session row starts with a state glyph in the state's color and the
 title, truncated to leave room for right-aligned badges: `↳N` agents (with a
