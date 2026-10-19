@@ -165,11 +165,12 @@ fn streaming_background(iterations: u32) {
     report_samples("streaming_background_8_delta_to_frame", &samples);
 }
 
-/// Twenty child sessions of the focused root streaming concurrently with the
-/// sidebar visible. Every delta updates a live tail that the sidebar renders,
-/// so this is the many-agents case the plan is for.
+/// Twenty agents of the focused session streaming concurrently with the
+/// sidebar visible: the session rolls them up and lists up to
+/// `FOCUSED_AGENT_ROWS` of them, so this is the many-agents case the plan is
+/// for. (Before tui-focus F1 this fixture built twenty roots instead.)
 fn children_with_sidebar(iterations: u32) {
-    let mut harness = BenchHarness::new(SIZE, 21, STEADY_MESSAGES);
+    let mut harness = BenchHarness::with_agents(SIZE, 20, STEADY_MESSAGES);
     harness.show_sidebar();
     harness.hide_inspector();
     let messages: Vec<_> = (1..=20)

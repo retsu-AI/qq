@@ -87,6 +87,21 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
+/// Sessions the rail and the strip list: roots that are not audit agents
+/// orphaned by a deleted parent. The layout's `Auto` rail and strip count
+/// these, never agents.
+pub(crate) fn listed_sessions(app: &App) -> usize {
+    app.sessions
+        .roots()
+        .iter()
+        .filter(|id| {
+            app.sessions.get(id).is_some_and(|session| {
+                session.summary.purpose != qq_protocol::SessionPurpose::Audit
+            })
+        })
+        .count()
+}
+
 /// Whether the sessions rail is on screen at `width` under `prefs`. Shared
 /// with the app so event visibility and the toggle command agree with the
 /// frame.
@@ -218,13 +233,7 @@ impl FrameRenderer {
         let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
         let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
-        let layout = compute_layout(
-            width,
-            height,
-            chrome_rows,
-            app.layout,
-            app.sessions.roots().len(),
-        );
+        let layout = compute_layout(width, height, chrome_rows, app.layout, listed_sessions(app));
         let body_height = layout.body.height;
         let mode = app.mode();
         // With the inspector on screen, expanded tool bodies and the

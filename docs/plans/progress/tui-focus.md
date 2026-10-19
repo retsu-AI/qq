@@ -44,3 +44,19 @@ whole terminal row.
   steady 21.7 → 22.4 µs; with_sidebar 33.5 → 34.1; streaming_focused
   34.7 → 35.5; run_on_32kb 458.4 → 438.5; children_20 55.5 → 52.5;
   sessions_200 28.8 → 26.8; golden_path 40.1 → 39.5; resize 30.8 → 30.6.
+
+### 2026-10-18 — F1–F2 review fixes (Codex on #354/#356)
+
+- Every agent `Need` rolls up (approval, failure, unseen finish), ranked
+  approval → failure → finish; rows painted in rank order (the focused agent
+  first under the focused session); unfocused cap row reads `+N need you`.
+- Audit roots (parent deleted) and every audit subtree are skipped in the
+  roll-up, the focused tree, and `listed_sessions` (the layout's count).
+- `children_20_with_sidebar` now builds one root with twenty agents
+  (`BenchHarness::with_agents`). Re-baselined on the stack base with the
+  same fixture: 52.0 µs → 50.7 / 52.7 / 53.3 µs after; sessions_200 28.5 →
+  28.7 / 30.2 / 30.3 µs (host load ≈7; within run-to-run spread).
+  `target/qq-perf/tui-focus-F1-2026-10-18/{baseline,after}-children-fixture.txt`.
+- Tests: `failed_and_unseen_agents_lift_their_session_and_rank_after_approvals`,
+  `an_audit_root_left_by_a_deleted_parent_is_not_a_session`. Guide diagram
+  shows RECENT.

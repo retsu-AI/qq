@@ -1317,7 +1317,7 @@ impl App {
             || crate::view::rail_visible(
                 self.terminal_width,
                 self.layout,
-                self.sessions.roots().len(),
+                crate::view::listed_sessions(self),
             )
     }
 
