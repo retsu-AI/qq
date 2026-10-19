@@ -444,6 +444,27 @@ impl FrameRenderer {
             geometry.rail_targets = painted.targets;
             columns.push((rail.x, painted.rows));
         }
+        // A spawned child's live card under its spawn call names that child
+        // in the transcript on screen, so the rule does not repeat it.
+        if let Some(shown) = app.view().transcript()
+            && let Some(calls) = app
+                .sessions
+                .get(&shown)
+                .and_then(|session| session.tool_calls.as_deref())
+        {
+            let carded = calls
+                .iter()
+                .filter_map(|call| app.sessions.child_spawned_by(call.id));
+            match &mut rail_named {
+                Some(named) => named.extend(carded),
+                None => {
+                    let carded: Vec<SessionId> = carded.collect();
+                    if !carded.is_empty() {
+                        rail_named = Some(carded);
+                    }
+                }
+            }
+        }
         self.geometry = geometry;
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the

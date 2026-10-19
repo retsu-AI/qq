@@ -1060,9 +1060,15 @@ impl App {
     fn open_session_picker(&mut self, scope: Option<SessionId>) -> Effects {
         let mut expanded = BTreeSet::new();
         // A focused agent opens with its session expanded so the cursor can
-        // start on it.
-        if let Some(root) = self.focused().and_then(|id| self.sessions.root_of(id))
-            && Some(root) != self.focused()
+        // start on it. The session comes from the picker's own rows, which
+        // know the top of an orphan component too (`root_of` does not).
+        if let Some(focused) = self.focused()
+            && let Some(root) = self
+                .session_rows(scope, &expanded, true)
+                .into_iter()
+                .find(|row| row.id == focused)
+                .map(|row| row.root)
+            && root != focused
         {
             expanded.insert(root);
         }

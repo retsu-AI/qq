@@ -1028,6 +1028,8 @@ impl App {
             self.sessions
                 .install_session_snapshot(body, &self.models, snapshot_sequence);
         }
+        // A fallback chosen over an audit focus, whose body is fetched.
+        let mut fallback_fetch: Option<Effects> = None;
         if let Some(focused) = snapshot.focused {
             let focused_id = focused.summary.id;
             if let Some(Overlay::GoalForm(form)) = &mut self.overlay
@@ -1047,10 +1049,11 @@ impl App {
             // newest root) focuses the newest non-audit session instead.
             if self.under_audit(focused_id) {
                 if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
-                    let target = self.first_listed_root();
-                    self.set_view(View::Transcript(target));
-                    if let Some(target) = target {
-                        self.set_focus(target);
+                    // `focus_session` fetches the fallback's body: it may be
+                    // a summary only.
+                    match self.first_listed_root() {
+                        Some(target) => fallback_fetch = Some(self.focus_session(target)),
+                        None => self.set_view(View::Transcript(None)),
                     }
                 }
             } else if !side_view
@@ -1079,6 +1082,9 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
+        if let Some(fetch) = fallback_fetch {
+            effects.extend(fetch);
+        }
         for event in replay {
             let replayed = self.sessions.replay_event(
                 &event,
@@ -3464,15 +3470,35 @@ impl App {
         false
     }
 
-    /// The newest root that is not an audit: where focus goes when the
-    /// session it would land on is hidden.
+    /// The newest listed session that is not an audit: a root, or an agent
+    /// whose parent is not loaded (listed as a session until it arrives).
+    /// Where focus goes when the session it would land on is hidden.
     fn first_listed_root(&self) -> Option<SessionId> {
-        self.sessions.thread_order().iter().copied().find(|id| {
-            self.sessions
-                .get(id)
-                .is_some_and(|session| session.summary.parent_id.is_none())
-                && !self.under_audit(*id)
-        })
+        self.sessions
+            .thread_order()
+            .iter()
+            .copied()
+            .find(|id| {
+                self.sessions
+                    .get(id)
+                    .is_some_and(|session| session.summary.parent_id.is_none())
+                    && !self.under_audit(*id)
+            })
+            .or_else(|| {
+                // Orphan components are outside `thread_order`; the newest
+                // one whose loaded ancestry has no audit.
+                self.sessions
+                    .values()
+                    .filter(|session| {
+                        session
+                            .summary
+                            .parent_id
+                            .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                            && !self.under_audit(session.summary.id)
+                    })
+                    .max_by_key(|session| (session.summary.updated_at_ms, session.summary.id))
+                    .map(|session| session.summary.id)
+            })
     }
 
     /// When an update reveals that the focused transcript sits under an audit

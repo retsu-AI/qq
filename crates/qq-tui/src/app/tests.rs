@@ -2885,6 +2885,18 @@ fn the_session_picker_lists_orphan_agents_as_sessions_and_tracks_reparented_agen
 }
 
 #[test]
+fn the_session_picker_opens_a_focused_orphan_descendant_under_its_session() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    // The root goes away, so `child` tops an orphan component.
+    app.sessions.remove(&root);
+    app.focus_session(grandchild);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    assert!(app.filtered_sessions().contains(&child));
+    let _ = other;
+}
+
+#[test]
 fn the_session_picker_opens_a_focused_agents_session_expanded() {
     let (mut app, root, child, _, _) = app_with_agent_tree();
     app.focus_session(child);
