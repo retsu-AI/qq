@@ -82,10 +82,13 @@ One O(sessions) pass replaces `rail_entries`. For each root session it
 yields its own state, the state rolled up over its agents (most urgent of
 NEEDS YOU > WORKING > the rest), agent counts (total, working), the agents
 waiting on an approval, unread, a live flag, and spend. Spend is the
-session's **inclusive** accounting (`SessionSummary.accounting.inclusive`,
-falling back to the compatibility alias), so cost incurred by hidden agents,
-audit agents included, stays on the session's row. Audit agents and their
-subtrees are never listed or counted as agents.
+session's **inclusive** accounting (`SessionSummary.accounting.inclusive`).
+A summary without `accounting` (written before inclusive accounting) only
+carries its own direct spend in the compatibility alias, so the row sums
+that alias over the session and its loaded agents (audit agents included);
+agents not loaded are then missing from the sum, which is the most such old
+records can say. Audit agents and their subtrees are never listed or
+counted as agents.
 
 Rail rows:
 
@@ -112,9 +115,11 @@ Rail rows:
 - An agent **needs the user** when it has an approval waiting *on the
   human* (`awaiting_approval` minus the delegate-owned `with_delegate`
   holds; a delegate-owned hold counts as working until it escalates), or
-  failed or finished while unseen. Such an agent lifts its session into
+  failed or finished while unseen (an unseen outcome still counts while a
+  later run waits on a delegate). Such an agent lifts its session into
   NEEDS YOU; a focused agent still lifts it (focusing clears an unseen
-  finish, never an approval).
+  finish, never an approval). Answering in place (`Alt-A`/`Alt-D`) picks a
+  call the human owns, never one a delegate is deciding.
 - Agent rows are bounded per session and painted in rank order. Under an
   unfocused session, at most `WAITING_AGENT_ROWS` (3) agents that need the
   user get a `↳` row (approval waits first, then failures, then unseen
@@ -140,8 +145,10 @@ Rail rows:
   summary carries no lineage beyond its own `purpose` and `parent_id`, so a
   task agent whose audit ancestor is not loaded is shown as a task until
   that ancestor arrives; closing that gap needs a lineage marker in
-  `SessionSummary` (a protocol change) and is recorded as a follow-up, not
-  done here.
+  `SessionSummary` (a protocol change) and is recorded as a follow-up
+  (ENG-1080), not done here. When an arriving summary reveals that the
+  focused session is under an audit, focus moves to the newest non-audit
+  root, as on deletion.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
@@ -202,17 +209,26 @@ tests otherwise unchanged.
   hidden) that is all of them; the strip's `◇ N` is an anonymous count, a
   pointer and not a naming, so the notice stays beside it. When the rail is
   on screen its rows name what they paint and the notice names only the
-  rest: rows collapsed into a `+N need you` row or scrolled out of the
-  rail's window. The notice is one row, so it names the most urgent one
+  rest: rows scrolled out of the rail's window, and rows collapsed into a
+  `+N need you` row. A collapsed row is already pointed at by that `+N`
+  row, so the notice does not name it again; it is named only when nothing
+  on screen points at it (the rail is hidden, or its session row itself is
+  scrolled out). With the rail up the strip is not shown, so each need has
+  at most its one row or pointer on the rail plus the rule. The notice is
+  one row, so it names the most urgent one
   (approval, then failure, then unseen finish; tree order within a rank) and
   counts the rest (`◇ Deploy helper +3 need you`), truncating the name
   before the count; `Ctrl-G` walks them and `/attention` lists them all.
   With nothing left over the rule omits the notice and leads with the
   in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords. A transient notice (info,
   warning, error) takes the left side while it lasts; any unpainted
-  attention then keeps a compact pointer on the right (`◇ 2  ^G` or
-  `✕ 1  ^G`) next to the answer chords, so a sticky error never hides a
-  need. A rail row counts as naming its session only when the title
+  attention then keeps a compact pointer on the right: the answer chords
+  while an approval waits, plus `✕ N` / `● N` for unseen failures and
+  finishes, and `^G jump`, so a sticky error never hides a need. A finish
+  that arrives while a side view (`/goal`, `/btw`) hides its own session's
+  transcript is attention like any other: only a session whose transcript
+  is on screen is excluded. A rail row counts as naming its session only
+  when the title
   survives the row's badges.
 - `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2
   /agents`, counting working agents by the rail's definition (running,
@@ -227,12 +243,17 @@ Acceptance: view tests that each waiting item is named at most once per
 frame outside its own transcript (a rail row or the rule notice, never both)
 and that every item is either named or counted, at Compact, Regular with the
 rail shown, Regular with the rail hidden, with more waiting agents under one
-session than `WAITING_AGENT_ROWS`, at a narrow width with a long title, for a
+session than `WAITING_AGENT_ROWS` (the collapsed ones pointed at only by the
+rail's `+N need you` row, not named again on the rule), at a narrow width
+with a long title, for a
 single session whose agent failed or finished unseen, for an unfocused
-session that failed unseen at Compact, and for a failed agent whose rail row
-is scrolled out; a Compact frame with a waiting agent of the focused session
-shows the named notice and the strip's pointer and no third count; `Ctrl-G`
-and `/attention` skip an audit with a pending approval; inspector `Auto`
+session that failed unseen at Compact, for a failed agent whose rail row is
+scrolled out, for a notice beside both an approval and an unseen failure,
+and for a finish that arrives behind `/goal`; a Compact frame with a waiting
+agent of the focused session shows the named notice and the strip's pointer
+and no third count; `Ctrl-G` and `/attention` skip an audit with a pending
+approval; `Alt-A` with a delegate-owned and a human-owned hold in one
+session answers the human-owned one; inspector `Auto`
 hidden with nothing expanded and shown with an expansion; goldens moved
 deliberately.
 
@@ -258,31 +279,47 @@ selection:
   drag paints nothing.
 - **Release** copies the selected text to the system clipboard with OSC 52
   (the transport Codex and most modern terminals and multiplexers support)
-  and shows `copied N lines`. Each row is the pane's text with the measure
-  inset and trailing spaces removed.
-- `Esc`, a key press, scrolling, a resize or a new frame that moves the body
-  clears the selection. `Shift`-drag keeps the terminal's native selection,
-  and `/mouse` still hands the mouse back to the terminal.
+  and shows `copied N lines`. A release at a different cell from the press
+  is a selection even when no drag event arrived between them. Each row is
+  the pane's text with the measure inset and trailing spaces removed; rows
+  joined by a soft wrap (prose the renderer wrapped at the pane width, not
+  a newline in the text) are copied as one line joined by a space, and code
+  blocks keep their own lines.
+- `Esc`, a key press, scrolling, a resize, or any frame whose selected
+  cells changed (streamed text arriving under the selection, the body
+  moving) clears the selection, so a copy is always of the cells the user
+  saw. Native terminal selection stays available: `Shift`-drag where the
+  terminal handles it (QQ never sees those events, so an old QQ highlight
+  stays until the next key or click), and `/mouse` hands the mouse back to
+  the terminal entirely.
 
 The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
 coordinates) and resolved against the last committed frame, so no
-transcript cache changes. Cells are grapheme clusters (a ZWJ emoji or a
-base with its marks is one cell group). Each row drops only its own
+transcript cache changes. Cells are grapheme clusters (a ZWJ emoji, a base
+with its marks, a regional-indicator flag pair, or an emoji with its
+modifier is one cell group). Each frame row carries whether it continues the
+row above it as a soft wrap (`Line::wrapped`, set by the prose wrapper),
+which is how a copy tells a wrap from a newline. Each row drops only its own
 non-text prefix (the measure inset, plus the 3-column message rail on
 message rows; workspace views have no rail). Copy payloads are bounded
 (`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
 first part, cut back to a grapheme boundary, and says so. A click focuses a
-rail target only while that session still exists. A modified press clears
-any QQ selection before handing the drag to the terminal.
+rail target only while that session still exists. A modified press or drag
+that the terminal does forward to QQ clears any QQ selection and starts
+none.
 
 Acceptance: app tests for click-to-focus (including a rail reordered between
-draw and click, and a deleted target), drag clamped to the pane, forward and
-reverse partial-row copies, forward and reverse copies whose endpoints land
-inside a wide glyph or a joined emoji, a `/goal` header copied whole, the
-copy effect's text (inset and rail excluded), clearing rules (a click leaves
-no highlight; a Shift-drag clears an old one), and the bound with a
-grapheme straddling it; terminal test for the OSC 52 bytes; frame test that
-only selected cells take the selection style.
+draw and click, and a deleted target), drag clamped to the pane, a press and
+release at different cells with no drag between, forward and reverse
+partial-row copies, forward and reverse copies whose endpoints land inside a
+wide glyph, a joined emoji, or a flag, a soft-wrapped paragraph copied as
+one line beside an explicit newline, a `/goal` header copied whole, the copy
+effect's text (inset and rail excluded), clearing rules (a click leaves no
+highlight; a forwarded modified press clears an old one; a content-only
+redraw under a selection clears it), and the bound with a grapheme
+straddling it; terminal test for the OSC 52 bytes; frame test that only
+selected cells take the selection style; the seven render gates recorded
+before and after.
 
 ## Non-goals
 

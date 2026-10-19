@@ -2839,6 +2839,14 @@ fn the_session_picker_left_and_ctrl_a_work_while_searching() {
     app.handle_key(key(KeyCode::Left));
     assert_eq!(app.session_picker_selected(), Some(root));
     assert_eq!(app.filtered_sessions().len(), 4, "still expanded");
+    // Under Ctrl-A with no search, Left on an agent still collapses its
+    // session, which shows once Ctrl-A is off again.
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.session_picker_selected(), Some(child));
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 2, "collapsed");
     let _ = child;
     // Ctrl-A toggles with nothing matched.
     app.handle_terminal_event(Event::Paste("zzz".to_owned()));
