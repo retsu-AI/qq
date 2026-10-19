@@ -290,7 +290,7 @@ impl Selection {
                     % 2
                     == 1;
                 let splits = next.is_some_and(continues_grapheme)
-                    || prev.is_some_and(|character| character == ZWJ)
+                    || prev.is_some_and(|character| character == ZWJ || is_virama(character))
                     || (odd_indicators && next.is_some_and(is_regional_indicator));
                 if !splits {
                     break;
@@ -323,6 +323,24 @@ fn is_regional_indicator(character: char) -> bool {
 /// one: a zero-width mark, a variation selector, an emoji skin-tone modifier,
 /// or a ZWJ (and so the character a ZWJ joins). Covers what a transcript
 /// realistically shows without a segmentation dependency.
+/// A virama joins the consonant after it into one conjunct (`क्ष`), the
+/// way a ZWJ joins emoji: the Indic scripts' signs.
+fn is_virama(character: char) -> bool {
+    matches!(
+        character,
+        '\u{094D}'
+            | '\u{09CD}'
+            | '\u{0A4D}'
+            | '\u{0ACD}'
+            | '\u{0B4D}'
+            | '\u{0BCD}'
+            | '\u{0C4D}'
+            | '\u{0CCD}'
+            | '\u{0D4D}'
+            | '\u{0DCA}'
+    )
+}
+
 fn continues_grapheme(character: char) -> bool {
     character == ZWJ
         || matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{1F3FB}'..='\u{1F3FF}')
@@ -352,7 +370,7 @@ fn cells(line: &Line) -> Vec<(usize, usize, String, Style)> {
                     last.1 = last.0 + 2;
                     column = last.1;
                 }
-                joined = character == ZWJ;
+                joined = character == ZWJ || is_virama(character);
                 open_flag = false;
                 continue;
             }
@@ -642,6 +660,61 @@ mod tests {
             "let value = compute(1, 2);",
             "{:?}",
             panel
+        );
+    }
+
+    #[test]
+    fn fifth_review_round_on_copy() {
+        // A code panel inside a message: `indent_lines` prepends the 3-cell
+        // message rail, and the gutter after it is still chrome.
+        let panel = crate::view::panel_rows_for_test(
+            [Line::styled("let value = compute(1, 2);", normal())],
+            None,
+            16,
+        );
+        let rows = crate::view::indent_lines_for_test(panel, "   ", normal(), 19);
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 19,
+            height: rows.len(),
+        };
+        let mut selection = Selection::start(area, 3, 0, 0).unwrap();
+        selection.extend(18, rows.len() - 1);
+        assert_eq!(selection.text(&rows).text, "let value = compute(1, 2);");
+
+        // A conjunct is one grapheme: `क्ष` copies whole from its last cell.
+        let lines = vec![Line::styled("aक्षb", normal())];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 1,
+        };
+        // The conjunct is one cell group at column 1: a drag ending on it
+        // copies the whole cluster, not `क्` alone.
+        let mut wide = Selection::start(area, 0, 0, 0).unwrap();
+        wide.extend(1, 0);
+        assert_eq!(wide.text(&lines).text, "aक्ष");
+
+        // A long token wider than the row wraps by characters: the copy
+        // joins it back with nothing; a break between words keeps a space.
+        let rows = crate::view::wrap_line_for_test(
+            Line::styled("see https://example.com/a/very/long/path ok", normal()),
+            12,
+        );
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 12,
+            height: rows.len(),
+        };
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(11, rows.len() - 1);
+        assert_eq!(
+            selection.text(&rows).text,
+            "see https://example.com/a/very/long/path ok",
+            "{rows:?}"
         );
     }
 

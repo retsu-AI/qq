@@ -53,6 +53,8 @@ use sidebar::*;
 use tools::*;
 use transcript::*;
 use workspace::*;
+#[cfg(test)]
+pub(crate) use wrap::indent_lines as indent_lines_for_test;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;

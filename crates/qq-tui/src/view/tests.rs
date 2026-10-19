@@ -6396,6 +6396,22 @@ fn a_wrapped_paragraph_dragged_in_the_real_transcript_copies_as_one_line() {
 }
 
 #[test]
+fn a_right_click_clears_a_selection() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    assert!(app.selection.is_some());
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Right), 5, row));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws());
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

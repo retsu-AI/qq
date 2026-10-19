@@ -65,6 +65,15 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     let mut output = vec![Line::default()];
     let mut used = 0_usize;
     let mut index = 0;
+    // Each break records how the row it ends continues: at whitespace the
+    // wrap dropped a separator (a copy joins with a space); inside a word
+    // wider than the row it dropped nothing (a copy joins with nothing).
+    let break_at = |output: &mut Vec<Line>, wrap: crate::render::Wrap| {
+        if let Some(row) = output.last_mut() {
+            row.wrapped = wrap;
+        }
+        output.push(Line::default());
+    };
     while index < tokens.len() {
         let whitespace = tokens[index].whitespace;
         let mut end = index + 1;
@@ -84,11 +93,25 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
             used += group_width;
         } else if whitespace {
             if used > 0 {
-                output.push(Line::default());
+                break_at(&mut output, crate::render::Wrap::Prose);
                 used = 0;
             }
         } else if group_width <= width {
-            output.push(Line::default());
+            // The word moves to a new row. After a whitespace group (which
+            // fit and is trimmed as trailing) the join is a space; a word
+            // directly after a word (spans split mid-word) has none.
+            let start = end - group.len();
+            let after_space = start
+                .checked_sub(1)
+                .is_some_and(|previous| tokens[previous].whitespace);
+            break_at(
+                &mut output,
+                if after_space || used == 0 {
+                    crate::render::Wrap::Prose
+                } else {
+                    crate::render::Wrap::Literal
+                },
+            );
             let line = output.last_mut().expect("output starts populated");
             for token in group {
                 let span = &spans[token.span];
@@ -101,7 +124,8 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
                 for character in span.text[token.range.clone()].chars() {
                     let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
                     if used > 0 && used + character_width > width {
-                        output.push(Line::default());
+                        // Inside a word: no separator was dropped.
+                        break_at(&mut output, crate::render::Wrap::Literal);
                         used = 0;
                     }
                     let mut encoded = [0; 4];
@@ -117,10 +141,9 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     while output.len() > 1 && output.last().is_some_and(Line::is_empty) {
         output.pop();
     }
-    // Every row but the last continues the same source line.
-    let last = output.len().saturating_sub(1);
-    for row in &mut output[..last] {
-        row.wrapped = crate::render::Wrap::Prose;
+    // The last row ends the source line itself.
+    if let Some(last) = output.last_mut() {
+        last.wrapped = crate::render::Wrap::Break;
     }
     output
 }
@@ -163,9 +186,13 @@ pub(crate) fn indent_lines(
         .into_iter()
         .map(|line| {
             let mut indented = Line::styled(prefix, prefix_style);
-            // How the row continues, and its chrome after the new prefix.
+            // How the row continues, and its chrome: the chrome sat at the
+            // start of the row's cells, which now begin after the prefix and
+            // the row's own margin.
             indented.wrapped = line.wrapped;
-            indented.chrome = line.chrome;
+            if line.chrome > 0 {
+                indented.chrome = crate::render::text_width(prefix) + line.indent + line.chrome;
+            }
             // A row's own margin (`Line::indent`) sits after the prefix, so
             // it becomes cells here rather than being dropped.
             if line.indent > 0 {

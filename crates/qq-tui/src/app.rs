@@ -1646,6 +1646,10 @@ impl App {
                     None => Effects::none(),
                 }
             }
+            // Any other button pressed (right, middle) still ends a
+            // selection: mouse capture sends the press to QQ, not the
+            // terminal.
+            MouseEventKind::Down(_) => Effects::changed_now(self.selection.take().is_some()),
             _ => Effects::none(),
         }
     }
