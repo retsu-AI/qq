@@ -96,6 +96,10 @@ pub(super) struct RailEntry {
     pub agents: u32,
     /// Of those, how many are running or queued.
     pub agents_working: u32,
+    /// The slice of [`Rollup::needs`] holding this session's agents that
+    /// need the user, most urgent first.
+    pub needs_start: u32,
+    pub needs_end: u32,
 }
 
 /// Every session grouped NEEDS YOU, WORKING, RECENT (tree order, newest
@@ -116,24 +120,66 @@ pub(super) struct Rollup {
 }
 
 impl Rollup {
-    /// Agents under `session` that need the user, most urgent first.
-    pub(super) fn needs_under(&self, session: SessionId) -> impl Iterator<Item = SessionId> + '_ {
-        self.needs
+    /// Agents under `entry`'s session that need the user, most urgent first.
+    /// A slice per session, so planning stays linear in sessions.
+    pub(super) fn needs_under(&self, entry: &RailEntry) -> impl Iterator<Item = SessionId> + '_ {
+        self.needs[entry.needs_start as usize..entry.needs_end as usize]
             .iter()
-            .filter(move |(root, _, _)| *root == session)
             .map(|(_, agent, _)| *agent)
     }
 }
 
 /// Whether a session exists for bookkeeping rather than for the user: audit
 /// agents check a parent's final answer and are never listed.
-fn is_audit(session: &SessionView) -> bool {
+pub(super) fn is_audit(session: &SessionView) -> bool {
     session.summary.purpose == qq_protocol::SessionPurpose::Audit
 }
 
+/// Why an agent needs the user, if it does. Like [`SessionView::need`],
+/// except that an approval counts only while the human is asked: a hold an
+/// approval delegate still owns (`with_delegate`) is the agent working.
+pub(super) fn agent_need(session: &SessionView) -> Option<Need> {
+    let live = &session.live;
+    // `with_delegate` is a subset of `awaiting_approval`.
+    if live.awaiting_approval.len() > live.with_delegate.len() {
+        return Some(Need::Approval);
+    }
+    match session.need() {
+        Some(Need::Approval) | None => None,
+        Some(need @ (Need::Failed | Need::FinishedUnread)) => Some(need),
+    }
+}
+
+/// Agents whose session is not loaded (a bounded snapshot can carry a child
+/// without its parent): absent from `thread_order`, so listed as sessions of
+/// their own until the parent arrives. Cheap when there are none.
+pub(super) fn orphans(app: &App) -> Vec<SessionId> {
+    if app.sessions.thread_order().len() == app.sessions.len() {
+        return Vec::new();
+    }
+    let mut orphans: Vec<&SessionView> = app
+        .sessions
+        .values()
+        .filter(|session| {
+            session
+                .summary
+                .parent_id
+                .is_some_and(|parent| !app.sessions.contains_key(&parent))
+                && !is_audit(session)
+        })
+        .collect();
+    orphans.sort_by(|a, b| {
+        (b.summary.updated_at_ms, b.summary.id).cmp(&(a.summary.updated_at_ms, a.summary.id))
+    });
+    orphans
+        .into_iter()
+        .map(|session| session.summary.id)
+        .collect()
+}
+
 /// The session being accumulated by [`rollup`]: its entry, its own group,
-/// whether any agent needs the user, and (only for the focused tree) its
-/// agents.
+/// whether any agent needs the user, where its needs start, and (only for
+/// the focused tree) its agents.
 struct Pending {
     entry: RailEntry,
     own: Group,
@@ -151,11 +197,15 @@ pub(super) fn rollup(app: &App) -> Rollup {
     let mut audit_depth: Option<usize> = None;
     let mut finish = |pending: Pending, rollup: &mut Rollup| {
         let Pending {
-            entry,
+            mut entry,
             own,
             needs_you,
             agents,
         } = pending;
+        // Most urgent first; tree order within a rank (stable sort).
+        let start = entry.needs_start as usize;
+        rollup.needs[start..].sort_by_key(|(_, _, need)| *need);
+        entry.needs_end = u32::try_from(rollup.needs.len()).unwrap_or(u32::MAX);
         let group = if own == Group::NeedsYou || needs_you {
             RailGroup::NeedsYou
         } else if own == Group::Working || entry.agents_working > 0 {
@@ -168,7 +218,37 @@ pub(super) fn rollup(app: &App) -> Rollup {
         }
         buckets[group as usize].push(RailEntry { group, ..entry });
     };
-    let mut first_need = 0;
+    let session_entry = |id: SessionId, session: &SessionView, needs_start: usize| {
+        let is_focused = focused == Some(id);
+        // Must agree with `live_status_line`; the planner relies on it.
+        let live = !session.live.awaiting_approval.is_empty()
+            || session.summary.status == SessionStatus::Running
+            || session.summary.queued_prompts > 0
+            || (!is_focused && !session.live.tail.is_empty());
+        let cost = session
+            .summary
+            .accounting
+            .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
+            .unwrap_or(session.summary.estimated_cost_usd_nanos)
+            .filter(|nanos| *nanos > 0);
+        let needs_start = u32::try_from(needs_start).unwrap_or(u32::MAX);
+        Pending {
+            entry: RailEntry {
+                id,
+                group: RailGroup::Recent,
+                unread: if is_focused { 0 } else { session.unread },
+                live,
+                cost,
+                agents: 0,
+                agents_working: 0,
+                needs_start,
+                needs_end: needs_start,
+            },
+            own: session.group(),
+            needs_you: false,
+            agents: (focused_root == Some(id)).then(Vec::new),
+        }
+    };
     for &id in order {
         let session = &app.sessions[&id];
         let root = session.summary.parent_id.is_none();
@@ -192,36 +272,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if let Some(pending) = current.take() {
                 finish(pending, &mut rollup);
             }
-            // Agents of the previous session that need the user, most
-            // urgent first; tree order is kept within a rank (stable sort).
-            rollup.needs[first_need..].sort_by_key(|(_, _, need)| *need);
-            first_need = rollup.needs.len();
-            let is_focused = focused == Some(id);
-            // Must agree with `live_status_line`; the planner relies on it.
-            let live = !session.live.awaiting_approval.is_empty()
-                || session.summary.status == SessionStatus::Running
-                || session.summary.queued_prompts > 0
-                || (!is_focused && !session.live.tail.is_empty());
-            let cost = session
-                .summary
-                .accounting
-                .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
-                .unwrap_or(session.summary.estimated_cost_usd_nanos)
-                .filter(|nanos| *nanos > 0);
-            current = Some(Pending {
-                entry: RailEntry {
-                    id,
-                    group: RailGroup::Recent,
-                    unread: if is_focused { 0 } else { session.unread },
-                    live,
-                    cost,
-                    agents: 0,
-                    agents_working: 0,
-                },
-                own: session.group(),
-                needs_you: false,
-                agents: (focused_root == Some(id)).then(Vec::new),
-            });
+            current = Some(session_entry(id, session, rollup.needs.len()));
             continue;
         }
         // An agent whose session is not loaded has nothing to roll into.
@@ -233,10 +284,9 @@ pub(super) fn rollup(app: &App) -> Rollup {
             SessionStatus::Running | SessionStatus::Queued => pending.entry.agents_working += 1,
             SessionStatus::Idle => {}
         }
-        // The focused agent has seen its own finish.
-        if focused != Some(id)
-            && let Some(need) = session.need()
-        {
+        // A focused agent still lifts its session while its approval waits;
+        // focusing clears an unseen finish, never an approval.
+        if let Some(need) = agent_need(session) {
             pending.needs_you = true;
             rollup.needs.push((pending.entry.id, id, need));
         }
@@ -247,7 +297,10 @@ pub(super) fn rollup(app: &App) -> Rollup {
     if let Some(pending) = current.take() {
         finish(pending, &mut rollup);
     }
-    rollup.needs[first_need..].sort_by_key(|(_, _, need)| *need);
+    for id in orphans(app) {
+        let pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
+        finish(pending, &mut rollup);
+    }
     rollup.counts = [buckets[0].len(), buckets[1].len(), buckets[2].len()];
     rollup.sessions = Vec::with_capacity(rollup.counts.iter().sum());
     for bucket in buckets {
@@ -338,7 +391,7 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             }
         };
         let Some((_, agents)) = tree else {
-            let mut needs = rollup.needs_under(entry.id);
+            let mut needs = rollup.needs_under(&entry);
             for agent in needs.by_ref().take(WAITING_AGENT_ROWS) {
                 agent_rows(&mut plan, agent);
             }
@@ -353,12 +406,12 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
         // (most urgent first), then quiet agents in tree order.
         let mut ranked: Vec<SessionId> = Vec::with_capacity(agents.len());
         ranked.extend(focused.filter(|id| agents.contains(id)));
-        ranked.extend(rollup.needs_under(entry.id));
+        ranked.extend(rollup.needs_under(&entry).filter(|id| Some(*id) != focused));
         ranked.extend(
             agents
                 .iter()
                 .copied()
-                .filter(|id| Some(*id) != focused && app.sessions[id].need().is_none()),
+                .filter(|id| Some(*id) != focused && agent_need(&app.sessions[id]).is_none()),
         );
         for &id in ranked.iter().take(FOCUSED_AGENT_ROWS) {
             if focused == Some(id) {
@@ -417,10 +470,9 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
     };
     for row in plan.into_iter().skip(start).take(height) {
         if let RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) = row
-            && app
-                .sessions
-                .get(&id)
-                .is_some_and(|session| !session.live.awaiting_approval.is_empty())
+            && app.sessions.get(&id).is_some_and(|session| {
+                agent_need(session).is_some() || !session.live.awaiting_approval.is_empty()
+            })
         {
             named.push(id);
         }

@@ -99,11 +99,19 @@ impl BenchHarness {
         let message = assistant_message(session_id(index), 200 + index, "");
         let id = message.id;
         let run_id = message.run_id;
+        // Keep the session's place in the tree: a fresh summary would turn
+        // an agent fixture back into a root.
+        let mut running = summary(session_id(index), SessionStatus::Running);
+        running.parent_id = self
+            .app
+            .sessions
+            .get(&session_id(index))
+            .and_then(|session| session.summary.parent_id);
         self.apply(
             index,
             SessionEvent::RunStarted {
                 origin: None,
-                session: Box::new(summary(session_id(index), SessionStatus::Running)),
+                session: Box::new(running),
                 run_id,
                 plan: None,
             },

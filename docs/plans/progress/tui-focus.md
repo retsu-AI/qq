@@ -126,3 +126,20 @@ whole terminal row.
   load ≈16–20): steady 22.5 → 21.9 µs; with_sidebar 34.3 → 33.8;
   streaming_focused 35.7 → 35.2; children_20 54.3 → 52.8; golden_path 40.6 →
   39.8; sessions_200 30.6 → 30.4.
+### 2026-10-18 — F1–F2 third review round (Codex on #356)
+
+- `agent_need`: an approval needs the user only while the human is asked
+  (`awaiting_approval` minus `with_delegate`); a focused waiting agent still
+  lifts its session. Needs are grouped per session (`RailEntry::needs_start..needs_end`),
+  so planning reads a slice per session, linear in sessions.
+- Agents whose session is not loaded are listed as sessions (`orphans`),
+  counted by `listed_sessions`.
+- A hidden agent's background deltas no longer schedule a redraw
+  (`a_hidden_agents_stream_does_not_wake_the_frame` fails on the old
+  predicate, passes now).
+- `Alt-Down`/`Alt-Left`/`Alt-Right` skip audit sessions.
+- `start_stream` keeps the session's parent, so `children_20` really measures
+  twenty agents. Same fixture on the stack base vs now
+  (`target/qq-perf/tui-focus-F1-2026-10-18/{baseline,after}-children-fixture-v2.txt`,
+  load ≈6): children_20 58.1 / 62.3 → 41.8 / 41.5 µs; sessions_200 28.5 /
+  29.7 → 30.6 / 30.5 µs (+3–7 %, inside the spread of earlier runs).

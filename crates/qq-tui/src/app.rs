@@ -1321,12 +1321,21 @@ impl App {
         {
             return true;
         }
-        self.terminal_width == 0
-            || crate::view::rail_visible(
-                self.terminal_width,
-                self.layout,
-                crate::view::listed_sessions(self),
-            )
+        // The rail shows live tails for sessions only; a hidden agent's
+        // stream changes no cell, so it does not wake the frame.
+        let listed_on_rail = self.sessions.get(&event.session_id).is_some_and(|session| {
+            session
+                .summary
+                .parent_id
+                .is_none_or(|parent| !self.sessions.contains_key(&parent))
+        });
+        listed_on_rail
+            && (self.terminal_width == 0
+                || crate::view::rail_visible(
+                    self.terminal_width,
+                    self.layout,
+                    crate::view::listed_sessions(self),
+                ))
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -2010,10 +2019,13 @@ impl App {
                 Some(parent) => self.focus_session(parent),
                 None => Effects::none(),
             },
-            Command::FocusFirstChild => match self
-                .focused()
-                .and_then(|focused| self.sessions.children_of(focused).first().copied())
-            {
+            Command::FocusFirstChild => match self.focused().and_then(|focused| {
+                self.sessions
+                    .children_of(focused)
+                    .iter()
+                    .copied()
+                    .find(|child| !self.is_audit(*child))
+            }) {
                 Some(child) => self.focus_session(child),
                 None => Effects::none(),
             },
@@ -3284,19 +3296,30 @@ impl App {
 
     /// The focused session's sibling `offset` places away in spawn order
     /// (oldest-first), wrapping at either end. Roots are siblings of roots.
+    /// Audit sessions are never listed, so navigation skips them too.
     fn sibling(&self, offset: isize) -> Option<SessionId> {
         let focused = self.focused()?;
         let parent = self.sessions.get(&focused)?.summary.parent_id;
-        let siblings = match parent {
+        let siblings: Vec<SessionId> = match parent {
             Some(parent) => self.sessions.children_of(parent),
             None => self.sessions.roots(),
-        };
+        }
+        .iter()
+        .copied()
+        .filter(|id| *id == focused || !self.is_audit(*id))
+        .collect();
         if siblings.len() < 2 {
             return None;
         }
         let position = siblings.iter().position(|id| *id == focused)?;
         let next = (position as isize + offset).rem_euclid(siblings.len() as isize) as usize;
         Some(siblings[next])
+    }
+
+    fn is_audit(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .is_some_and(|session| session.summary.purpose == qq_protocol::SessionPurpose::Audit)
     }
 
     /// Sessions with a tool call awaiting approval, in tree order.

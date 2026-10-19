@@ -378,7 +378,28 @@ impl App {
         let Some(overlay) = self.overlay.as_mut() else {
             return Effects::none();
         };
+        // A query edit resets the cursor to the first row; in the session
+        // picker, clearing the search lands on the session the highlighted
+        // row belongs to instead, so a found agent's session stays in view.
+        let searched_root = match &*overlay {
+            Overlay::Sessions { picker, .. } if key.code == KeyCode::Backspace => {
+                picker.current().map(|row| (row.id, row.root))
+            }
+            _ => None,
+        };
         let outcome = overlay.handle_key(key);
+        if let (Some((id, root)), Overlay::Sessions { picker, .. }) = (searched_root, &mut *overlay)
+            && picker.query.is_empty()
+        {
+            let target = picker
+                .items()
+                .iter()
+                .position(|row| row.id == id && row.listed)
+                .or_else(|| picker.items().iter().position(|row| row.id == root));
+            if let Some(index) = target {
+                picker.select_item(index);
+            }
+        }
         match (outcome, overlay) {
             (PickerOutcome::Ignored, _) => Effects::none(),
             (PickerOutcome::Changed, Overlay::Themes { picker, .. }) => {
@@ -1170,6 +1191,16 @@ impl App {
         else {
             return Effects::none();
         };
+        // Ctrl-A does not depend on a highlighted row: it works on an empty
+        // search result too.
+        if matches!(code, KeyCode::Char('a' | 'A')) {
+            if scope.is_some() {
+                return Effects::none();
+            }
+            *every_agent = !*every_agent;
+            self.refresh_session_picker();
+            return Effects::redraw(Redraw::Immediate);
+        }
         let Some((root, agent, agents)) = picker
             .current()
             .map(|row| (row.root, row.is_agent(), row.agents))
@@ -1177,10 +1208,6 @@ impl App {
             return Effects::none();
         };
         let changed = match code {
-            KeyCode::Char('a' | 'A') if scope.is_none() => {
-                *every_agent = !*every_agent;
-                true
-            }
             KeyCode::Tab => {
                 if agents > 0 && !expanded.remove(&root) {
                     expanded.insert(root);
@@ -1188,13 +1215,19 @@ impl App {
                 agents > 0
             }
             KeyCode::Right => agents > 0 && expanded.insert(root),
-            KeyCode::Left if agent && !*every_agent => {
-                expanded.remove(&root);
-                true
-            }
             KeyCode::Left if agent => {
-                // Every agent stays listed; move to the session row.
-                if let Some(index) = picker.items().iter().position(|row| row.id == root) {
+                // Always land on the session row: a search or `Ctrl-A` can
+                // keep the agent listed, so collapsing alone may not move
+                // the cursor, and a search may hide the session row, so
+                // `Left` from a found agent clears the search to show it.
+                if !*every_agent {
+                    expanded.remove(&root);
+                }
+                picker.query.clear();
+                self.refresh_session_picker();
+                if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay
+                    && let Some(index) = picker.items().iter().position(|row| row.id == root)
+                {
                     picker.select_item(index);
                 }
                 return Effects::redraw(Redraw::Immediate);

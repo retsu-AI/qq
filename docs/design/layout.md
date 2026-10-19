@@ -28,11 +28,12 @@ each pane is described in [`transcript.md`](./transcript.md) and
 | --- | --- | --- |
 | Compact | < 90 | One transcript column. When more than one session exists (agents do not count), a one-row strip above the composer rule. Composer grows to at most 4 rows. |
 | Regular | 90–159 | Transcript plus a sessions rail on the right (a quarter of the width, 20–28 columns) when more than one session exists or the rail is pinned. |
-| Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
+| Wide | 160–239 | Regular, plus an inspector pane between the transcript and the rail while it has something to show: the focused session's expanded tool detail and the workspace views render there so the prose column stays prose. |
 | Ultra | ≥ 240 | Wide; the tier is distinct, but the layout still shows one transcript pane. |
 
 The breakpoints are `view::layout::{REGULAR_MIN_WIDTH, WIDE_MIN_WIDTH,
-ULTRA_MIN_WIDTH}`. The inspector's `Auto` state shows it from Wide. The
+ULTRA_MIN_WIDTH}`. The inspector's `Auto` state shows it from Wide while it
+has content. The
 layout produces one transcript slot at every tier (`compute_layout` in
 `view/layout.rs`).
 
@@ -117,8 +118,12 @@ configuration; they reset per launch.
 The inspector (`view/workspace.rs::inspector_pane`) is the focused pane's
 detail column: 40–80 columns carved only from width past one full measure
 plus the rail, so opening it never narrows the transcript below its measure.
-`Auto` shows it at Wide and Ultra; `Shown` pins it at any width that can
-carve one (142 columns and up with no rail); `Hidden` keeps it off.
+`Auto` shows it at Wide and Ultra only while it has content (an expanded
+tool call of the focused pane's session, or a workspace view); with nothing
+to hold it gives its width back. `Shown` pins it at any width that can carve
+one (142 columns and up with no rail), empty or not; `Hidden` keeps it off.
+The layout learns whether it has content from
+`LayoutDemand::inspector_content`, computed once per frame.
 
 What it holds, top to bottom under a `│ INSPECTOR` header:
 
@@ -132,9 +137,9 @@ What it holds, top to bottom under a `│ INSPECTOR` header:
   row between calls. The transcript then shows only the summary rows: the
   expansion moved, it did not duplicate. Below Wide, or with the inspector
   hidden, the same body renders inline under the row.
-- When nothing is expanded and no view is up, a muted hint naming the
-  cursor chord (`Nothing expanded — Ctrl-Up selects a tool row, Enter
-  expands it`).
+- When nothing is expanded and no view is up (reachable only when pinned
+  with `Shown`), a muted hint naming the cursor chord (`Nothing expanded —
+  Ctrl-Up selects a tool row, Enter expands it`).
 
 Inline and inspector detail come from one path: `tools::tool_expanded_lines`
 (and `tool_summary_line`, `attention_body`, `changes_body`) take a width and
@@ -227,8 +232,11 @@ search hit on an agent prefixes its session's title (`Fan out › agent 1`).
 The picker opens with a focused agent's session expanded and the cursor on
 the agent. `/agents` is the same picker scoped to the focused tree with every
 agent listed. The cursor keeps its id across refreshes while that row is
-listed; when an agent row stops being listed the cursor moves to its session.
-Audit agents have no row.
+listed; when an agent row stops being listed the cursor moves to its
+session. Clearing a search lands on the highlighted agent's session (or the
+agent itself when it stays listed), not the first row. `Left` on an agent
+row clears any search and moves to its session; `Ctrl-A` works with an
+empty result. Audit agents have no row.
 
 ## Mouse
 
