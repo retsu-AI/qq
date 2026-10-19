@@ -10,7 +10,7 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP3 | Audiences defined once | Shipped (`332e8a62`) | #346 | |
 | AP4 | State and backends split out of `lib.rs` | Shipped (`b1c66be4`) | #347 | |
 | AP4b | Request-credential perf fixtures | Shipped (`2f585b0d`) | #351 | Baseline recorded (30 samples, MAD ≤ 12%); `fixture_version` 6 |
-| AP5 | One request-credential provider + bench | In review | `refactor/eng-1066-ap5-request-credentials` | xAI OAuth gains the epoch/expiry cache; warm requests no longer serialise |
+| AP5 | One request-credential provider + bench | Shipped (`9341fc49`) | #353 | xAI OAuth gains the epoch/expiry cache; warm requests no longer serialise |
 | AP6 | Header-set request credentials | In review | `refactor/eng-1066-ap6a-header-credentials`, `refactor/eng-1066-ap6b-body-shape` | Two PRs: header sets; explicit body shape and Google request-time auth |
 | AP7 | Table-driven built-in providers (ADR) | Planned | | |
 | AP8 | Provider-neutral OAuth grants | Planned | | |

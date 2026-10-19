@@ -161,9 +161,23 @@ async fn exercise(scenario: &'static str) {
             after: receipt.committed_through,
         })
         .unwrap();
-    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+    let observed = async {
+        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut audits = 0;
         loop {
-            let event = events.next().await.unwrap().unwrap();
+            let event = tokio::time::timeout_at(deadline, events.next())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{scenario}: independent bounded audit did not settle: {error}")
+                })
+                .unwrap()
+                .unwrap();
+            if let SessionEvent::GoalUpdated { goal } = &event.event
+                && goal.counters.audits > audits
+            {
+                audits = goal.counters.audits;
+                deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            }
             if let SessionEvent::GoalUpdated { goal } = event.event
                 && ((scenario == "confirm" && goal.status == qq_protocol::GoalStatus::Achieved)
                     || (scenario == "allowance"
@@ -180,11 +194,8 @@ async fn exercise(scenario: &'static str) {
                 break goal;
             }
         }
-    })
-    .await
-    .unwrap_or_else(|error| {
-        panic!("{scenario}: independent bounded audit did not settle: {error}")
-    });
+    }
+    .await;
     assert_eq!(
         observed.counters.audits,
         if scenario == "allowance" { 8 } else { 1 }

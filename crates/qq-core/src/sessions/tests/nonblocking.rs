@@ -846,8 +846,20 @@ fn a_long_delivered_answer_is_bounded_and_names_where_the_rest_is() {
 
 /// A parent whose run deadline passes while it waits for answers settles as
 /// budget-exhausted at the deadline, and its child is cancelled.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_deadline_ends_a_wait_for_answers() {
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
+    let (stop_watchdog, stopped) = std::sync::mpsc::channel();
+    let (expired, watchdog) = tokio::sync::oneshot::channel();
+    let watchdog_thread = std::thread::spawn(move || {
+        if stopped.recv_timeout(Duration::from_secs(10)).is_err() {
+            let _ = expired.send(());
+        }
+    });
     let mut delegation = delegation(
         vec![ParentTurn::Calls(vec![spawn("survey")])],
         "never released",
@@ -876,10 +888,18 @@ async fn the_deadline_ends_a_wait_for_answers() {
         panic!("expected a queued prompt");
     };
     // A duration bound is not a spend bound: the spawn still detaches.
-    tokio::time::timeout(Duration::from_secs(5), waiting)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::select! {
+        result = waiting => result.unwrap(),
+        _ = watchdog => {
+            keep_clock.abort();
+            panic!("parent did not reach the answer wait before the independent watchdog");
+        }
+    }
+    stop_watchdog.send(()).unwrap();
+    watchdog_thread.join().unwrap();
+    tokio::time::advance(Duration::from_millis(1_501)).await;
+    tokio::time::resume();
+    keep_clock.abort();
     let observed = tokio::time::timeout(
         Duration::from_secs(10),
         collect_until_run_finished(&mut delegation.harness.events, run),
