@@ -119,21 +119,23 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
             }
             used = group_width;
         } else {
+            // Broken by grapheme cluster, never inside one: a ZWJ emoji, a
+            // flag, or a conjunct moves to the next row whole.
+            let mut state = crate::selection::Clusters::default();
             for token in group {
                 let span = &spans[token.span];
-                for character in span.text[token.range.clone()].chars() {
-                    let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
-                    if used > 0 && used + character_width > width {
+                let text = &span.text[token.range.clone()];
+                for (range, cluster_width, starts) in crate::selection::clusters(text, &mut state) {
+                    if starts && used > 0 && used + cluster_width > width {
                         // Inside a word: no separator was dropped.
                         break_at(&mut output, crate::render::Wrap::Literal);
                         used = 0;
                     }
-                    let mut encoded = [0; 4];
                     output
                         .last_mut()
                         .expect("output starts populated")
-                        .push(&*character.encode_utf8(&mut encoded), span.style);
-                    used += character_width;
+                        .push(&text[range], span.style);
+                    used += cluster_width;
                 }
             }
         }
@@ -153,20 +155,21 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
 pub(crate) fn wrap_line_chars(line: Line, width: usize) -> Vec<Line> {
     let mut output = vec![Line::default()];
     let mut current_width = 0;
+    // Rows break between grapheme clusters only, across spans too.
+    let mut state = crate::selection::Clusters::default();
     for span in line.spans {
         let mut start = 0;
-        for (offset, character) in span.text.char_indices() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
-            if current_width > 0 && current_width + character_width > width {
+        for (range, cluster_width, starts) in crate::selection::clusters(&span.text, &mut state) {
+            if starts && current_width > 0 && current_width + cluster_width > width {
                 let row = output.last_mut().expect("output starts populated");
-                row.push(&span.text[start..offset], span.style);
+                row.push(&span.text[start..range.start], span.style);
                 // The same literal line continues: a copy joins with nothing.
                 row.wrapped = crate::render::Wrap::Literal;
                 output.push(Line::default());
                 current_width = 0;
-                start = offset;
+                start = range.start;
             }
-            current_width += character_width;
+            current_width += cluster_width;
         }
         output
             .last_mut()

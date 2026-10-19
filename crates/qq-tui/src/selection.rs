@@ -220,14 +220,17 @@ impl Selection {
     /// dropped. Indentation that is part of the text (code) is kept.
     /// Bounded by [`MAX_COPY_BYTES`].
     pub(crate) fn text(&self, lines: &[Line]) -> Copied {
-        // Each selected row's text and whether it soft-wraps into the next.
-        let mut rows: Vec<(String, crate::render::Wrap)> = self
+        // Each selected row's text, how it continues into the next, and
+        // whether it is a panel's padding (chrome and nothing else).
+        let mut rows: Vec<(String, crate::render::Wrap, bool)> = self
             .rows()
             .map(|(row, from, to)| {
                 let mut text = String::new();
                 let mut wrapped = crate::render::Wrap::Break;
+                let mut panel = false;
                 if let Some(line) = lines.get(row) {
                     wrapped = line.wrapped;
+                    panel = line.chrome > 0;
                     // Chrome cells start where the row's spans start.
                     let chrome_end = line.indent + line.chrome;
                     for (start, end, grapheme, _) in cells(line) {
@@ -245,22 +248,24 @@ impl Selection {
                 if wrapped != crate::render::Wrap::Literal {
                     text.truncate(text.trim_end().len());
                 }
-                (text, wrapped)
+                (text, wrapped, panel)
             })
             .collect();
-        while rows.last().is_some_and(|(row, _)| row.is_empty()) {
+        while rows.last().is_some_and(|(row, _, _)| row.is_empty()) {
             rows.pop();
         }
-        // Blank rows before the first text (a panel's padding row) too.
+        // A panel's padding rows before the first text are chrome; an
+        // ordinary blank row the drag began on (a break between blocks) is
+        // a line break the user selected and stays.
         let first_text = rows
             .iter()
-            .position(|(row, _)| !row.is_empty())
+            .position(|(row, _, panel)| !row.is_empty() || !panel)
             .unwrap_or(rows.len());
         rows.drain(..first_text);
         // A soft wrap joins with a space (the wrap dropped the space it broke
         // on); a real line break stays a newline.
         let mut text = String::new();
-        for (index, (row, _)) in rows.iter().enumerate() {
+        for (index, (row, _, _)) in rows.iter().enumerate() {
             if index > 0 {
                 match rows[index - 1].1 {
                     crate::render::Wrap::Break => text.push('\n'),
@@ -314,6 +319,52 @@ impl Selection {
 
 const ZWJ: char = '\u{200D}';
 
+/// The grapheme rules [`cells`] and the wrappers share, fed one character at
+/// a time: whether a character continues the cluster before it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Clusters {
+    /// The last character was a ZWJ or a virama: the next one joins.
+    joined: bool,
+    /// The last cluster is a lone regional indicator awaiting its pair.
+    open_flag: bool,
+}
+
+impl Clusters {
+    /// Feed `character`; `(continues, pairs)`: whether it continues the
+    /// cluster before it, and whether it is the second indicator of a flag.
+    pub(crate) fn step(&mut self, character: char) -> (bool, bool) {
+        let pairs = self.open_flag && is_regional_indicator(character);
+        let continues = continues_grapheme(character) || self.joined || pairs;
+        self.joined = character == ZWJ || is_virama(character);
+        self.open_flag = !continues && is_regional_indicator(character);
+        (continues, pairs)
+    }
+}
+
+/// `text` split into clusters, each `(bytes, width, starts)`: `starts` is
+/// false for a leading run that continues a cluster begun before `text`
+/// (`state` carries it across spans). Widths sum the characters' widths,
+/// as `text_width` measures the row.
+pub(crate) fn clusters(
+    text: &str,
+    state: &mut Clusters,
+) -> Vec<(std::ops::Range<usize>, usize, bool)> {
+    let mut out: Vec<(std::ops::Range<usize>, usize, bool)> = Vec::new();
+    for (offset, character) in text.char_indices() {
+        let width = UnicodeWidthChar::width(character).unwrap_or_default();
+        let end = offset + character.len_utf8();
+        let (continues, _) = state.step(character);
+        match out.last_mut() {
+            Some(last) if continues => {
+                last.0.end = end;
+                last.1 += width;
+            }
+            _ => out.push((offset..end, width, !continues)),
+        }
+    }
+    out
+}
+
 /// A flag is two regional indicators shown as one glyph.
 fn is_regional_indicator(character: char) -> bool {
     matches!(character, '\u{1F1E6}'..='\u{1F1FF}')
@@ -355,27 +406,21 @@ fn cells(line: &Line) -> Vec<(usize, usize, String, Style)> {
     let mut out: Vec<(usize, usize, String, Style)> = Vec::with_capacity(line.indent + 64);
     out.extend((0..line.indent).map(|column| (column, column + 1, " ".to_owned(), normal())));
     let mut column = line.indent;
-    let mut joined = false;
-    // Whether the last cell is a lone regional indicator awaiting its pair.
-    let mut open_flag = false;
+    let mut state = Clusters::default();
     for span in &line.spans {
         for character in span.text.chars() {
-            let pairs = open_flag && is_regional_indicator(character);
-            let attaches =
-                (continues_grapheme(character) || joined || pairs) && out.len() > line.indent;
+            let (continues, pairs) = state.step(character);
+            let attaches = continues && out.len() > line.indent;
             if attaches && let Some(last) = out.last_mut() {
                 last.2.push(character);
-                // Two one-column indicators show as one two-column flag.
-                if pairs && last.1 - last.0 < 2 {
+                // Two one-column indicators show as one two-column flag, and
+                // an emoji presentation selector draws its base two wide.
+                if (pairs || character == '\u{FE0F}') && last.1 - last.0 < 2 {
                     last.1 = last.0 + 2;
                     column = last.1;
                 }
-                joined = character == ZWJ || is_virama(character);
-                open_flag = false;
                 continue;
             }
-            joined = false;
-            open_flag = is_regional_indicator(character);
             let width = UnicodeWidthChar::width(character).unwrap_or_default();
             out.push((column, column + width, character.to_string(), span.style));
             column += width;
@@ -718,6 +763,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sixth_review_round_on_copy() {
+        // 1. A ZWJ emoji at the row edge moves to the next row whole, in
+        //    both wrappers: `ab` fills 2 of 3 cells, `👩‍💻` is 4 wide.
+        let emoji = "ab👩‍💻cd";
+        for rows in [
+            crate::view::wrap_line_for_test(Line::styled(emoji, normal()), 3),
+            crate::view::wrap_line_chars_for_test(Line::styled(emoji, normal()), 3),
+        ] {
+            let texts: Vec<String> = rows
+                .iter()
+                .map(|row| row.spans.iter().map(|span| span.text.as_str()).collect())
+                .collect();
+            assert!(
+                texts.iter().any(|row| row.contains("👩‍💻")),
+                "the cluster stays on one row: {texts:?}"
+            );
+        }
+        // A cluster split across two spans (`👩‍` styled apart from `💻`)
+        // does not break between them either.
+        let mut split = Line::styled("ab👩‍", normal());
+        split.push("💻cd", crate::render::accent());
+        for rows in [
+            crate::view::wrap_line_for_test(split.clone(), 4),
+            crate::view::wrap_line_chars_for_test(split.clone(), 4),
+        ] {
+            let texts: Vec<String> = rows
+                .iter()
+                .map(|row| row.spans.iter().map(|span| span.text.as_str()).collect())
+                .collect();
+            assert!(
+                texts.iter().any(|row| row.contains("👩‍💻")),
+                "the split cluster stays on one row: {texts:?}"
+            );
+        }
+
+        // 2. A drag beginning on a blank row between blocks keeps that line
+        //    break.
+        let lines = vec![
+            Line::styled("first", normal()),
+            Line::default(),
+            Line::styled("second", normal()),
+        ];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 3,
+        };
+        let mut selection = Selection::start(area, 0, 0, 1).unwrap();
+        selection.extend(9, 2);
+        assert_eq!(selection.text(&lines).text, "\nsecond");
+
+        // 3. `☀️` draws two cells: `x` after it is at column 2.
+        let lines = vec![Line::styled("☀️x", normal())];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 1,
+        };
+        let mut selection = Selection::start(area, 0, 2, 0).unwrap();
+        selection.extend(2, 0);
+        assert_eq!(selection.text(&lines).text, "x");
+    }
     #[test]
     fn a_copy_is_bounded() {
         let wide = Area {
