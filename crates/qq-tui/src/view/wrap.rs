@@ -117,6 +117,11 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     while output.len() > 1 && output.last().is_some_and(Line::is_empty) {
         output.pop();
     }
+    // Every row but the last continues the same source line.
+    let last = output.len().saturating_sub(1);
+    for row in &mut output[..last] {
+        row.wrapped = true;
+    }
     output
 }
 
@@ -269,6 +274,7 @@ mod tests {
     fn indent_lines_keeps_a_rows_own_margin_after_the_prefix() {
         let row = Line {
             indent: 3,
+            wrapped: false,
             spans: vec![Span {
                 text: "┃ body".to_owned(),
                 style: normal(),

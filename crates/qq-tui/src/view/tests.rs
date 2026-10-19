@@ -6074,6 +6074,24 @@ fn workspace_views_copy_from_the_inset_and_stale_rail_targets_are_ignored() {
 }
 
 #[test]
+fn a_release_at_another_cell_without_a_drag_selects_and_copies() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 9, row));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::CopySelection(_))),
+        "{effects:?}"
+    );
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

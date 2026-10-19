@@ -213,11 +213,14 @@ impl Selection {
     /// dropped. Indentation that is part of the text (code) is kept.
     /// Bounded by [`MAX_COPY_BYTES`].
     pub(crate) fn text(&self, lines: &[Line]) -> Copied {
-        let mut rows: Vec<String> = self
+        // Each selected row's text and whether it soft-wraps into the next.
+        let mut rows: Vec<(String, bool)> = self
             .rows()
             .map(|(row, from, to)| {
                 let mut text = String::new();
+                let mut wrapped = false;
                 if let Some(line) = lines.get(row) {
+                    wrapped = line.wrapped;
                     for (start, end, grapheme, _) in cells(line) {
                         if start < self.text_x {
                             continue;
@@ -228,26 +231,43 @@ impl Selection {
                     }
                 }
                 text.truncate(text.trim_end().len());
-                text
+                (text, wrapped)
             })
             .collect();
-        while rows.last().is_some_and(String::is_empty) {
+        while rows.last().is_some_and(|(row, _)| row.is_empty()) {
             rows.pop();
         }
-        let mut text = rows.join("\n");
+        // A soft wrap joins with a space (the wrap dropped the space it broke
+        // on); a real line break stays a newline.
+        let mut text = String::new();
+        for (index, (row, _)) in rows.iter().enumerate() {
+            if index > 0 {
+                text.push(if rows[index - 1].1 { ' ' } else { '\n' });
+            }
+            text.push_str(row);
+        }
         let mut truncated = false;
         if text.len() > MAX_COPY_BYTES {
             let mut cut = MAX_COPY_BYTES;
             while !text.is_char_boundary(cut) {
                 cut -= 1;
             }
-            // Back up to a grapheme boundary: never end on a joiner or before
-            // a mark that belongs to the last kept character.
+            // Back up to a grapheme boundary: never end on a joiner, before
+            // a mark that belongs to the last kept character, or between the
+            // two regional indicators of a flag.
             while cut > 0 {
                 let next = text[cut..].chars().next();
                 let prev = text[..cut].chars().next_back();
+                let odd_indicators = text[..cut]
+                    .chars()
+                    .rev()
+                    .take_while(|character| is_regional_indicator(*character))
+                    .count()
+                    % 2
+                    == 1;
                 let splits = next.is_some_and(continues_grapheme)
-                    || prev.is_some_and(|character| character == ZWJ);
+                    || prev.is_some_and(|character| character == ZWJ)
+                    || (odd_indicators && next.is_some_and(is_regional_indicator));
                 if !splits {
                     break;
                 }
@@ -270,6 +290,11 @@ impl Selection {
 
 const ZWJ: char = '\u{200D}';
 
+/// A flag is two regional indicators shown as one glyph.
+fn is_regional_indicator(character: char) -> bool {
+    matches!(character, '\u{1F1E6}'..='\u{1F1FF}')
+}
+
 /// Whether `character` continues the grapheme before it rather than starting
 /// one: a zero-width mark, a variation selector, an emoji skin-tone modifier,
 /// or a ZWJ (and so the character a ZWJ joins). Covers what a transcript
@@ -289,15 +314,26 @@ fn cells(line: &Line) -> Vec<(usize, usize, String, Style)> {
     out.extend((0..line.indent).map(|column| (column, column + 1, " ".to_owned(), normal())));
     let mut column = line.indent;
     let mut joined = false;
+    // Whether the last cell is a lone regional indicator awaiting its pair.
+    let mut open_flag = false;
     for span in &line.spans {
         for character in span.text.chars() {
-            let attaches = (continues_grapheme(character) || joined) && out.len() > line.indent;
+            let pairs = open_flag && is_regional_indicator(character);
+            let attaches =
+                (continues_grapheme(character) || joined || pairs) && out.len() > line.indent;
             if attaches && let Some(last) = out.last_mut() {
                 last.2.push(character);
+                // Two one-column indicators show as one two-column flag.
+                if pairs && last.1 - last.0 < 2 {
+                    last.1 = last.0 + 2;
+                    column = last.1;
+                }
                 joined = character == ZWJ;
+                open_flag = false;
                 continue;
             }
             joined = false;
+            open_flag = is_regional_indicator(character);
             let width = UnicodeWidthChar::width(character).unwrap_or_default();
             out.push((column, column + width, character.to_string(), span.style));
             column += width;
@@ -513,6 +549,38 @@ mod tests {
         let last = copied.text.chars().next_back().unwrap();
         assert_ne!(last, ZWJ, "never ends on a joiner");
         assert!(!continues_grapheme(last) || last == '💻');
+    }
+
+    #[test]
+    fn flags_are_one_glyph_and_soft_wraps_copy_as_spaces() {
+        let lines = vec![Line::styled("a🇺🇸b", normal())];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 2,
+        };
+        // A drag over the flag's second cell copies the whole flag.
+        let mut selection = Selection::start(area, 0, 2, 0).unwrap();
+        selection.extend(3, 0);
+        assert_eq!(selection.text(&lines).text, "🇺🇸b");
+        // A paragraph wrapped over two rows copies as one line; a real
+        // break between rows stays a newline.
+        let mut first = Line::styled("soft", normal());
+        first.wrapped = true;
+        let lines = vec![first, Line::styled("wrap", normal())];
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(9, 1);
+        assert_eq!(selection.text(&lines).text, "soft wrap");
+        let lines = vec![
+            Line::styled("hard", normal()),
+            Line::styled("break", normal()),
+        ];
+        assert_eq!(selection.text(&lines).text, "hard\nbreak");
+        // The prose wrapper marks every row but the last.
+        let rows = crate::view::wrap_line_for_test(Line::styled("one two three", normal()), 5);
+        assert!(rows[..rows.len() - 1].iter().all(|row| row.wrapped));
+        assert!(!rows.last().unwrap().wrapped);
     }
 
     #[test]

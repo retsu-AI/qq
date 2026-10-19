@@ -615,7 +615,9 @@ pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensi
         targets.push(match row {
             RailRow::Session(entry) | RailRow::Detail(entry) => Some(entry.id),
             RailRow::Agent(id) | RailRow::AgentDetail(id) => Some(id),
-            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(_) => None,
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(..) => {
+                None
+            }
         });
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),

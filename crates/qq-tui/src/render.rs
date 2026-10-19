@@ -105,12 +105,16 @@ pub(crate) struct Line {
     /// shift free for rows shared with the width-keyed caches.
     pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
+    /// The row continues on the next row: a prose wrap, not a line break.
+    /// A copy joins it to the next row with a space instead of a newline.
+    pub(crate) wrapped: bool,
 }
 
 impl Line {
     pub(crate) fn styled(text: impl Into<String>, style: Style) -> Self {
         Self {
             indent: 0,
+            wrapped: false,
             spans: vec![Span {
                 text: text.into(),
                 style,

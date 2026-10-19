@@ -1608,18 +1608,25 @@ impl App {
                 }
                 None => Effects::none(),
             },
-            MouseEventKind::Up(MouseButton::Left) => match self.selection {
-                Some(selection) if selection.is_empty() => {
-                    self.selection = None;
-                    Effects::redraw(Redraw::Immediate)
+            MouseEventKind::Up(MouseButton::Left) => {
+                // A quick drag can arrive as a press then a release at another
+                // cell with no drag event between: the release is the head.
+                if let Some(selection) = &mut self.selection {
+                    selection.extend(column, row);
                 }
-                Some(selection) => {
-                    let mut effects = Effects::redraw(Redraw::Immediate);
-                    effects.push(Effect::CopySelection(selection));
-                    effects
+                match self.selection {
+                    Some(selection) if selection.is_empty() => {
+                        self.selection = None;
+                        Effects::redraw(Redraw::Immediate)
+                    }
+                    Some(selection) => {
+                        let mut effects = Effects::redraw(Redraw::Immediate);
+                        effects.push(Effect::CopySelection(selection));
+                        effects
+                    }
+                    None => Effects::none(),
                 }
-                None => Effects::none(),
-            },
+            }
             _ => Effects::none(),
         }
     }

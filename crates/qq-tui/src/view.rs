@@ -54,6 +54,8 @@ use workspace::*;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;
+#[cfg(test)]
+pub(crate) use wrap::wrap_line as wrap_line_for_test;
 use wrap::{
     bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line, wrap_line,
     wrap_line_chars,
@@ -456,6 +458,7 @@ impl FrameRenderer {
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
+                    wrapped: first.wrapped,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
                 };
                 row.spans.extend(first.spans);
