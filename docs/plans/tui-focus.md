@@ -5,7 +5,8 @@
 [`progress/tui-focus.md`](progress/tui-focus.md).
 **Owner:** TUI lane.
 **Owned paths:** `crates/qq-tui/src/**`, `crates/qq-tui/tests/**`,
-`crates/qq-tui/benches/render.rs`, `docs/design/layout.md`,
+`crates/qq-tui/benches/render.rs`, `crates/qq-tui/Cargo.toml` (F6 only: the
+`base64` workspace dependency), `docs/design/layout.md`,
 `docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`.
 `commands.rs`, `input.rs` and `terminal.rs` are shared with other lanes; this
 plan touches them only for the rows and effects named below.
@@ -79,20 +80,23 @@ Stacked PRs from one worktree, each on the previous branch, in this order.
 
 One O(sessions) pass replaces `rail_entries`. For each root session it
 yields its own state, the state rolled up over its agents (most urgent of
-NEEDS YOU > WORKING > the rest), agent counts (total, working, waiting), the
-agents that need the user (bounded), unread, a live flag, and spend. Audit
-agents are skipped everywhere.
+NEEDS YOU > WORKING > the rest), agent counts (total, working), the agents
+waiting on an approval, unread, a live flag, and spend. Spend is the
+session's **inclusive** accounting (`SessionSummary.accounting.inclusive`,
+falling back to the compatibility alias), so cost incurred by hidden agents,
+audit agents included, stays on the session's row. Audit agents and their
+subtrees are never listed or counted as agents.
 
 Rail rows:
 
 ```
 │ NEEDS YOU  1
-│ ◇ Session 0       ⑂4
-│   ↳ ◇ Deploy helper
-│       approve run
+│ ○ Session 0      ↳4 ◐1
+│ ↳ ◇ Deploy helper
+│     ◇ approve run
 │
 │ WORKING  1
-│ ◐ Write tests  ⑂5 ◐3
+│ ◐ Write tests    ↳5 ◐3
 │    compacting context
 │
 │ RECENT  4
@@ -104,20 +108,27 @@ Rail rows:
   groups; a finished-but-unseen or failed-and-unseen session is already in
   NEEDS YOU, and RECENT rows keep their state glyphs (`●` seen finish, `◌`
   stopped, `○` never run) so done and idle stay distinguishable.
-- One row per session with an `⑂N` agent badge (and `◐N` while any work).
-- Agents that need the user get one `↳` row under their session, whatever
-  group it is in. The focused session's agents are listed under it, capped at
-  `FOCUSED_AGENT_ROWS` (6), then `+N more  /agents`.
-- A focused agent shows its session expanded around it, so the focused row
-  is always on the rail.
+- One row per session with a `↳N` agent badge (and `◐N` while any work).
+- Agent rows are bounded per session. Under an unfocused session, at most
+  `WAITING_AGENT_ROWS` (3) waiting agents get a `↳` row (each with its
+  approval status row), then `+N waiting  Ctrl-G`. Under the focused session,
+  at most `FOCUSED_AGENT_ROWS` (6) agent rows: the focused agent first, then
+  waiting agents, then quiet agents in tree order; the rest collapse to
+  `+N more  /agents`. A focused agent is therefore always on the rail when
+  the rail is shown.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
+- With one session the rail stays hidden under `Auto` (pinning still shows
+  it). The focused agent is then named by the top-row breadcrumb, and a
+  waiting agent by the composer-rule notice (F4–F5 keeps that notice
+  whenever the rail is not on screen), so neither is ever invisible.
 
-Acceptance: unit tests for the roll-up (state rises, counts, audit skipped,
-strip and rail agree); view tests for the rail shape, cap and focused agent;
-a `fanout` golden scene (3 sessions × 20 agents) at the five golden sizes;
-`sessions_200_with_sidebar` and `children_20_with_sidebar` benches within 5 %
-of baseline or faster.
+Acceptance: unit tests for the roll-up (state rises, counts, inclusive cost
+with a hidden agent's spend, audit skipped, strip and rail agree); view
+tests for the rail shape, both caps, ordering, and the focused agent past the
+cap; a `fanout` golden scene (sessions with many agents, several waiting) at
+the five golden sizes; `sessions_200_with_sidebar` and
+`children_20_with_sidebar` benches within 5 % of baseline or faster.
 
 ### F3: picker
 
@@ -128,24 +139,36 @@ of baseline or faster.
   session's title as a muted prefix (`Session 0 › Deploy helper`).
 - `Ctrl-A` toggles showing every agent (the previous behavior).
 - `/agents` keeps opening the focused tree fully expanded.
-- The cursor stays on the same id across tree changes.
+- The cursor stays on the same id across tree changes while that row is
+  listed. When the highlighted agent's row stops being listed (the query is
+  cleared, `Ctrl-A` is toggled off, or its session collapses), the cursor
+  moves to that agent's session row; when the session itself is gone, to
+  the nearest remaining row.
 
 Acceptance: app tests for default rows, expand/collapse, search hits,
-`Ctrl-A`, focus-preserving refresh; existing `/agents` tests unchanged.
+`Ctrl-A`, focus-preserving refresh, and the agent-to-session cursor
+fallback; existing `/agents` tests unchanged.
 
 ### F4–F5: one place per fact, panes on demand
 
-- The composer-rule notice for another session's approval appears only when
-  no rail or strip shows it (Compact with no strip, or the rail hidden).
-- `related sessions` becomes one muted summary row: `⑂ 3 agents · ◐ 2 · ◇ 1
+- The composer-rule notice naming another session's (or agent's) waiting
+  approval is shown exactly when the rail is **not** on screen: Compact, a
+  single session under `Auto`, or the rail hidden. The strip's `◇ N` is an
+  anonymous count, a pointer and not a naming, so the named notice stays
+  beside it. When the rail is on screen its `↳ ◇` row names the approval and
+  the rule omits the notice (the in-place `Alt-A`/`Alt-D` chords move to the
+  rule's hint side while any approval waits).
+- `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2 · ◇ 1
   /agents`.
 - Inspector `Auto` shows only when it has content (an expanded call or a
   workspace view); `Shown` still pins it.
 - The top row omits a known zero cost.
 
-Acceptance: view tests that each approval is named once per frame outside
-its own transcript; inspector `Auto` hidden with nothing expanded and shown
-with an expansion; goldens moved deliberately.
+Acceptance: view tests that each waiting approval is *named* exactly once per
+frame outside its own transcript (rail row or rule notice, never both) at
+Compact, Regular with the rail shown, and Regular with the rail hidden;
+inspector `Auto` hidden with nothing expanded and shown with an expansion;
+goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
 
@@ -177,9 +200,11 @@ the selection style.
 
 ## Non-goals
 
-No new dependencies (OSC 52 base64 uses the workspace `base64` crate already
-in the graph), no protocol change, no persisted layout preference, no
-split transcripts (L4), no word or line double-click selection.
+No new crates in `Cargo.lock`: F6 adds `base64.workspace = true` to
+`crates/qq-tui/Cargo.toml` for OSC 52 encoding (the workspace already pins
+`base64` 0.22 and the root package uses it, so the build graph is unchanged).
+No protocol change, no persisted layout preference, no split transcripts
+(L4), no word or line double-click selection.
 
 ## Gates
 
