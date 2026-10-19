@@ -5436,6 +5436,44 @@ fn an_off_rail_failure_is_counted_beside_an_off_rail_approval() {
 }
 
 #[test]
+fn the_approval_chords_survive_a_long_status_and_delegate_holds_are_not_answerable() {
+    let (mut app, [_, child, _, parent, _]) = app_with_every_rail_group();
+    // The focused session carries a goal: `goal · run 4/200 · 23h left ·
+    // next 0s` plus `◐ working` fills the left at this width, and every
+    // waiting approval is on the rail, so only the chords keep the rule
+    // actionable.
+    let mut goal = fixtures::goal_snapshot(parent);
+    goal.counters.runs = 4;
+    app.sessions.get_mut(&parent).unwrap().goal = Some(goal);
+    app.sessions.get_mut(&parent).unwrap().summary.status = SessionStatus::Running;
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 70, Some(&[child]))]).join("");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("^G jump"),
+        "{rule}"
+    );
+    assert!(rule.chars().count() <= 70, "{rule}");
+    // A delegate-owned hold is neither named nor answered by Alt-A.
+    let held: Vec<_> = app.sessions[&child]
+        .live
+        .awaiting_approval
+        .iter()
+        .copied()
+        .collect();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .with_delegate
+        .extend(held);
+    assert!(app.sessions_awaiting_approval().is_empty());
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::ALT,
+    )));
+    assert!(effects.into_requests().is_empty(), "nothing approved");
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();

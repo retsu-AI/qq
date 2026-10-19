@@ -937,7 +937,12 @@ impl TranscriptCache {
                     .count();
                 let waiting = children
                     .iter()
-                    .filter(|child| !app.sessions[*child].live.awaiting_approval.is_empty())
+                    .filter(|child| {
+                        // Only approvals the human is asked for; a
+                        // delegate-owned hold is still work.
+                        let live = &app.sessions[*child].live;
+                        live.awaiting_approval.len() > live.with_delegate.len()
+                    })
                     .count();
                 let mut line = Line::styled(
                     format!("  ↳ {}", count_noun(children.len(), "agent", "agents")),

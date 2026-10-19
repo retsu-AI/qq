@@ -2747,13 +2747,15 @@ impl App {
     /// one, without moving focus. The banner names that session; this is
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
-        let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
-            Some(*id) != self.view().transcript()
-                && !self.sessions[id].live.awaiting_approval.is_empty()
-        }) else {
+        let Some(session_id) = self
+            .sessions_needing_attention()
+            .into_iter()
+            .find(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
+        else {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
+        let with_delegate = &self.sessions[&session_id].live.with_delegate;
         let Some(call) = self
             .sessions
             .get(&session_id)
@@ -2761,6 +2763,7 @@ impl App {
             .and_then(|calls| {
                 calls.iter().find(|call| {
                     call.state == ToolCallState::AwaitingApproval
+                        && !with_delegate.contains(&call.id)
                         && !self.answered_approvals.contains(&call.id)
                 })
             })
@@ -3245,15 +3248,39 @@ impl App {
             .is_some_and(|session| session.summary.purpose == qq_protocol::SessionPurpose::Audit)
     }
 
-    /// Sessions with a tool call awaiting approval, in tree order.
+    /// Sessions with a tool call awaiting the human's approval, in tree
+    /// order. Holds an approval delegate still owns are excluded: the
+    /// human is not asked yet, so nothing names, answers, or jumps to them.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions.awaiting_approval()
+        self.sessions
+            .awaiting_approval()
+            .into_iter()
+            .filter(|id| self.human_waiting(*id))
+            .collect()
+    }
+
+    fn human_waiting(&self, id: SessionId) -> bool {
+        self.sessions.get(&id).is_some_and(|session| {
+            // `with_delegate` is a subset of `awaiting_approval`.
+            session.live.awaiting_approval.len() > session.live.with_delegate.len()
+        })
     }
 
     /// Sessions that need the user, most urgent first and then in tree
-    /// order: approvals, then unread failures, then unread finishes.
+    /// order: approvals the human is asked for, then unread failures, then
+    /// unread finishes. A session whose only hold a delegate owns is not
+    /// listed until it escalates.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
-        self.sessions.needing_attention()
+        self.sessions
+            .needing_attention()
+            .into_iter()
+            .filter(|id| {
+                self.human_waiting(*id)
+                    || self.sessions.get(id).is_some_and(|session| {
+                        !matches!(session.need(), Some(qq_client::state::Need::Approval))
+                    })
+            })
+            .collect()
     }
 
     /// The next session (after the focused one, wrapping) that needs the
