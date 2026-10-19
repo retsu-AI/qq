@@ -38,6 +38,11 @@ export const api = {
   gitCommit: (projectId: string, message: string, push: boolean) =>
     invoke<string>("git_commit", { projectId, message, push }),
   gitPush: (projectId: string) => invoke<void>("git_push", { projectId }),
+  /** Resolves to the new worktree's folder. */
+  createWorktree: (projectId: string, branch: string, base: string | null) =>
+    invoke<string>("create_worktree", { projectId, branch, base }),
+  removeWorktree: (projectId: string, force: boolean) =>
+    invoke<void>("remove_worktree", { projectId, force }),
   /** Pushes and opens a pull request; resolves to its URL. */
   gitCreatePr: (projectId: string, title: string, body: string, draft: boolean) =>
     invoke<string>("git_create_pr", { projectId, title, body, draft }),

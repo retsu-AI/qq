@@ -97,6 +97,8 @@ lockfile remain independent of desktop dependencies.
   whose popup Windows draws outside the app theme.
 - `git.rs` runs `git` and `gh` directly (no shell), with prompts disabled,
   a deadline, no console window and one commit/push/PR at a time;
+  Worktrees are detected from a folder's `.git` file (no process) and created
+  beside the repository with `git worktree add`.
   `editor.rs` finds an editor on `PATH` and only opens paths inside the
   project. Side questions and the `/` menu use the shared protocol
   (`SubmitSideQuestion`, capability skill entries); nothing is reimplemented.
