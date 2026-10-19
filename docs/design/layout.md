@@ -18,9 +18,11 @@ each pane is described in [`transcript.md`](./transcript.md) and
    of prose never stretches past a readable length. The pane's remaining width
    is margin.
 4. **The layout is a pure function.** `view::layout::compute_layout(width,
-   height, chrome_rows, prefs, sessions)` runs once per frame with no access
-   to the model beyond the session count, and every pane paints inside the
-   `Rect` it is handed.
+   height, chrome_rows, prefs, demand)` runs once per frame over values
+   only, with no access to the model: `LayoutDemand` carries what the
+   model asks of the layout (how many sessions the rail would list, and
+   whether the inspector has content), derived before the call. Every pane
+   paints inside the `Rect` it is handed.
 
 ## Tiers
 

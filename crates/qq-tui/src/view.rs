@@ -383,7 +383,11 @@ impl FrameRenderer {
         // in the transcript on screen, but only while the card is inside the
         // viewport: the card's `↳ title` row must be among the body rows
         // drawn. Such a child is named once: the rule does not repeat it and
-        // the rail does not list it again under the focused session.
+        // the rail does not list it again under the focused session. The
+        // card's title is a span of its own after the `↳` prefix
+        // (`session_line` styles it apart from the glyph and the badges), so
+        // it is matched whole: a child titled `API` is not carded by a drawn
+        // `API tests` card.
         let mut carded: Vec<SessionId> = Vec::new();
         if let Some(shown) = app.view().transcript()
             && let Some(calls) = app
@@ -391,19 +395,25 @@ impl FrameRenderer {
                 .get(&shown)
                 .and_then(|session| session.tool_calls.as_deref())
         {
-            let drawn: Vec<String> = body
+            let card_spans: Vec<&str> = body
                 .iter()
-                .map(|line| line.spans.iter().map(|span| span.text.as_str()).collect())
+                .filter_map(|line| {
+                    let arrow = line.spans.iter().position(|span| span.text.contains('↳'))?;
+                    Some(
+                        line.spans[arrow + 1..]
+                            .iter()
+                            .map(|span| span.text.as_str()),
+                    )
+                })
+                .flatten()
                 .collect();
             carded.extend(
                 calls
                     .iter()
                     .filter_map(|call| app.sessions.child_spawned_by(call.id))
                     .filter(|child| {
-                        let title = &app.sessions[child].summary.title;
-                        drawn
-                            .iter()
-                            .any(|row| row.contains('↳') && row.contains(title.as_str()))
+                        let title = app.sessions[child].summary.title.as_str();
+                        card_spans.contains(&title)
                     }),
             );
         }
