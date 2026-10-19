@@ -7,6 +7,8 @@ import {
   CircleAlert,
   FolderOpen,
   FolderPlus,
+  GitBranch,
+  GitBranchPlus,
   KeyRound,
   Loader2,
   MoreHorizontal,
@@ -22,6 +24,7 @@ import {
   activate,
   closeProject,
   pickProject,
+  removeWorktree,
   showProviders,
 } from "../lib/store";
 import { relativeTime } from "../lib/format";
@@ -39,6 +42,8 @@ import {
 } from "../lib/session-preferences";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { Dropdown } from "./Dropdown";
+import { toast } from "../lib/toast";
+import { showWorktreeDialog } from "../lib/worktree-dialog";
 
 interface Props {
   app: {
@@ -281,6 +286,20 @@ function ProjectSwitcher({
   const waiting = open
     .filter((p) => p.id !== activeId)
     .reduce((total, p) => total + needsYou(p.id), 0);
+  const [removing, setRemoving] = useState(false);
+  // Worktrees list right after their repository, under its name.
+  const repoOf = (p: ProjectInfo) => (p.worktree?.main_name ?? p.name).toLowerCase();
+  const sorted = [...open].sort(
+    (a, b) =>
+      repoOf(a).localeCompare(repoOf(b)) ||
+      Number(Boolean(a.worktree)) - Number(Boolean(b.worktree)) ||
+      a.name.localeCompare(b.name),
+  );
+  const repoCounts = new Map<string, number>();
+  for (const p of open) repoCounts.set(repoOf(p), (repoCounts.get(repoOf(p)) ?? 0) + 1);
+  const running = active
+    ? (projects[active.id]?.sessions.some((s) => s.status !== "idle") ?? false)
+    : false;
 
   return (
     <div className="px-2 pb-2">
@@ -292,12 +311,21 @@ function ProjectSwitcher({
         bare
         rootClassName="w-full"
         className="group/project flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-hover aria-expanded:bg-hover"
-        options={open.map((p) => {
+        options={sorted.map((p) => {
           const needs = needsYou(p.id);
           return {
             value: p.id,
-            label: p.name,
-            hint: needs > 0 ? `${needs} need${needs === 1 ? "s" : ""} you` : p.path,
+            label: p.worktree ? (p.worktree.branch ?? p.name) : p.name,
+            hint:
+              needs > 0
+                ? `${needs} need${needs === 1 ? "s" : ""} you`
+                : p.worktree
+                  ? `Worktree · ${p.path}`
+                  : p.path,
+            group:
+              (repoCounts.get(repoOf(p)) ?? 0) > 1
+                ? (p.worktree?.main_name ?? p.name)
+                : undefined,
           };
         })}
         onChange={activate}
@@ -310,6 +338,25 @@ function ProjectSwitcher({
           ...(active
             ? [
                 {
+                  label: "New worktree session…",
+                  icon: <GitBranchPlus className="h-3.5 w-3.5" />,
+                  onSelect: () => showWorktreeDialog(active.id),
+                },
+              ]
+            : []),
+          ...(active?.worktree
+            ? [
+                {
+                  label: "Remove this worktree…",
+                  icon: <Trash2 className="h-3.5 w-3.5" />,
+                  danger: true,
+                  onSelect: () => setRemoving(true),
+                },
+              ]
+            : []),
+          ...(active
+            ? [
+                {
                   label: `Close ${active.name}`,
                   icon: <X className="h-3.5 w-3.5" />,
                   onSelect: () => void closeProject(active.id),
@@ -319,15 +366,21 @@ function ProjectSwitcher({
         ]}
       >
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-[13px] font-semibold uppercase text-accent">
-          {active?.name.slice(0, 1) ?? <FolderOpen className="h-4 w-4" />}
+          {active?.worktree ? (
+            <GitBranch className="h-4 w-4" />
+          ) : (
+            (active?.name.slice(0, 1) ?? <FolderOpen className="h-4 w-4" />)
+          )}
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] font-medium">
-            {active?.name ?? "No project"}
+            {active?.worktree?.branch ?? active?.name ?? "No project"}
           </span>
           {active && (
             <span className="block truncate text-[11px] text-faint">
-              {displayPath(active.path)}
+              {active.worktree
+                ? `worktree of ${active.worktree.main_name}`
+                : displayPath(active.path)}
             </span>
           )}
         </span>
@@ -338,7 +391,61 @@ function ProjectSwitcher({
         )}
         <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-faint group-hover/project:text-muted" />
       </Dropdown>
+      {removing && active?.worktree && (
+        <RemoveWorktreeDialog
+          project={active}
+          running={running}
+          close={() => setRemoving(false)}
+        />
+      )}
     </div>
+  );
+}
+
+/** Deletes a worktree's folder after confirmation; its branch is kept. */
+function RemoveWorktreeDialog({
+  project,
+  running,
+  close,
+}: {
+  project: ProjectInfo;
+  running: boolean;
+  close: () => void;
+}) {
+  const [force, setForce] = useState(false);
+  const branch = project.worktree?.branch;
+  return (
+    <ConfirmDialog
+      title="Remove this worktree?"
+      confirmLabel={force ? "Discard changes and remove" : "Remove worktree"}
+      onConfirm={async () => {
+        if (running)
+          throw new Error("A session here is still running. Stop it first.");
+        await removeWorktree(project.id, force);
+        toast(`Removed the ${branch ?? project.name} worktree`);
+      }}
+      close={close}
+    >
+      <p>
+        Deletes <code className="font-mono text-fg">{project.path}</code> and
+        closes it here.
+        {branch ? (
+          <>
+            {" "}The branch <code className="font-mono text-fg">{branch}</code>{" "}
+            and its commits stay in the repository.
+          </>
+        ) : null}
+      </p>
+      <label className="mt-3 flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={force}
+          onChange={(event) => setForce(event.target.checked)}
+          className="accent-[var(--danger)]"
+        />
+        Also discard uncommitted changes (otherwise Git refuses if there are any)
+      </label>
+    </ConfirmDialog>
   );
 }
 

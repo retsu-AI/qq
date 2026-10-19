@@ -312,9 +312,224 @@ pub async fn create_pr(
         .to_owned())
 }
 
+/// A linked worktree: a second checkout of a repository on its own branch,
+/// so several agents can work on one repository without colliding.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(TS))]
+pub struct WorktreeDto {
+    /// Checked-out branch; null when detached.
+    pub branch: Option<String>,
+    /// The main checkout this worktree belongs to.
+    pub main_path: String,
+    pub main_name: String,
+}
+
+/// The worktree a folder is, read from its `.git` file without running git:
+/// a linked worktree's `.git` is a file naming `<main>/.git/worktrees/<id>`.
+pub fn worktree_of(path: &Path) -> Option<WorktreeDto> {
+    let pointer = std::fs::read_to_string(path.join(".git")).ok()?;
+    let gitdir = pointer
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir: "))?;
+    let gitdir = gitdir.trim().replace('\\', "/");
+    let (main, _) = gitdir.rsplit_once("/.git/worktrees/")?;
+    let head = std::fs::read_to_string(Path::new(&gitdir).join("HEAD")).unwrap_or_default();
+    let main_path =
+        crate::view::display_path(Path::new(main)).replace('/', std::path::MAIN_SEPARATOR_STR);
+    Some(WorktreeDto {
+        branch: head
+            .trim()
+            .strip_prefix("ref: refs/heads/")
+            .map(str::to_owned),
+        main_name: crate::view::display_name(Path::new(&main_path)),
+        main_path,
+    })
+}
+
+/// A folder name for `branch`: path separators and anything unusual become `-`.
+pub fn worktree_folder(branch: &str) -> String {
+    let slug: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches(|c| c == '-' || c == '.').to_owned();
+    if slug.is_empty() {
+        "worktree".to_owned()
+    } else {
+        slug
+    }
+}
+
+/// Creates a worktree for `branch` beside the repository, in
+/// `<repo>.worktrees/<branch>`, so the main checkout's tools never see it.
+/// A new branch starts at `base` (the main checkout's HEAD when absent); an
+/// existing branch is checked out as it is. Returns the new folder.
+pub async fn add_worktree(
+    root: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<std::path::PathBuf, GitError> {
+    let branch = branch.trim();
+    let valid = run(
+        "git",
+        "check-ref-format",
+        &["check-ref-format", "--branch", branch],
+        root,
+        LOCAL_DEADLINE,
+    )
+    .await?;
+    if branch.is_empty() || !valid.ok || branch.starts_with('-') {
+        return Err(GitError::Invalid("that is not a valid branch name"));
+    }
+    // Worktrees of a worktree still belong beside the main checkout.
+    let main = worktree_of(root)
+        .map(|worktree| std::path::PathBuf::from(worktree.main_path))
+        .unwrap_or_else(|| root.to_path_buf());
+    let name = main
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or(GitError::Invalid("the repository has no folder name"))?;
+    let parent = main
+        .parent()
+        .ok_or(GitError::Invalid("the repository has no parent folder"))?;
+    let folder = parent
+        .join(format!("{name}.worktrees"))
+        .join(worktree_folder(branch));
+    if folder.exists() {
+        return Err(GitError::Failed(format!(
+            "{} already exists; choose another branch name",
+            crate::view::display_path(&folder)
+        )));
+    }
+    let folder_arg = crate::view::display_path(&folder);
+    let exists = run(
+        "git",
+        "rev-parse",
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        root,
+        LOCAL_DEADLINE,
+    )
+    .await?
+    .ok;
+    let base = base
+        .map(str::trim)
+        .filter(|base| !base.is_empty())
+        .unwrap_or("HEAD");
+    if base.starts_with('-') {
+        return Err(GitError::Invalid("that is not a valid base"));
+    }
+    let args: Vec<&str> = if exists {
+        vec!["worktree", "add", &folder_arg, branch]
+    } else {
+        vec!["worktree", "add", "-b", branch, &folder_arg, base]
+    };
+    let output = run("git", "worktree add", &args, root, NETWORK_DEADLINE).await?;
+    if !output.ok {
+        return Err(failure("git worktree add", &output));
+    }
+    Ok(folder)
+}
+
+/// Removes the linked worktree at `path`; its branch is kept. Without
+/// `force`, git refuses when the worktree has uncommitted changes.
+pub async fn remove_worktree(path: &Path, force: bool) -> Result<(), GitError> {
+    let worktree =
+        worktree_of(path).ok_or(GitError::Invalid("this project is not a linked worktree"))?;
+    let main = std::path::PathBuf::from(&worktree.main_path);
+    let target = crate::view::display_path(path);
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(&target);
+    let output = run("git", "worktree remove", &args, &main, LOCAL_DEADLINE).await?;
+    if output.ok {
+        Ok(())
+    } else {
+        Err(failure("git worktree remove", &output))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_folders_are_safe_names() {
+        assert_eq!(worktree_folder("qq/fix-login"), "qq-fix-login");
+        assert_eq!(worktree_folder("feat/ä b"), "feat---b");
+        assert_eq!(worktree_folder("../x"), "x");
+        assert_eq!(worktree_folder("///"), "worktree");
+    }
+
+    #[tokio::test]
+    async fn worktrees_are_created_beside_the_repository_and_removed() {
+        let base = std::env::temp_dir().join(format!("qq-git-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("demo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["config", "user.name", "QQ Test"],
+            &["config", "user.email", "qq@example.invalid"],
+            &["config", "commit.gpgsign", "false"],
+        ] {
+            assert!(
+                run("git", "setup", args, &repo, LOCAL_DEADLINE)
+                    .await
+                    .unwrap()
+                    .ok
+            );
+        }
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        commit(&repo, "init").await.unwrap();
+        assert_eq!(worktree_of(&repo), None);
+
+        let folder = add_worktree(&repo, "qq/try-it", None).await.unwrap();
+        assert_eq!(folder, base.join("demo.worktrees").join("qq-try-it"));
+        let worktree = worktree_of(&folder).unwrap();
+        assert_eq!(worktree.branch.as_deref(), Some("qq/try-it"));
+        assert_eq!(worktree.main_name, "demo");
+        assert_eq!(
+            status(&folder, false).await.unwrap().branch.as_deref(),
+            Some("qq/try-it")
+        );
+        // The same branch cannot get a second folder.
+        assert!(add_worktree(&repo, "qq/try-it", None).await.is_err());
+        assert_eq!(
+            add_worktree(&repo, "bad..name", None).await,
+            Err(GitError::Invalid("that is not a valid branch name"))
+        );
+
+        // Uncommitted work blocks a plain removal; force discards it.
+        std::fs::write(folder.join("b.txt"), "draft\n").unwrap();
+        assert!(remove_worktree(&folder, false).await.is_err());
+        remove_worktree(&folder, true).await.unwrap();
+        assert!(!folder.exists());
+        // The branch survives its worktree.
+        let branch = run(
+            "git",
+            "rev-parse",
+            &["rev-parse", "--verify", "refs/heads/qq/try-it"],
+            &repo,
+            LOCAL_DEADLINE,
+        )
+        .await
+        .unwrap();
+        assert!(branch.ok);
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn porcelain_v2_status_is_summarized() {

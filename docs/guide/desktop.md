@@ -105,6 +105,18 @@ branch, and creates a pull request with `gh`, each after a confirmation. Status
 refreshes every 15 seconds, on window focus and when a run settles; Git hooks
 and credential helpers run as usual, and prompts are disabled so nothing hangs.
 
+New worktree session (Ctrl Shift N, the File menu, the Git menu or the project
+switcher) gives a task its own checkout and branch so several agents can work
+on one repository at once. It runs `git worktree add` into
+`<repo>.worktrees/<branch>` beside the repository (never inside it, where the
+main checkout's agent would see it) and opens that folder as a project with
+the task waiting in its composer. The branch name is derived from the task and
+can be changed; an existing branch is checked out as it is. Worktrees appear
+under their repository in the project switcher. "Remove this worktree" deletes
+the folder and keeps the branch; Git refuses while it has uncommitted changes
+unless you choose to discard them. The new folder may ask for trust again
+because QQ trusts configuration per folder.
+
 ## Window, menus and settings
 
 The title bar holds back/forward through recently viewed sessions (Alt ←/→),

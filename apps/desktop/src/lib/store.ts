@@ -5,6 +5,7 @@ import { useSyncExternalStore } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
+import { drafts } from "./drafts";
 import type { PendingFile, ProjectInfo, ProjectState } from "./types";
 
 interface AppSnapshot {
@@ -63,7 +64,8 @@ export function activeProject(app: AppSnapshot): ProjectState | null {
   return app.activeId ? (app.projects[app.activeId] ?? null) : null;
 }
 
-export async function openProject(path: string) {
+/** Resolves to the opened project, or null when opening failed. */
+export async function openProject(path: string): Promise<ProjectInfo | null> {
   try {
     const info = await api.openProject(path);
     const open = snapshot.open.some((p) => p.id === info.id)
@@ -76,9 +78,46 @@ export async function openProject(path: string) {
     persist();
     void refreshRecents();
     void checkTrust(info.id);
+    return info;
   } catch (error) {
     set({ error: String(error) });
+    return null;
   }
+}
+
+/**
+ * Creates a worktree for `branch`, opens it as a project and leaves `task`
+ * in its composer to send. Throws so the dialog can show why.
+ */
+export async function createWorktreeSession(
+  projectId: string,
+  branch: string,
+  base: string | null,
+  task: string,
+) {
+  const folder = await api.createWorktree(projectId, branch, base);
+  const info = await openProject(folder);
+  if (!info) throw new Error(snapshot.error ?? `could not open ${folder}`);
+  if (task.trim()) drafts.set(`new:${info.id}`, task.trim());
+}
+
+/** Deletes a worktree project's folder (the branch stays) and closes it. */
+export async function removeWorktree(projectId: string, force: boolean) {
+  const main = snapshot.open.find((p) => p.id === projectId)?.worktree?.main_path;
+  await api.removeWorktree(projectId, force);
+  const open = snapshot.open.filter((p) => p.id !== projectId);
+  const projects = { ...snapshot.projects };
+  delete projects[projectId];
+  const mainProject = open.find(
+    (p) => main && p.path.toLowerCase() === main.toLowerCase(),
+  );
+  const activeId =
+    snapshot.activeId === projectId
+      ? (mainProject?.id ?? open[0]?.id ?? null)
+      : snapshot.activeId;
+  set({ open, projects, activeId });
+  persist();
+  void refreshRecents();
 }
 
 export async function pickProject() {

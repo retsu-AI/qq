@@ -1,4 +1,5 @@
 // Shared protocol and host types; native view DTOs are generated in generated.ts.
+import type { WorktreeDto } from "./generated";
 export type SessionStatus = "idle" | "queued" | "running";
 export type RunActivity =
   | "waiting_for_provider"
@@ -27,6 +28,8 @@ export interface ProjectInfo {
   id: string;
   path: string;
   name: string;
+  /** Set when the folder is a linked Git worktree. */
+  worktree: WorktreeDto | null;
 }
 
 export interface TokenUsage {

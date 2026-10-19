@@ -343,6 +343,7 @@ function Fixture() {
                 id: project.project_id,
                 path: project.path,
                 name: project.name,
+                worktree: null,
               },
             ],
             projects: { [project.project_id]: project },
