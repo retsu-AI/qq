@@ -5469,6 +5469,155 @@ fn deleting_onto_an_audit_fetches_the_fallback_and_a_revealed_audit_moves_focus(
 }
 
 #[test]
+fn eighth_review_round_on_the_rail() {
+    use qq_client::state::Need;
+    // 1. A `/goal` view over an orphan whose missing parent arrives as an
+    //    audit moves focus off it.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x66; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    app.set_view(View::Goal(ids[0]));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_ne!(app.view().session(), Some(ids[0]), "a side view moves too");
+
+    // 2. An orphan session's audit subtree adds its legacy spend.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        summary.accounting = None;
+        summary.estimated_cost_usd_nanos = Some(1_000_000);
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        } else {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    let orphan = SessionSummary {
+        accounting: None,
+        estimated_cost_usd_nanos: Some(4_000_000),
+        parent_id: Some(SessionId::from_bytes([0x67; 16])),
+        ..fixtures::session_summary(SessionId::from_bytes([0x68; 16]))
+    };
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(orphan.id);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        orphan.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(orphan.clone()),
+        },
+    )));
+    app.sessions.remove(&root);
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == orphan.id)
+        .unwrap();
+    assert_eq!(entry.cost, Some(6_000_000), "own + audit + agent under it");
+
+    // 3. Reasoning deltas, and text for a root outside the rail window, do
+    //    not wake the frame.
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    let reasoning = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(RunId::from_bytes([0x69; 16])),
+        ..fixtures::envelope(
+            2,
+            other,
+            SessionEvent::ReasoningDelta {
+                run_id: RunId::from_bytes([0x69; 16]),
+                kind: qq_protocol::ReasoningKind::Summary,
+                text: "thinking".to_owned(),
+            },
+        )
+    }));
+    assert!(!reasoning.redraws(), "{reasoning:?}");
+    app.rail_painted = Some(Vec::new());
+    let text = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(RunId::from_bytes([0x69; 16])),
+        ..fixtures::envelope(
+            3,
+            other,
+            SessionEvent::TextAppended {
+                message_id: MessageId::from_bytes([0x6a; 16]),
+                channel: qq_protocol::TextChannel::Output,
+                text: "out of window".to_owned(),
+            },
+        )
+    }));
+    assert!(!text.redraws(), "{text:?}");
+
+    // 4. Two orphan components with equal needs rank newest first.
+    let older = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x71; 16])),
+        updated_at_ms: 1,
+        ..fixtures::session_summary(SessionId::from_bytes([0xf0; 16]))
+    };
+    let newer = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x72; 16])),
+        updated_at_ms: 9,
+        ..fixtures::session_summary(SessionId::from_bytes([0x01; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![older.clone(), newer.clone()],
+        ..fixtures::workspace_snapshot()
+    }));
+    for id in [older.id, newer.id] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x73; 16]));
+    }
+    assert_eq!(app.sessions_needing_attention(), [newer.id, older.id]);
+
+    // 5. One session whose agent failed unseen: the rule names it.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(rule.contains("✕ agent 0 failed"), "{rule}");
+
+    // 6. /attention shows the unseen failure, not the delegate-owned hold.
+    let hold = ToolCallId::from_bytes([0x74; 16]);
+    {
+        let live = &mut app.sessions.get_mut(&ids[0]).unwrap().live;
+        live.awaiting_approval.insert(hold);
+        live.with_delegate.insert(hold);
+    }
+    assert_eq!(app.attention_need(ids[0]), Some(Need::Failed));
+    app.execute(Command::ShowAttention);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 30));
+    assert!(
+        text.contains("failed") && !text.contains("needs approval"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its

@@ -153,6 +153,8 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
+    /// Sessions the last frame's rail window painted; handed to the app.
+    rail_painted: Option<Vec<SessionId>>,
 }
 
 impl FrameRenderer {
@@ -165,6 +167,7 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
+        app.rail_painted = self.rail_painted.take();
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -339,7 +342,11 @@ impl FrameRenderer {
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
+            let (rows, painted) = sidebar(app, rail.width, body_height, density);
+            self.rail_painted = Some(painted);
+            columns.push((rail.x, rows));
+        } else {
+            self.rail_painted = Some(Vec::new());
         }
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
