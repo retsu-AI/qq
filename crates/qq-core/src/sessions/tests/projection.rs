@@ -660,6 +660,15 @@ async fn ab2_ambiguous_history_fails_only_its_run_and_keeps_fresh_sessions_usabl
 
 #[tokio::test]
 async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict() {
+    checkpoint_without_exact_projection_fails_closed(true).await;
+}
+
+#[tokio::test]
+async fn ab2_started_checkpoint_without_verdict_or_projection_fails_closed() {
+    checkpoint_without_exact_projection_fails_closed(false).await;
+}
+
+async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -669,22 +678,35 @@ async fn ab2_checkpoint_review_without_exact_projection_cannot_lose_its_verdict(
         connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
         Ok(())
     }).await.unwrap();
-    store
-        .record_checkpoint(
-            &claimed,
-            super::super::streaming::CheckpointRecord {
-                correlation: "checkpoint-proof".to_owned(),
-                phase: qq_protocol::CheckpointPhase::ToolResult,
-                tool_call_id: Some(ids[0]),
-                outcome: qq_protocol::CheckpointOutcome::Contradicted,
-                confidence_basis_points: Some(10_000),
-                feedback: "the result contradicts the task".to_owned(),
-                spend: None,
-            },
-            None,
-        )
-        .await
-        .unwrap();
+    if reviewed {
+        store
+            .record_checkpoint(
+                &claimed,
+                super::super::streaming::CheckpointRecord {
+                    correlation: "checkpoint-proof".to_owned(),
+                    phase: qq_protocol::CheckpointPhase::ToolResult,
+                    tool_call_id: Some(ids[0]),
+                    outcome: qq_protocol::CheckpointOutcome::Contradicted,
+                    confidence_basis_points: Some(10_000),
+                    feedback: "the result contradicts the task".to_owned(),
+                    spend: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+    } else {
+        // The process died after the review started and before its verdict.
+        store
+            .record_checkpoint_started(
+                &claimed,
+                "checkpoint-proof".to_owned(),
+                qq_protocol::CheckpointPhase::ToolResult,
+                Some(ids[0]),
+            )
+            .await
+            .unwrap();
+    }
     store
         .finish_run(
             &claimed,

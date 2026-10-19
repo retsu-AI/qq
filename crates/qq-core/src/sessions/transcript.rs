@@ -456,8 +456,9 @@ fn assemble_model_context(
                          WHEN length(CAST(t.tool_results_projection_json AS BLOB))<=2097152 THEN t.tool_results_projection_json END,
                     length(CAST(t.tool_results_projection_json AS BLOB)),
                     -- A reviewed turn without its projection is replayable unless a
-                    -- durable verdict names one of its calls. Turns without tool
-                    -- calls never reach the unindexed event probe.
+                    -- checkpoint started or reviewed one of its calls: a started
+                    -- review without a verdict may have been cut short. Turns
+                    -- without tool calls never reach the unindexed event probe.
                     CASE WHEN t.tool_results_projection_json IS NOT NULL THEN 0
                          WHEN CASE WHEN json_valid(r.plan_descriptor_json)
                                    THEN json_type(r.plan_descriptor_json,'$.checkpoint') IS NULL
@@ -473,7 +474,7 @@ fn assemble_model_context(
                              WHERE e.workspace_id = (SELECT workspace_id FROM sessions WHERE id = m.session_id)
                                AND c.run_id = t.run_id AND c.turn_ordinal = t.turn_ordinal
                                AND json_extract(e.envelope_json,'$.run_id') = t.run_id
-                               AND json_extract(e.envelope_json,'$.event.type') = 'checkpoint_reviewed'
+                               AND json_extract(e.envelope_json,'$.event.type') IN ('checkpoint_started', 'checkpoint_reviewed')
                          ) END, t.goal_notice
              FROM messages m
              JOIN runs r ON r.id = m.run_id
