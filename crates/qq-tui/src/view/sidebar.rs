@@ -1,9 +1,7 @@
 use super::*;
 use layout::Tier;
 use qq_client::state::{Group, Need};
-
-/// The title is the third span `session_line` builds (prefix, marker, title).
-const TITLE_SPAN: usize = 2;
+use unicode_width::UnicodeWidthChar;
 
 pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefix: &str) -> Line {
     let view = &app.sessions[&session_id];
@@ -682,23 +680,38 @@ fn sidebar_inner(
                 agent_need(session).is_some() || !session.live.awaiting_approval.is_empty()
             })
         };
-        let titled = |line: &Line, id: SessionId| {
-            // The title span itself kept enough of the title to read (two
-            // characters, or the whole of a shorter title): a badge that
-            // happens to contain the title's text does not count, and a
-            // title squeezed down to its ellipsis is gone. The selected row
-            // merges its prefix and marker, so the title is found by
-            // content after the marker span.
+        let titled = |line: &Line, id: SessionId, title_column: usize| {
+            // The cells at the title's own column kept enough of the title
+            // to read (two characters, or the whole of a shorter title): a
+            // badge that contains the title's text, or a marker glyph a
+            // title happens to start with, sits at another column and does
+            // not count, and a title squeezed to its ellipsis is gone.
             let title = &app.sessions[&id].summary.title;
             let want: String = title.chars().take(2).collect();
             if want.is_empty() {
                 return true;
             }
-            line.spans
-                .iter()
-                .skip(1)
-                .take(TITLE_SPAN)
-                .any(|span| span.text.starts_with(want.as_str()))
+            let text: String = line.spans.iter().map(|span| span.text.as_str()).collect();
+            let mut column = line.indent;
+            let mut at = text.len();
+            for (offset, character) in text.char_indices() {
+                if column >= title_column {
+                    at = offset;
+                    break;
+                }
+                column += UnicodeWidthChar::width(character).unwrap_or_default();
+            }
+            column >= title_column && text[at..].starts_with(want.as_str())
+        };
+        // Where `session_line` starts the title: its prefix, then the
+        // one-column state marker and a space.
+        let title_column = match row {
+            RailRow::Session(_) => text_width("│ ") + 2,
+            RailRow::Agent(id) => {
+                let depth = app.sessions.depth(id).clamp(1, 4);
+                text_width(&format!("│ {}↳ ", "  ".repeat(depth - 1))) + 2
+            }
+            _ => 0,
         };
         let row_target = match row {
             RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) => Some(id),
@@ -824,7 +837,9 @@ fn sidebar_inner(
             }
         });
         if let Some(id) = row_target
-            && rows.last().is_some_and(|line| titled(line, id))
+            && rows
+                .last()
+                .is_some_and(|line| titled(line, id, title_column))
         {
             painted.push(id);
             if needs(id) {

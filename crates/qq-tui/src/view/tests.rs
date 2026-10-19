@@ -6702,6 +6702,100 @@ fn a_drawn_card_does_not_card_a_child_whose_title_it_contains() {
 }
 
 #[test]
+fn a_drawn_card_does_not_card_an_off_screen_namesake() {
+    // A second `survey callers` is spawned by a call the transcript does
+    // not draw: one drawn card cannot tell the two apart, so the rule still
+    // names the title.
+    let (mut app, child) = app_with_spawned_child();
+    let parent = app.focused().unwrap();
+    let hidden_call = ToolCallSnapshot {
+        run_id: RunId::from_bytes([0x99; 16]),
+        ..tool_call_snapshot(
+            0x27,
+            "spawn_agent",
+            r#"{"task":"survey callers"}"#,
+            ToolCallState::Running,
+            None,
+            false,
+        )
+    };
+    app.sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(hidden_call.clone());
+    let twin = SessionId::from_bytes([0x33; 16]);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        twin,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                parent_id: Some(parent),
+                spawned_by: Some(qq_protocol::SpawnOrigin {
+                    run_id: hidden_call.run_id,
+                    tool_call_id: Some(hidden_call.id),
+                    depth: 1,
+                }),
+                title: "survey callers".to_owned(),
+                ..fixtures::session_summary(twin)
+            }),
+        },
+    )));
+    app.sessions
+        .get_mut(&twin)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let _ = child;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    let cards = rows
+        .iter()
+        .filter(|row| row.contains("↳") && row.contains("survey callers"))
+        .count();
+    assert_eq!(cards, 1, "one card drawn: {rows:#?}");
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey callers needs approval"), "{rule}");
+}
+
+#[test]
+fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
+    // A waiting session titled `◇ deploy` on a narrow rail whose badges
+    // clip its title away: the `◇ ` marker must not read as the title.
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    {
+        let view = app.sessions.get_mut(&other).unwrap();
+        view.summary.title = "◇ deploy the whole thing".to_owned();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x87; 16]));
+        view.unread = 999_999_999;
+    }
+    app.layout.rail = PanePref::Shown;
+    app.focus_session(SessionId::from_bytes([0x10; 16]));
+    let (rows, named, _) = super::sidebar::sidebar_without(
+        &app,
+        layout::RAIL_MIN_WIDTH,
+        30,
+        super::sidebar::RailDensity::Compact,
+        &[],
+    );
+    let texts = frame_rows(&rows);
+    let row = texts
+        .iter()
+        .find(|row| row.contains("999999999"))
+        .unwrap_or_else(|| panic!("{texts:#?}"));
+    assert!(!row.contains("deploy"), "the title is clipped: {row}");
+    assert!(!named.contains(&other), "{texts:#?}");
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
