@@ -157,9 +157,11 @@ every session in the tree. A session's **agents** (sub-agent sessions under
 it) roll up into its row. The one pass `rollup` walks `thread_order` once
 and yields, per session, the group it lists under, its unread count, its live
 flag, its spend including its agents (`accounting.inclusive`), its agent
-count and working-agent count, plus every agent waiting on an approval.
-Audit agents (`SessionPurpose::Audit`) and anything under them are skipped
-everywhere.
+count and working-agent count, plus every agent that needs the user. Audit
+agents (`SessionPurpose::Audit`) and anything under them are skipped by the
+rail, the strip, the layout's session count, tree navigation and the
+attention list (`App::sessions_needing_attention`, which `Ctrl-G`,
+`Alt-A`/`Alt-D` and `/attention` read).
 
 Groups follow what the user should do: **NEEDS YOU** (the session, or any of
 its agents, waits on an approval; or the session failed or finished unseen),

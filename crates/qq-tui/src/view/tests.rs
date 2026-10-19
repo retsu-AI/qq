@@ -5096,6 +5096,87 @@ fn a_side_question_counts_as_agent_work() {
 }
 
 #[test]
+fn a_sessions_own_delegate_hold_and_side_question_list_it_as_working() {
+    let (mut app, root, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    let hold = ToolCallId::from_bytes([0x94; 16]);
+    {
+        let live = &mut app.sessions.get_mut(&root).unwrap().live;
+        live.awaiting_approval.insert(hold);
+        live.with_delegate.insert(hold);
+    }
+    app.sessions
+        .get_mut(&other)
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x93; 16]));
+    let groups: Vec<_> = rollup(&app)
+        .sessions
+        .iter()
+        .map(|entry| (entry.id, entry.group))
+        .collect();
+    assert!(groups.contains(&(root, RailGroup::Working)), "{groups:?}");
+    assert!(groups.contains(&(other, RailGroup::Working)), "{groups:?}");
+    // Neither is named on the rule or reachable by Ctrl-G.
+    assert!(app.sessions_awaiting_approval().is_empty());
+    assert!(app.sessions_needing_attention().is_empty());
+}
+
+#[test]
+fn an_orphans_loaded_descendants_roll_into_it() {
+    // `agent 0`'s parent is not loaded; `agent 1` is its child and waits.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 1 {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    app.sessions.remove(&root);
+    app.sessions
+        .get_mut(&ids[1])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x92; 16]));
+    app.focus_session(ids[1]);
+    let rollup = rollup(&app);
+    let entry = rollup
+        .sessions
+        .iter()
+        .find(|entry| entry.id == ids[0])
+        .unwrap();
+    assert_eq!((entry.agents, entry.group), (1, RailGroup::NeedsYou));
+    assert_eq!(
+        rollup
+            .focused_tree
+            .as_ref()
+            .map(|(id, agents)| (*id, agents.clone())),
+        Some((ids[0], vec![ids[1]]))
+    );
+}
+
+#[test]
+fn attention_routes_skip_audits() {
+    let (mut app, _, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+    });
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x91; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert!(app.sessions_needing_attention().is_empty());
+    assert!(app.sessions_awaiting_approval().is_empty());
+    let before = app.focused();
+    app.execute(Command::FocusNextApproval);
+    assert_eq!(app.focused(), before, "Ctrl-G does not reach the audit");
+    app.execute(Command::ShowAttention);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 30));
+    assert!(!text.contains("agent 0"), "{text}");
+}
+
+#[test]
 fn a_hidden_agents_stream_does_not_wake_the_frame() {
     // The rail is up (two sessions, 120 columns) and focused on `Other`; a
     // quiet agent of `Fan out` streams. Its row is not on the rail, so its
