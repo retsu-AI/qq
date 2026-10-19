@@ -85,6 +85,10 @@ pub enum CheckError {
     },
     #[error("failed to read {0}")]
     Read(PathBuf, #[source] io::Error),
+    #[error(
+        "this branch restores the previous version of files {base} changed since, undoing merged work:\n  {files}\nre-apply only your own diff onto {base} (`git diff <old-base> HEAD | git apply --3way` on a fresh branch)"
+    )]
+    RevertsBase { base: String, files: String },
 }
 
 /// A workspace package as the selection needs it.
@@ -381,6 +385,49 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
         );
     }
     Ok(changed.into_iter().collect())
+}
+
+/// Files whose committed content on HEAD equals their content just before the
+/// base's most recent change to them: the branch silently undoes work that
+/// landed on the base, typically by committing an old tree onto a newer base.
+fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
+    let git = |args: &[&str]| {
+        capture(
+            ProcessCommand::new("git").args(args).current_dir(root),
+            "git",
+        )
+    };
+    let Ok(merge_base) = git(&["merge-base", base, "HEAD"]) else {
+        return Ok(Vec::new());
+    };
+    let merge_base = merge_base.trim();
+    let files = git(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        merge_base,
+        "HEAD",
+    ])?;
+    // A blob id, or empty when the path does not exist at that revision.
+    let blob = |revision: &str, path: &str| {
+        git(&["rev-parse", "-q", "--verify", &format!("{revision}:{path}")])
+            .map(|id| id.trim().to_owned())
+            .unwrap_or_default()
+    };
+    let mut reverted = Vec::new();
+    for path in files.split('\0').filter(|path| !path.is_empty()) {
+        let last = git(&["log", "-1", "--format=%H", merge_base, "--", path])?;
+        let last = last.trim();
+        if last.is_empty() {
+            continue;
+        }
+        let before = blob(&format!("{last}^"), path);
+        if blob("HEAD", path) == before && blob(merge_base, path) != before {
+            reverted.push(format!("{path} (undoes {})", short(last)));
+        }
+    }
+    Ok(reverted)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -986,6 +1033,13 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
     } else {
         changed_files(&root, &args.base)?
     };
+    let reverted = reverted_base_changes(&root, &args.base)?;
+    if !reverted.is_empty() {
+        return Err(CheckError::RevertsBase {
+            base: args.base.clone(),
+            files: reverted.join("\n  "),
+        });
+    }
     let selection = if args.full {
         Selection {
             scope: Scope::Full,
@@ -1221,6 +1275,50 @@ mod tests {
         assert_ne!(new.2, super::git_head(root).unwrap().2);
         std::fs::remove_file(root.join("new")).unwrap();
         assert_eq!(staged.2, super::git_head(root).unwrap().2);
+    }
+
+    #[test]
+    fn a_branch_that_restores_files_the_base_changed_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=Test", "-c", "user.email=t@example.invalid"];
+            full.extend_from_slice(args);
+            assert!(
+                std::process::Command::new("git")
+                    .args(&full)
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{args:?}"
+            );
+        };
+        let write = |path: &str, text: &str| std::fs::write(root.join(path), text).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        write("auth.rs", "old auth");
+        write("mine.rs", "old mine");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        // Someone else's work lands on main.
+        write("auth.rs", "new auth");
+        git(&["commit", "-qam", "auth refactor"]);
+        // A clean branch from the new main touching only its own file passes.
+        git(&["checkout", "-qb", "good"]);
+        write("mine.rs", "new mine");
+        git(&["commit", "-qam", "mine"]);
+        assert_eq!(
+            super::reverted_base_changes(root, "main").unwrap(),
+            Vec::<String>::new()
+        );
+        // A branch that commits its stale tree on top of the new main reverts it.
+        git(&["checkout", "-qb", "bad", "main"]);
+        write("auth.rs", "old auth");
+        write("mine.rs", "new mine");
+        git(&["commit", "-qam", "mine on a stale tree"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
     }
 
     use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};
