@@ -36,6 +36,7 @@ import type {
   Transcript as TranscriptData,
 } from "../lib/types";
 import { CodeBlock, CopyButton } from "./CodeBlock";
+import { Starters } from "./Starters";
 import { ToolGroup } from "./ToolCall";
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
@@ -109,7 +110,12 @@ export function Transcript({
   });
   if (transcript.items.length === 0) {
     return (
-      <p className="pt-8 text-center text-muted">Send a message to start.</p>
+      <div className="mx-auto max-w-[640px] pt-[12vh]">
+        <p className="mb-4 text-center text-muted">
+          Send a message to start, or pick a starting point.
+        </p>
+        <Starters draftKey={transcript.session_id} />
+      </div>
     );
   }
   return (
