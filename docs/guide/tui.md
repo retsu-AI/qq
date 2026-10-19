@@ -360,9 +360,11 @@ Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
 - **Drag** in the transcript to select text. The selection stays inside the
   transcript: the sidebar, inspector, borders, top row and composer are never
   included, however far the pointer goes. Releasing copies the text to your
-  clipboard and the rule reads `copied N lines`. Each line is copied without
-  the transcript's margin or trailing spaces. `Esc`, any key, scrolling or a
-  resize clears the highlight.
+  clipboard and the rule reads `copied N lines`. Lines are copied without
+  the transcript's margin or trailing spaces; indentation inside the text
+  (code) is kept, and wide characters are copied whole. `Esc`, any key,
+  scrolling, a resize, or new text arriving under the selection clears the
+  highlight.
 - Copying uses the terminal's clipboard escape (OSC 52), which most
   terminals support; in tmux enable `set -g set-clipboard on`. A selection
   larger than 1 MiB copies its first 1 MiB and says so.

@@ -1482,11 +1482,17 @@ impl App {
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                // Any key ends a selection; Esc only clears it.
-                if self.selection.take().is_some() && key.code == KeyCode::Esc {
+                // Any key ends a selection; Esc only clears it. Clearing it
+                // always repaints, even when the key itself does nothing.
+                let cleared = self.selection.take().is_some();
+                if cleared && key.code == KeyCode::Esc {
                     return Effects::redraw(Redraw::Immediate);
                 }
-                self.handle_key(key)
+                let mut effects = self.handle_key(key);
+                if cleared {
+                    effects.push(Effect::Redraw(Redraw::Immediate));
+                }
+                effects
             }
             Event::Paste(text) => {
                 let changed = match &mut self.overlay {
@@ -1521,6 +1527,19 @@ impl App {
         use crossterm::event::MouseButton;
         let (column, row) = (usize::from(mouse.column), usize::from(mouse.row));
         let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
+        // Modified clicks and drags belong to the terminal (Shift-drag is the
+        // native-selection escape hatch where a terminal forwards it).
+        let modified = mouse
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL);
+        if modified
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
+            )
+        {
+            return Effects::none();
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 // The selection is screen-anchored; scrolling would move the
@@ -1540,10 +1559,9 @@ impl App {
                     effects.push(Effect::Redraw(Redraw::Immediate));
                     return effects;
                 }
-                self.selection = self
-                    .geometry
-                    .transcript
-                    .and_then(|area| crate::selection::Selection::start(area, column, row));
+                self.selection = self.geometry.transcript.and_then(|area| {
+                    crate::selection::Selection::start(area, self.geometry.text_x, column, row)
+                });
                 Effects::changed_now(cleared)
             }
             MouseEventKind::Drag(MouseButton::Left) => match &mut self.selection {
@@ -1556,7 +1574,7 @@ impl App {
             MouseEventKind::Up(MouseButton::Left) => match self.selection {
                 Some(selection) if selection.is_empty() => {
                     self.selection = None;
-                    Effects::none()
+                    Effects::redraw(Redraw::Immediate)
                 }
                 Some(selection) => {
                     let mut effects = Effects::redraw(Redraw::Immediate);

@@ -5618,6 +5618,105 @@ fn a_rail_click_focuses_the_row_that_was_drawn_even_after_the_rail_reordered() {
 }
 
 #[test]
+fn modified_drags_pass_through_and_clearing_a_selection_always_repaints() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    let shifted = |kind| {
+        TerminalEvent::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row,
+            modifiers: KeyModifiers::SHIFT,
+        })
+    };
+    // Shift-press and Shift-drag leave the terminal's own selection alone.
+    app.handle_terminal_event(shifted(MouseEventKind::Down(MouseButton::Left)));
+    app.handle_terminal_event(shifted(MouseEventKind::Drag(MouseButton::Left)));
+    assert!(app.selection.is_none());
+    // An unbound key that clears a visible selection still repaints.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::F(12),
+        KeyModifiers::NONE,
+    )));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws(), "{effects:?}");
+    // A click-only press and release clears the old selection and repaints.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 4, row));
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 4, row));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws(), "{effects:?}");
+}
+
+#[test]
+fn a_selection_is_dropped_when_streamed_text_moves_its_rows() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, session_id, run_id, mut sequence) = running_view_app();
+    let message_id = MessageId::from_bytes([0x71; 16]);
+    let mut event = |event: SessionEvent| {
+        sequence += 1;
+        ClientUpdate::Event(SessionEventEnvelope {
+            run_id: Some(run_id),
+            ..fixtures::envelope(sequence, session_id, event)
+        })
+    };
+    app.apply_client_update(event(SessionEvent::AssistantMessageStarted {
+        message: MessageSnapshot {
+            run_id,
+            state: MessageState::Streaming,
+            ..fixtures::message(message_id, session_id, "streaming answer")
+        },
+    }));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(
+        rows.iter()
+            .position(|row| row.contains("streaming answer"))
+            .unwrap(),
+    )
+    .unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 40, row));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some(), "the first frame records it");
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some(), "an unchanged frame keeps it");
+    // A streamed delta changes the selected row's text.
+    app.apply_client_update(event(SessionEvent::TextAppended {
+        message_id,
+        channel: qq_protocol::TextChannel::Output,
+        text: " grows\nand pushes more rows\n".repeat(4),
+    }));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_none(), "stale selections are dropped");
+}
+
+#[test]
+fn a_too_small_frame_leaves_nothing_clickable() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _, _) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    // Two identical frames: the second leaves an equal hit map on both
+    // sides, which a conditional hand-off would keep across the small frame.
+    renderer.frame_and_commit(&mut app, 120, 40);
+    renderer.frame_and_commit(&mut app, 120, 40);
+    assert!(app.geometry.rail.is_some());
+    renderer.frame_and_commit(&mut app, 20, 5);
+    assert_eq!(app.geometry, crate::selection::FrameGeometry::default());
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 110, 3));
+    assert_eq!(app.focused(), before);
+    assert!(app.selection.is_none());
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

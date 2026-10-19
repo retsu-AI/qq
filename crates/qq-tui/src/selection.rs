@@ -50,6 +50,9 @@ impl Area {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FrameGeometry {
     pub transcript: Option<Area>,
+    /// The column transcript text starts at: cells left of it are the
+    /// pane's margin and message rail, not text, and a copy drops them.
+    pub text_x: usize,
     pub rail: Option<Area>,
     /// One entry per rail body row, top to bottom.
     pub rail_targets: Vec<Option<SessionId>>,
@@ -69,12 +72,17 @@ impl FrameGeometry {
 
 /// A drag in progress or finished: from `anchor` to `head`, both inside
 /// `area`. Reads like text: the first row from the anchor to the pane's
-/// right edge, whole rows between, the last row up to the head.
+/// right edge, whole rows between, the last row up to the head. `seen` is
+/// a fingerprint of the selected rows' text when the selection last moved,
+/// so a frame whose rows changed under it (streamed text reflowed) can tell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Selection {
     area: Area,
+    /// Cells left of this column are margin and rail, never copied.
+    text_x: usize,
     anchor: (usize, usize),
     head: (usize, usize),
+    seen: Option<u64>,
 }
 
 /// The text a selection copies.
@@ -88,23 +96,63 @@ pub(crate) struct Copied {
 
 impl Selection {
     /// A selection anchored at a press inside `area`; `None` outside it.
-    pub(crate) fn start(area: Area, column: usize, row: usize) -> Option<Self> {
+    /// Copies keep text from `text_x` on.
+    pub(crate) fn start(area: Area, text_x: usize, column: usize, row: usize) -> Option<Self> {
         area.contains(column, row).then_some(Self {
             area,
+            text_x,
             anchor: (column, row),
             head: (column, row),
+            seen: None,
         })
     }
 
     /// Move the head to the pointer, clamped to the pane: dragging over the
-    /// rail or the composer extends to the pane's edge and no further.
+    /// rail or the composer extends to the pane's edge and no further. The
+    /// fingerprint is retaken on the next frame.
     pub(crate) fn extend(&mut self, column: usize, row: usize) {
         self.head = self.area.clamp(column, row);
+        self.seen = None;
+    }
+
+    /// Whether `lines` still hold what this selection was made over: true
+    /// the first time a frame is seen after a press or drag (which records
+    /// it), then only while the selected rows' text is unchanged.
+    pub(crate) fn matches(&self, lines: &[Line]) -> bool {
+        self.seen.is_none_or(|seen| seen == self.fingerprint(lines))
+    }
+
+    /// Record the selected rows' text of the frame the user is looking at.
+    pub(crate) fn remember(&mut self, lines: &[Line]) {
+        if self.seen.is_none() {
+            self.seen = Some(self.fingerprint(lines));
+        }
+    }
+
+    fn fingerprint(&self, lines: &[Line]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (row, from, to) in self.rows() {
+            if let Some(line) = lines.get(row) {
+                for (start, end, character, _) in cells(line) {
+                    if start < to && end > from {
+                        character.hash(&mut hasher);
+                    }
+                }
+            }
+            row.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// A press released where it started: a click, not a selection.
     pub(crate) fn is_empty(&self) -> bool {
         self.anchor == self.head
+    }
+
+    /// The same cells, whatever fingerprint either carries.
+    pub(crate) fn same_range(&self, other: &Self) -> bool {
+        (self.area, self.anchor, self.head) == (other.area, other.anchor, other.head)
     }
 
     /// `(row, first column, end column)` per selected row, end exclusive,
@@ -125,15 +173,20 @@ impl Selection {
     }
 
     /// Paint the selected cells of `lines` (the frame's rows, top row first)
-    /// on the selection background. Only selected rows are rebuilt.
+    /// on the selection background. Only selected rows are rebuilt. A glyph
+    /// is selected when any of its cells is, so a wide character never shows
+    /// half selected. A press that has not moved paints nothing.
     pub(crate) fn paint(&self, lines: &mut [Line]) {
+        if self.is_empty() {
+            return;
+        }
         for (row, from, to) in self.rows() {
             let Some(line) = lines.get_mut(row) else {
                 continue;
             };
             let mut painted = Line::default();
-            for (column, character, style) in cells(line) {
-                let style = if (from..to).contains(&column) {
+            for (start, end, character, style) in cells(line) {
+                let style = if start < to && end > from {
                     selection(style)
                 } else {
                     style
@@ -153,18 +206,30 @@ impl Selection {
         }
     }
 
-    /// The selected text of `lines`: each row's selected cells with trailing
-    /// spaces removed, the indentation every row shares (the pane's measure
-    /// inset) removed, and trailing blank rows dropped. Bounded by
-    /// [`MAX_COPY_BYTES`].
+    /// The selected text of `lines`: each row's selected characters (a glyph
+    /// counts when any of its cells is selected, and a combining mark goes
+    /// with its base), with the pane's margin and message rail (everything
+    /// left of `text_x`) and trailing spaces removed, and trailing blank rows
+    /// dropped. Indentation that is part of the text (code) is kept.
+    /// Bounded by [`MAX_COPY_BYTES`].
     pub(crate) fn text(&self, lines: &[Line]) -> Copied {
         let mut rows: Vec<String> = self
             .rows()
             .map(|(row, from, to)| {
                 let mut text = String::new();
                 if let Some(line) = lines.get(row) {
-                    for (column, character, _) in cells(line) {
-                        if (from..to).contains(&column) {
+                    for (start, end, character, _) in cells(line) {
+                        if start < self.text_x {
+                            continue;
+                        }
+                        // A zero-width mark (start == end) belongs to the
+                        // glyph before it.
+                        let selected = if start == end {
+                            start > from && start <= to
+                        } else {
+                            start < to && end > from
+                        };
+                        if selected {
                             text.push(character);
                         }
                     }
@@ -176,27 +241,7 @@ impl Selection {
         while rows.last().is_some_and(String::is_empty) {
             rows.pop();
         }
-        // The first row starts at the anchor, not the pane edge, so it does
-        // not decide the inset shared by the rows below it.
-        let shared = rows
-            .iter()
-            .skip(usize::from(rows.len() > 1))
-            .filter(|row| !row.is_empty())
-            .map(|row| row.len() - row.trim_start_matches(' ').len())
-            .min()
-            .unwrap_or(0);
-        let mut text = String::new();
-        for (index, row) in rows.iter().enumerate() {
-            if index > 0 {
-                text.push('\n');
-            }
-            let row = if index == 0 && rows.len() > 1 {
-                row.trim_start_matches(' ')
-            } else {
-                row.get(shared..).unwrap_or_default()
-            };
-            text.push_str(row);
-        }
+        let mut text = rows.join("\n");
         let mut truncated = false;
         if text.len() > MAX_COPY_BYTES {
             let mut cut = MAX_COPY_BYTES;
@@ -218,16 +263,18 @@ impl Selection {
     }
 }
 
-/// Each character of `line` with the column it starts at and its style; the
-/// line's indent reads as leading blank cells.
-fn cells(line: &Line) -> Vec<(usize, char, Style)> {
+/// Each character of `line` with the columns it occupies (`start..end`;
+/// equal for a zero-width mark) and its style; the line's indent reads as
+/// leading blank cells.
+fn cells(line: &Line) -> Vec<(usize, usize, char, Style)> {
     let mut out = Vec::with_capacity(line.indent + 64);
-    out.extend((0..line.indent).map(|column| (column, ' ', normal())));
+    out.extend((0..line.indent).map(|column| (column, column + 1, ' ', normal())));
     let mut column = line.indent;
     for span in &line.spans {
         for character in span.text.chars() {
-            out.push((column, character, span.style));
-            column += UnicodeWidthChar::width(character).unwrap_or_default();
+            let width = UnicodeWidthChar::width(character).unwrap_or_default();
+            out.push((column, column + width, character, span.style));
+            column += width;
         }
     }
     out
@@ -246,23 +293,26 @@ mod tests {
     use crate::render::{accent, muted};
 
     /// A 30-column frame: a transcript pane of 20 columns at x 0, rows 1..=3,
-    /// and a rail glued on at column 20.
+    /// and a rail glued on at column 20. Transcript rows carry the pane's
+    /// 3-column measure inset as `Line::indent`, as the renderer does;
+    /// `delta` has two columns of its own (code) indentation.
     fn frame() -> (Vec<Line>, Area) {
         let row = |transcript: &str, rail: &str| {
-            let mut line = Line::styled(format!("{transcript:<20}"), normal());
+            let mut line = Line::styled(format!("{transcript:<17}"), normal());
+            line.indent = 3;
             line.push(rail, muted());
             line
         };
-        let mut first = Line::styled("   ", normal());
-        first.push("alpha beta", accent());
+        let mut first = Line::styled("alpha beta", accent());
+        first.indent = 3;
         first.push(format!("{:<7}", ""), normal());
         first.push("│ RAIL", muted());
         (
             vec![
                 Line::styled(" qq  top row", normal()),
                 first,
-                row("   gamma", "│ ○ other"),
-                row("     delta", "│"),
+                row("gamma", "│ ○ other"),
+                row("  delta", "│"),
                 Line::styled("─── rule", muted()),
             ],
             Area {
@@ -275,9 +325,9 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_selects_text_in_the_pane_only_and_drops_the_shared_inset() {
+    fn a_drag_selects_text_in_the_pane_only_and_drops_only_the_margin() {
         let (lines, area) = frame();
-        let mut selection = Selection::start(area, 3, 1).unwrap();
+        let mut selection = Selection::start(area, 3, 3, 1).unwrap();
         // Dragged far right over the rail and down past the body: clamped.
         selection.extend(29, 9);
         let copied = selection.text(&lines);
@@ -286,7 +336,7 @@ mod tests {
         assert!(!copied.truncated);
         assert!(!copied.text.contains('│') && !copied.text.contains("RAIL"));
         // Upward drags read the same way.
-        let mut backwards = Selection::start(area, 9, 3).unwrap();
+        let mut backwards = Selection::start(area, 3, 9, 3).unwrap();
         backwards.extend(9, 1);
         assert_eq!(backwards.text(&lines).text, "beta\ngamma\n  delta");
     }
@@ -294,17 +344,17 @@ mod tests {
     #[test]
     fn a_press_outside_the_pane_starts_nothing_and_a_click_is_empty() {
         let (_, area) = frame();
-        assert!(Selection::start(area, 22, 1).is_none(), "rail");
-        assert!(Selection::start(area, 3, 0).is_none(), "top row");
-        assert!(Selection::start(area, 3, 4).is_none(), "rule");
-        let click = Selection::start(area, 3, 2).unwrap();
+        assert!(Selection::start(area, 3, 22, 1).is_none(), "rail");
+        assert!(Selection::start(area, 3, 3, 0).is_none(), "top row");
+        assert!(Selection::start(area, 3, 3, 4).is_none(), "rule");
+        let click = Selection::start(area, 3, 3, 2).unwrap();
         assert!(click.is_empty());
     }
 
     #[test]
     fn painting_restyles_only_the_selected_cells() {
         let (mut lines, area) = frame();
-        let mut selection = Selection::start(area, 3, 1).unwrap();
+        let mut selection = Selection::start(area, 3, 3, 1).unwrap();
         selection.extend(7, 1);
         selection.paint(&mut lines);
         let row = &lines[1];
@@ -330,13 +380,80 @@ mod tests {
         let (lines, area) = frame();
         // From inside `alpha` on row 1 to inside `gamma` on row 2: the end
         // of row 1 from the anchor, then row 2 up to and including the head.
-        let mut forward = Selection::start(area, 5, 1).unwrap();
+        let mut forward = Selection::start(area, 3, 5, 1).unwrap();
         forward.extend(5, 2);
         assert_eq!(forward.text(&lines).text, "pha beta\ngam");
         // The same cells dragged upward copy the same text.
-        let mut reverse = Selection::start(area, 5, 2).unwrap();
+        let mut reverse = Selection::start(area, 3, 5, 2).unwrap();
         reverse.extend(5, 1);
         assert_eq!(reverse.text(&lines).text, forward.text(&lines).text);
+    }
+
+    #[test]
+    fn code_indentation_shared_by_every_selected_row_is_kept() {
+        let code = |text: &str| {
+            let mut line = Line::styled(text, normal());
+            line.indent = 3;
+            line
+        };
+        let lines = vec![code("    if x:"), code("        y()")];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 2,
+        };
+        let mut selection = Selection::start(area, 3, 0, 0).unwrap();
+        selection.extend(19, 1);
+        assert_eq!(selection.text(&lines).text, "    if x:\n        y()");
+    }
+
+    #[test]
+    fn wide_glyphs_and_combining_marks_are_selected_whole() {
+        // `界` occupies columns 0-1, `b́` is `b` plus a combining accent.
+        let lines = vec![Line::styled("界ab\u{301}c", normal())];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 1,
+        };
+        // Forward from the wide glyph's second cell through `b`.
+        let mut forward = Selection::start(area, 0, 1, 0).unwrap();
+        forward.extend(3, 0);
+        assert_eq!(forward.text(&lines).text, "界ab\u{301}");
+        // Reverse, ending on the wide glyph's second cell.
+        let mut reverse = Selection::start(area, 0, 3, 0).unwrap();
+        reverse.extend(1, 0);
+        assert_eq!(reverse.text(&lines).text, "界ab\u{301}");
+        // Painting covers the whole glyph too.
+        let mut painted = lines.clone();
+        forward.paint(&mut painted);
+        let background = crate::render::selection(normal()).background;
+        assert!(
+            painted[0]
+                .spans
+                .iter()
+                .any(|span| span.text.contains('界') && span.style.background == background)
+        );
+    }
+
+    #[test]
+    fn a_selection_over_rows_that_changed_no_longer_matches() {
+        let (lines, area) = frame();
+        let mut selection = Selection::start(area, 3, 3, 2).unwrap();
+        selection.extend(7, 2);
+        assert!(selection.matches(&lines), "first frame is recorded");
+        selection.remember(&lines);
+        assert!(selection.matches(&lines));
+        let mut moved = lines.clone();
+        moved[2] = Line::styled("   streamed in", normal());
+        assert!(!selection.matches(&moved));
+        // A click that never moved paints nothing.
+        let click = Selection::start(area, 3, 3, 2).unwrap();
+        let mut painted = lines.clone();
+        click.paint(&mut painted);
+        assert_eq!(painted, lines);
     }
 
     #[test]
@@ -350,7 +467,7 @@ mod tests {
         let lines: Vec<Line> = (0..512)
             .map(|_| Line::styled("é".repeat(1024), normal()))
             .collect();
-        let mut selection = Selection::start(wide, 0, 0).unwrap();
+        let mut selection = Selection::start(wide, 0, 0, 0).unwrap();
         selection.extend(1023, 511);
         let copied = selection.text(&lines);
         assert!(copied.truncated);
@@ -361,6 +478,7 @@ mod tests {
     fn rail_clicks_resolve_to_the_row_they_land_on() {
         let geometry = FrameGeometry {
             transcript: None,
+            text_x: 0,
             rail: Some(Area {
                 x: 20,
                 y: 1,

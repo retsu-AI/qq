@@ -170,6 +170,10 @@ pub(crate) struct FrameRenderer {
     /// What the mouse can act on in the last frame; handed to the app on
     /// commit.
     geometry: crate::selection::FrameGeometry,
+    /// The app's selection no longer matches the frame's cells.
+    selection_stale: bool,
+    /// The app's selection with the fingerprint of the frame just built.
+    selection_seen: Option<crate::selection::Selection>,
 }
 
 impl FrameRenderer {
@@ -182,8 +186,23 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
-        if app.geometry != self.geometry {
-            app.geometry = std::mem::take(&mut self.geometry);
+        // Every frame's hit map replaces the last, even an empty one (a
+        // too-small terminal), so a click never lands on stale rows.
+        app.geometry = std::mem::take(&mut self.geometry);
+        // A selection whose cells changed under it (streamed text reflowed
+        // or pushed the rows) no longer marks what the user pressed on.
+        if self.selection_stale {
+            app.selection = None;
+            self.selection_stale = false;
+        }
+        // The first frame after a press or drag records what the selection
+        // covers, so a later frame that moved those rows can tell.
+        if let Some(remembered) = self.selection_seen.take()
+            && app
+                .selection
+                .is_some_and(|current| current.same_range(&remembered))
+        {
+            app.selection = Some(remembered);
         }
     }
 
@@ -255,6 +274,9 @@ impl FrameRenderer {
             self.invalidate();
         }
         if width < layout::MIN_WIDTH || height < layout::MIN_HEIGHT {
+            // Nothing under the pointer is clickable or selectable.
+            self.geometry = crate::selection::FrameGeometry::default();
+            self.selection_stale = app.selection.is_some();
             return fit_height(
                 vec![
                     Line::styled(" qq", brand().bold()),
@@ -381,6 +403,9 @@ impl FrameRenderer {
                 width: slot.area.width,
                 height: body_height,
             });
+            // Prose starts after the measure inset and the 3-column
+            // message rail (`   ` / ` ▌ `); a copy keeps text from there.
+            geometry.text_x = slot.area.x + slot.inset + 3;
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
@@ -461,7 +486,14 @@ impl FrameRenderer {
         }
         let mut lines = fit_height(lines, height);
         if let Some(selection) = &app.selection {
-            selection.paint(&mut lines);
+            if selection.matches(&lines) {
+                let mut remembered = *selection;
+                remembered.remember(&lines);
+                self.selection_seen = Some(remembered);
+                selection.paint(&mut lines);
+            } else {
+                self.selection_stale = true;
+            }
         }
         lines
     }

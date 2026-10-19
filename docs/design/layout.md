@@ -256,10 +256,16 @@ starts a `Selection` (screen-anchored cells, clamped to the pane on drag);
 the last frame repaints the selected cells on the `selection` background
 after composition, so no cache sees it. Release emits
 `Effect::CopySelection`; the loop reads the text from the last drawn frame
-(trailing spaces and the rows' shared inset removed, bounded by
+(the pane margin and message rail left of `FrameGeometry::text_x` and
+trailing spaces removed; text indentation kept; a glyph is selected when any
+of its cells is and a combining mark travels with its base; bounded by
 `MAX_COPY_BYTES`), writes OSC 52, and the rule reports the line count. Keys,
-the wheel, a resize and a new press clear the selection. A press released
-where it started copies nothing.
+the wheel, a resize and a new press clear the selection, as does a frame
+whose selected rows changed (the first frame after a press or drag records a
+fingerprint of them). A press released where it started copies and paints
+nothing. Shift-, Alt- and Ctrl-modified clicks and drags are left to the
+terminal. The hit map is replaced on every frame, so a too-small terminal
+leaves nothing clickable.
 
 ## Bounds
 
