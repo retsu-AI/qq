@@ -319,9 +319,10 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
             left.push(format!("  {}", hints.join("  ")), muted());
         }
     } else if crate::view::listed_sessions(app) < 2
-        && app.layout.rail != crate::view::PanePref::Shown
+        && !crate::view::rail_visible(width, app.layout, crate::view::listed_sessions(app))
     {
-        // With one session there is no rail (under `Auto`) and no strip, so
+        // With one session there is no rail (under `Auto`, or pinned on a
+        // terminal too narrow to fit it) and no strip, so
         // an agent that failed or finished unseen has nowhere else to
         // appear: name it here.
         let unseen: Vec<(&str, bool)> = app
