@@ -177,13 +177,18 @@ separates groups; the focused row is padded to the rail width on the
 
 Agents get rows in two cases only:
 
-- An agent waiting on an approval gets a `↳` row and a status row under its
-  own session, whichever group that session is in, so a child is never drawn
-  under an unrelated session.
+- An agent that needs the user gets a `↳` row under its own session,
+  whichever group that session is in, so a child is never drawn under an
+  unrelated session: an approval the human is asked for (`awaiting_approval`
+  minus the delegate-owned `with_delegate`; it adds a status row), a
+  failure, or a finish not yet seen, ranked in that order. An unfocused
+  session lists at most `WAITING_AGENT_ROWS` (3), then `+N need you
+  Ctrl-G`. A hold a delegate still owns counts as work (`delegate
+  deciding`), as does a running side question.
 - The focused session lists its agents under it, at most
-  `FOCUSED_AGENT_ROWS` (6); the rest collapse to `+N more  /agents`. Waiting
-  agents and a focused agent always get a row, so focusing an agent past the
-  cap keeps it on the rail.
+  `FOCUSED_AGENT_ROWS` (6), in rank order: the focused agent, then agents
+  that need the user, then quiet agents; the rest collapse to `+N more
+  /agents`. Focusing an agent past the cap keeps it on the rail.
 
 The rail and the one-row strip both consume `rollup`. The rail plans rows
 from it and paints only the rows inside its scrolled window (centered on the

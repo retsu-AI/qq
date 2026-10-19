@@ -381,8 +381,12 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
 
     let mut right = Line::default();
     // With the rail naming every waiting approval, the rule keeps only the
-    // chords that answer or reach them, ahead of the ordinary hints.
+    // chords that answer or reach them. They outrank the ordinary hints:
+    // those are added only while the whole right side still fits beside the
+    // status, so a long status drops hints before it drops these.
+    let mut keep_right = false;
     if !all_waiting.is_empty() && waiting.is_empty() {
+        keep_right = true;
         let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
         let approve = app.chord_label(crate::commands::Command::ApproveBackground);
         let deny = app.chord_label(crate::commands::Command::DenyBackground);
@@ -416,13 +420,41 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
             };
             compact_chord(&chord)
         };
+        let mut hint = Line::default();
         if !right.is_empty() {
-            right.push("  ", muted());
+            hint.push("  ", muted());
         }
-        right.push(chord, accent());
-        right.push(format!(" {label}"), muted());
+        hint.push(chord, accent());
+        hint.push(format!(" {label}"), muted());
+        // Each lower-priority hint is dropped rather than the whole side.
+        if keep_right && left.width() + right.width() + hint.width() + 6 > width {
+            break;
+        }
+        right.spans.extend(hint.spans);
+    }
+    if keep_right {
+        return rule_keeping_right(left, right, width);
     }
     rule_with(left, right, width)
+}
+
+/// [`rule_with`] for a right side that must stay (the in-place approval
+/// chords): the status truncates to make room instead.
+fn rule_keeping_right(left: Line, right: Line, width: usize) -> Line {
+    let mut padded = Line::styled(" ", muted());
+    padded.spans.extend(right.spans);
+    padded.push(" ", muted());
+    if padded.width() + 4 > width {
+        return rule_with(left, Line::default(), width);
+    }
+    let mut rule = truncate_line(left, width.saturating_sub(padded.width() + 5));
+    if !rule.is_empty() {
+        rule.push(" ", muted());
+    }
+    let filler = width.saturating_sub(rule.width() + padded.width());
+    rule.push("─".repeat(filler), border());
+    rule.spans.extend(padded.spans);
+    truncate_line(rule, width)
 }
 
 pub(super) fn goal_duration(ms: u64) -> String {

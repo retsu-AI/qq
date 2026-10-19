@@ -5031,6 +5031,11 @@ fn delegate_holds_stay_working_and_a_focused_waiting_agent_still_lifts_its_sessi
         live.awaiting_approval.insert(hold);
         live.with_delegate.insert(hold);
     }
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    assert!(
+        !rail.contains("◇ agent 0") && !rail.contains("approve"),
+        "a delegate-owned hold reads as work, not an approval: {rail}"
+    );
     app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
     app.focus_session(SessionId::from_bytes([0x11; 16]));
     let entry = |app: &App| {
@@ -5084,6 +5089,23 @@ fn an_agent_whose_session_is_not_loaded_is_listed_as_a_session() {
     assert_eq!(listed_sessions(&app), 2);
     let rail = rail_rows(&mut app, 120, 40).join("\n");
     assert!(rail.contains("agent 0"), "{rail}");
+}
+
+#[test]
+fn a_side_question_counts_as_agent_work() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x95; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!((entry.group, entry.agents_working), (RailGroup::Working, 1));
 }
 
 #[test]
@@ -5590,6 +5612,44 @@ fn an_off_rail_failure_is_counted_beside_an_off_rail_approval() {
         rule.contains("agent 0 needs approval +1 need you"),
         "the failure is counted: {rule}"
     );
+}
+
+#[test]
+fn the_approval_chords_survive_a_long_status_and_delegate_holds_are_not_answerable() {
+    let (mut app, [_, child, _, parent, _]) = app_with_every_rail_group();
+    // The focused session carries a goal: `goal · run 4/200 · 23h left ·
+    // next 0s` plus `◐ working` fills the left at this width, and every
+    // waiting approval is on the rail, so only the chords keep the rule
+    // actionable.
+    let mut goal = fixtures::goal_snapshot(parent);
+    goal.counters.runs = 4;
+    app.sessions.get_mut(&parent).unwrap().goal = Some(goal);
+    app.sessions.get_mut(&parent).unwrap().summary.status = SessionStatus::Running;
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 70, Some(&[child]))]).join("");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("^G jump"),
+        "{rule}"
+    );
+    assert!(rule.chars().count() <= 70, "{rule}");
+    // A delegate-owned hold is neither named nor answered by Alt-A.
+    let held: Vec<_> = app.sessions[&child]
+        .live
+        .awaiting_approval
+        .iter()
+        .copied()
+        .collect();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .with_delegate
+        .extend(held);
+    assert!(app.sessions_awaiting_approval().is_empty());
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::ALT,
+    )));
+    assert!(effects.into_requests().is_empty(), "nothing approved");
 }
 
 #[test]

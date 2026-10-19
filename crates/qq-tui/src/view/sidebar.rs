@@ -7,13 +7,15 @@ pub(super) fn session_line(app: &App, session_id: SessionId, width: usize, prefi
     let session = &view.summary;
     // The same state vocabulary tool rows use: ● done, ✕ failed, ◌ stopped
     // early, ◇ waiting, the shared spinner while running. Color follows the
-    // attention rule: `warning` for a pending approval, `error` for a
-    // failure, `accent` for a finish the user has not looked at, muted for
-    // everything settled.
-    let (marker, style) = match view.need() {
+    // attention rule: `warning` for an approval the human is asked for,
+    // `error` for a failure, `accent` for a finish the user has not looked
+    // at, muted for everything settled. A hold an approval delegate still
+    // owns is work, so it reads as running.
+    let (marker, style) = match agent_need(view) {
         Some(Need::Approval) => ("◇", warning()),
         Some(Need::Failed) => ("✕", failure()),
         Some(Need::FinishedUnread) => ("●", accent()),
+        None if !view.live.awaiting_approval.is_empty() => (spinner(app.animation_tick), info()),
         None => match session.status {
             SessionStatus::Idle => match session.last_outcome.as_ref() {
                 Some(qq_protocol::RunOutcome::Completed) => ("●", muted()),
@@ -135,13 +137,28 @@ pub(super) fn is_audit(session: &SessionView) -> bool {
     session.summary.purpose == qq_protocol::SessionPurpose::Audit
 }
 
+/// Whether the human is asked to answer an approval in `session`:
+/// `awaiting_approval` minus the holds an approval delegate still owns.
+pub(super) fn human_waiting(session: &SessionView) -> bool {
+    // `with_delegate` is a subset of `awaiting_approval`.
+    session.live.awaiting_approval.len() > session.live.with_delegate.len()
+}
+
+/// Whether `session` is doing work: running, queued, answering a side
+/// question, or waiting on an approval delegate.
+fn is_working(session: &SessionView) -> bool {
+    matches!(
+        session.summary.status,
+        SessionStatus::Running | SessionStatus::Queued
+    ) || session.summary.running_side_question.is_some()
+        || (!session.live.with_delegate.is_empty() && !human_waiting(session))
+}
+
 /// Why an agent needs the user, if it does. Like [`SessionView::need`],
 /// except that an approval counts only while the human is asked: a hold an
 /// approval delegate still owns (`with_delegate`) is the agent working.
 pub(super) fn agent_need(session: &SessionView) -> Option<Need> {
-    let live = &session.live;
-    // `with_delegate` is a subset of `awaiting_approval`.
-    if live.awaiting_approval.len() > live.with_delegate.len() {
+    if human_waiting(session) {
         return Some(Need::Approval);
     }
     match session.need() {
@@ -280,9 +297,8 @@ pub(super) fn rollup(app: &App) -> Rollup {
             continue;
         };
         pending.entry.agents += 1;
-        match session.summary.status {
-            SessionStatus::Running | SessionStatus::Queued => pending.entry.agents_working += 1,
-            SessionStatus::Idle => {}
+        if is_working(session) {
+            pending.entry.agents_working += 1;
         }
         // A focused agent still lifts its session while its approval waits;
         // focusing clears an unseen finish, never an approval.
@@ -386,7 +402,7 @@ pub(super) fn plan_rail(app: &App, density: RailDensity) -> (Vec<RailRow>, usize
             .filter(|(root, _)| *root == entry.id);
         let agent_rows = |plan: &mut Vec<RailRow>, id: SessionId| {
             plan.push(RailRow::Agent(id));
-            if !app.sessions[&id].live.awaiting_approval.is_empty() {
+            if human_waiting(&app.sessions[&id]) {
                 plan.push(RailRow::AgentDetail(id));
             }
         };
@@ -694,9 +710,12 @@ pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> V
 pub(super) fn live_status_line(app: &App, session_id: SessionId) -> Option<(String, Style)> {
     let session = app.sessions.get(&session_id)?;
     let live = &session.live;
-    if !live.awaiting_approval.is_empty() {
+    if human_waiting(session) {
         let tool = live.active_tool.as_deref().map_or("tool", tool_verb);
         return Some((format!("◇ approve {tool}"), warning().bold()));
+    }
+    if !live.with_delegate.is_empty() {
+        return Some(("delegate deciding".to_owned(), muted().italic()));
     }
     if session.summary.status == SessionStatus::Running {
         if let Some(tool) = &live.active_tool {
