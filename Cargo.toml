@@ -36,7 +36,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/retsu-AI/qq"
@@ -101,6 +101,10 @@ tree-sitter-bash = "0.25"
 tempfile = "3"
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+tracing = "0.1"
+
+tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
 
 [dependencies]
@@ -127,6 +131,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+
+tracing.workspace = true
+
+tracing-core.workspace = true
 webbrowser.workspace = true
 
 # `qq init` opens its target relative to a no-follow directory handle.

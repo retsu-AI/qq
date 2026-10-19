@@ -8327,9 +8327,15 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     // Store admission and the native read use real I/O; keep fake time
     // fixed until the blocking read reaches the phase this test exercises.
     let keep_clock = tokio::spawn(async {
-        let began = std::time::Instant::now();
-        while began.elapsed() < Duration::from_secs(5) {
+        loop {
             tokio::task::yield_now().await;
+        }
+    });
+    let (stop_watchdog, stopped) = std::sync::mpsc::channel();
+    let (expired, watchdog) = tokio::sync::oneshot::channel();
+    let watchdog_thread = std::thread::spawn(move || {
+        if stopped.recv_timeout(Duration::from_secs(10)).is_err() {
+            let _ = expired.send(());
         }
     });
     let cancellation = RunCancellation::new();
@@ -8359,12 +8365,18 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
                 .await
         })
     };
-    tokio::time::timeout(Duration::from_secs(10), entered)
-        .await
-        .unwrap()
-        .unwrap();
+    tokio::select! {
+        result = entered => result.unwrap(),
+        _ = watchdog => {
+            keep_clock.abort();
+            panic!("blocked inspection did not enter before the independent watchdog");
+        }
+    }
+    stop_watchdog.send(()).unwrap();
+    watchdog_thread.join().unwrap();
     // Past the deadline with the read still blocked, nothing has settled.
     tokio::time::advance(Duration::from_millis(400)).await;
+    keep_clock.abort();
     tokio::time::timeout(Duration::from_secs(1), deadline_cancelled.cancelled())
         .await
         .unwrap();

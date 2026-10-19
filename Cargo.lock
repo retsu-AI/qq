@@ -1083,15 +1083,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
-name = "convert_case"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1176,7 +1167,6 @@ checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
 dependencies = [
  "bitflags",
  "crossterm_winapi",
- "derive_more",
  "document-features",
  "futures-core",
  "mio",
@@ -1229,28 +1219,6 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
-
-[[package]]
-name = "derive_more"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
-dependencies = [
- "derive_more-impl",
-]
-
-[[package]]
-name = "derive_more-impl"
-version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
-dependencies = [
- "convert_case",
- "proc-macro2",
- "quote",
- "rustc_version",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "digest"
@@ -1579,15 +1547,6 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
-]
-
-[[package]]
-name = "getopts"
-version = "0.2.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfe4fbac503b8d1f88e6676011885f34b7174f46e59956bba534ba83abded4df"
-dependencies = [
- "unicode-width",
 ]
 
 [[package]]
@@ -2790,21 +2749,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
 dependencies = [
  "bitflags",
- "getopts",
  "memchr",
- "pulldown-cmark-escape",
  "unicase",
 ]
 
 [[package]]
-name = "pulldown-cmark-escape"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "007d8adb5ddab6f8e3f491ac63566a7d5002cc7ed73901f72057943fa71ae1ae"
-
-[[package]]
 name = "qq"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -2833,12 +2784,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
+ "tracing-core",
  "webbrowser",
 ]
 
 [[package]]
 name = "qq-auth"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -2860,7 +2813,7 @@ dependencies = [
 
 [[package]]
 name = "qq-client"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -2880,7 +2833,7 @@ dependencies = [
 
 [[package]]
 name = "qq-config"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "directories",
  "objc2-core-foundation",
@@ -2897,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "qq-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "axum",
@@ -2922,6 +2875,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "tree-sitter",
  "tree-sitter-bash",
  "url",
@@ -2929,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "qq-harness"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "axum",
  "futures-util",
@@ -2949,7 +2903,7 @@ dependencies = [
 
 [[package]]
 name = "qq-mcp"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "futures-util",
  "qq-provider",
@@ -2963,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "qq-protocol"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "getrandom 0.3.4",
  "qq-reasoning",
@@ -2974,7 +2928,7 @@ dependencies = [
 
 [[package]]
 name = "qq-provider"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -3003,14 +2957,14 @@ dependencies = [
 
 [[package]]
 name = "qq-reasoning"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qq-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "axum",
@@ -3030,7 +2984,7 @@ dependencies = [
 
 [[package]]
 name = "qq-tui"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "base64 0.22.1",
  "crossterm",
@@ -4419,12 +4373,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
-name = "unicode-segmentation"
-version = "1.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
-
-[[package]]
 name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5082,7 +5030,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "cap-std",
