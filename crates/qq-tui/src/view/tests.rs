@@ -5766,6 +5766,47 @@ fn the_related_agents_row_counts_work_by_the_rails_rules_and_names_no_approval()
 }
 
 #[test]
+fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_nothing() {
+    // One session (no rail, no strip) whose agent failed unseen, and a
+    // sticky notice on the rule.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    app.set_info_for_test("theme saved");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("theme saved"), "{rule}");
+    assert!(rule.contains("✕ 1") && rule.contains("^G jump"), "{rule}");
+
+    // A narrow rail whose badges leave no room for a waiting session's
+    // title does not report that session as named, so the rule names it.
+    let (mut app, root, _) = app_with_fanout(30);
+    {
+        let view = app.sessions.get_mut(&root).unwrap();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x85; 16]));
+        view.unread = 99_999;
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let (_, named) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    assert!(!named.contains(&root), "title truncated away: not named");
+    let (_, named) = sidebar(&app, 60, 30, RailDensity::Compact);
+    assert!(named.contains(&root), "title visible: named");
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();

@@ -11,7 +11,7 @@ below works the same either way.
 ```
  qq  my-project › fix parser                    anthropic/claude-sonnet-5  12% ctx  $0.04
                                                                 │ NEEDS YOU  1
-  ▌ YOU                                                          │ ◐ fix parser    ↳1 ◐1
+  ▌ YOU                                                          │ ◐ fix parser       ↳1
   ▌ Fix the failing test in parser.rs                          │ ↳ ◇ add-tests
                                                                 │     ◇ approve run
   ● Read   src/parser.rs                                 0.1s   │
@@ -21,7 +21,7 @@ below works the same either way.
                                                                 │
     The test expected seconds but the parser…                   │
                                                                 │
-  ↳ 1 agent · ◐ 1 · ◇ 1  /agents                               │
+  ↳ 1 agent  /agents                                            │
  ─────────────────────── M-A/M-D answer  ^G jump  ? help  ^K commands  ^O detail
  › Ask QQ...
 ```

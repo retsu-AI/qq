@@ -161,14 +161,39 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
             crate::app::NoticeLevel::Error => ("error: ", failure()),
         };
         left.push(format!(" {prefix}{status} "), style.bold());
-        // A notice takes the left side, but approvals waiting elsewhere keep
-        // their answer and jump chords on the right.
+        // A notice takes the left side; attention elsewhere keeps a compact
+        // pointer on the right so a sticky error never hides a need: the
+        // answer chords for approvals, else a count of unseen failures and
+        // finishes with the jump chord.
         let waiting = !app
             .sessions_awaiting_approval()
             .into_iter()
             .all(|id| Some(id) == app.view().transcript());
         if waiting {
             return rule_keeping_right(left, approval_chords(app), width);
+        }
+        let others: Vec<SessionId> = app
+            .sessions_needing_attention()
+            .into_iter()
+            .filter(|id| Some(*id) != app.focused())
+            .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+            .collect();
+        if !others.is_empty() {
+            let failed = others.iter().any(|id| {
+                app.sessions.get(id).is_some_and(|session| {
+                    super::sidebar::agent_need(session) == Some(qq_client::state::Need::Failed)
+                })
+            });
+            let mut right = Line::default();
+            right.push(
+                format!("{} {}", if failed { "✕" } else { "●" }, others.len()),
+                if failed { failure() } else { accent() },
+            );
+            if let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+                right.push(format!("  {}", compact_chord(&jump)), warning());
+                right.push(" jump", muted());
+            }
+            return rule_keeping_right(left, right, width);
         }
         return rule_with(left, Line::default(), width);
     }
