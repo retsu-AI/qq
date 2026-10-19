@@ -4540,6 +4540,47 @@ fn a_background_approval_is_answered_in_place_without_moving_focus() {
 }
 
 #[test]
+fn a_background_question_is_not_answered_with_a_yes_or_no() {
+    let (mut app, parent, child_id, _, call_id) = app_with_child_awaiting_approval();
+    app.sessions
+        .get_mut(&child_id)
+        .unwrap()
+        .approval_previews
+        .insert(
+            call_id,
+            qq_client::state::ApprovalPreview {
+                question: Some(qq_protocol::QuestionPreview {
+                    questions: vec![qq_protocol::Question {
+                        prompt: "Which crate?".to_owned(),
+                        options: vec!["qq-core".to_owned()],
+                        free_text: false,
+                    }],
+                }),
+                ..Default::default()
+            },
+        );
+    assert_eq!(app.focused(), Some(parent));
+    let (_, requests) = app
+        .handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT,
+        )))
+        .split();
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientRequest::Command(CommandRequest {
+                command: SessionCommand::RespondToolApproval { .. },
+                ..
+            })
+        )),
+        "{requests:#?}"
+    );
+    assert_eq!(app.focused(), Some(child_id), "the question takes the keys");
+    assert!(app.pending_question().is_some());
+}
+
+#[test]
 fn shift_n_denies_and_steers_with_an_amendment() {
     let (mut app, _, child_id, run_id, call_id) = app_with_child_awaiting_approval();
     app.focus_session(child_id);
@@ -5675,6 +5716,125 @@ fn eighth_review_round_on_the_rail() {
         text.contains("failed") && !text.contains("needs approval"),
         "{text}"
     );
+}
+
+#[test]
+fn ninth_review_round_on_the_rail() {
+    // 1. A pinned rail that cannot fit leaves the rule naming the failure.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Shown;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    assert!(!crate::view::rail_visible(40, app.layout, 1));
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    assert!(rule.contains("agent 0"), "{rule}");
+
+    // 2. A side question under a root the rail window did not paint keeps
+    //    no animation timer running.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    app.status = None;
+    app.rail_painted = Some(vec![SessionId::from_bytes([0x11; 16])]);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x75; 16]));
+    assert!(!app.has_activity());
+    assert!(!app.advance_animation());
+
+    // 3. A later snapshot that installs the shown orphan's audit parent
+    //    moves focus off it, though it carries no focused body.
+    let parent = SessionId::from_bytes([0x76; 16]);
+    let orphan = SessionSummary {
+        parent_id: Some(parent),
+        ..fixtures::session_summary(SessionId::from_bytes([0x77; 16]))
+    };
+    let other = fixtures::session_summary(SessionId::from_bytes([0x78; 16]));
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![orphan.clone(), other.clone()],
+        focused: Some(fixtures::session_snapshot(orphan.clone())),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(orphan.id));
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![
+            SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(parent)
+            },
+            orphan.clone(),
+            other.clone(),
+        ],
+        focused: None,
+        cursor: fixtures::cursor(2),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(other.id));
+
+    // 4. An audit child's stream under its focused parent changes no cell.
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+    });
+    app.focus_session(root);
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    let run = RunId::from_bytes([0x79; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run),
+        ..fixtures::envelope(
+            2,
+            ids[0],
+            SessionEvent::AssistantMessageStarted {
+                message: MessageSnapshot {
+                    run_id: run,
+                    state: MessageState::Streaming,
+                    ..fixtures::message(MessageId::from_bytes([0x7a; 16]), ids[0], "")
+                },
+            },
+        )
+    }));
+    let effects = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run),
+        ..fixtures::envelope(
+            3,
+            ids[0],
+            SessionEvent::TextAppended {
+                message_id: MessageId::from_bytes([0x7a; 16]),
+                channel: qq_protocol::TextChannel::Output,
+                text: "audit notes".to_owned(),
+            },
+        )
+    }));
+    assert!(!effects.redraws(), "{effects:?}");
+
+    // 5. Leaving a workspace view with only an orphan task agent loaded
+    //    lands on it, not on the empty prompt.
+    let lone = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x7b; 16])),
+        ..fixtures::session_summary(SessionId::from_bytes([0x7c; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![lone.clone()],
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    app.set_view(View::Transcript(None));
+    app.execute(Command::ShowAttention);
+    app.execute(Command::ShowAttention);
+    assert_eq!(app.focused(), Some(lone.id));
 }
 
 #[test]

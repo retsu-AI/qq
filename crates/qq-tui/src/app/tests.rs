@@ -2701,6 +2701,27 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
     assert!(listed.contains(&root) && listed.contains(&other_root.id));
 }
 
+#[test]
+fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
+    // `child`'s parent is not loaded: `/agents` from its grandchild lists
+    // the orphan component, not nothing.
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let mut child = summary_named(0x81, "child");
+    child.parent_id = Some(SessionId::from_bytes([0x8f; 16]));
+    let mut grandchild = summary_named(0x82, "grandchild");
+    grandchild.parent_id = Some(child.id);
+    initial.sessions.extend([child.clone(), grandchild.clone()]);
+    app.apply_snapshot(initial);
+    app.focus_session(grandchild.id);
+    app.execute(Command::OpenAgents);
+    let mut listed = app.filtered_sessions();
+    listed.sort();
+    let mut expected = vec![child.id, grandchild.id];
+    expected.sort();
+    assert_eq!(listed, expected);
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }

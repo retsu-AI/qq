@@ -1046,11 +1046,14 @@ impl App {
             self.set_warning("focus a session to view its agents".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
+        // The topmost loaded ancestor: an agent whose parent is not loaded
+        // tops its own component, which the picker lists as a session.
         let mut root = focused;
         while let Some(parent) = self
             .sessions
             .get(&root)
             .and_then(|session| session.summary.parent_id)
+            .filter(|parent| self.sessions.contains_key(parent))
         {
             root = parent;
         }
