@@ -185,6 +185,7 @@ export function Composer({
     <div className="relative">
       {mentions.open && (
         <MentionMenu
+          below={(ref.current?.getBoundingClientRect().top ?? Infinity) < 360}
           suggestions={mentions.suggestions}
           loading={mentions.loading}
           highlight={mentions.highlight}
@@ -588,7 +589,10 @@ function MentionMenu({
   query,
   onHover,
   onChoose,
+  below,
 }: {
+  /** Open under the composer: there is no room above it. */
+  below: boolean;
   suggestions: Suggestion[];
   loading: boolean;
   highlight: number;
@@ -608,7 +612,10 @@ function MentionMenu({
       id="mention-menu"
       role="listbox"
       aria-label="Mention suggestions"
-      className="animate-pop-up absolute bottom-full left-0 right-0 z-40 mb-2 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-popover"
+      className={clsx(
+        "absolute left-0 right-0 z-40 max-h-[300px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] shadow-popover",
+        below ? "animate-pop-down top-full mt-2" : "animate-pop-up bottom-full mb-2",
+      )}
     >
       <div className="flex items-center justify-between px-2.5 pb-1 pt-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-faint">
         <span>Mention</span>

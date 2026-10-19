@@ -18,6 +18,10 @@ history before retrying, because the server may already have accepted the task.
 Disconnected/replaying states pause sending. Engine startup errors include a
 Retry connection button; Settings exposes connection and tool-host details.
 
+A new or empty session offers starting points: explain the project, review
+your changes (`@diff`), fix a bug, or add tests. Choosing one fills the composer
+for you to finish; nothing is sent until you send it.
+
 ## Sessions and run controls
 
 Search sessions in the sidebar (Ctrl F; Esc clears). Each session's ⋯ menu
