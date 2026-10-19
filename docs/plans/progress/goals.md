@@ -6,11 +6,11 @@ Plan: [`../goals.md`](../goals.md). One writer per file.
 | --- | --- | --- | --- | --- | --- |
 | G0 | Foundation: durable goals and AC4 loop guard | Shipped (87d3ed1a) | ENG-1045 | [#308](https://github.com/retsu-AI/qq/pull/308) | Foundation merged; whole-plan acceptance remains open |
 | G1 | — | Dropped (combined into G0) | | | No separate slice |
-| G2 | Driver closeout | In review | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged; full G2 acceptance belongs to this closeout |
+| G2 | Driver closeout | Shipped (0df22416) | ENG-1053 / ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | G2.1 merged earlier; closeout merged with G3 |
 | G2.1 | Idle driver, historical spend and admission checkpoint | Shipped (ffa46942) | ENG-1053 | [#309](https://github.com/retsu-AI/qq/pull/309) | Published checkpoint only; full G2 remains open |
-| G3 | Completion checks and crash-safe recovery | In review | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | First new PR combines G2 closeout and G3 |
-| G4 | TUI, CLI and foreground hosting | In review | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations are in G2/G3; surface acceptance follows |
-| G5 | Live multi-hour qualification | In review | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Ninth qualifies final runtime `e84e3552`: 145.7 minutes, four compactions, 14 retained checklist identities, terminal usage reconciled; subscription only, no paid API fallback |
+| G3 | Completion checks and crash-safe recovery | Shipped (0df22416) | ENG-1063 | [#330](https://github.com/retsu-AI/qq/pull/330) | Combined with the G2 closeout |
+| G4 | TUI, CLI and foreground hosting | Shipped (53aae3ba) | ENG-1064 | [#331](https://github.com/retsu-AI/qq/pull/331) | Config/policy foundations shipped in G2/G3 |
+| G5 | Live multi-hour qualification | Shipped (a9bff3ef) | ENG-1065 / ENG-809 | [#332](https://github.com/retsu-AI/qq/pull/332) | Ninth qualifies final runtime `e84e3552`: 145.7 minutes, four compactions, 14 retained checklist identities, terminal usage reconciled; subscription only, no paid API fallback. H0/ENG-1058 performance acceptance stays open |
 
 ## Entries
 
@@ -1248,3 +1248,11 @@ publication and thread resolution remain pending.
   host isolation remain explicit. ENG-1058/performance acceptance stays open.
 - Plan and curated receipt now qualify G5 for the final stack. ENG-1065 moves to
   review; #332 publication/gate evidence is recorded in its PR body. No merge.
+
+### 2026-10-18 — delivery stack merged (v0.1.8 preparation)
+
+- Reconciled against main `7750ec7f`: #330 merged as `0df22416` (G2/G3),
+  #331 as `53aae3ba` (G4) and #332 as `a9bff3ef` (G5). Top table moved to
+  Shipped; no acceptance is inferred beyond each slice's recorded evidence.
+- ADR-0049 stays Proposed: acceptance is a maintainer decision listed as a
+  v0.1.8 pre-bump gate in `release-0.1.8.md`. H0/ENG-1058 remain open.
