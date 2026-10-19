@@ -330,6 +330,34 @@ fn delete_session(
     state.send(&project_id, UiCommand::Delete(parse_session(&session_id)?))
 }
 
+/// `@` completion for the composer: the TUI's ignore-aware, ranked and
+/// deadline-bounded `complete_paths`, off the executor. A busy pool or a
+/// failed walk yields no suggestions rather than an error, since completion
+/// is advisory and the next keystroke asks again.
+#[tauri::command]
+async fn complete_mention(
+    state: State<'_, AppState>,
+    project_id: String,
+    query: String,
+) -> Result<Vec<String>, String> {
+    if query.len() > MAX_COMPLETION_QUERY_BYTES {
+        return Ok(Vec::new());
+    }
+    let path = state.project(&project_id)?.path;
+    let Ok(permit) = Arc::clone(&state.input_slots).try_acquire_owned() else {
+        return Ok(Vec::new());
+    };
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        qq_core::mentions::complete_paths(&path, &query, &[])
+    })
+    .await
+    .unwrap_or_default())
+}
+
+/// Longer queries cannot match a useful path and only cost a walk.
+const MAX_COMPLETION_QUERY_BYTES: usize = 512;
+
 #[tauri::command]
 fn set_notifications_enabled(state: State<'_, AppState>, enabled: bool) {
     state
@@ -537,6 +565,7 @@ fn main() {
             set_session_option,
             session_action,
             set_notifications_enabled,
+            complete_mention,
             select_model,
             delete_session,
             auth_providers,

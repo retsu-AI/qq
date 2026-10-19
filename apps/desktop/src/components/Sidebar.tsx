@@ -6,6 +6,7 @@ import {
   FolderPlus,
   KeyRound,
   Loader2,
+  Settings as SettingsIcon,
   SquarePen,
   Trash2,
   X,
@@ -24,7 +25,6 @@ import type {
   ProjectState,
   SessionRow,
 } from "../lib/types";
-import { Logo } from "./Logo";
 import {
   matchesSession,
   parseSessionPreferences,
@@ -39,9 +39,10 @@ interface Props {
     activeId: string | null;
   };
   project: ProjectState | null;
+  openSettings: () => void;
 }
 
-export function Sidebar({ app, project }: Props) {
+export function Sidebar({ app, project, openSettings }: Props) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [metadata, setMetadata] = useState<SessionPreferences>(() =>
@@ -97,11 +98,7 @@ export function Sidebar({ app, project }: Props) {
   }, [project?.sessions, metadata, query, showArchived]);
 
   return (
-    <aside className="flex w-[272px] shrink-0 flex-col border-r border-line bg-sidebar">
-      <div className="flex h-12 items-center gap-2 px-4">
-        <Logo className="h-5 w-5" />
-        <span className="text-[13px] font-semibold tracking-tight">QQ</span>
-      </div>
+    <aside className="flex w-[272px] shrink-0 flex-col border-r border-line bg-sidebar pt-2">
 
       <ProjectSwitcher
         open={app.open}
@@ -201,6 +198,14 @@ export function Sidebar({ app, project }: Props) {
         >
           <KeyRound className="h-3.5 w-3.5" />
           Providers
+        </button>
+        <button
+          onClick={openSettings}
+          title="Settings (Ctrl ,)"
+          aria-label="Settings"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-fg"
+        >
+          <SettingsIcon className="h-3.5 w-3.5" />
         </button>
       </footer>
     </aside>
