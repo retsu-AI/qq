@@ -6,6 +6,7 @@ import { Sidebar } from "../src/components/Sidebar";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import type { Item, ProjectState } from "../src/lib/types";
+import { getPreferences, setPreferences } from "../src/lib/preferences";
 import "../src/styles.css";
 
 const count = Math.min(
@@ -212,6 +213,9 @@ if (new URLSearchParams(location.search).has("demo")) {
     },
   ];
 }
+// `?changes`: open the Changes panel (saved like any preference).
+if (new URLSearchParams(location.search).has("changes"))
+  setPreferences({ ...getPreferences(), changesPanel: true });
 if (new URLSearchParams(location.search).has("approval"))
   project.transcript!.items.push({
     kind: "tool",
