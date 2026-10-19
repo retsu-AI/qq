@@ -326,6 +326,20 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_row_selection_reads_like_a_terminal_in_either_direction() {
+        let (lines, area) = frame();
+        // From inside `alpha` on row 1 to inside `gamma` on row 2: the end
+        // of row 1 from the anchor, then row 2 up to and including the head.
+        let mut forward = Selection::start(area, 5, 1).unwrap();
+        forward.extend(5, 2);
+        assert_eq!(forward.text(&lines).text, "pha beta\ngam");
+        // The same cells dragged upward copy the same text.
+        let mut reverse = Selection::start(area, 5, 2).unwrap();
+        reverse.extend(5, 1);
+        assert_eq!(reverse.text(&lines).text, forward.text(&lines).text);
+    }
+
+    #[test]
     fn a_copy_is_bounded() {
         let wide = Area {
             x: 0,

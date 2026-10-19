@@ -5481,6 +5481,40 @@ fn a_drag_in_the_transcript_selects_only_its_text_and_copies_it_on_release() {
 }
 
 #[test]
+fn a_rail_click_focuses_the_row_that_was_drawn_even_after_the_rail_reordered() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let other_row =
+        u16::try_from(rows.iter().position(|row| row.contains("Other")).unwrap()).unwrap();
+    // An update moves the rail before anything is redrawn: agent 1 now
+    // waits on an approval, so its session jumps to NEEDS YOU above `Other`
+    // and adds rows.
+    app.sessions
+        .get_mut(&ids[1])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x97; 16]));
+    let column = u16::try_from(rail_x + 4).unwrap();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        other_row,
+    ));
+    assert_eq!(
+        app.focused(),
+        Some(SessionId::from_bytes([0x11; 16])),
+        "the click lands on the row the user saw"
+    );
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);
