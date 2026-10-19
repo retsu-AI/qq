@@ -12,18 +12,23 @@ use std::{
 
 use qq_config as config;
 
-use crate::{LOGIN_PROVIDERS, cli};
+use crate::cli;
 
 /// Built-in providers offered by the chooser, in `qq auth login` order:
 /// name, an example model from the shipped catalog, and the API-key
-/// variable when the provider reads one.
-const CHOICES: [(&str, &str, Option<&str>); 5] = [
-    ("openai", "gpt-5.6", Some("OPENAI_API_KEY")),
-    ("anthropic", "claude-sonnet-5", Some("ANTHROPIC_API_KEY")),
-    ("google", "gemini-2.5-flash", Some("GEMINI_API_KEY")),
-    ("xai", "grok-4.6", Some("XAI_API_KEY")),
-    ("openai-codex", "gpt-5.6-luna", None),
-];
+/// variable when the provider reads one. Derived from the provider table.
+static CHOICES: std::sync::LazyLock<Vec<(&str, &str, Option<&str>)>> =
+    std::sync::LazyLock::new(|| {
+        config::builtin_providers()
+            .map(|provider| {
+                (
+                    provider.id,
+                    provider.init_model,
+                    provider.environment_variable,
+                )
+            })
+            .collect()
+    });
 
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {
@@ -224,23 +229,23 @@ pub fn run<R: BufRead, W: Write>(
     }
 
     let next = match provider {
-        "openai-codex" => {
-            "qq auth login openai-codex      # signs in through the browser".to_owned()
-        }
         "bedrock" | "bedrock-mantle" => {
             "sign in to AWS (AWS_PROFILE or the default credential chain)".to_owned()
         }
-        name if LOGIN_PROVIDERS.contains(&name) => {
-            match CHOICES.iter().find(|(choice, _, _)| *choice == name) {
-                Some((_, _, Some(variable))) => {
+        name => match config::builtin_providers().find(|provider| provider.id == name) {
+            Some(provider) => match (provider.login.first(), provider.environment_variable) {
+                (Some(config::LoginMethod::OpenAiCodexBrowser), _) => {
+                    format!("qq auth login {name:<12}    # signs in through the browser")
+                }
+                (_, Some(variable)) => {
                     format!("qq auth login {name:<12}    # or export {variable}")
                 }
-                Some((_, _, None)) | None => format!("qq auth login {name}"),
-            }
-        }
-        name => format!(
-            "declare provider {name:?} under providers: in that file, then qq auth set or its key"
-        ),
+                (_, None) => format!("qq auth login {name}"),
+            },
+            None => format!(
+                "declare provider {name:?} under providers: in that file, then qq auth set or its key"
+            ),
+        },
     };
     let written = writeln!(stdout, "wrote {} (model: {route})", path.display())
         .and_then(|()| writeln!(stdout))
@@ -769,6 +774,6 @@ mod tests {
     #[test]
     fn chooser_lists_exactly_the_login_providers() {
         let names: Vec<&str> = CHOICES.iter().map(|(name, _, _)| *name).collect();
-        assert_eq!(names, LOGIN_PROVIDERS);
+        assert_eq!(names, crate::login_providers());
     }
 }
