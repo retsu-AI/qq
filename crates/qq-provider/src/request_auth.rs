@@ -93,8 +93,10 @@ impl RequestCredential {
     ) -> Result<Self, RequestCredentialError> {
         let access_token = access_token.into();
         let account_id = account_id.into();
-        // `Bearer ` plus the token, the account ID, `qq` and `true`.
-        check_credential_size(7 + access_token.len() + account_id.len() + 2 + 4)?;
+        // `Bearer ` plus the token, the account ID, `qq`, and `true` only
+        // when the FedRAMP header is sent.
+        let fedramp = if is_fedramp { 4 } else { 0 };
+        check_credential_size(7 + access_token.len() + account_id.len() + 2 + fedramp)?;
         let mut credential = Self::empty();
         credential.push_bearer(access_token)?;
         credential.push_secret(CHATGPT_ACCOUNT_ID, account_id)?;
@@ -717,6 +719,14 @@ mod tests {
         let half = "x".repeat(MAX_CREDENTIAL_HEADER_BYTES / 2);
         assert!(matches!(
             RequestCredential::codex(half.clone(), half, false),
+            Err(RequestCredentialError::Invalid)
+        ));
+        // Exactly at the limit: `Bearer ` + token + account + `qq`, and the
+        // FedRAMP `true` counts only when that header is sent.
+        let token = "t".repeat(MAX_CREDENTIAL_HEADER_BYTES - 7 - 1 - 2);
+        assert!(RequestCredential::codex(token.clone(), "a", false).is_ok());
+        assert!(matches!(
+            RequestCredential::codex(token, "a", true),
             Err(RequestCredentialError::Invalid)
         ));
     }
