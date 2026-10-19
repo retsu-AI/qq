@@ -143,3 +143,20 @@ whole terminal row.
   (`target/qq-perf/tui-focus-F1-2026-10-18/{baseline,after}-children-fixture-v2.txt`,
   load ≈6): children_20 58.1 / 62.3 → 41.8 / 41.5 µs; sessions_200 28.5 /
   29.7 → 30.6 / 30.5 µs (+3–7 %, inside the spread of earlier runs).
+
+### 2026-10-19 — F1–F2 fourth review round and the full render gate
+
+- A session's own group uses the human-aware rules (`own_group`): a hold the
+  delegate owns or a running side question lists it as WORKING. Orphan
+  agents carry their loaded descendants. `App::sessions_needing_attention`
+  and `sessions_awaiting_approval` are the one audit-filtered, human-owned
+  attention list behind `Ctrl-G`, `Alt-A`/`Alt-D`, `/attention` and the rule.
+  `listed_sessions` stops counting at two.
+- Full gate, base = stack base with the same 20-agent fixture, head = this
+  branch, two release binaries interleaved 4× pinned to one core, quiet host
+  (load ≈1), medians (`target/qq-perf/tui-focus-F1-2026-10-19/interleaved-core3.txt`):
+  steady 21.1 → 21.2 µs (+0.5 %); streaming_focused 33.8 → 34.0 (+0.3 %);
+  run_on_32kb 457.1 → 409.1 (−10.5 %); golden_path 38.8 → 38.5 (−0.9 %);
+  sessions_200 27.9 → 27.9 (+0.4 %); children_20 57.3 → 40.8 (−28.9 %);
+  resize_horizontal 30.3 → 30.2 (−0.3 %). All seven within 5 % or faster;
+  the earlier +3–10 % sessions_200 readings were sequential-run drift.

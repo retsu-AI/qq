@@ -7,7 +7,7 @@
    Drafted the checklist.                                                                   │
    ✓ 0.0s · ttft 0.0s                                                                       │ WORKING  2
                                                                                             │ ◐ Write tests       1 new
-  ↳ 1 agent · ◐ 1 · ◇ 1  /agents                                                            │    compacting context
+  ↳ 1 agent · ◐ 1  /agents                                                                  │    compacting context
                                                                                             │ ◐ Survey callers    1 new
                                                                                             │    Found twelve call ...
                                                                                             │

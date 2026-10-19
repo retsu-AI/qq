@@ -87,11 +87,13 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
-/// Sessions the rail and the strip list: roots that are not audit agents
-/// orphaned by a deleted parent, plus agents whose session is not loaded.
-/// The layout's `Auto` rail and strip count these, never agents.
+/// Sessions the rail and the strip list, counted only as far as the layout
+/// needs: it compares the count with one, so the scan stops at two. Roots
+/// that are not audit agents orphaned by a deleted parent, plus agents whose
+/// session is not loaded. Agents never count.
 pub(crate) fn listed_sessions(app: &App) -> usize {
-    app.sessions
+    let roots = app
+        .sessions
         .roots()
         .iter()
         .filter(|id| {
@@ -99,8 +101,12 @@ pub(crate) fn listed_sessions(app: &App) -> usize {
                 .get(id)
                 .is_some_and(|session| !is_audit(session))
         })
-        .count()
-        + orphans(app).len()
+        .take(2)
+        .count();
+    if roots >= 2 {
+        return roots;
+    }
+    roots + orphans(app).len()
 }
 
 /// Whether the sessions rail is on screen at `width` under `prefs`. Shared
