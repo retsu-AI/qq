@@ -5023,6 +5023,125 @@ fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
 }
 
 #[test]
+fn delegate_holds_stay_working_and_a_focused_waiting_agent_still_lifts_its_session() {
+    let (mut app, root, ids) = app_with_fanout(2);
+    let hold = ToolCallId::from_bytes([0x99; 16]);
+    {
+        let live = &mut app.sessions.get_mut(&ids[0]).unwrap().live;
+        live.awaiting_approval.insert(hold);
+        live.with_delegate.insert(hold);
+    }
+    app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let entry = |app: &App| {
+        rollup(app)
+            .sessions
+            .into_iter()
+            .find(|e| e.id == root)
+            .unwrap()
+    };
+    assert_eq!(
+        entry(&app).group,
+        RailGroup::Working,
+        "the delegate decides it"
+    );
+    assert!(rollup(&app).needs.is_empty());
+    // The delegate escalates: now the human is asked.
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .with_delegate
+        .clear();
+    assert_eq!(entry(&app).group, RailGroup::NeedsYou);
+    // Focusing the waiting agent does not hide its approval from the rail.
+    app.focus_session(ids[0]);
+    assert_eq!(entry(&app).group, RailGroup::NeedsYou);
+    let rail = rail_rows(&mut app, 120, 40);
+    let agent_rows = rail.iter().filter(|row| row.contains("agent 0")).count();
+    assert_eq!(agent_rows, 1, "listed once, first: {rail:#?}");
+}
+
+#[test]
+fn an_agent_whose_session_is_not_loaded_is_listed_as_a_session() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x98; 16]));
+    app.sessions.remove(&root);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let rollup = rollup(&app);
+    assert!(
+        rollup
+            .sessions
+            .iter()
+            .any(|entry| entry.id == ids[0] && entry.group == RailGroup::NeedsYou),
+        "{rollup:?}"
+    );
+    assert_eq!(listed_sessions(&app), 2);
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    assert!(rail.contains("agent 0"), "{rail}");
+}
+
+#[test]
+fn a_hidden_agents_stream_does_not_wake_the_frame() {
+    // The rail is up (two sessions, 120 columns) and focused on `Other`; a
+    // quiet agent of `Fan out` streams. Its row is not on the rail, so its
+    // deltas change nothing on screen.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    let run = RunId::from_bytes([0x77; 16]);
+    let message = MessageSnapshot {
+        run_id: run,
+        state: MessageState::Streaming,
+        ..fixtures::message(MessageId::from_bytes([0x78; 16]), ids[0], "")
+    };
+    let envelope = |sequence, event| {
+        ClientUpdate::Event(SessionEventEnvelope {
+            run_id: Some(run),
+            occurred_at_ms: sequence,
+            ..fixtures::envelope(sequence, ids[0], event)
+        })
+    };
+    app.apply_client_update(envelope(
+        2,
+        SessionEvent::AssistantMessageStarted { message },
+    ));
+    let effects = app.apply_client_update(envelope(
+        3,
+        SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([0x78; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "hidden progress".to_owned(),
+        },
+    ));
+    assert!(!effects.redraws(), "{effects:?}");
+}
+
+#[test]
+fn tree_navigation_skips_audit_agents() {
+    // agent 0 is an audit and the oldest child; agents 1 and 2 are real.
+    let (mut app, root, ids) = app_with_fanout_where(3, |index, summary| {
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        }
+    });
+    app.focus_session(root);
+    app.execute(Command::FocusFirstChild);
+    assert_eq!(app.focused(), Some(ids[1]), "Alt-Down skips the audit");
+    for _ in 0..3 {
+        app.execute(Command::FocusNextSibling);
+        assert_ne!(app.focused(), Some(ids[0]));
+        app.execute(Command::FocusPreviousSibling);
+        assert_ne!(app.focused(), Some(ids[0]));
+    }
+}
+
+#[test]
 fn audit_agents_are_never_listed_or_counted() {
     let (mut app, root, _) = app_with_fanout_where(2, |index, summary| {
         if index == 1 {

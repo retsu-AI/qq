@@ -2804,6 +2804,46 @@ fn the_session_picker_never_lists_audit_agents_or_anything_under_them() {
 }
 
 #[test]
+fn the_session_picker_left_and_ctrl_a_work_while_searching() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.focus_session(other);
+    app.execute(Command::OpenSessions);
+    // A search highlights an agent under the second-listed session; Left
+    // moves to its session row even though the search keeps it listed.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    // Clearing the query lands on the agent's session, not the first row.
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_ne!(
+        app.filtered_sessions()[0],
+        root,
+        "fixture: root is not first"
+    );
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Left on a searched agent clears the search and lands on its session.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.session_picker_selected(), Some(root), "Left moved");
+    assert_eq!(
+        app.filtered_sessions().len(),
+        2,
+        "search cleared, collapsed"
+    );
+    let _ = child;
+    // Ctrl-A toggles with nothing matched.
+    app.handle_terminal_event(Event::Paste("zzz".to_owned()));
+    assert!(app.filtered_sessions().is_empty());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(app.filtered_sessions().len(), 4, "every agent listed");
+}
+
+#[test]
 fn the_session_picker_opens_a_focused_agents_session_expanded() {
     let (mut app, root, child, _, _) = app_with_agent_tree();
     app.focus_session(child);

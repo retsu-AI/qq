@@ -227,8 +227,11 @@ search hit on an agent prefixes its session's title (`Fan out › agent 1`).
 The picker opens with a focused agent's session expanded and the cursor on
 the agent. `/agents` is the same picker scoped to the focused tree with every
 agent listed. The cursor keeps its id across refreshes while that row is
-listed; when an agent row stops being listed the cursor moves to its session.
-Audit agents have no row.
+listed; when an agent row stops being listed the cursor moves to its
+session. Clearing a search lands on the highlighted agent's session (or the
+agent itself when it stays listed), not the first row. `Left` on an agent
+row clears any search and moves to its session; `Ctrl-A` works with an
+empty result. Audit agents have no row.
 
 ## Bounds
 
