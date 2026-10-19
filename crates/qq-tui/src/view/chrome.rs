@@ -311,28 +311,26 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         .collect();
     // Agents that failed or finished unseen and whose row is not on screen:
     // a session's own state shows on its rail row or the strip, but an
-    // agent's has nowhere else to appear.
-    let unseen: Vec<(&str, bool)> = if waiting.is_empty() {
-        app.sessions_needing_attention()
-            .into_iter()
-            .filter(|id| Some(*id) != app.focused())
-            .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
-            .filter_map(|id| app.sessions.get(&id))
-            .filter(|session| session.summary.parent_id.is_some())
-            .filter_map(|session| match super::sidebar::agent_need(session) {
-                Some(qq_client::state::Need::Failed) => {
-                    Some((session.summary.title.as_str(), true))
-                }
-                Some(qq_client::state::Need::FinishedUnread) => {
-                    Some((session.summary.title.as_str(), false))
-                }
-                Some(qq_client::state::Need::Approval) | None => None,
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if let [(first, failed), rest @ ..] = unseen.as_slice() {
+    // agent's has nowhere else to appear. Counted alongside approvals, so
+    // every off-rail item is named or counted.
+    let unseen: Vec<(&str, bool)> = app
+        .sessions_needing_attention()
+        .into_iter()
+        .filter(|id| Some(*id) != app.focused())
+        .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+        .filter_map(|id| app.sessions.get(&id))
+        .filter(|session| session.summary.parent_id.is_some())
+        .filter_map(|session| match super::sidebar::agent_need(session) {
+            Some(qq_client::state::Need::Failed) => Some((session.summary.title.as_str(), true)),
+            Some(qq_client::state::Need::FinishedUnread) => {
+                Some((session.summary.title.as_str(), false))
+            }
+            Some(qq_client::state::Need::Approval) | None => None,
+        })
+        .collect();
+    if waiting.is_empty()
+        && let [(first, failed), rest @ ..] = unseen.as_slice()
+    {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         let (glyph, verb, style) = if *failed {
             ("✕ ", "failed", failure())
@@ -355,11 +353,14 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
     if !waiting.is_empty() {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
+        // The most urgent item is named; approvals then the unseen agents
+        // are counted.
+        let others = waiting.len() - 1 + unseen.len();
         left.push(
-            match waiting.as_slice() {
-                [one] => format!("{one} needs approval"),
-                [first, rest @ ..] => format!("{first} +{} need approval", rest.len()),
-                [] => String::new(),
+            match (waiting[0], others, unseen.is_empty()) {
+                (one, 0, _) => format!("{one} needs approval"),
+                (first, rest, true) => format!("{first} +{rest} need approval"),
+                (first, rest, false) => format!("{first} needs approval +{rest} need you"),
             },
             warning().bold(),
         );
