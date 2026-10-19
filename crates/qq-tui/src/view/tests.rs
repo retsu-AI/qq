@@ -5943,13 +5943,15 @@ fn the_approval_chords_stay_beside_a_notice() {
 #[test]
 fn the_related_agents_row_counts_work_by_the_rails_rules_and_names_no_approval() {
     let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
-    app.sessions.get_mut(&child_id).unwrap().summary.spawned_by = None;
-    app.sessions.get_mut(&child_id).unwrap().summary.status = SessionStatus::Idle;
-    app.sessions
-        .get_mut(&child_id)
-        .unwrap()
-        .summary
-        .running_side_question = Some(RunId::from_bytes([0x90; 16]));
+    {
+        let child = app.sessions.get_mut(&child_id).unwrap();
+        child.summary.spawned_by = None;
+        child.summary.status = SessionStatus::Idle;
+        child.summary.running_side_question = Some(RunId::from_bytes([0x90; 16]));
+        // Only the side question: an agent blocked on an approval is not
+        // working.
+        child.live.awaiting_approval.clear();
+    }
     app.focus_session(parent);
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
     let related = rows
