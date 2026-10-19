@@ -59,6 +59,11 @@ line ranges such as `@src/main.rs:10-40`, also works when typed by hand.
 QQ enforces workspace containment and file/output bounds. Unresolvable references
 retain your draft with an explanation. This app currently accepts text and
 workspace files; arbitrary binary/image uploads are outside this release.
+Drag files from Explorer onto the window to mention them at the cursor. Only
+files inside the project can be mentioned, and mention paths cannot contain
+spaces; skipped files are listed under the composer. The ring beside Send shows
+how much of the model's context the session uses (hover for tokens and cost);
+compact the session from Ctrl K when it fills up.
 
 History follows streamed output until you scroll upward. Latest resumes following.
 Focus the history region and use Ctrl Home/Ctrl End for its beginning/end.
