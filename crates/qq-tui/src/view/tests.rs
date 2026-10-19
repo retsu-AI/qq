@@ -5338,7 +5338,87 @@ fn a_legacy_session_sums_its_agents_direct_spend() {
         .find(|entry| entry.id == root)
         .unwrap();
     assert_eq!(entry.cost, Some(35_000_000), "own + agent + audit");
+    // An agent below the audit still adds its direct spend to the legacy
+    // total, though the audit subtree is never listed.
+    let below = SessionSummary {
+        parent_id: Some(ids[1]),
+        accounting: None,
+        estimated_cost_usd_nanos: Some(7_000_000),
+        ..fixtures::session_summary(SessionId::from_bytes([0x5a; 16]))
+    };
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        below.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(below),
+        },
+    )));
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(
+        entry.cost,
+        Some(42_000_000),
+        "the audit's subtree counts too"
+    );
     let _ = ids;
+}
+
+#[test]
+fn an_audit_focus_at_startup_fetches_a_cold_fallback_and_orphans_are_fallbacks() {
+    let audit_id = SessionId::from_bytes([0x5b; 16]);
+    let cold_id = SessionId::from_bytes([0x5c; 16]);
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        updated_at_ms: 999,
+        ..fixtures::session_summary(audit_id)
+    };
+    let cold = SessionSummary {
+        title: "cold".to_owned(),
+        ..fixtures::session_summary(cold_id)
+    };
+    let mut app = App::new(TuiOptions::default());
+    let effects = app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit.clone(), cold],
+        focused: Some(fixtures::session_snapshot(audit)),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(cold_id));
+    let requested: Vec<_> = effects
+        .into_requests()
+        .into_iter()
+        .filter_map(|request| match request {
+            ClientRequest::Snapshot(snapshot) => snapshot.focused_session_id,
+            _ => None,
+        })
+        .collect();
+    assert!(
+        requested.contains(&cold_id),
+        "cold fallback fetched: {requested:?}"
+    );
+
+    // The only conversation besides the audit is an orphan agent.
+    let orphan_id = SessionId::from_bytes([0x5d; 16]);
+    let orphan = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x5e; 16])),
+        ..fixtures::session_summary(orphan_id)
+    };
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        updated_at_ms: 999,
+        ..fixtures::session_summary(audit_id)
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit.clone(), orphan],
+        focused: Some(fixtures::session_snapshot(audit)),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(orphan_id));
 }
 
 #[test]

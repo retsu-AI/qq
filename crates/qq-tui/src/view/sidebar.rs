@@ -333,9 +333,13 @@ pub(super) fn rollup(app: &App) -> Rollup {
     for &id in order {
         let session = &app.sessions[&id];
         let root = session.summary.parent_id.is_none();
-        // Everything below an audit agent is bookkeeping too.
+        // Everything below an audit agent is bookkeeping too, but its spend
+        // still belongs to a legacy session's total.
         if let Some(depth) = audit_depth {
             if !root && app.sessions.depth(id) > depth {
+                if let Some(pending) = current.as_mut() {
+                    add_legacy_cost(pending, session);
+                }
                 continue;
             }
             audit_depth = None;
