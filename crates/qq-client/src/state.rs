@@ -404,6 +404,14 @@ impl SessionStore {
         loaded_through: u64,
     ) {
         let session_id = snapshot.summary.id;
+        // A body the snapshot's shared byte budget ran out before reaching
+        // holds no rows yet has history. Installing it would cache an empty
+        // transcript forever; keep the session cold so focusing it fetches
+        // its own body.
+        if snapshot.messages.is_empty() && snapshot.has_older_messages {
+            self.upsert_summary(snapshot.summary, models, loaded_through);
+            return;
+        }
         let mut messages = snapshot.messages;
         retain_recent_messages(&mut messages);
         let history = messages
