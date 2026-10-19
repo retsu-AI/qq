@@ -16,5 +16,6 @@ Drive an open PR to merge-ready without stopping at the first red check.
    step 2) and fix it; do not re-run until green and move on.
 4. **Conflicts:** rebase onto `origin/main`, rerun `cargo xtask check`.
 5. Push fixes as new commits; reply to each thread with the commit.
-6. Stop when every check is green, every thread is resolved or answered,
-   and the PR is in the merge queue or waiting on a human approval only.
+6. Stop when CI is green and review threads are answered. Then tell the
+   user "mergeable" in one line. A bot's written "no major issues" counts as
+   approval; don't wait for emoji reactions.

@@ -61,7 +61,7 @@ points, or options without a caller (`AGENTS.md` § Engineering priorities).
 
 Turn the rule into a type, a lint (`xtask/src/lint.rs`, `[workspace.lints]`),
 a CI step, or a test, in that order of preference. Add the rule and its
-enforcer to `AGENTS.md` § Rules → enforcers. Run `.qq/skills/qq-mode/playbooks/correct.md`.
+enforcer. Run `.qq/skills/qq-mode/playbooks/correct.md`.
 
 ## Explain the number
 

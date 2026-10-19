@@ -741,7 +741,9 @@ fn named_error_kind(name: &str) -> ProviderErrorKind {
         | "invalid_value"
         | "model_not_found"
         | "unsupported_value" => ProviderErrorKind::InvalidRequest,
-        "server_error" | "service_unavailable" => ProviderErrorKind::Unavailable,
+        "server_error" | "service_unavailable" | "server_is_overloaded" | "overloaded_error" => {
+            ProviderErrorKind::Unavailable
+        }
         _ => ProviderErrorKind::Response,
     }
 }
