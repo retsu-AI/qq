@@ -151,6 +151,28 @@ qualification and H0 metric registration remain AC0.2. Store raw logs beneath
 
 ## Same-binary control
 
+### Hosted full H0 qualification
+
+Dispatch `ci.yml` at the candidate ref with `perf_h0=true` and an immutable
+forty-hex `perf_baseline_sha` to run the full H0/size recorder instead of the
+turn diagnostic. Both arms use the candidate recorder source and must have
+identical budgets and toolchains. The historical action-bias baseline retains
+only its explicitly pinned retry-contract correction; arbitrary budget changes
+refuse qualification.
+
+```sh
+gh workflow run ci.yml --ref <candidate-ref> \
+  -f perf_h0=true -f perf_baseline_sha=<full-baseline-commit>
+gh run download <run-id> --name action-bias-h0-<run-id>-<attempt> \
+  --dir target/qq-perf/<slice>-<date>/hosted-h0
+```
+
+The job records baseline, candidate and same-binary candidate control, then
+checks A/B and A/A against unchanged budgets and refuses excessive I/O pressure.
+A recording completing successfully is not itself a budget pass: inspect both
+check logs and the overall job result. Retained artifacts include receipts,
+pressure, reports and check logs; no local or inherited violation is waived.
+
 ### Isolated turn diagnostic recording
 
 The CI workflow accepts an optional `perf_baseline_sha` on manual dispatch.

@@ -10,6 +10,8 @@ mod loop_guard;
 mod progress;
 mod prompt;
 mod run_loop;
+
+pub(crate) use run_loop::next_diagnostic_run;
 mod shell_policy;
 mod spill;
 mod steering;

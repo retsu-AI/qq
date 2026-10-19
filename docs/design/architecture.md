@@ -79,6 +79,18 @@ reservation publishes its discovery metadata only at `start`, once the
 runtime is open; dropping an unstarted reservation releases the lock and
 leaves no metadata behind.
 
+## Diagnostic tracing
+
+The binary optionally installs metadata-only `QQ_LOG=info` JSON tracing under
+its state directory (local-data fallback on platforms without one). Core emits `qq::diagnostic` run/turn/provider/tool/store
+spans without payload content; other targets are rejected. Async polling is
+instrumented rather than holding entered guards across yields. A bounded lossy
+queue hands complete records to a dedicated file writer, drained off-executor
+on normal shutdown. Exclusive bounded files avoid cross-process deletion.
+Diagnostics are not persisted session events and cannot establish durability.
+See [ADR-0063](../adr/0063-opt-in-structured-tracing.md) for bounds and rationale,
+and the [guide](../guide/troubleshooting.md#diagnostic-tracing) for activation.
+
 ## Repository Layout
 
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
