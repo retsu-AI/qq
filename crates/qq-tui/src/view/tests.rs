@@ -7213,7 +7213,7 @@ fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
     }
     app.layout.rail = PanePref::Shown;
     app.focus_session(SessionId::from_bytes([0x10; 16]));
-    let (rows, named, _) = super::sidebar::sidebar_without(
+    let super::sidebar::RailFrame { rows, named, .. } = super::sidebar::sidebar_without(
         &app,
         layout::RAIL_MIN_WIDTH,
         30,
