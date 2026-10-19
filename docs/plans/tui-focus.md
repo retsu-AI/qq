@@ -213,7 +213,11 @@ tests otherwise unchanged.
   `+N need you` row. A collapsed row is already pointed at by that `+N`
   row, so the notice does not name it again; it is named only when nothing
   on screen points at it (the rail is hidden, or its session row itself is
-  scrolled out). With the rail up the strip is not shown, so each need has
+  scrolled out or its title clipped away). A row names its session only when
+  the title span itself keeps cells; a badge that happens to contain the
+  title's text does not count. A spawned child's live card under the
+  focused parent's spawn call names that child too, so the rule does not
+  repeat it. With the rail up the strip is not shown, so each need has
   at most its one row or pointer on the rail plus the rule. The notice is
   one row, so it names the most urgent one
   (approval, then failure, then unseen finish; tree order within a rank) and
@@ -297,16 +301,19 @@ The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
 coordinates) and resolved against the last committed frame, so no
 transcript cache changes. Cells are grapheme clusters (a ZWJ emoji, a base
 with its marks, a regional-indicator flag pair, or an emoji with its
-modifier is one cell group). Each frame row carries whether it continues the
-row above it as a soft wrap (`Line::wrapped`, set by the prose wrapper),
-which is how a copy tells a wrap from a newline. Each row drops only its own
+modifier is one cell group). Each frame row carries how it continues into
+the row below (`Line::wrapped`): a prose wrap joins with a space, a literal
+wrap (a code or table line broken by `wrap_line_chars`) joins with nothing,
+and anything else is a real line break. That is how a copy tells a wrap
+from a newline and keeps code lines whole. Each row drops only its own
 non-text prefix (the measure inset, plus the 3-column message rail on
 message rows; workspace views have no rail). Copy payloads are bounded
 (`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
 first part, cut back to a grapheme boundary, and says so. A click focuses a
-rail target only while that session still exists. A modified press or drag
-that the terminal does forward to QQ clears any QQ selection and starts
-none.
+rail target only while that session still exists and is not under an audit
+(an ancestor that arrived after the frame was drawn hides it). A modified
+press or drag that the terminal does forward to QQ clears any QQ selection
+and starts none.
 
 Acceptance: app tests for click-to-focus (including a rail reordered between
 draw and click, and a deleted target), drag clamped to the pane, a press and
