@@ -3249,13 +3249,14 @@ impl App {
     }
 
     /// Sessions with a tool call awaiting the human's approval, in tree
-    /// order. Holds an approval delegate still owns are excluded: the
-    /// human is not asked yet, so nothing names, answers, or jumps to them.
+    /// order. Holds an approval delegate still owns are excluded (the human
+    /// is not asked yet), and so are audit sessions and anything under them,
+    /// which are never listed.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
         self.sessions
             .awaiting_approval()
             .into_iter()
-            .filter(|id| self.human_waiting(*id))
+            .filter(|id| self.human_waiting(*id) && !self.under_audit(*id))
             .collect()
     }
 
@@ -3266,14 +3267,33 @@ impl App {
         })
     }
 
-    /// Sessions that need the user, most urgent first and then in tree
-    /// order: approvals the human is asked for, then unread failures, then
-    /// unread finishes. A session whose only hold a delegate owns is not
-    /// listed until it escalates.
+    /// Whether `id` or an ancestor is an audit session. Bounded by the tree
+    /// depth.
+    fn under_audit(&self, mut id: SessionId) -> bool {
+        for _ in 0..=self.sessions.depth(id) {
+            let Some(session) = self.sessions.get(&id) else {
+                return false;
+            };
+            if session.summary.purpose == qq_protocol::SessionPurpose::Audit {
+                return true;
+            }
+            match session.summary.parent_id {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,
+    /// `/attention`, the rule): sessions that need the user, most urgent
+    /// first and then in tree order. Approvals count only while the human is
+    /// asked; audit sessions and their subtrees are excluded.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
         self.sessions
             .needing_attention()
             .into_iter()
+            .filter(|id| !self.under_audit(*id))
             .filter(|id| {
                 self.human_waiting(*id)
                     || self.sessions.get(id).is_some_and(|session| {

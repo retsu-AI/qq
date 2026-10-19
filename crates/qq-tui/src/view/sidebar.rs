@@ -194,6 +194,18 @@ pub(super) fn orphans(app: &App) -> Vec<SessionId> {
         .collect()
 }
 
+/// A session's own group by the same human-aware rules the roll-up applies
+/// to its agents: an approval counts only while the human is asked, and a
+/// delegate deciding or a side question is work.
+fn own_group(session: &SessionView) -> Group {
+    match agent_need(session) {
+        Some(_) => Group::NeedsYou,
+        None if is_working(session) => Group::Working,
+        None if session.summary.last_outcome.is_some() => Group::Done,
+        None => Group::Idle,
+    }
+}
+
 /// The session being accumulated by [`rollup`]: its entry, its own group,
 /// whether any agent needs the user, where its needs start, and (only for
 /// the focused tree) its agents.
@@ -206,7 +218,21 @@ struct Pending {
 
 pub(super) fn rollup(app: &App) -> Rollup {
     let focused = app.focused();
-    let focused_root = focused.and_then(|id| app.sessions.root_of(id));
+    // The topmost loaded ancestor: a root, or an orphan whose parent is not
+    // loaded. Bounded by the tree depth.
+    let focused_root = focused.map(|mut id| {
+        for _ in 0..=64 {
+            match app
+                .sessions
+                .get(&id)
+                .and_then(|session| session.summary.parent_id)
+            {
+                Some(parent) if app.sessions.contains_key(&parent) => id = parent,
+                _ => break,
+            }
+        }
+        id
+    });
     let order = app.sessions.thread_order();
     let mut buckets: [Vec<RailEntry>; 3] = Default::default();
     let mut rollup = Rollup::default();
@@ -261,7 +287,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
                 needs_start,
                 needs_end: needs_start,
             },
-            own: session.group(),
+            own: own_group(session),
             needs_you: false,
             agents: (focused_root == Some(id)).then(Vec::new),
         }
@@ -314,7 +340,31 @@ pub(super) fn rollup(app: &App) -> Rollup {
         finish(pending, &mut rollup);
     }
     for id in orphans(app) {
-        let pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
+        // A temporary session: its loaded descendants roll into it the
+        // same way a root's do, depth-first in spawn order.
+        let mut pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
+        let mut stack: Vec<SessionId> =
+            app.sessions.children_of(id).iter().rev().copied().collect();
+        while let Some(agent) = stack.pop() {
+            let Some(session) = app.sessions.get(&agent) else {
+                continue;
+            };
+            if is_audit(session) {
+                continue;
+            }
+            pending.entry.agents += 1;
+            if is_working(session) {
+                pending.entry.agents_working += 1;
+            }
+            if let Some(need) = agent_need(session) {
+                pending.needs_you = true;
+                rollup.needs.push((id, agent, need));
+            }
+            if let Some(agents) = pending.agents.as_mut() {
+                agents.push(agent);
+            }
+            stack.extend(app.sessions.children_of(agent).iter().rev().copied());
+        }
         finish(pending, &mut rollup);
     }
     rollup.counts = [buckets[0].len(), buckets[1].len(), buckets[2].len()];
