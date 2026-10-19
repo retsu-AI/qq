@@ -136,10 +136,12 @@ Rail rows:
 - An agent whose session is not loaded (a bounded snapshot can carry a child
   without its parent) is listed as a session of its own until the parent
   arrives, so its attention is never dropped. Audit ancestry is decided over
-  the loaded ancestors only: an agent under a loaded audit is hidden, and
-  the server keeps an audit's descendants out of user-facing snapshots
-  unless the audit itself is included (the TUI has no other lineage
-  marker), so a missing-parent task agent is treated as a task.
+  the loaded ancestors only: an agent under a loaded audit is hidden. The
+  summary carries no lineage beyond its own `purpose` and `parent_id`, so a
+  task agent whose audit ancestor is not loaded is shown as a task until
+  that ancestor arrives; closing that gap needs a lineage marker in
+  `SessionSummary` (a protocol change) and is recorded as a follow-up, not
+  done here.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
