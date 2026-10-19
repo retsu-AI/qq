@@ -46,8 +46,12 @@ shortcut. Answer question cards using their own controls.
 
 ## File context and history
 
-Expand Attach workspace files and enter one relative path per line (up to eight),
-or use `@src/main.rs` and the shared TUI mention syntax, including line ranges.
+Type `@` in the composer (or press its @ button) to pick a file or folder from a
+list that filters as you type; arrow keys move, Enter or Tab inserts, Escape
+closes. Choosing a folder keeps the list open inside it. Suggestions are the
+TUI's `@` completions (ignore-aware, ranked, time-bounded), and `@diff`,
+`@web:` and `@sha:` are offered too. The shared TUI mention syntax, including
+line ranges such as `@src/main.rs:10-40`, also works when typed by hand.
 QQ enforces workspace containment and file/output bounds. Unresolvable references
 retain your draft with an explanation. This app currently accepts text and
 workspace files; arbitrary binary/image uploads are outside this release.
@@ -58,7 +62,12 @@ Rendering mounts a bounded window of the native retained snapshot. Older history
 outside that snapshot is not deleted, but a new paging protocol is not provided.
 Diffs, tool output, reasoning and child-session links retain their existing controls.
 
-## Settings and commands
+## Window, menus and settings
+
+The title bar holds back/forward through recently viewed sessions (Alt ←/→),
+the sidebar toggle (Ctrl B) and the File, Edit, View and Help menus (Alt F/E/V/H).
+View switches theme and zooms text (Ctrl +, Ctrl -, Ctrl 0). Drag the empty part
+of the bar to move the window; double-click it to maximize.
 
 Ctrl , opens theme, transcript/composer text size, optional notifications,
 keyboard shortcuts, connection diagnostics and reported external-tool status.

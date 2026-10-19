@@ -86,9 +86,15 @@ lockfile remain independent of desktop dependencies.
 - Existing sessions expose profile, advertised reasoning effort and approval
   delegate. Profile/effort/model changes apply to the next run; delegate changes
   apply at the next held call. New sessions initially use configured/default values.
-- Attach up to eight workspace-relative files, or use the TUI's `@file`, range,
-  directory/glob and other mention grammar. The shared resolver checks containment;
-  unresolved mentions show an error and retain the draft for correction.
+- Type `@` for a file picker backed by the TUI's `qq_core::mentions::complete_paths`
+  (native `complete_mention` command, bounded blocking pool). The TUI's full `@`
+  grammar (ranges, directories, globs, `@diff`, `@web:`, `@sha:`) still applies; the
+  shared resolver checks containment, and unresolved mentions show an error and
+  retain the draft for correction.
+- The window is undecorated: `TitleBar.tsx` draws navigation, the File/Edit/View/Help
+  menus and caption buttons; `capabilities/window.json` grants exactly the window
+  calls it uses. All pickers use the themed `Dropdown.tsx` instead of `<select>`,
+  whose popup Windows draws outside the app theme.
 - Ctrl K opens implemented desktop commands, including child sessions,
   compaction, rollback and empty-session pruning. Ctrl , opens settings,
   shortcuts, connection diagnostics and reported external-tool status.

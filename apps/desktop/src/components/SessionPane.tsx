@@ -9,7 +9,7 @@ import clsx from "clsx";
 import { ArrowDown, KeyRound, Loader2 } from "lucide-react";
 import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
-import { activityLabel, cost, modelShort, tokens } from "../lib/format";
+import { activityLabel, cost, modelLabel, tokens } from "../lib/format";
 import type {
   PendingFile,
   ProjectState,
@@ -180,7 +180,7 @@ function Header({
         className="text-[12px] text-faint"
         title={transcript.model ?? undefined}
       >
-        {modelShort(transcript.model)}
+        {modelLabel(transcript.model, project.models)}
       </span>
       {percent !== null && (
         <span

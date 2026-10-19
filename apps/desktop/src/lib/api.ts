@@ -15,6 +15,8 @@ export const api = {
     sessionId: string | null,
     action: "compact" | "rollback" | "prune" | "child",
   ) => invoke<void>("session_action", { projectId, sessionId, action }),
+  completeMention: (projectId: string, query: string) =>
+    invoke<string[]>("complete_mention", { projectId, query }),
   setNotificationsEnabled: (enabled: boolean) =>
     invoke<void>("set_notifications_enabled", { enabled }),
   launchPaths: () => invoke<string[]>("launch_paths"),
