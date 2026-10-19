@@ -2693,8 +2693,97 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
     assert_eq!(listed, expected);
     assert!(!app.filtered_sessions().contains(&other_root.id));
 
-    // /sessions lists everything.
+    // /sessions lists sessions only; agents come back on Tab or a search.
+    app.focus_session(root);
     app.execute(Command::OpenSessions);
+    let listed = app.filtered_sessions();
+    assert_eq!(listed.len(), 2, "sessions only: {listed:?}");
+    assert!(listed.contains(&root) && listed.contains(&other_root.id));
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// Two sessions; `root` has a child with a grandchild. Focused on `root`.
+fn app_with_agent_tree() -> (App, SessionId, SessionId, SessionId, SessionId) {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let root = initial.sessions[0].id;
+    let mut child = summary_named(0x81, "child");
+    child.parent_id = Some(root);
+    let mut grandchild = summary_named(0x82, "grandchild");
+    grandchild.parent_id = Some(child.id);
+    let other_root = summary_named(0x83, "other root");
+    initial
+        .sessions
+        .extend([child.clone(), grandchild.clone(), other_root.clone()]);
+    app.apply_snapshot(initial);
+    app.focus_session(root);
+    (app, root, child.id, grandchild.id, other_root.id)
+}
+
+#[test]
+fn the_session_picker_expands_and_collapses_a_sessions_agents() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Tab expands the highlighted session in tree order.
+    app.handle_key(key(KeyCode::Tab));
+    let listed = app.filtered_sessions();
+    let position = |id| listed.iter().position(|row| *row == id).unwrap();
+    assert!(position(root) < position(child) && position(child) < position(grandchild));
+    assert!(listed.contains(&other));
+    // Down onto the agent; Left collapses back to its session.
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.session_picker_selected(), Some(child));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.filtered_sessions().len(), 2);
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Right expands, Tab toggles closed again.
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.filtered_sessions().len(), 2);
+    // Ctrl-A lists every agent under every session, and toggles off.
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 2);
+}
+
+#[test]
+fn a_session_picker_search_finds_agents_and_clearing_it_falls_back_to_their_session() {
+    let (mut app, root, _, grandchild, _) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.filtered_sessions(), [grandchild]);
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    // Clearing the query hides the agent row; the cursor lands on its session.
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    app.refresh_session_picker();
+    assert_eq!(app.filtered_sessions().len(), 2);
+    // A tree change while the cursor is on a now-hidden agent falls back too.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(grandchild),
+        "still matched"
+    );
+    let _ = root;
+}
+
+#[test]
+fn the_session_picker_opens_a_focused_agents_session_expanded() {
+    let (mut app, root, child, _, _) = app_with_agent_tree();
+    app.focus_session(child);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(child));
+    assert!(app.filtered_sessions().contains(&root));
     assert_eq!(app.filtered_sessions().len(), 4);
 }
 

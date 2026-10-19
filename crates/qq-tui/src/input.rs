@@ -10,6 +10,8 @@
 mod goal_form;
 pub(crate) use goal_form::{GoalForm, GoalFormRefresh};
 
+use std::collections::BTreeSet;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use qq_protocol::{
     AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ReasoningEffort, SessionId,
@@ -151,15 +153,37 @@ impl PickerItem for ThemeRow {
 
 /// A row in the session picker. Identity is the id, not the position: the
 /// tree reorders when sessions are created or deleted underneath the picker.
+/// Every session in scope has a row; agent rows are `listed` only while
+/// their session is expanded or every agent is shown, and match a search
+/// either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SessionRow {
     pub id: SessionId,
     pub title: String,
+    /// The session (root) this row belongs to; `id` itself for a session.
+    pub root: SessionId,
+    /// The root's title, for agent rows found by a search.
+    pub root_title: Option<String>,
+    /// Agents under a session row; zero for agent rows.
+    pub agents: u32,
+    /// Distance from the root: zero for a session.
+    pub depth: usize,
+    pub listed: bool,
+}
+
+impl SessionRow {
+    pub(crate) const fn is_agent(&self) -> bool {
+        self.depth > 0
+    }
 }
 
 impl PickerItem for SessionRow {
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>) {
         out.push(&self.title);
+    }
+
+    fn listed(&self) -> bool {
+        self.listed
     }
 }
 
@@ -256,9 +280,14 @@ pub(crate) enum Overlay {
     },
     Sessions {
         picker: Picker<SessionRow>,
-        /// When set, only this session and its descendants are listed: the
+        /// When set, only this session and its agents are listed: the
         /// `/agents` view of one root's delegated work.
         scope: Option<SessionId>,
+        /// Sessions whose agents are listed under them (`Tab`/`Right`).
+        expanded: BTreeSet<SessionId>,
+        /// Every agent listed under its session (`Ctrl-A`; always for
+        /// `/agents`).
+        every_agent: bool,
         confirm: Option<SessionConfirm>,
     },
     /// Every command with its chord and slash name, filterable. `help` shows
@@ -329,6 +358,8 @@ impl Overlay {
         Self::Sessions {
             picker,
             scope: None,
+            expanded: BTreeSet::new(),
+            every_agent: false,
             confirm,
         }
     }
@@ -417,6 +448,12 @@ impl Overlay {
             Self::Delegate(picker) => dispatch(picker, key),
             Self::Skills(picker) => dispatch(picker, key),
             Self::Themes { picker, .. } => dispatch(picker, key),
+            // Tab and the arrows expand and collapse a session's agents.
+            Self::Sessions { .. }
+                if matches!(key.code, KeyCode::Tab | KeyCode::Left | KeyCode::Right) =>
+            {
+                PickerOutcome::Chord(key.code)
+            }
             Self::Sessions { picker, .. } => dispatch(picker, key),
             Self::Commands { picker, .. } => dispatch(picker, key),
             Self::History(picker) => dispatch(picker, key),

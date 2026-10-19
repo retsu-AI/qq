@@ -97,6 +97,8 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
     let Some(Overlay::Sessions {
         picker,
         scope,
+        expanded,
+        every_agent,
         confirm,
     }) = &app.overlay
     else {
@@ -135,27 +137,53 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
             },
             hint: if confirm.is_some() {
                 "y confirms, n or Esc cancels"
-            } else {
+            } else if scope.is_some() {
                 "type to search, Enter focuses, Ctrl-D deletes, Esc closes"
+            } else if *every_agent {
+                "type to search, Enter focuses, Ctrl-A sessions only, Ctrl-D deletes, Esc closes"
+            } else {
+                "type to search, Tab agents, Ctrl-A all agents, Enter focuses, Ctrl-D deletes, Esc closes"
             },
-            placeholder: "all sessions",
+            placeholder: "sessions and agents",
             question,
             empty: &empty,
         },
         width,
         height,
         |row: &SessionRow, selected, out| {
-            let depth = app.sessions.depth(row.id);
-            let prefix = format!(
-                "  {}{} ",
-                "  ".repeat(depth),
-                if selected { ">" } else { " " }
-            );
-            out.push(finish_row(
-                session_line(app, row.id, width, &prefix),
-                selected,
-                width,
-            ));
+            let cursor = if selected { ">" } else { " " };
+            // Agents found by a search name their session, so a match is
+            // never ambiguous out of its tree.
+            let searching = !picker.query.is_empty();
+            let mut prefix = if row.is_agent() {
+                format!("  {cursor} {}↳ ", "  ".repeat(row.depth.clamp(1, 4) - 1))
+            } else {
+                format!("  {cursor} ")
+            };
+            if searching
+                && row.is_agent()
+                && let Some(root) = &row.root_title
+            {
+                prefix.push_str(root);
+                prefix.push_str(" › ");
+            }
+            let mut right = Line::default();
+            if row.agents > 0 {
+                let open = *every_agent || expanded.contains(&row.id) || scope.is_some();
+                right.push(
+                    format!("{} ↳{}", if open { "▾" } else { "▸" }, row.agents),
+                    muted(),
+                );
+            }
+            let right_width = right.width();
+            let title_width =
+                width.saturating_sub(if right_width == 0 { 0 } else { right_width + 3 });
+            let mut line = session_line(app, row.id, title_width, &prefix);
+            if right_width > 0 {
+                pad_line(&mut line, width.saturating_sub(right_width + 1));
+                line.spans.extend(right.spans);
+            }
+            out.push(finish_row(line, selected, width));
         },
     )
 }

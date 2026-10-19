@@ -215,6 +215,21 @@ Pinning the rail (`PanePref::Shown`) shows it at any width where a
 below that the layout keeps the strip and the pin is remembered. Hiding the
 rail at any width brings the strip back when more than one session exists.
 
+## Session picker
+
+`/sessions` (`view/overlay.rs::session_picker`, rows from
+`App::session_rows`) lists sessions, one row each with a right-aligned
+`▸ ↳N` agent badge (`▾` while expanded). Every agent in scope also has a
+row, so a search matches agents; an agent row is listed under an empty query
+only while its session is expanded (`Tab` toggles, `Right` opens, `Left`
+closes, also from one of its agents) or every agent is shown (`Ctrl-A`). A
+search hit on an agent prefixes its session's title (`Fan out › agent 1`).
+The picker opens with a focused agent's session expanded and the cursor on
+the agent. `/agents` is the same picker scoped to the focused tree with every
+agent listed. The cursor keeps its id across refreshes while that row is
+listed; when an agent row stops being listed the cursor moves to its session.
+Audit agents have no row.
+
 ## Bounds
 
 A frame is laid out for at most 1024 × 512 cells (`view::MAX_RENDER_WIDTH`,

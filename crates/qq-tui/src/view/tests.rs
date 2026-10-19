@@ -2539,8 +2539,29 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
     let text = frame_text(&frame);
 
     assert!(text.contains("SESSIONS"));
-    assert!(text.contains("search: all sessions"));
+    assert!(text.contains("search: sessions and agents"));
     assert!(text.contains("Session 10"));
+}
+
+#[test]
+fn the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_session() {
+    let (mut app, _, _) = app_with_fanout(3);
+    app.layout.rail = PanePref::Hidden;
+    app.execute(Command::OpenSessions);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 100, 20));
+    assert!(text.contains("Fan out") && text.contains("▸ ↳3"), "{text}");
+    assert!(
+        !text.contains("agent 1"),
+        "agents hidden by default: {text}"
+    );
+    assert!(text.contains("Tab agents"), "{text}");
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 100, 20));
+    assert!(
+        text.contains("Fan out › "),
+        "a found agent names its session: {text}"
+    );
+    assert!(text.contains("agent 1"), "{text}");
 }
 
 #[test]
