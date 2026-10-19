@@ -4540,6 +4540,47 @@ fn a_background_approval_is_answered_in_place_without_moving_focus() {
 }
 
 #[test]
+fn a_background_question_is_not_answered_with_a_yes_or_no() {
+    let (mut app, parent, child_id, _, call_id) = app_with_child_awaiting_approval();
+    app.sessions
+        .get_mut(&child_id)
+        .unwrap()
+        .approval_previews
+        .insert(
+            call_id,
+            qq_client::state::ApprovalPreview {
+                question: Some(qq_protocol::QuestionPreview {
+                    questions: vec![qq_protocol::Question {
+                        prompt: "Which crate?".to_owned(),
+                        options: vec!["qq-core".to_owned()],
+                        free_text: false,
+                    }],
+                }),
+                ..Default::default()
+            },
+        );
+    assert_eq!(app.focused(), Some(parent));
+    let (_, requests) = app
+        .handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT,
+        )))
+        .split();
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientRequest::Command(CommandRequest {
+                command: SessionCommand::RespondToolApproval { .. },
+                ..
+            })
+        )),
+        "{requests:#?}"
+    );
+    assert_eq!(app.focused(), Some(child_id), "the question takes the keys");
+    assert!(app.pending_question().is_some());
+}
+
+#[test]
 fn shift_n_denies_and_steers_with_an_amendment() {
     let (mut app, _, child_id, run_id, call_id) = app_with_child_awaiting_approval();
     app.focus_session(child_id);
@@ -5675,6 +5716,125 @@ fn eighth_review_round_on_the_rail() {
         text.contains("failed") && !text.contains("needs approval"),
         "{text}"
     );
+}
+
+#[test]
+fn ninth_review_round_on_the_rail() {
+    // 1. A pinned rail that cannot fit leaves the rule naming the failure.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Shown;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    assert!(!crate::view::rail_visible(40, app.layout, 1));
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 40, None)]).join("");
+    assert!(rule.contains("agent 0"), "{rule}");
+
+    // 2. A side question under a root the rail window did not paint keeps
+    //    no animation timer running.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    app.status = None;
+    app.rail_painted = Some(vec![SessionId::from_bytes([0x11; 16])]);
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x75; 16]));
+    assert!(!app.has_activity());
+    assert!(!app.advance_animation());
+
+    // 3. A later snapshot that installs the shown orphan's audit parent
+    //    moves focus off it, though it carries no focused body.
+    let parent = SessionId::from_bytes([0x76; 16]);
+    let orphan = SessionSummary {
+        parent_id: Some(parent),
+        ..fixtures::session_summary(SessionId::from_bytes([0x77; 16]))
+    };
+    let other = fixtures::session_summary(SessionId::from_bytes([0x78; 16]));
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![orphan.clone(), other.clone()],
+        focused: Some(fixtures::session_snapshot(orphan.clone())),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(orphan.id));
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![
+            SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(parent)
+            },
+            orphan.clone(),
+            other.clone(),
+        ],
+        focused: None,
+        cursor: fixtures::cursor(2),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(other.id));
+
+    // 4. An audit child's stream under its focused parent changes no cell.
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+    });
+    app.focus_session(root);
+    app.handle_terminal_event(TerminalEvent::Resize(120, 40));
+    let run = RunId::from_bytes([0x79; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run),
+        ..fixtures::envelope(
+            2,
+            ids[0],
+            SessionEvent::AssistantMessageStarted {
+                message: MessageSnapshot {
+                    run_id: run,
+                    state: MessageState::Streaming,
+                    ..fixtures::message(MessageId::from_bytes([0x7a; 16]), ids[0], "")
+                },
+            },
+        )
+    }));
+    let effects = app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run),
+        ..fixtures::envelope(
+            3,
+            ids[0],
+            SessionEvent::TextAppended {
+                message_id: MessageId::from_bytes([0x7a; 16]),
+                channel: qq_protocol::TextChannel::Output,
+                text: "audit notes".to_owned(),
+            },
+        )
+    }));
+    assert!(!effects.redraws(), "{effects:?}");
+
+    // 5. Leaving a workspace view with only an orphan task agent loaded
+    //    lands on it, not on the empty prompt.
+    let lone = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x7b; 16])),
+        ..fixtures::session_summary(SessionId::from_bytes([0x7c; 16]))
+    };
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        sessions: vec![lone.clone()],
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    app.set_view(View::Transcript(None));
+    app.execute(Command::ShowAttention);
+    app.execute(Command::ShowAttention);
+    assert_eq!(app.focused(), Some(lone.id));
 }
 
 #[test]
@@ -6834,6 +6994,71 @@ fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
         rule.contains("survey callers"),
         "named when off screen: {rows:#?}"
     );
+}
+
+#[test]
+fn a_drawn_card_does_not_card_a_child_whose_title_it_contains() {
+    // `survey` is spawned by a call of a run the transcript does not draw,
+    // so it has no card; `survey callers`'s card contains its title.
+    let (mut app, child) = app_with_spawned_child();
+    let parent = app.focused().unwrap();
+    let hidden_call = tool_call_snapshot(
+        0x27,
+        "spawn_agent",
+        r#"{"task":"survey"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    let hidden_call = ToolCallSnapshot {
+        run_id: RunId::from_bytes([0x99; 16]),
+        ..hidden_call
+    };
+    app.sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(hidden_call.clone());
+    let survey = SessionId::from_bytes([0x32; 16]);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        survey,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                parent_id: Some(parent),
+                spawned_by: Some(qq_protocol::SpawnOrigin {
+                    run_id: hidden_call.run_id,
+                    tool_call_id: Some(hidden_call.id),
+                    depth: 1,
+                }),
+                title: "survey".to_owned(),
+                ..fixtures::session_summary(survey)
+            }),
+        },
+    )));
+    for id in [child, survey] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ ◇ survey callers"))
+            && !rows
+                .iter()
+                .any(|row| row.trim_end().ends_with("↳ ◇ survey")),
+        "only `survey callers` has a card: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey needs approval"), "{rule}");
 }
 
 #[test]
@@ -8216,4 +8441,80 @@ fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
         panic!("form")
     };
     assert_eq!(form.fields[1].expanded(), exact);
+}
+
+#[test]
+fn a_sticky_error_keeps_a_pointer_to_every_need_at_minimum_width() {
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    let other = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "X".to_owned(),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(other)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&other).unwrap().finished_unread = true;
+    app.apply_notice(
+        None,
+        qq_client::state::NoticeLevel::Error,
+        "boom happened".to_owned(),
+    );
+    for width in [32, 33] {
+        let rule = frame_rows(&[super::chrome::composer_rule(&app, width, None)]).join("");
+        assert!(
+            rule.contains('◇') && rule.contains("● 1"),
+            "{width}: {rule}"
+        );
+    }
+}
+
+#[test]
+fn a_card_whose_title_row_scrolled_away_does_not_name_its_child() {
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    // Two more completed calls under the card; at the live tail a short
+    // pane clips the body from the top, and some height starts the
+    // viewport on the card's status row.
+    let parent = app.focused().unwrap();
+    let calls = app
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap();
+    for byte in 0x26..0x2a {
+        calls.push(tool_call_snapshot(
+            byte,
+            "read_file",
+            r#"{"path":"b.rs"}"#,
+            ToolCallState::Completed,
+            Some("ok"),
+            false,
+        ));
+    }
+    let mut found = false;
+    for height in 6..20 {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, height));
+        if rows.iter().any(|row| row.contains("◇ approve tool"))
+            && !rows.iter().any(|row| row.contains("↳ ◇ survey callers"))
+        {
+            let rule = rows
+                .iter()
+                .find(|row| row.contains('─'))
+                .unwrap_or_else(|| panic!("{rows:#?}"));
+            assert!(rule.contains("survey callers"), "{rows:#?}");
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "no height kept only the status row");
 }

@@ -1073,6 +1073,11 @@ impl App {
         {
             self.set_focus(first);
         }
+        // The summaries may have revealed that the session on screen sits
+        // under an audit, whichever body this snapshot carried.
+        if fallback_fetch.is_none() {
+            fallback_fetch = Some(self.leave_hidden_focus());
+        }
         self.evict_cold_bodies();
         if initial {
             self.last_sequence = snapshot_sequence;
@@ -1354,9 +1359,12 @@ impl App {
             return true;
         }
         // A child's live status renders under its spawn call in the parent.
+        // An audit child has no card (its spawn is synthetic), so its
+        // stream changes nothing under the focused parent.
         if self
             .sessions
             .get(&event.session_id)
+            .filter(|session| session.summary.purpose != qq_protocol::SessionPurpose::Audit)
             .and_then(|session| session.summary.parent_id)
             .is_some_and(|parent| self.focused() == Some(parent))
         {
@@ -1971,8 +1979,8 @@ impl App {
         let target = self
             .view_return
             .take()
-            .filter(|id| self.sessions.contains_key(id))
-            .or_else(|| self.sessions.thread_order().first().copied());
+            .filter(|id| self.sessions.contains_key(id) && !self.under_audit(*id))
+            .or_else(|| self.first_listed_root());
         match target {
             Some(session) => self.focus_session(session),
             None => {
@@ -2943,6 +2951,15 @@ impl App {
         };
         let tool_call_id = call.id;
         let run_id = call.run_id;
+        // An `ask_user` hold needs its answers, not a yes or no: focus the
+        // session so its question block takes the keys.
+        if self.sessions[&session_id]
+            .approval_previews
+            .get(&tool_call_id)
+            .is_some_and(|preview| preview.question.is_some())
+        {
+            return self.focus_session(session_id);
+        }
         let title = self.sessions[&session_id].summary.title.clone();
         self.answered_approvals.insert(tool_call_id);
         self.set_info(format!(
@@ -3320,7 +3337,7 @@ impl App {
         }
         let active = self.sessions.values().any(|session| {
             matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                || session.summary.running_side_question.is_some()
+                || self.side_question_shown(session)
         });
         self.expire_status()
             || active
@@ -3346,8 +3363,45 @@ impl App {
             || self.status.is_some()
             || self.sessions.values().any(|session| {
                 matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                    || session.summary.running_side_question.is_some()
+                    || self.side_question_shown(session)
             })
+    }
+
+    /// Whether `session` answers a side question whose spinner is on screen:
+    /// in the view that follows it, on its painted rail row or the badge of
+    /// a painted ancestor. While the rail is down (the strip's working count
+    /// may show it) or before the first frame, every one counts.
+    fn side_question_shown(&self, session: &qq_client::state::SessionView) -> bool {
+        if session.summary.running_side_question.is_none() {
+            return false;
+        }
+        let Some(painted) = self.rail_painted.as_ref() else {
+            return true;
+        };
+        if self.terminal_width == 0
+            || !crate::view::rail_visible(
+                self.terminal_width,
+                self.layout,
+                crate::view::listed_sessions(self),
+            )
+        {
+            return true;
+        }
+        let mut id = session.summary.id;
+        for _ in 0..=self.sessions.depth(id) {
+            if self.view().session() == Some(id) || painted.contains(&id) {
+                return true;
+            }
+            match self
+                .sessions
+                .get(&id)
+                .and_then(|view| view.summary.parent_id)
+            {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        false
     }
 
     /// Prompts and steering sent to `session_id` whose receipt has not
@@ -3500,31 +3554,33 @@ impl App {
     /// whose parent is not loaded (listed as a session until it arrives).
     /// Where focus goes when the session it would land on is hidden.
     fn first_listed_root(&self) -> Option<SessionId> {
-        self.sessions
-            .thread_order()
+        let root = self
+            .sessions
+            .roots()
             .iter()
+            .rev()
             .copied()
-            .find(|id| {
-                self.sessions
-                    .get(id)
-                    .is_some_and(|session| session.summary.parent_id.is_none())
-                    && !self.under_audit(*id)
+            .find(|id| !self.under_audit(*id));
+        // Orphan components are outside `thread_order`; the newest one whose
+        // loaded ancestry has no audit competes with the newest root.
+        let orphan = self
+            .sessions
+            .values()
+            .filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                    && !self.under_audit(session.summary.id)
             })
-            .or_else(|| {
-                // Orphan components are outside `thread_order`; the newest
-                // one whose loaded ancestry has no audit.
-                self.sessions
-                    .values()
-                    .filter(|session| {
-                        session
-                            .summary
-                            .parent_id
-                            .is_some_and(|parent| !self.sessions.contains_key(&parent))
-                            && !self.under_audit(session.summary.id)
-                    })
-                    .max_by_key(|session| (session.summary.updated_at_ms, session.summary.id))
-                    .map(|session| session.summary.id)
-            })
+            .max_by_key(|session| (session.summary.updated_at_ms, session.summary.id))
+            .map(|session| session.summary.id);
+        let updated = |id: &SessionId| self.sessions.get(id).map(|s| s.summary.updated_at_ms);
+        match (root, orphan) {
+            (Some(root), Some(orphan)) if updated(&orphan) > updated(&root) => Some(orphan),
+            (Some(root), _) => Some(root),
+            (None, orphan) => orphan,
+        }
     }
 
     /// When an update reveals that the focused transcript sits under an audit

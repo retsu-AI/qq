@@ -185,32 +185,63 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
                 })
             })
             .collect();
-        let mut right = if waiting {
-            approval_chords(app)
-        } else {
-            Line::default()
-        };
-        if !others.is_empty() {
+        // Forms of the right side, widest first, the first that fits beside
+        // a truncated status wins: the full chords and count, then shorter
+        // pointers, down to a bare `◇` or count, so even the narrowest
+        // terminal keeps something pointing at the need.
+        let count = (!others.is_empty()).then(|| {
             let failed = others.iter().any(|id| {
                 app.sessions.get(id).is_some_and(|session| {
                     super::sidebar::agent_need(session) == Some(qq_client::state::Need::Failed)
                 })
             });
-            if !right.is_empty() {
-                right.push("  ", muted());
-            }
-            right.push(
+            let mut count = Line::default();
+            count.push(
                 format!("{} {}", if failed { "✕" } else { "●" }, others.len()),
                 if failed { failure() } else { accent() },
             );
-            if !waiting
-                && let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval)
-            {
-                right.push(format!("  {}", compact_chord(&jump)), warning());
-                right.push(" jump", muted());
+            count
+        });
+        let join = |parts: &[&Line]| {
+            let mut right = Line::default();
+            for part in parts {
+                if !right.is_empty() {
+                    right.push("  ", muted());
+                }
+                right.spans.extend(part.spans.iter().cloned());
             }
+            right
+        };
+        let mut diamond = Line::default();
+        diamond.push("◇", warning().bold());
+        let mut candidates: Vec<Line> = Vec::new();
+        match (waiting, &count) {
+            (true, Some(count)) => {
+                let chords = approval_chords(app);
+                candidates.push(join(&[&chords, count]));
+                candidates.push(join(&[&diamond, count]));
+                candidates.push(diamond.clone());
+            }
+            (true, None) => {
+                candidates.push(approval_chords(app));
+                candidates.push(diamond.clone());
+            }
+            (false, Some(count)) => {
+                if let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+                    let mut chord = Line::default();
+                    chord.push(compact_chord(&jump), warning());
+                    chord.push(" jump", muted());
+                    candidates.push(join(&[count, &chord]));
+                }
+                candidates.push(count.clone());
+            }
+            (false, None) => {}
         }
-        if !right.is_empty() {
+        // `rule_keeping_right` keeps a side that leaves four cells of rule.
+        if let Some(right) = candidates
+            .into_iter()
+            .find(|right| right.width() + 2 + 4 <= width)
+        {
             return rule_keeping_right(left, right, width);
         }
         return rule_with(left, Line::default(), width);
@@ -425,9 +456,10 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
             left.push(format!("  {}", hints.join("  ")), muted());
         }
     } else if crate::view::listed_sessions(app) < 2
-        && app.layout.rail != crate::view::PanePref::Shown
+        && !crate::view::rail_visible(width, app.layout, crate::view::listed_sessions(app))
     {
-        // With one session there is no rail (under `Auto`) and no strip, so
+        // With one session there is no rail (under `Auto`, or pinned on a
+        // terminal too narrow to fit it) and no strip, so
         // an agent that failed or finished unseen has nowhere else to
         // appear: name it here.
         let unseen: Vec<(&str, bool)> = app
