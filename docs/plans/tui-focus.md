@@ -125,10 +125,12 @@ Rail rows:
   the rest collapse to `+N more  /agents`. A focused agent is therefore
   always on the rail when the rail is shown.
 - Audit agents (and anything under them) are never listed, counted, or
-  reachable by tree navigation (`Alt-Down`/`Alt-Left`/`Alt-Right` skip
-  them), on the rail, the strip, the layout's session count, or the picker,
-  including an audit whose parent was deleted and which therefore became a
-  root.
+  reachable: not on the rail, the strip, the layout's session count, the
+  picker, tree navigation (`Alt-Down`/`Alt-Left`/`Alt-Right`), `Ctrl-G`,
+  `Alt-A`/`Alt-D`, or the `/attention` list, including an audit whose parent
+  was deleted and which therefore became a root. One audit-filtered
+  attention list (human-owned approvals, then unseen failures, then unseen
+  finishes) feeds every attention surface.
 - An agent whose session is not loaded (a bounded snapshot can carry a child
   without its parent) is listed as a session of its own until the parent
   arrives, so its attention is never dropped.
@@ -181,9 +183,9 @@ tests otherwise unchanged.
 
 ### F4–F5: one place per fact, panes on demand
 
-- The composer-rule notice names attention the rail does not paint: agents
-  and sessions with an approval waiting on the human, then (single-session or
-  rail-hidden only) agents that failed or finished unseen. When the rail is
+- The composer-rule notice names attention the rail does not paint: every
+  session or agent with an approval waiting on the human, an unseen failure,
+  or an unseen finish whose own rail row is not on screen. When the rail is
   **not** on screen (Compact, a single session under `Auto`, or the rail
   hidden) that is all of them; the strip's `◇ N` is an anonymous count, a
   pointer and not a naming, so the notice stays beside it. When the rail is
@@ -195,8 +197,11 @@ tests otherwise unchanged.
   before the count; `Ctrl-G` walks them and `/attention` lists them all.
   With nothing left over the rule omits the notice and leads with the
   in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords.
-- `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2 · ◇ 1
-  /agents`.
+- `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2
+  /agents`, counting working agents by the rail's definition (running,
+  queued, a side question, or a delegate deciding). It carries no `◇` count:
+  the waiting agent is already named on the rail or the rule, and the strip
+  points at it, so a third pointer would repeat the fact.
 - Inspector `Auto` shows only when it has content (an expanded call or a
   workspace view); `Shown` still pins it.
 - The top row omits a known zero cost.
@@ -205,8 +210,12 @@ Acceptance: view tests that each waiting item is named at most once per
 frame outside its own transcript (a rail row or the rule notice, never both)
 and that every item is either named or counted, at Compact, Regular with the
 rail shown, Regular with the rail hidden, with more waiting agents under one
-session than `WAITING_AGENT_ROWS`, at a narrow width with a long title, and
-for a single session whose agent failed or finished unseen; inspector `Auto`
+session than `WAITING_AGENT_ROWS`, at a narrow width with a long title, for a
+single session whose agent failed or finished unseen, for an unfocused
+session that failed unseen at Compact, and for a failed agent whose rail row
+is scrolled out; a Compact frame with a waiting agent of the focused session
+shows the named notice and the strip's pointer and no third count; `Ctrl-G`
+and `/attention` skip an audit with a pending approval; inspector `Auto`
 hidden with nothing expanded and shown with an expansion; goldens moved
 deliberately.
 
@@ -224,8 +233,12 @@ selection:
   the rail, inspector, borders, top row and composer are never included.
   It is a linear (stream) selection like a terminal's: from the earlier
   endpoint to the end of its row, whole rows between, and the start of the
-  later endpoint's row through it, whichever way the drag went. The
-  selected cells repaint on the `selection` background.
+  later endpoint's row through it, whichever way the drag went. Endpoints
+  snap to whole characters: a cell inside a double-width glyph selects the
+  glyph, and a combining mark travels with its base character, so a copy
+  never splits a grapheme or emits a blank for a continuation cell. The
+  selected cells repaint on the `selection` background; a press without a
+  drag paints nothing.
 - **Release** copies the selected text to the system clipboard with OSC 52
   (the transport Codex and most modern terminals and multiplexers support)
   and shows `copied N lines`. Each row is the pane's text with the measure
@@ -241,9 +254,10 @@ before encoding); a larger selection copies the first part and says so.
 
 Acceptance: app tests for click-to-focus (including a rail reordered between
 draw and click), drag clamped to the pane, forward and reverse partial-row
-copies, the copy effect's text (inset and rail excluded), clearing rules,
-and the bound; terminal test for the OSC 52 bytes; frame test that only
-selected cells take the selection style.
+copies, forward and reverse copies whose endpoints land inside a wide glyph,
+the copy effect's text (inset and rail excluded), clearing rules (a click
+leaves no highlight), and the bound; terminal test for the OSC 52 bytes;
+frame test that only selected cells take the selection style.
 
 ## Non-goals
 
