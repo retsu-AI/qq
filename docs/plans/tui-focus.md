@@ -217,8 +217,13 @@ tests otherwise unchanged.
   the title span itself keeps cells; a badge that happens to contain the
   title's text does not count. A spawned child's live card under the
   focused parent's spawn call names that child too, so the rule does not
-  repeat it. With the rail up the strip is not shown, so each need has
-  at most its one row or pointer on the rail plus the rule. The notice is
+  repeat it, but only while the card is inside the transcript's viewport;
+  and the rail does not list that child again under the focused session
+  while its card is on screen. A collapsed group counts as pointed at only
+  while its `+N need you` row itself is painted (a window can keep the
+  session row and clip the `+N` row). With the rail up the strip is not
+  shown, so each need has at most its one row or pointer on the rail plus
+  the rule. The notice is
   one row, so it names the most urgent one
   (approval, then failure, then unseen finish; tree order within a rank) and
   counts the rest (`◇ Deploy helper +3 need you`), truncating the name
@@ -299,21 +304,28 @@ selection:
 
 The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
 coordinates) and resolved against the last committed frame, so no
-transcript cache changes. Cells are grapheme clusters (a ZWJ emoji, a base
-with its marks, a regional-indicator flag pair, or an emoji with its
-modifier is one cell group). Each frame row carries how it continues into
-the row below (`Line::wrapped`): a prose wrap joins with a space, a literal
-wrap (a code or table line broken by `wrap_line_chars`) joins with nothing,
-and anything else is a real line break. That is how a copy tells a wrap
-from a newline and keeps code lines whole. Each row drops only its own
-non-text prefix (the measure inset, plus the 3-column message rail on
-message rows; workspace views have no rail). Copy payloads are bounded
+transcript cache changes. Cells are grapheme clusters as the terminal
+draws them for the scripts a transcript carries: a ZWJ emoji, a base with
+its marks, a regional-indicator flag pair, an emoji with its modifier, and
+an Indic consonant joined to the next by a virama are each one cell group.
+Full UAX #29 segmentation would add a crate, which this plan's non-goals
+rule out; the remaining rare clusters (Hangul jamo sequences, prepended
+concatenation marks) are a recorded limit. Each frame row carries how it
+continues into the row below (`Line::wrapped`): a prose wrap that dropped
+the space it broke on joins with a space, a wrap without a separator (a
+prose token wider than the pane, broken by characters; a code or table line
+broken by `wrap_line_chars`) joins with nothing, and anything else is a
+real line break. That is how a copy tells a wrap from a newline and keeps
+code lines and long tokens whole. Each row drops only its own non-text
+prefix (the measure inset, plus the 3-column message rail on message rows;
+workspace views have no rail; a code panel's gutter counted after whatever
+prefix a row gains). Copy payloads are bounded
 (`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
 first part, cut back to a grapheme boundary, and says so. A click focuses a
 rail target only while that session still exists and is not under an audit
-(an ancestor that arrived after the frame was drawn hides it). A modified
-press or drag that the terminal does forward to QQ clears any QQ selection
-and starts none.
+(an ancestor that arrived after the frame was drawn hides it). Any press
+of a button the terminal reports clears a QQ selection; a modified press
+or drag that the terminal does forward to QQ starts none.
 
 Acceptance: app tests for click-to-focus (including a rail reordered between
 draw and click, and a deleted target), drag clamped to the pane, a press and

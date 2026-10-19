@@ -392,14 +392,29 @@ pub(super) fn rollup(app: &App) -> Rollup {
         // A temporary session: its loaded descendants roll into it the
         // same way a root's do, depth-first in spawn order.
         let mut pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
-        let mut stack: Vec<SessionId> =
-            app.sessions.children_of(id).iter().rev().copied().collect();
-        while let Some(agent) = stack.pop() {
+        // `(agent, under an audit)`: an audit's subtree is never listed but
+        // its spend still counts toward a legacy session's total.
+        let mut stack: Vec<(SessionId, bool)> = app
+            .sessions
+            .children_of(id)
+            .iter()
+            .rev()
+            .map(|child| (*child, false))
+            .collect();
+        while let Some((agent, hidden)) = stack.pop() {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
             add_legacy_cost(&mut pending, session);
-            if is_audit(session) {
+            let hidden = hidden || is_audit(session);
+            stack.extend(
+                app.sessions
+                    .children_of(agent)
+                    .iter()
+                    .rev()
+                    .map(|child| (*child, hidden)),
+            );
+            if hidden {
                 continue;
             }
             pending.entry.agents += 1;
@@ -413,7 +428,6 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if let Some(agents) = pending.agents.as_mut() {
                 agents.push(agent);
             }
-            stack.extend(app.sessions.children_of(agent).iter().rev().copied());
         }
         finish(pending, &mut rollup);
     }
@@ -576,13 +590,14 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
 /// when they need the user. The focused row sits on the selection
 /// background. Always `height` rows so it zips against the body. Also
 /// returns the sessions and agents with a waiting approval whose row was
-/// painted, so the composer rule names only the rest.
+/// painted, so the composer rule names only the rest, and every session
+/// or agent whose row is inside the window.
 pub(super) fn sidebar(
     app: &App,
     width: usize,
     height: usize,
     density: RailDensity,
-) -> (Vec<Line>, Vec<SessionId>) {
+) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
     sidebar_at(app, width, height, density, None)
 }
 
@@ -594,7 +609,7 @@ pub(super) fn sidebar_at(
     height: usize,
     density: RailDensity,
     window_start: Option<usize>,
-) -> (Vec<Line>, Vec<SessionId>) {
+) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
     let inner = width.saturating_sub(2);
     let RailPlan {
         rows: plan,
@@ -604,6 +619,8 @@ pub(super) fn sidebar_at(
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
     // Sessions and agents whose titled row is on screen.
+    // Every session and agent with a row inside the window.
+    let mut window: Vec<SessionId> = Vec::new();
     let mut painted: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
@@ -645,6 +662,13 @@ pub(super) fn sidebar_at(
             RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) => Some(id),
             _ => None,
         };
+        match row {
+            RailRow::Session(RailEntry { id, .. })
+            | RailRow::Detail(RailEntry { id, .. })
+            | RailRow::Agent(id)
+            | RailRow::AgentDetail(id) => window.push(id),
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(..) => {}
+        }
         rows.push(match row {
             RailRow::Gap => Line::styled("│", border()),
             RailRow::Header(group, count) => {
@@ -777,7 +801,7 @@ pub(super) fn sidebar_at(
         rows.push(Line::styled("│", border()));
     }
     rows.truncate(height);
-    (rows, named)
+    (rows, named, window)
 }
 
 /// One row above the composer when the rail is hidden and more than one

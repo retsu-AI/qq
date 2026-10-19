@@ -183,6 +183,8 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
+    /// Sessions the last frame's rail window painted; handed to the app.
+    rail_painted: Option<Vec<SessionId>>,
 }
 
 impl FrameRenderer {
@@ -195,6 +197,7 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
+        app.rail_painted = self.rail_painted.take();
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -379,9 +382,12 @@ impl FrameRenderer {
         let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            let (rows, named) = sidebar(app, rail.width, body_height, density);
+            let (rows, named, window) = sidebar(app, rail.width, body_height, density);
             rail_named = Some(named);
+            self.rail_painted = Some(window);
             columns.push((rail.x, rows));
+        } else {
+            self.rail_painted = Some(Vec::new());
         }
         // A spawned child's live card under its spawn call names that child
         // in the transcript on screen, so the rule does not repeat it.

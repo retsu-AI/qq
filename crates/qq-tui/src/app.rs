@@ -482,6 +482,10 @@ pub(crate) struct App {
     /// wheel scrolls the transcript; `/mouse` turns it off for native
     /// selection and copy (most terminals also select with Shift held).
     pub(crate) mouse_capture: bool,
+    /// Sessions whose row the last frame's rail window painted, committed by
+    /// the renderer; `None` before the first frame. A background delta for a
+    /// session outside it changes no cell.
+    pub(crate) rail_painted: Option<Vec<SessionId>>,
     /// Terminal width from the last resize event, so update paths can decide
     /// whether a change to an unshown session is visible at all. Zero until
     /// the first resize, which reads as "assume visible".
@@ -553,6 +557,7 @@ impl App {
             layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
+            rail_painted: None,
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
             } else {
@@ -1351,7 +1356,13 @@ impl App {
         }
         // The rail shows live tails for sessions only; a hidden agent's (or a
         // hidden audit's) stream changes no cell, so it does not wake the
-        // frame.
+        // frame. A rail row shows the message tail and the activity, never
+        // reasoning or tool output, and only rows inside the rail's window
+        // are drawn.
+        let rail_shown = matches!(
+            event.event,
+            SessionEvent::TextAppended { .. } | SessionEvent::RunActivityChanged { .. }
+        );
         let listed_on_rail = self.sessions.get(&event.session_id).is_some_and(|session| {
             session.summary.purpose != qq_protocol::SessionPurpose::Audit
                 && session
@@ -1359,13 +1370,17 @@ impl App {
                     .parent_id
                     .is_none_or(|parent| !self.sessions.contains_key(&parent))
         });
-        listed_on_rail
+        rail_shown
+            && listed_on_rail
             && (self.terminal_width == 0
-                || crate::view::rail_visible(
+                || (crate::view::rail_visible(
                     self.terminal_width,
                     self.layout,
                     crate::view::listed_sessions(self),
-                ))
+                ) && self
+                    .rail_painted
+                    .as_ref()
+                    .is_none_or(|painted| painted.contains(&event.session_id))))
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -3322,10 +3337,19 @@ impl App {
                         .parent_id
                         .is_some_and(|parent| !self.sessions.contains_key(&parent))
                 })
-                .map(|session| session.summary.id)
+                .map(|session| (session.summary.updated_at_ms, session.summary.id))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(_, id)| id)
                 .collect()
         };
-        stack.sort();
+        // Newest first, as the rail lists these temporary sessions: the
+        // stack pops from the back, so the newest goes last.
+        stack.sort_by_key(|id| {
+            self.sessions
+                .get(id)
+                .map(|session| (session.summary.updated_at_ms, session.summary.id))
+        });
         std::iter::from_fn(move || {
             let id = stack.pop()?;
             stack.extend(self.sessions.children_of(id).iter().rev().copied());
@@ -3394,7 +3418,9 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
-        let Some(focused) = self.view().transcript() else {
+        // The followed session, so a `/goal` or `/btw` view over a session
+        // now known to sit under an audit moves too.
+        let Some(focused) = self.view().session() else {
             return Effects::none();
         };
         if !self.under_audit(focused) {
@@ -3436,7 +3462,7 @@ impl App {
     /// [`SessionView::need`], but an approval counts only while the human is
     /// asked, and an unseen outcome is still reported when every waiting
     /// hold belongs to a delegate.
-    fn attention_need(&self, id: SessionId) -> Option<qq_client::state::Need> {
+    pub(crate) fn attention_need(&self, id: SessionId) -> Option<qq_client::state::Need> {
         use qq_client::state::Need;
         let session = self.sessions.get(&id)?;
         if self.human_waiting(id) {
