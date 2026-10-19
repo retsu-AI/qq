@@ -25,6 +25,8 @@ const REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
     "request-time Codex authentication requires the OpenAI Responses protocol";
 const CODEX_BODY_REQUIRES_RESPONSES_MESSAGE: &str =
     "the Codex request body shape requires the OpenAI Responses protocol";
+const REQUEST_TIME_GOOGLE_API_KEY_REQUIRES_GOOGLE_MESSAGE: &str =
+    "request-time Google API-key authentication requires the Google GenerateContent protocol";
 const AUTHORIZER_WITH_AUTH_MESSAGE: &str =
     "internal request authorization cannot be combined with HTTP authentication";
 
@@ -297,6 +299,15 @@ fn resolve_http_auth(
                 auth: GoogleAuth::NoAuth,
                 authorizer: RequestAuthorizer::request_time_bearer(credentials),
             }),
+        },
+        (HttpAuth::RequestTimeGoogleApiKey(credentials), None) => match protocol {
+            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
+                auth: GoogleAuth::NoAuth,
+                authorizer: RequestAuthorizer::request_time_google_api_key(credentials),
+            }),
+            _ => Err(ProviderError::Configuration(
+                REQUEST_TIME_GOOGLE_API_KEY_REQUIRES_GOOGLE_MESSAGE.to_owned(),
+            )),
         },
         (HttpAuth::RequestTimeCodex(credentials), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(

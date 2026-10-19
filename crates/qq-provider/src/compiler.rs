@@ -254,7 +254,8 @@ impl ResponsesBodyShape {
             | HttpAuth::ApiKey(_)
             | HttpAuth::Bearer(_)
             | HttpAuth::Header(..)
-            | HttpAuth::RequestTimeBearer(_) => Self::Standard,
+            | HttpAuth::RequestTimeBearer(_)
+            | HttpAuth::RequestTimeGoogleApiKey(_) => Self::Standard,
         }
     }
 }
@@ -353,6 +354,10 @@ pub enum HttpAuth {
     /// This intent is valid only for OpenAI Responses. [`HttpProviderRecipe::new`]
     /// pairs it with [`ResponsesBodyShape::Codex`] unless another shape is set.
     RequestTimeCodex(SharedRequestCredentialProvider),
+    /// A Google API key resolved on each request and sent as
+    /// `x-goog-api-key`. Valid only for Google GenerateContent; credentials
+    /// come from [`crate::RequestCredential::google_api_key`].
+    RequestTimeGoogleApiKey(SharedRequestCredentialProvider),
 }
 
 #[cfg(test)]
@@ -1001,5 +1006,89 @@ mod tests {
                 "{name}: {error:?}"
             );
         }
+    }
+
+    struct StaticGoogleApiKey;
+
+    impl crate::RequestCredentialProvider for StaticGoogleApiKey {
+        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
+            Box::pin(async { crate::RequestCredential::google_api_key("google-request-time-key") })
+        }
+    }
+
+    #[tokio::test]
+    async fn google_accepts_request_time_api_keys_as_x_goog_api_key() {
+        let server = LoopbackServer::sse(concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},",
+            "\"finishReason\":\"STOP\"}]}\n\n"
+        ));
+        let provider = ProviderCompiler::new()
+            .unwrap()
+            .compile_for_canary(ProviderRecipe::http(HttpProviderRecipe::new(
+                EndpointSpec::base(format!("{}/v1beta", server.base_url), true),
+                HttpProtocol::GoogleGenerateContent,
+                HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
+                    StaticGoogleApiKey,
+                )),
+            )))
+            .unwrap();
+        let events = provider
+            .stream(ModelRequest::new(
+                "gemini-test",
+                vec![Message::user("ping")],
+                64,
+            ))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(Ok(ProviderEvent::Completed { .. }))),
+            "{events:?}"
+        );
+        let request = server.capture();
+        assert_eq!(
+            request.header("x-goog-api-key"),
+            Some("google-request-time-key")
+        );
+        assert_eq!(request.header("authorization"), None);
+    }
+
+    #[test]
+    fn request_time_google_api_keys_are_rejected_outside_google_and_as_static_headers() {
+        for protocol in [
+            HttpProtocol::OpenAiResponses,
+            HttpProtocol::OpenAiChatCompletions,
+            HttpProtocol::AnthropicMessages,
+        ] {
+            let error = ProviderCompiler::new()
+                .unwrap()
+                .compile(ProviderRecipe::http(HttpProviderRecipe::new(
+                    EndpointSpec::exact("http://127.0.0.1:1/v1", true),
+                    protocol,
+                    HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
+                        StaticGoogleApiKey,
+                    )),
+                )))
+                .err()
+                .expect("Google API-key intent needs GenerateContent");
+            assert!(
+                matches!(error, ProviderError::Configuration(_)),
+                "{protocol:?}"
+            );
+        }
+        let error = ProviderCompiler::new()
+            .unwrap()
+            .compile(ProviderRecipe::http(
+                HttpProviderRecipe::new(
+                    EndpointSpec::base("http://127.0.0.1:1/v1beta", true),
+                    HttpProtocol::GoogleGenerateContent,
+                    HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
+                        StaticGoogleApiKey,
+                    )),
+                )
+                .with_headers(vec![("x-goog-api-key".to_owned(), "static".to_owned())]),
+            ))
+            .err()
+            .expect("a static x-goog-api-key must be rejected");
+        assert!(matches!(error, ProviderError::Configuration(_)));
     }
 }
