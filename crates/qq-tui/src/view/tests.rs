@@ -5563,6 +5563,36 @@ fn a_lone_sessions_failed_agent_is_named_on_the_rule() {
 }
 
 #[test]
+fn an_off_rail_failure_is_counted_beside_an_off_rail_approval() {
+    let (mut app, root, ids) = app_with_fanout(2);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x96; 16]));
+    {
+        let view = app.sessions.get_mut(&ids[1]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(
+        rule.contains("agent 0 needs approval +1 need you"),
+        "the failure is counted: {rule}"
+    );
+}
+
+#[test]
 fn the_top_row_omits_a_known_zero_cost() {
     let mut app = app_with_messages(1);
     let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
