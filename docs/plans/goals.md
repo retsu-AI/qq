@@ -5,7 +5,7 @@
 | | |
 | --- | --- |
 | Linear | [ENG-982](https://linear.app/retsu-ai/issue/ENG-982) (design) |
-| Now | G0/AC4 merged in #308 (`87d3ed1a`); G2.1 merged in #309 (`ffa46942`). G2/G3 closeout is in review in #330 (ENG-1063), G4 in #331 (ENG-1064), and G5 evidence in #332 (ENG-1065). The ninth trial qualifies G5 on final runtime `e84e3552`: 145.7 minutes, four compactions, 14 checklist identities retained and terminal accounting verified. The stack is not merged and resource/performance qualification remains separate. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed |
+| Now | Delivery stack merged: G0/AC4 #308 (`87d3ed1a`), G2.1 #309 (`ffa46942`), G2/G3 closeout #330 (`0df22416`, ENG-1063), G4 surfaces #331 (`53aae3ba`, ENG-1064) and G5 evidence #332 (`a9bff3ef`, ENG-1065). The ninth trial qualifies G5 on final runtime `e84e3552`: 145.7 minutes, four compactions, 14 checklist identities retained and terminal accounting verified. Resource/performance qualification (H0, ENG-1058) remains separate and open. [ADR-0049](../adr/0049-durable-run-goal-and-loop-guard.md) remains Proposed pending a maintainer acceptance decision |
 | Research | [`../research/goal-pursuit.md`](../research/goal-pursuit.md) |
 | Ledger | [`progress/goals.md`](./progress/goals.md) |
 | Parent | [runtime reliability](./reliability.md). This plan replaces former AC7–AC9 and owns AC4 (the loop guard) with G0 |
