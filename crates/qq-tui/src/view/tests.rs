@@ -2565,6 +2565,25 @@ fn the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_
 }
 
 #[test]
+fn a_found_agent_keeps_its_title_beside_a_long_session_name() {
+    let (mut app, root, _) = app_with_fanout(2);
+    app.sessions.get_mut(&root).unwrap().summary.title = "a very long session name ".repeat(6);
+    app.layout.rail = PanePref::Hidden;
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 60, 20));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("› "))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        row.contains("agent 1"),
+        "the matched title stays visible: {row:?}"
+    );
+    assert!(row.chars().count() <= 60, "{row:?}");
+}
+
+#[test]
 fn session_picker_renders_an_empty_search_result() {
     let mut app = app_with_messages(0);
     app.open_session_picker_with("missing", None, None);
@@ -4773,9 +4792,10 @@ fn the_rail_lists_sessions_with_agent_state_rolled_up_from_one_pass() {
         "the unseen finish carries a badge"
     );
     assert_eq!(rollup.sessions[0].cost, Some(120_000_000));
+    // The one agent is blocked on the human, not working.
     assert_eq!(
         (rollup.sessions[1].agents, rollup.sessions[1].agents_working),
-        (1, 1)
+        (1, 0)
     );
     assert_eq!(
         rollup.sessions[1].unread, 0,
@@ -5187,6 +5207,52 @@ fn attention_routes_skip_audits() {
     app.execute(Command::ShowAttention);
     let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 30));
     assert!(!text.contains("agent 0"), "{text}");
+}
+
+#[test]
+fn orphan_attention_reaches_ctrl_g_and_held_agents_are_not_working() {
+    // agent 0's parent is not loaded; its child agent 1 waits on the human.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 1 {
+            summary.parent_id = Some(SessionId::from_bytes([0x20; 16]));
+        }
+    });
+    app.sessions.remove(&root);
+    {
+        let view = app.sessions.get_mut(&ids[1]).unwrap();
+        view.summary.status = SessionStatus::Running;
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x89; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert_eq!(app.sessions_needing_attention(), [ids[1]]);
+    assert_eq!(app.sessions_awaiting_approval(), [ids[1]]);
+    app.execute(Command::FocusNextApproval);
+    assert_eq!(
+        app.focused(),
+        Some(ids[1]),
+        "Ctrl-G reaches the orphan tree"
+    );
+    // Blocked on the human, a running agent is not counted as working.
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == ids[0])
+        .unwrap();
+    assert_eq!(entry.agents_working, 0);
+}
+
+#[test]
+fn a_running_side_question_keeps_the_spinner_animating() {
+    let (mut app, _, ids) = app_with_fanout(1);
+    assert!(!app.has_activity());
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .running_side_question = Some(RunId::from_bytes([0x88; 16]));
+    assert!(app.has_activity());
 }
 
 #[test]

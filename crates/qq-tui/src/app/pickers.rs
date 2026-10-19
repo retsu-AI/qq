@@ -1094,14 +1094,50 @@ impl App {
         expanded: &BTreeSet<SessionId>,
         every_agent: bool,
     ) -> Vec<SessionRow> {
+        // `thread_order`, then each component whose topmost session's parent
+        // is not loaded (listed as a session until the parent arrives), in
+        // the same depth-first order with depths relative to that session.
+        let mut order: Vec<(SessionId, usize, bool)> = self
+            .sessions
+            .thread_order()
+            .iter()
+            .map(|id| (*id, self.sessions.depth(*id), false))
+            .collect();
+        if order.len() < self.sessions.len() {
+            let mut orphans: Vec<SessionId> = self
+                .sessions
+                .values()
+                .filter(|session| {
+                    session
+                        .summary
+                        .parent_id
+                        .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                })
+                .map(|session| session.summary.id)
+                .collect();
+            orphans.sort();
+            for orphan in orphans {
+                let mut stack = vec![(orphan, 0usize)];
+                while let Some((id, depth)) = stack.pop() {
+                    order.push((id, depth, depth == 0));
+                    stack.extend(
+                        self.sessions
+                            .children_of(id)
+                            .iter()
+                            .rev()
+                            .map(|child| (*child, depth + 1)),
+                    );
+                }
+            }
+        }
         let mut rows: Vec<SessionRow> = Vec::new();
         let mut root: Option<(SessionId, usize)> = None;
         let mut audit_depth: Option<usize> = None;
-        for &id in self.sessions.thread_order() {
+        for (id, depth, orphan_root) in order {
             let session = &self.sessions[&id];
-            let depth = self.sessions.depth(id);
+            let is_root = session.summary.parent_id.is_none() || orphan_root;
             if let Some(limit) = audit_depth {
-                if depth > limit {
+                if depth > limit && !is_root {
                     continue;
                 }
                 audit_depth = None;
@@ -1109,13 +1145,13 @@ impl App {
             if session.summary.purpose == qq_protocol::SessionPurpose::Audit {
                 // An audit root (its parent was deleted) also ends the
                 // previous session's agents.
-                if session.summary.parent_id.is_none() {
+                if is_root {
                     root = None;
                 }
                 audit_depth = Some(depth);
                 continue;
             }
-            if session.summary.parent_id.is_none() {
+            if is_root {
                 root = scope
                     .is_none_or(|scope| scope == id)
                     .then_some((id, rows.len()));
@@ -1166,10 +1202,18 @@ impl App {
         };
         let rows = self.session_rows(scope, &expanded, every_agent);
         if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay {
-            let before = picker.current().map(|row| (row.id, row.root));
+            let before = picker.current().map(|row| row.id);
             picker.replace_items(rows, |row| row.id);
-            if let Some((id, root)) = before
+            // When the highlighted agent is no longer listed, fall back to the
+            // session it belongs to now: a deleted root re-parents its
+            // children, so the root comes from the rebuilt rows.
+            if let Some(id) = before
                 && picker.current().map(|row| row.id) != Some(id)
+                && let Some(root) = picker
+                    .items()
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| row.root)
                 && let Some(index) = picker.items().iter().position(|row| row.id == root)
             {
                 picker.select_item(index);
