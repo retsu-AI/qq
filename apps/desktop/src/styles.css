@@ -127,9 +127,13 @@ body {
   background: transparent;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+/* In the base layer so a component can replace it with its own focus style
+   (the composer shows focus on its whole card). */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 }
 
 /* Assistant markdown. */
@@ -262,5 +266,4 @@ body {
 }
 
 .selectable, .prose-qq, textarea { font-size: var(--desktop-font-size, 14px); }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; scroll-behavior: auto !important; } }

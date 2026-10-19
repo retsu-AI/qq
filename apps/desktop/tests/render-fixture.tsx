@@ -198,6 +198,7 @@ function Fixture() {
     <>
       <div className="flex h-full">
         <Sidebar
+          openSettings={() => undefined}
           app={{
             open: [
               {

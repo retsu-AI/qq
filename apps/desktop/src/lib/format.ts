@@ -87,3 +87,25 @@ export function modelShort(model: string | null | undefined): string {
   const slash = model.indexOf("/");
   return slash >= 0 ? model.slice(slash + 1) : model;
 }
+
+const PROVIDER_NAMES: Record<string, string> = {
+  "openai-codex": "ChatGPT",
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+  xai: "xAI",
+};
+
+/** A provider ID as people know it ("openai-codex" is ChatGPT sign-in). */
+export function providerName(id: string): string {
+  return PROVIDER_NAMES[id] ?? id;
+}
+
+/** The catalog's display name for a model route, else its short route. */
+export function modelLabel(
+  route: string | null | undefined,
+  models: ReadonlyArray<{ id: string; name: string | null; model: string }>,
+): string {
+  const model = models.find((candidate) => candidate.id === route);
+  return model ? (model.name ?? model.model) : modelShort(route);
+}
