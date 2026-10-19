@@ -20,6 +20,7 @@ use std::{
 
 use qq_protocol::{ApprovalMode, SessionId, ToolCallId};
 use tauri::{Emitter, Manager, State, WindowEvent};
+use tauri_plugin_window_state::StateFlags;
 
 use crate::{
     auth::{AUTH_EVENT, AuthChanged, BrowserSignIn, PendingSignIns, ProviderDto, SignInError},
@@ -528,6 +529,14 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // Size, position and maximized state persist across launches.
+        // Visibility is left out so a first run, with nothing saved, shows the
+        // window; decorations stay as configured (the app draws its own).
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(StateFlags::all() - StateFlags::VISIBLE - StateFlags::DECORATIONS)
+                .build(),
+        )
         .setup(move |app| {
             let settings = Settings::load(app.handle());
             app.manage(AppState {
