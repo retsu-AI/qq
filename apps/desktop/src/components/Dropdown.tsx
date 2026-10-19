@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import clsx from "clsx";
 import { Check } from "lucide-react";
 
@@ -16,12 +23,22 @@ export interface DropdownOption<T extends string> {
 export interface DropdownAction {
   label: string;
   onSelect: () => void;
+  icon?: ReactNode;
+  /** Destructive: drawn in the danger color. */
+  danger?: boolean;
 }
+
+/** Popup height used to decide whether it fits below or above the trigger. */
+const MAX_POPUP_HEIGHT = 340;
 
 /**
  * A themed replacement for `<select>`: native select popups are drawn by
  * Windows and ignore the app theme. Keyboard: arrows, Home/End, Enter or
  * Space to choose, Escape to close, typing to jump by first letter.
+ *
+ * With no options it is a command menu (`role="menu"`). The popup is fixed to
+ * the viewport so a scrolling ancestor cannot clip it; it flips to the other
+ * side when there is no room, and closes when an ancestor scrolls.
  */
 export function Dropdown<T extends string>({
   value,
@@ -34,6 +51,8 @@ export function Dropdown<T extends string>({
   align = "start",
   disabled,
   className,
+  rootClassName,
+  bare,
   title,
 }: {
   value: T | null;
@@ -49,15 +68,20 @@ export function Dropdown<T extends string>({
   align?: "start" | "end";
   disabled?: boolean;
   className?: string;
+  rootClassName?: string;
+  /** Trigger takes only `className`, without the default chip styling. */
+  bare?: boolean;
   title?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [position, setPosition] = useState<CSSProperties>({});
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const id = useId();
   const count = options.length + actions.length;
+  const menu = options.length === 0;
   const selectedIndex = Math.max(
     0,
     options.findIndex((option) => option.value === value),
@@ -69,8 +93,22 @@ export function Dropdown<T extends string>({
     const onDown = (event: MouseEvent) => {
       if (!root.current?.contains(event.target as Node)) setOpen(false);
     };
+    // Only a scrolling ancestor moves the trigger; a streaming transcript
+    // scrolling beside the composer must not close its menus.
+    const onScroll = (event: Event) => {
+      const target = event.target as Node;
+      if (trigger.current && target.contains?.(trigger.current))
+        setOpen(false);
+    };
+    const onResize = () => setOpen(false);
     document.addEventListener("mousedown", onDown);
-    return () => document.removeEventListener("mousedown", onDown);
+    document.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onResize);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -82,7 +120,25 @@ export function Dropdown<T extends string>({
 
   const show = () => {
     if (disabled || count === 0) return;
-    setActive(selectedIndex);
+    const rect = trigger.current?.getBoundingClientRect();
+    if (rect) {
+      const below = window.innerHeight - rect.bottom;
+      const above = rect.top;
+      const top =
+        side === "top"
+          ? above >= MAX_POPUP_HEIGHT || above >= below
+          : below < MAX_POPUP_HEIGHT && above > below;
+      setPosition({
+        ...(top
+          ? { bottom: window.innerHeight - rect.top + 6 }
+          : { top: rect.bottom + 6 }),
+        ...(align === "end"
+          ? { right: window.innerWidth - rect.right }
+          : { left: rect.left }),
+        maxHeight: Math.max(120, Math.min(MAX_POPUP_HEIGHT, (top ? above : below) - 12)),
+      });
+    }
+    setActive(menu ? 0 : selectedIndex);
     setOpen(true);
   };
   const close = (refocus = true) => {
@@ -100,14 +156,14 @@ export function Dropdown<T extends string>({
   };
 
   return (
-    <div ref={root} className="relative">
+    <div ref={root} className={clsx("relative", rootClassName)}>
       <button
         ref={trigger}
         type="button"
         title={title}
         disabled={disabled}
         aria-label={label}
-        aria-haspopup="listbox"
+        aria-haspopup={menu ? "menu" : "listbox"}
         aria-expanded={open}
         aria-controls={open ? id : undefined}
         onClick={() => (open ? close() : show())}
@@ -118,8 +174,9 @@ export function Dropdown<T extends string>({
           }
         }}
         className={clsx(
-          "flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:bg-hover hover:text-fg disabled:opacity-50",
-          open && "bg-hover text-fg",
+          !bare &&
+            "flex h-8 items-center gap-1 rounded-lg px-2 text-[12.5px] text-muted hover:bg-hover hover:text-fg disabled:opacity-50",
+          !bare && open && "bg-hover text-fg",
           className,
         )}
       >
@@ -129,7 +186,7 @@ export function Dropdown<T extends string>({
         <div
           ref={list}
           id={id}
-          role="listbox"
+          role={menu ? "menu" : "listbox"}
           tabIndex={-1}
           aria-label={label}
           aria-activedescendant={`${id}-${active}`}
@@ -171,10 +228,10 @@ export function Dropdown<T extends string>({
             event.preventDefault();
             event.stopPropagation();
           }}
+          style={position}
           className={clsx(
-            "absolute z-50 max-h-[340px] min-w-[220px] overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-[0_12px_32px_rgba(0,0,0,0.35)] outline-none",
-            side === "top" ? "bottom-full mb-1.5" : "top-full mt-1.5",
-            align === "end" ? "right-0" : "left-0",
+            "fixed z-50 overflow-y-auto rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-[0_12px_32px_rgba(0,0,0,0.35)] outline-none",
+            menu ? "min-w-[180px]" : "min-w-[220px]",
           )}
         >
           {options.map((option, index) => (
@@ -225,16 +282,26 @@ export function Dropdown<T extends string>({
                 key={action.label}
                 id={`${id}-${index}`}
                 data-index={index}
-                role="option"
-                aria-selected={false}
+                role={menu ? "menuitem" : "option"}
+                aria-selected={menu ? undefined : false}
                 onMouseEnter={() => setActive(index)}
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={() => choose(index)}
                 className={clsx(
-                  "cursor-default rounded-lg px-2.5 py-1.5 pl-8 text-muted",
-                  index === active && "bg-hover text-fg",
+                  "flex cursor-default items-center gap-2 rounded-lg px-2.5 py-1.5",
+                  !menu && !action.icon && "pl-8",
+                  action.danger
+                    ? "text-danger"
+                    : clsx("text-muted", index === active && "text-fg"),
+                  index === active &&
+                    (action.danger ? "bg-danger-soft" : "bg-hover"),
                 )}
               >
+                {action.icon && (
+                  <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                    {action.icon}
+                  </span>
+                )}
                 {action.label}
               </div>
             );

@@ -73,6 +73,17 @@ export function App() {
     void api.setNotificationsEnabled(getPreferences().notifications);
   }, []);
 
+  /** Shows the sidebar if hidden and focuses its search. */
+  const findSession = () => {
+    if (!sidebarOpen) toggleSidebar();
+    requestAnimationFrame(() => {
+      const search = document.querySelector<HTMLInputElement>(
+        'input[aria-label="Search sessions"]',
+      );
+      search?.focus();
+      search?.select();
+    });
+  };
   const toggleSidebar = () =>
     setSidebarOpen((open) => {
       try {
@@ -123,8 +134,9 @@ export function App() {
   };
 
   // Global shortcuts. Ctrl N new session, Ctrl O open project, Ctrl , settings,
-  // Ctrl K commands, Ctrl B sidebar, Ctrl +/-/0 zoom, Alt ←/→ history,
-  // Ctrl Shift A next session that needs you, Ctrl Shift D changes panel.
+  // Ctrl K commands, Ctrl B sidebar, Ctrl F find session, Ctrl +/-/0 zoom,
+  // Alt ←/→ history, Ctrl Shift A next session that needs you, Ctrl Shift D
+  // changes panel.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
@@ -149,6 +161,9 @@ export function App() {
       } else if (key === "b" && !event.shiftKey) {
         handled();
         toggleSidebar();
+      } else if (key === "f" && !event.shiftKey && project) {
+        handled();
+        findSession();
       } else if (key === "=" || key === "+") {
         handled();
         zoom(1);
@@ -235,6 +250,12 @@ export function App() {
           onSelect: () => edit("selectAll"),
         },
         "separator",
+        {
+          label: "Find session",
+          shortcut: "Ctrl F",
+          onSelect: findSession,
+          disabled: !project,
+        },
         {
           label: "Command palette…",
           shortcut: "Ctrl K",

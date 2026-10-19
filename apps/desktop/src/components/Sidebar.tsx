@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
-  ChevronDown,
+  Archive,
+  ArchiveRestore,
+  ChevronsUpDown,
   CircleAlert,
+  FolderOpen,
   FolderPlus,
   KeyRound,
   Loader2,
+  MoreHorizontal,
+  Pencil,
+  Search,
   Settings as SettingsIcon,
   SquarePen,
   Trash2,
@@ -31,6 +37,8 @@ import {
   updateSessionPreferences,
   type SessionPreferences,
 } from "../lib/session-preferences";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { Dropdown } from "./Dropdown";
 
 interface Props {
   app: {
@@ -123,23 +131,60 @@ export function Sidebar({ app, project, openSettings }: Props) {
       )}
 
       {project && (
-        <div className="px-3 pb-2">
-          <input
-            aria-label="Search sessions"
-            placeholder="Search sessions…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            className="w-full rounded border border-line bg-raised px-2 py-1 text-[13px]"
-          />
-          <button
-            aria-pressed={showArchived}
-            onClick={() => setShowArchived((value) => !value)}
-            className="mt-1 text-[11px] text-muted"
-          >
-            {showArchived
-              ? "Show current sessions"
-              : `Archived locally (${metadata.archived.length})`}
-          </button>
+        <div className="px-2 pb-1">
+          <div className="flex items-center gap-1">
+            <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-line bg-raised px-2.5 focus-within:border-line-strong">
+              <Search className="h-3.5 w-3.5 shrink-0 text-faint" />
+              <input
+                aria-label="Search sessions"
+                placeholder="Search sessions"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && query) {
+                    event.preventDefault();
+                    setQuery("");
+                  }
+                }}
+                className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-faint focus-visible:outline-none"
+              />
+              {query ? (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  title="Clear (Esc)"
+                  onClick={() => setQuery("")}
+                  className="rounded p-0.5 text-faint hover:text-fg"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <kbd className="font-mono text-[10.5px] text-faint">Ctrl F</kbd>
+              )}
+            </label>
+            <button
+              aria-pressed={showArchived}
+              aria-label={
+                showArchived
+                  ? "Show current sessions"
+                  : `Show archived sessions (${metadata.archived.length})`
+              }
+              title={
+                showArchived
+                  ? "Show current sessions"
+                  : `Archived on this desktop (${metadata.archived.length})`
+              }
+              onClick={() => setShowArchived((value) => !value)}
+              className={clsx(
+                "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
+                showArchived
+                  ? "bg-active text-fg"
+                  : "text-faint hover:bg-hover hover:text-fg",
+              )}
+            >
+              <Archive className="h-3.5 w-3.5" />
+            </button>
+          </div>
           {error && (
             <p role="alert" className="text-[12px] text-danger">
               {error}
@@ -173,6 +218,15 @@ export function Sidebar({ app, project, openSettings }: Props) {
                 </ul>
               </section>
             ),
+          )}
+        {project &&
+          (query.trim() || showArchived) &&
+          groups.every(([, rows]) => rows.length === 0) && (
+            <p className="px-2.5 pt-3 text-[12.5px] text-faint">
+              {query.trim()
+                ? "No sessions match."
+                : "Nothing archived. Archive keeps a session out of this list on this desktop only."}
+            </p>
           )}
         {project &&
           project.sessions.length === 0 &&
@@ -221,75 +275,78 @@ function ProjectSwitcher({
   projects: Record<string, ProjectState>;
   activeId: string | null;
 }) {
-  const [expanded, setExpanded] = useState(false);
   const active = open.find((p) => p.id === activeId) ?? null;
+  const needsYou = (id: string) =>
+    projects[id]?.sessions.filter((s) => s.group === "needs_you").length ?? 0;
+  const waiting = open
+    .filter((p) => p.id !== activeId)
+    .reduce((total, p) => total + needsYou(p.id), 0);
 
   return (
     <div className="px-2 pb-2">
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 rounded-md border border-line bg-raised px-2.5 py-1.5 text-left hover:bg-hover"
+      <Dropdown
+        label="Switch project"
+        title={active?.path}
+        value={activeId}
+        side="bottom"
+        bare
+        rootClassName="w-full"
+        className="group/project flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-hover aria-expanded:bg-hover"
+        options={open.map((p) => {
+          const needs = needsYou(p.id);
+          return {
+            value: p.id,
+            label: p.name,
+            hint: needs > 0 ? `${needs} need${needs === 1 ? "s" : ""} you` : p.path,
+          };
+        })}
+        onChange={activate}
+        actions={[
+          {
+            label: "Open project…",
+            icon: <FolderPlus className="h-3.5 w-3.5" />,
+            onSelect: () => void pickProject(),
+          },
+          ...(active
+            ? [
+                {
+                  label: `Close ${active.name}`,
+                  icon: <X className="h-3.5 w-3.5" />,
+                  onSelect: () => void closeProject(active.id),
+                },
+              ]
+            : []),
+        ]}
       >
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] font-medium">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-soft text-[13px] font-semibold uppercase text-accent">
+          {active?.name.slice(0, 1) ?? <FolderOpen className="h-4 w-4" />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-medium">
             {active?.name ?? "No project"}
-          </div>
+          </span>
           {active && (
-            <div className="truncate text-[11px] text-faint">{active.path}</div>
+            <span className="block truncate text-[11px] text-faint">
+              {displayPath(active.path)}
+            </span>
           )}
-        </div>
-        <ChevronDown
-          className={clsx(
-            "h-4 w-4 text-muted transition-transform",
-            expanded && "rotate-180",
-          )}
-        />
-      </button>
-      {expanded && (
-        <div className="mt-1 rounded-md border border-line bg-raised py-1 shadow-lg">
-          {open.map((p) => {
-            const needs =
-              projects[p.id]?.sessions.filter((s) => s.group === "needs_you")
-                .length ?? 0;
-            return (
-              <div key={p.id} className="group flex items-center">
-                <button
-                  onClick={() => {
-                    activate(p.id);
-                    setExpanded(false);
-                  }}
-                  className={clsx(
-                    "flex min-w-0 flex-1 items-center gap-2 px-2.5 py-1.5 text-left text-[13px] hover:bg-hover",
-                    p.id === activeId && "text-accent",
-                  )}
-                >
-                  <span className="truncate">{p.name}</span>
-                  {needs > 0 && <Badge tone="warn">{needs}</Badge>}
-                </button>
-                <button
-                  title="Close project"
-                  onClick={() => void closeProject(p.id)}
-                  className="mr-1 rounded p-1 text-faint opacity-0 hover:bg-hover hover:text-fg group-hover:opacity-100"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            );
-          })}
-          <button
-            onClick={() => {
-              setExpanded(false);
-              void pickProject();
-            }}
-            className="flex w-full items-center gap-2 border-t border-line px-2.5 py-1.5 pt-2 text-left text-[13px] text-muted hover:bg-hover hover:text-fg"
-          >
-            <FolderPlus className="h-4 w-4" />
-            Open project…
-          </button>
-        </div>
-      )}
+        </span>
+        {waiting > 0 && (
+          <span title="Sessions in other projects need you">
+            <Badge tone="warn">{waiting}</Badge>
+          </span>
+        )}
+        <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-faint group-hover/project:text-muted" />
+      </Dropdown>
     </div>
   );
+}
+
+/** The project's parent folder, shortened from the left. */
+function displayPath(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  const parent = parts.slice(0, -1);
+  return parent.length > 2 ? `…/${parent.slice(-2).join("/")}` : parent.join("/");
 }
 
 function SessionItem({
@@ -307,25 +364,45 @@ function SessionItem({
 }) {
   const working = row.status !== "idle";
   const [renaming, setRenaming] = useState(false);
-  const [title, setTitle] = useState(row.title);
+  const [deleting, setDeleting] = useState(false);
+  const status =
+    row.awaiting_approval > 0
+      ? "Waiting for your approval"
+      : working
+        ? row.active_tool
+          ? `Running ${row.active_tool}`
+          : row.tail
+        : "";
   return (
-    <li className="group relative">
-      <button
-        onClick={() => void api.focusSession(projectId, row.id)}
-        className={clsx(
-          "flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left",
-          active ? "bg-active" : "hover:bg-hover",
-        )}
-        style={{ paddingLeft: `${10 + Math.min(row.depth, 3) * 12}px` }}
-      >
-        <span className="mt-[5px] flex h-3 w-3 shrink-0 items-center justify-center">
-          <StatusGlyph row={row} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
+    <li className="group/row relative">
+      {renaming ? (
+        <RenameField
+          initial={row.title}
+          depth={row.depth}
+          save={(title) => {
+            onChange({ title });
+            setRenaming(false);
+          }}
+          cancel={() => setRenaming(false)}
+        />
+      ) : (
+        <button
+          onClick={() => void api.focusSession(projectId, row.id)}
+          onDoubleClick={() => setRenaming(true)}
+          aria-current={active ? "page" : undefined}
+          className={clsx(
+            "flex w-full items-start gap-2.5 rounded-md py-1.5 pr-9 text-left",
+            active ? "bg-active" : "hover:bg-hover",
+          )}
+          style={{ paddingLeft: `${10 + Math.min(row.depth, 3) * 12}px` }}
+        >
+          <span className="mt-[5px] flex h-3 w-3 shrink-0 items-center justify-center">
+            <StatusGlyph row={row} />
+          </span>
+          <span className="min-w-0 flex-1">
             <span
               className={clsx(
-                "truncate text-[13px]",
+                "block truncate text-[13px]",
                 row.unread > 0 || row.group === "needs_you"
                   ? "font-medium text-fg"
                   : "text-fg/90",
@@ -333,82 +410,120 @@ function SessionItem({
             >
               {row.title}
             </span>
-            <span className="ml-auto shrink-0 text-[11px] text-faint group-hover:invisible">
-              {working ? "" : relativeTime(row.updated_at_ms)}
-            </span>
+            {status && (
+              <span className="mt-0.5 block truncate text-[11.5px] text-muted">
+                {status}
+              </span>
+            )}
           </span>
-          {(row.awaiting_approval > 0 ||
-            (working && (row.active_tool || row.tail))) && (
-            <span className="mt-0.5 block truncate text-[11.5px] text-muted">
-              {row.awaiting_approval > 0
-                ? "Waiting for your approval"
-                : row.active_tool
-                  ? `Running ${row.active_tool}`
-                  : row.tail}
+        </button>
+      )}
+      {!renaming && (
+        <div className="absolute right-1 top-1 flex items-center">
+          {!working && (
+            <span className="pointer-events-none absolute right-1.5 top-[5px] whitespace-nowrap text-[11px] text-faint group-focus-within/row:invisible group-hover/row:invisible">
+              {relativeTime(row.updated_at_ms)}
             </span>
           )}
-        </span>
-      </button>
-      {renaming && (
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            onChange({ title });
-            setRenaming(false);
-          }}
-          className="p-1"
-        >
-          <input
-            autoFocus
-            aria-label="Local session name"
-            maxLength={160}
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Escape") setRenaming(false);
-            }}
-            className="w-full rounded border border-line bg-raised px-2 py-1"
-          />
-          <button type="submit" className="px-2 text-[11px]">
-            Save local name
-          </button>
-          <button
-            type="button"
-            onClick={() => setRenaming(false)}
-            className="text-[11px]"
+          <Dropdown
+            label={`Actions for ${row.title}`}
+            title="More actions"
+            value={null}
+            options={[]}
+            onChange={() => undefined}
+            side="bottom"
+            align="end"
+            bare
+            className="flex h-6 w-6 items-center justify-center rounded-md text-muted opacity-0 hover:bg-active hover:text-fg focus-visible:opacity-100 group-hover/row:opacity-100 aria-expanded:bg-active aria-expanded:opacity-100"
+            actions={[
+              {
+                label: "Rename locally",
+                icon: <Pencil className="h-3.5 w-3.5" />,
+                onSelect: () => setRenaming(true),
+              },
+              {
+                label: archived ? "Restore" : "Archive locally",
+                icon: archived ? (
+                  <ArchiveRestore className="h-3.5 w-3.5" />
+                ) : (
+                  <Archive className="h-3.5 w-3.5" />
+                ),
+                onSelect: () => onChange({ archived: !archived }),
+              },
+              {
+                label: "Delete…",
+                icon: <Trash2 className="h-3.5 w-3.5" />,
+                danger: true,
+                onSelect: () => setDeleting(true),
+              },
+            ]}
           >
-            Cancel
-          </button>
-        </form>
+            <MoreHorizontal className="h-4 w-4" />
+          </Dropdown>
+        </div>
       )}
-      <div className="flex justify-end gap-2 px-2 text-[11px] text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-        <button
-          onClick={() => {
-            setTitle(row.title);
-            setRenaming(true);
-          }}
-          title="Name on this desktop only"
+      {deleting && (
+        <ConfirmDialog
+          title="Delete this session?"
+          confirmLabel="Delete"
+          onConfirm={() => api.deleteSession(projectId, row.id)}
+          close={() => setDeleting(false)}
         >
-          Rename locally
-        </button>
-        <button onClick={() => onChange({ archived: !archived })}>
-          {archived ? "Restore" : "Archive locally"}
-        </button>
-      </div>
-      <button
-        title="Delete session"
-        aria-label={`Delete ${row.title}`}
-        onClick={(event) => {
-          event.stopPropagation();
-          if (confirm(`Delete "${row.title}"? This cannot be undone.`)) {
-            void api.deleteSession(projectId, row.id);
+          <span className="font-medium text-fg">{row.title}</span> and its
+          history are removed from QQ. This cannot be undone.
+        </ConfirmDialog>
+      )}
+    </li>
+  );
+}
+
+/** In-place title editor. Names are kept on this desktop only. */
+function RenameField({
+  initial,
+  depth,
+  save,
+  cancel,
+}: {
+  initial: string;
+  depth: number;
+  save: (title: string) => void;
+  cancel: () => void;
+}) {
+  const [title, setTitle] = useState(initial);
+  const done = useRef(false);
+  const finish = (commit: boolean) => {
+    if (done.current) return;
+    done.current = true;
+    if (commit && title.trim() !== initial) save(title);
+    else cancel();
+  };
+  return (
+    <div
+      className="flex items-center gap-2.5 rounded-md bg-active py-1 pr-1.5"
+      style={{ paddingLeft: `${10 + Math.min(depth, 3) * 12}px` }}
+    >
+      <span className="h-3 w-3 shrink-0" />
+      <input
+        autoFocus
+        onFocus={(event) => event.currentTarget.select()}
+        aria-label="Session name on this desktop"
+        title="Enter to save, Esc to cancel. Clear it to use the session's own title."
+        maxLength={160}
+        value={title}
+        onChange={(event) => setTitle(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            finish(true);
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            finish(false);
           }
         }}
-        className="absolute right-1.5 top-1.5 rounded p-1 text-faint opacity-0 hover:bg-active hover:text-danger group-hover:opacity-100 focus:opacity-100"
-      >
-        <Trash2 className="h-3.5 w-3.5" />
-      </button>
-    </li>
+        onBlur={() => finish(true)}
+        className="min-w-0 flex-1 rounded border border-accent/60 bg-bg px-1.5 py-0.5 text-[13px] outline-none focus-visible:outline-none"
+      />
+    </div>
   );
 }
 

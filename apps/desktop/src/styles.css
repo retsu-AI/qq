@@ -23,6 +23,8 @@
   --warn-soft: rgb(242 184 75 / 0.1);
   --danger: #f2716b;
   --danger-soft: rgb(242 113 107 / 0.1);
+  /* Filled destructive buttons with white text. */
+  --danger-solid: #c42b1c;
   --diff-add: rgb(78 201 138 / 0.12);
   --diff-del: rgb(242 113 107 / 0.12);
   /* Syntax colors for code blocks and diffs. */
@@ -57,6 +59,7 @@
   --warn-soft: rgb(183 121 31 / 0.1);
   --danger: #d64545;
   --danger-soft: rgb(214 69 69 / 0.08);
+  --danger-solid: #c53030;
   --diff-add: rgb(31 157 97 / 0.12);
   --diff-del: rgb(214 69 69 / 0.1);
   --syn-keyword: #8839ef;
@@ -100,6 +103,7 @@
   --color-warn-soft: var(--warn-soft);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
+  --color-danger-solid: var(--danger-solid);
   --font-sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
 }
