@@ -2778,6 +2778,32 @@ fn a_session_picker_search_finds_agents_and_clearing_it_falls_back_to_their_sess
 }
 
 #[test]
+fn the_session_picker_never_lists_audit_agents_or_anything_under_them() {
+    let (mut app, root, child, grandchild, _) = app_with_agent_tree();
+    // The child audits the root's answer; the grandchild is under the audit.
+    app.sessions.get_mut(&child).unwrap().summary.purpose = qq_protocol::SessionPurpose::Audit;
+    app.execute(Command::OpenSessions);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let listed = app.filtered_sessions();
+    assert!(
+        !listed.contains(&child) && !listed.contains(&grandchild),
+        "{listed:?}"
+    );
+    app.handle_terminal_event(Event::Paste("child".to_owned()));
+    assert!(
+        app.filtered_sessions().is_empty(),
+        "a search finds no audit row"
+    );
+    app.execute(Command::OpenAgents);
+    assert_eq!(app.filtered_sessions(), [root]);
+    // An audit whose parent was deleted is not listed as a session either.
+    app.sessions.get_mut(&child).unwrap().summary.parent_id = None;
+    app.sessions.remove(&root);
+    app.execute(Command::OpenSessions);
+    assert!(!app.filtered_sessions().contains(&child));
+}
+
+#[test]
 fn the_session_picker_opens_a_focused_agents_session_expanded() {
     let (mut app, root, child, _, _) = app_with_agent_tree();
     app.focus_session(child);

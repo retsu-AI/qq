@@ -5,7 +5,7 @@ use qq_protocol::{
     WorkspaceSnapshot,
 };
 
-use qq_client::state::ToolCallTiming;
+use qq_client::state::{Need, ToolCallTiming};
 
 use super::*;
 use crate::{
@@ -4754,7 +4754,7 @@ fn the_rail_lists_sessions_with_agent_state_rolled_up_from_one_pass() {
         "agents are not listed as sessions: {rollup:?}"
     );
     assert_eq!(rollup.counts, [2, 1, 1]);
-    assert_eq!(rollup.waiting, [(parent, child)]);
+    assert_eq!(rollup.needs, [(parent, child, Need::Approval)]);
     assert_eq!(
         rollup.sessions[0].unread, 1,
         "the unseen finish carries a badge"
@@ -4878,7 +4878,7 @@ fn an_unfocused_session_lists_at_most_three_waiting_agents() {
     }
     app.focus_session(SessionId::from_bytes([0x11; 16]));
     let rollup = rollup(&app);
-    assert_eq!(rollup.waiting.len(), 5);
+    assert_eq!(rollup.needs.len(), 5);
     assert_eq!(
         rollup.sessions[0].id, root,
         "waiting agents lift their session"
@@ -4889,7 +4889,7 @@ fn an_unfocused_session_lists_at_most_three_waiting_agents() {
     assert_eq!(listed, WAITING_AGENT_ROWS, "{rail:#?}");
     assert!(
         rail.iter()
-            .any(|row| row.contains("+2 waiting") && row.contains("Ctrl-G")),
+            .any(|row| row.contains("+2 need you") && row.contains("Ctrl-G")),
         "{rail:#?}"
     );
     // Focusing the fan-out lists the waiting agents first within its cap.
@@ -4897,6 +4897,91 @@ fn an_unfocused_session_lists_at_most_three_waiting_agents() {
     let rail = rail_rows(&mut app, 120, 40);
     let listed = rail.iter().filter(|row| row.contains("↳ ◇ agent")).count();
     assert_eq!(listed, 5, "{rail:#?}");
+}
+
+#[test]
+fn failed_and_unseen_agents_lift_their_session_and_rank_after_approvals() {
+    // agent 0 quiet, agent 1 finished unseen, agent 2 failed unseen, agent 3
+    // waits on an approval; the other root is focused.
+    let (mut app, root, ids) = app_with_fanout(4);
+    let finished = |app: &mut App, id: SessionId, outcome| {
+        let view = app.sessions.get_mut(&id).unwrap();
+        view.summary.last_outcome = Some(outcome);
+        view.finished_unread = true;
+    };
+    finished(&mut app, ids[1], qq_protocol::RunOutcome::Completed);
+    finished(
+        &mut app,
+        ids[2],
+        qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        },
+    );
+    app.sessions
+        .get_mut(&ids[3])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x99; 16]));
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let rollup = rollup(&app);
+    assert_eq!(
+        rollup.needs,
+        [
+            (root, ids[3], Need::Approval),
+            (root, ids[2], Need::Failed),
+            (root, ids[1], Need::FinishedUnread),
+        ]
+    );
+    assert_eq!(rollup.sessions[0].group, RailGroup::NeedsYou);
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    let at = |label: &str| {
+        rail.find(label)
+            .unwrap_or_else(|| panic!("{label}: {rail}"))
+    };
+    assert!(
+        at("agent 3") < at("agent 2") && at("agent 2") < at("agent 1"),
+        "{rail}"
+    );
+    assert!(
+        !rail.contains("agent 0"),
+        "quiet agents stay hidden: {rail}"
+    );
+    // Focused: the focused agent first, then needs, then quiet.
+    app.focus_session(ids[0]);
+    let rail = rail_rows(&mut app, 120, 40).join("\n");
+    let at = |label: &str| {
+        rail.find(label)
+            .unwrap_or_else(|| panic!("{label}: {rail}"))
+    };
+    assert!(
+        at("agent 0") < at("agent 3") && at("agent 3") < at("agent 2"),
+        "{rail}"
+    );
+}
+
+#[test]
+fn an_audit_root_left_by_a_deleted_parent_is_not_a_session() {
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.purpose = qq_protocol::SessionPurpose::Audit;
+        summary.title = "audit final answer".to_owned();
+    });
+    // The parent is gone; the audit is now a root.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = None;
+    app.sessions.remove(&root);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    assert_eq!(listed_sessions(&app), 1);
+    assert_eq!(rollup(&app).sessions.len(), 1);
+    app.layout.rail = PanePref::Auto;
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert!(!text.contains("audit"), "{text}");
+    assert!(
+        !text.contains("RECENT"),
+        "one listed session: no rail: {text}"
+    );
 }
 
 #[test]

@@ -7,7 +7,7 @@
    Spawned one agent per crate.                                                             │     ◇ approve run
    ✓ 0.0s · ttft 0.0s                                                                       │ ↳ ◇ publish step 2
                                                                                             │     ◇ approve run
-  related sessions                                                                          │   +1 waiting  Ctrl-G
+  related sessions                                                                          │   +1 need you  Ctrl-G
   ↳ ○ crate 00                                                                              │
   ↳ ○ crate 01                                                                              │ RECENT  2
   ↳ ○ crate 02                                                                              │ ○ Notes
