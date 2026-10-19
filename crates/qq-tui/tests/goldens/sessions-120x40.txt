@@ -1,13 +1,13 @@
  qq  Session 0                                                                                          openai/gpt-test
                                                                                             │ NEEDS YOU  2
  ▌ YOU                                                                                      │ ● Refactor          1 new
- ▌ plan the release                                                                         │ ○ Session 0         ↳1 ◐1
+ ▌ plan the release                                                                         │ ○ Session 0            ↳1
                                                                                             │ ↳ ◇ Deploy helper
    QQ                                                                                       │     ◇ approve run
    Drafted the checklist.                                                                   │
    ✓ 0.0s · ttft 0.0s                                                                       │ WORKING  2
                                                                                             │ ◐ Write tests       1 new
-  ↳ 1 agent · ◐ 1  /agents                                                                  │    compacting context
+  ↳ 1 agent  /agents                                                                        │    compacting context
                                                                                             │ ◐ Survey callers    1 new
                                                                                             │    Found twelve call ...
                                                                                             │

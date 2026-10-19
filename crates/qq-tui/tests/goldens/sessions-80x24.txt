@@ -7,7 +7,7 @@
    Drafted the checklist.
    ✓ 0.0s · ttft 0.0s
 
-  ↳ 1 agent · ◐ 1  /agents
+  ↳ 1 agent  /agents
 
 
 

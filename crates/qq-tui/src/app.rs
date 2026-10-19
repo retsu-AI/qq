@@ -3279,6 +3279,7 @@ impl App {
             || self.status.is_some()
             || self.sessions.values().any(|session| {
                 matches!(session.summary.status, qq_protocol::SessionStatus::Running)
+                    || session.summary.running_side_question.is_some()
             })
     }
 
@@ -3355,11 +3356,42 @@ impl App {
     /// is not asked yet), and so are audit sessions and anything under them,
     /// which are never listed.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions
-            .awaiting_approval()
+        let mut sessions = self.sessions.awaiting_approval();
+        sessions.extend(
+            self.orphan_trees()
+                .filter(|id| !self.sessions[id].live.awaiting_approval.is_empty()),
+        );
+        sessions
             .into_iter()
             .filter(|id| self.human_waiting(*id) && !self.under_audit(*id))
             .collect()
+    }
+
+    /// Sessions in components `thread_order` omits because their topmost
+    /// session's parent is not loaded (a bounded snapshot can carry a child
+    /// without its parent), depth-first. Empty in the common case.
+    fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
+        let complete = self.sessions.thread_order().len() == self.sessions.len();
+        let mut stack: Vec<SessionId> = if complete {
+            Vec::new()
+        } else {
+            self.sessions
+                .values()
+                .filter(|session| {
+                    session
+                        .summary
+                        .parent_id
+                        .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                })
+                .map(|session| session.summary.id)
+                .collect()
+        };
+        stack.sort();
+        std::iter::from_fn(move || {
+            let id = stack.pop()?;
+            stack.extend(self.sessions.children_of(id).iter().rev().copied());
+            Some(id)
+        })
     }
 
     fn human_waiting(&self, id: SessionId) -> bool {
@@ -3392,8 +3424,32 @@ impl App {
     /// first and then in tree order. Approvals count only while the human is
     /// asked; audit sessions and their subtrees are excluded.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
-        self.sessions
-            .needing_attention()
+        let mut needing = self.sessions.needing_attention();
+        // Orphan trees are outside `thread_order`; merge them in by urgency
+        // after the store's entries of the same rank.
+        let orphans: Vec<(qq_client::state::Need, SessionId)> = self
+            .orphan_trees()
+            .filter_map(|id| self.sessions[&id].need().map(|need| (need, id)))
+            .collect();
+        if !orphans.is_empty() {
+            let mut ranked: Vec<(qq_client::state::Need, usize, SessionId)> = needing
+                .iter()
+                .enumerate()
+                .filter_map(|(position, id)| {
+                    self.sessions[id].need().map(|need| (need, position, *id))
+                })
+                .collect();
+            let base = ranked.len();
+            ranked.extend(
+                orphans
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, (need, id))| (need, base + position, id)),
+            );
+            ranked.sort();
+            needing = ranked.into_iter().map(|(_, _, id)| id).collect();
+        }
+        needing
             .into_iter()
             .filter(|id| !self.under_audit(*id))
             .filter(|id| {
