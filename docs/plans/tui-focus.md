@@ -7,7 +7,10 @@
 **Owned paths:** `crates/qq-tui/src/**`, `crates/qq-tui/tests/**`,
 `crates/qq-tui/benches/render.rs`, `crates/qq-tui/Cargo.toml` (F6 only: the
 `base64` workspace dependency), `docs/design/layout.md`,
-`docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`.
+`docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`,
+and the client bootstrap's session choice and its tests
+(`crates/qq-client/src/interactive.rs`, `crates/qq-client/src/lib.rs`: F1
+only, refusing an audit `--session` and starting on a non-audit session).
 `commands.rs`, `input.rs` and `terminal.rs` are shared with other lanes; this
 plan touches them only for the rows and effects named below.
 
@@ -156,7 +159,12 @@ Rail rows:
   (ENG-1080), not done here. When an arriving summary reveals that the
   focused session is under an audit, focus moves to the newest displayed
   non-audit session (orphans included), as on deletion; the session a
-  workspace view would return to is replaced the same way.
+  workspace view would return to is replaced the same way. That forced move
+  first drops the focus-scoped interaction state (a partly answered
+  `ask_user` form, an armed Shift-Y/Shift-N amendment, the composer's
+  approval draft), so nothing answered for the hidden session is submitted
+  against the fallback's call; a regression reveals the ancestry mid-form and
+  mid-amendment.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
