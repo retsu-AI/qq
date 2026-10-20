@@ -1331,7 +1331,7 @@ async fn reviewer_approval_executes_a_held_call_without_a_client() {
 
 #[tokio::test]
 async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() {
-    // DA4: the reviewer's Approve of `git commit -m x` records that exact
+    // DA4: the reviewer's Approve of `git push origin x` records that exact
     // string as a session grant. The same command is not held again; a
     // sibling with a different argument still is; and the recorded row is a
     // delegate row, so a later human prefix grant is not what covers it.
@@ -1342,15 +1342,15 @@ async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() 
         vec![vec![
             (
                 "__test_shell",
-                r#"{"command":"git commit -m x"}"#.to_owned(),
+                r#"{"command":"git push origin x"}"#.to_owned(),
             ),
             (
                 "__test_shell",
-                r#"{"command":"git commit -m x"}"#.to_owned(),
+                r#"{"command":"git push origin x"}"#.to_owned(),
             ),
             (
                 "__test_shell",
-                r#"{"command":"git commit -m y"}"#.to_owned(),
+                r#"{"command":"git push origin y"}"#.to_owned(),
             ),
         ]],
         None,
@@ -1370,7 +1370,7 @@ async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() 
         .collect();
     assert_eq!(
         held,
-        ["git commit -m x", "git commit -m y"],
+        ["git push origin x", "git push origin y"],
         "the repeated exact command is covered; the different one is held"
     );
     assert_eq!(
@@ -1402,9 +1402,12 @@ async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() 
     );
     assert_eq!(
         grants.delegate.commands,
-        ["git commit -m x".to_owned(), "git commit -m y".to_owned()]
-            .into_iter()
-            .collect()
+        [
+            "git push origin x".to_owned(),
+            "git push origin y".to_owned()
+        ]
+        .into_iter()
+        .collect()
     );
     // The same row shape a delegate writes is never a workspace promotion.
     let pending: u32 = harness
@@ -1490,15 +1493,15 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
         vec![vec![
             (
                 "__test_shell",
-                r#"{"command":"git commit -m x"}"#.to_owned(),
+                r#"{"command":"git push origin x"}"#.to_owned(),
             ),
             (
                 "__test_shell",
-                r#"{"command":"git commit -m x"}"#.to_owned(),
+                r#"{"command":"git push origin x"}"#.to_owned(),
             ),
             (
                 "__test_shell",
-                r#"{"command":"git commit -m x --amend"}"#.to_owned(),
+                r#"{"command":"git push origin x --amend"}"#.to_owned(),
             ),
         ]],
         None,
@@ -1539,12 +1542,12 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
         [
             (
                 "shell_prefix".to_owned(),
-                "git commit -m x".to_owned(),
+                "git push origin x".to_owned(),
                 "jev".to_owned()
             ),
             (
                 "shell_prefix".to_owned(),
-                "git commit -m x --amend".to_owned(),
+                "git push origin x --amend".to_owned(),
                 "jev".to_owned()
             ),
         ]
@@ -1560,7 +1563,7 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
         grants.shell_prefixes.is_empty(),
         "a Jev row is a delegate row, not a human prefix: {grants:?}"
     );
-    assert!(grants.delegate.commands.contains("git commit -m x"));
+    assert!(grants.delegate.commands.contains("git push origin x"));
 }
 
 #[tokio::test]
@@ -1568,7 +1571,7 @@ async fn a_delegate_grant_that_cannot_be_stored_still_approves_the_call_once() {
     // The storage rule from #125 holds for a delegate verdict too: a value
     // past MAX_GRANT_BYTES, or a run already at its delegate cap, approves
     // the call and records nothing. The approval never fails.
-    let long = format!("git commit -m {}", "x".repeat(MAX_GRANT_BYTES));
+    let long = format!("git push origin {}", "x".repeat(MAX_GRANT_BYTES));
     let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = scripted_runs_harness_with(
         ApprovalMode::Auto,
@@ -1579,7 +1582,7 @@ async fn a_delegate_grant_that_cannot_be_stored_still_approves_the_call_once() {
             ),
             (
                 "__test_shell",
-                r#"{"command":"git commit -m capped"}"#.to_owned(),
+                r#"{"command":"git push origin capped"}"#.to_owned(),
             ),
         ]],
         None,
@@ -2683,7 +2686,7 @@ async fn a_session_delegate_override_reaches_the_reviewer_under_ask_and_children
         ApprovalMode::Ask,
         vec![vec![(
             "__test_shell",
-            r#"{"command":"git commit -m x"}"#.to_owned(),
+            r#"{"command":"git push origin x"}"#.to_owned(),
         )]],
         None,
         Some(reviewer),

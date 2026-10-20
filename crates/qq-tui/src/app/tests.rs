@@ -2520,6 +2520,32 @@ fn creating_a_session_adopts_it_without_a_snapshot_round_trip() {
 }
 
 #[test]
+fn a_tool_starved_focused_snapshot_requests_its_own_body_once() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let focused = initial.focused.as_mut().unwrap();
+    let session_id = focused.summary.id;
+    focused.tool_calls.clear();
+    focused.has_older_tool_calls = true;
+    let retry = initial.clone();
+    let other = summary_named(0x51, "prewarmed");
+    initial.included.push(body_for(&other, "large transcript"));
+    let (_, requests) = app.apply_snapshot(initial).split();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Snapshot(SnapshotRequest {
+            focused_session_id: Some(id), include_sessions, ..
+        })] if *id == session_id && include_sessions.is_empty()
+    ));
+    // Even an oversized single-body response must not trigger a fetch loop.
+    let expected_messages = retry.focused.as_ref().unwrap().messages.clone();
+    let (_, requests) = app.apply_snapshot(retry).split();
+    assert!(requests.is_empty());
+    assert!(app.sessions[&session_id].is_warm());
+    assert_eq!(app.sessions[&session_id].messages, Some(expected_messages));
+}
+
+#[test]
 fn switching_to_a_warm_session_needs_no_request_and_a_cold_one_does() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();

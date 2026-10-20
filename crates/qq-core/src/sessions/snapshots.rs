@@ -50,13 +50,13 @@ pub(super) fn load_snapshot(
     // response always fits the wire cap however large the transcripts are
     // (F11). Each body keeps its newest rows and reports what it dropped.
     let mut budget = SnapshotBudget::new(SNAPSHOT_BODY_BUDGET_BYTES);
-    let focused = request
+    let mut focused = request
         .focused_session_id
         .map(|session_id| {
             if session_workspace(&transaction, session_id)? != request.workspace_id {
                 return Err(SessionRuntimeError::SessionNotFound);
             }
-            load_session_snapshot(&transaction, session_id, request.message_limit, &mut budget)
+            load_session_body(&transaction, session_id, request.message_limit, &mut budget)
         })
         .transpose()?;
     // Extra bodies are best-effort: a session that left the workspace or was
@@ -69,7 +69,7 @@ pub(super) fn load_snapshot(
         }
         match session_workspace(&transaction, *session_id) {
             Ok(workspace_id) if workspace_id == request.workspace_id => {
-                included.push(load_session_snapshot(
+                included.push(load_session_body(
                     &transaction,
                     *session_id,
                     request.message_limit,
@@ -79,6 +79,13 @@ pub(super) fn load_snapshot(
             Ok(_) | Err(SessionRuntimeError::SessionNotFound) => {}
             Err(error) => return Err(error),
         }
+    }
+    // Tool calls spend what the transcripts left, in the same order. Their
+    // results are the heavy rows; admitting them per body before the next
+    // body's messages let one session's large reads starve every later body
+    // of its transcript, which a client then showed as an empty session.
+    for body in focused.iter_mut().chain(included.iter_mut()) {
+        load_tool_call_tail(&transaction, body, &mut budget)?;
     }
     let check_interruption = super::goal_check::interruption(&transaction, request.workspace_id)?;
     transaction.commit()?;
@@ -136,7 +143,22 @@ impl SnapshotBudget {
     }
 }
 
+/// One session body: transcript, run receipts, and its newest tool calls.
+#[cfg(test)]
 pub(super) fn load_session_snapshot(
+    transaction: &Connection,
+    session_id: SessionId,
+    message_limit: u16,
+    budget: &mut SnapshotBudget,
+) -> Result<SessionSnapshot, SessionRuntimeError> {
+    let mut body = load_session_body(transaction, session_id, message_limit, budget)?;
+    load_tool_call_tail(transaction, &mut body, budget)?;
+    Ok(body)
+}
+
+/// A session body without tool calls: summary, side questions, the newest
+/// messages, and the run receipts they reference.
+fn load_session_body(
     transaction: &Connection,
     session_id: SessionId,
     message_limit: u16,
@@ -250,6 +272,25 @@ pub(super) fn load_session_snapshot(
         }
     }
     runs.reverse();
+    Ok(SessionSnapshot {
+        goal: goals::load_live(transaction, session_id)?.map(Box::new),
+        side_questions,
+        summary,
+        messages,
+        runs,
+        tool_calls: Vec::new(),
+        has_older_tool_calls: false,
+        has_older_messages,
+    })
+}
+
+/// Admit `body`'s newest tool calls, newest first, while the budget lasts.
+fn load_tool_call_tail(
+    transaction: &Connection,
+    body: &mut SessionSnapshot,
+    budget: &mut SnapshotBudget,
+) -> Result<(), SessionRuntimeError> {
+    let session_id = body.summary.id;
     let mut statement = transaction.prepare(
         "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
              WHERE r.session_id = ?1
@@ -287,16 +328,9 @@ pub(super) fn load_session_snapshot(
         tool_calls.push(tool_call);
     }
     tool_calls.reverse();
-    Ok(SessionSnapshot {
-        goal: goals::load_live(transaction, session_id)?.map(Box::new),
-        side_questions,
-        summary,
-        messages,
-        runs,
-        tool_calls,
-        has_older_tool_calls,
-        has_older_messages,
-    })
+    body.tool_calls = tool_calls;
+    body.has_older_tool_calls = has_older_tool_calls;
+    Ok(())
 }
 
 pub(super) fn session_file_state_rows(

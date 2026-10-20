@@ -4927,3 +4927,189 @@ fn goal_configuration_rejects_invalid_bounds_and_requires_workspace_trust() {
         Err(ConfigError::TrustRequired { .. })
     ));
 }
+
+/// Every provider patch shape a user can write today. AP7 (ADR-0064)
+/// replaces the per-provider variants with a provider table; these documents
+/// must keep parsing to the same providers and hashing to the same trust
+/// digest so already-trusted project files stay trusted.
+const BUILTIN_PATCH_DOCUMENTS: [&str; 13] = [
+    r#"(version: 1, providers: {"openai": OpenAi(api_key: Env("MY_OPENAI_KEY"))})"#,
+    r#"(version: 1, providers: {"openai": OpenAi(api_key: Stored("openai/work"), models: {"m": (name: "M")})})"#,
+    r#"(version: 1, providers: {"openai-codex": OpenAiCodex(profile: "work")})"#,
+    r#"(version: 1, providers: {"openai-codex": OpenAiCodex(profile: Clear)})"#,
+    r#"(version: 1, providers: {"anthropic": Anthropic(api_key: Env("A_KEY"))})"#,
+    r#"(version: 1, providers: {"google": Google(api_key: Stored("google/work"))})"#,
+    r#"(version: 1, providers: {"xai": XAi(profile: "work")})"#,
+    r#"(version: 1, providers: {"xai": XAi(api_key: Env("X_KEY"), profile: "work")})"#,
+    r#"(version: 1, providers: {"openai": Remove})"#,
+    r#"(version: 1, providers: {"gw": LiteLlm(connection: (base_url: "https://gw.example/v1", api: OpenAiChatCompletions, auth: Bearer(Env("GW_KEY"))))})"#,
+    r#"(version: 1, providers: {"bedrock": AmazonBedrock(region: "us-east-1", auth: Aws(Profile("work")))})"#,
+    r#"(version: 1, providers: {"bedrock-mantle": AmazonBedrockMantle(region: "us-west-2", api: OpenAiChatCompletions)})"#,
+    r#"(version: 1, providers: {"c": Custom(connection: (base_url: "https://c.example/v1", api: AnthropicMessages, auth: ApiKey(Stored("c/key"))), models: {"m": Remove})})"#,
+];
+
+/// The trust digests of [`BUILTIN_PATCH_DOCUMENTS`], recorded from the
+/// per-variant representation before AP7.
+const BUILTIN_PATCH_DIGESTS: [&str; 13] = [
+    "206e1448f30dde87534e6a4b278d535e442d06229759614248dd9d2e3a09631d",
+    "5e8e0d7bb05617439d91718c29e3125a248d4849cafcfefc733be35344042d4b",
+    "7065b85c67038db8bc44dc22ebdfaa3130a46ba0e2be6678936926250adc7349",
+    "0664848b4a54147cd1f844bcf41ce34ceb053ab552058bd25bf6f42179723324",
+    "2e4a2ab14dfcf22462716b5178d11d86113abb55833c466d6b98cfb76fa00179",
+    "6a6dd2604c8765d64b861d82a9a897ffe3e80d053f24aa7d865641737c222665",
+    "75d1a8c0479da73b6a3e0454fba02d6efd8f80896580bfd353f8e4ebe5840360",
+    "a11b40da61aecfcd19983d3c6dedb267a1e5dab385c52422ca1dd9152ec175e9",
+    "09ebd67285af55137513c2efe5c996237ba5f4f536d4f206ac8b476fd977a021",
+    "6096f9f6ef9957cb1c9b522f4683ab0a3935232fc70bbb24396f203fb00a833c",
+    "a6c9f075336586a84974c5fb9006caeed34baeb736859b6ff377ead9da352c61",
+    "e2a4ca205aae7b5c6302d72306deb67b6705bbb725df9ebdfbe0dbd77da0f488",
+    "4c69a2556314e907bd1f7393b5f1079288256ee6f947b7da1c41bf169fda4e55",
+];
+
+#[test]
+fn builtin_provider_patches_keep_their_trust_digests() {
+    let source = SourceIdentity::virtual_source(SourceKind::Inline, "digest pin");
+    let digests: Vec<String> = BUILTIN_PATCH_DOCUMENTS
+        .iter()
+        .map(|document| {
+            document::Document::parse(document, &source)
+                .unwrap()
+                .sensitive_digest()
+                .unwrap()
+                .expect("provider patches are trust-sensitive")
+        })
+        .collect();
+    assert_eq!(digests, BUILTIN_PATCH_DIGESTS);
+}
+
+/// Each built-in accepts only its own credential fields; anything else is
+/// a parse error, not silently ignored.
+#[test]
+fn builtin_provider_patches_reject_fields_they_do_not_have() {
+    for (provider, patch) in [
+        ("openai", r#"OpenAi(profile: "work")"#),
+        ("openai-codex", r#"OpenAiCodex(api_key: Env("K"))"#),
+        ("anthropic", r#"Anthropic(profile: "work")"#),
+        ("google", r#"Google(profile: "work")"#),
+        ("xai", r#"XAi(region: "us-east-1")"#),
+        ("openai", r#"OpenAi(unknown: 1)"#),
+    ] {
+        let tree = TempTree::new();
+        let document = format!("(version: 1, providers: {{\"{provider}\": {patch}}})");
+        let error = tree
+            .loader()
+            .load(&tree.request().with_explicit_content(document.clone()))
+            .unwrap_err();
+        assert!(
+            matches!(error, ConfigError::Parse { .. }),
+            "{document}: {error:?}"
+        );
+    }
+}
+
+/// The built-in presets each patch layers over, as observable on the loaded
+/// snapshot: endpoint, mode, protocol, credential and usage.
+#[test]
+fn builtin_provider_patches_layer_over_their_presets() {
+    let tree = TempTree::new();
+    let snapshot = tree
+        .loader()
+        .load(&tree.request().with_explicit_content(
+            r#"(
+                version: 1,
+                providers: {
+                    "openai": OpenAi(api_key: Env("MY_OPENAI_KEY")),
+                    "openai-codex": OpenAiCodex(profile: "work"),
+                    "anthropic": Anthropic(api_key: Env("A_KEY")),
+                    "google": Google(api_key: Stored("google/work")),
+                    "xai": XAi(api_key: Env("X_KEY"), profile: "work"),
+                },
+            )"#,
+        ))
+        .unwrap();
+    let http = |id: &str| {
+        let provider = snapshot.providers().get(id).unwrap();
+        let Some(ProviderAccess::Http(access)) = provider.access() else {
+            panic!("{id} is HTTP");
+        };
+        (provider.kind().name(), provider.usage(), access.clone())
+    };
+
+    let (kind, usage, access) = http("openai");
+    assert_eq!((kind, usage), ("OpenAi", UsageType::Metered));
+    assert_eq!(access.endpoint(), "https://api.openai.com/v1/responses");
+    assert_eq!(access.api(), ProviderApi::OpenAiResponses);
+    let builtin = |access: &HttpAccess| match access.auth() {
+        HttpCredential::Builtin {
+            provider,
+            api_key,
+            profile,
+        } => (
+            *provider,
+            provider.stored_name(profile.as_deref()),
+            api_key.clone(),
+            profile.clone(),
+        ),
+        HttpCredential::Configured(auth) => panic!("configured {auth:?}"),
+    };
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "openai/default");
+    assert_eq!(provider.variables, ["OPENAI_API_KEY"]);
+    assert_eq!(
+        provider.audience,
+        BuiltinAudience::Table("https://api.openai.com")
+    );
+    assert_eq!(api_key, Some(SecretRef::Env("MY_OPENAI_KEY".to_owned())));
+    assert_eq!(profile, None);
+
+    let (kind, usage, access) = http("openai-codex");
+    assert_eq!((kind, usage), ("OpenAiCodex", UsageType::Subscription));
+    assert_eq!(
+        access.endpoint(),
+        "https://chatgpt.com/backend-api/codex/responses"
+    );
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "openai-codex/work");
+    assert_eq!(provider.variables, [] as [&str; 0]);
+    assert_eq!(provider.audience, BuiltinAudience::OpenAiCodex);
+    assert_eq!((api_key, profile), (None, Some("work".to_owned())));
+
+    let (kind, _, access) = http("anthropic");
+    assert_eq!(kind, "Anthropic");
+    assert_eq!(access.api(), ProviderApi::AnthropicMessages);
+    let (provider, stored, api_key, _) = builtin(&access);
+    assert_eq!(stored, "anthropic/default");
+    assert_eq!(provider.variables, ["ANTHROPIC_API_KEY"]);
+    assert_eq!(
+        provider.audience,
+        BuiltinAudience::Table("https://api.anthropic.com")
+    );
+    assert_eq!(api_key, Some(SecretRef::Env("A_KEY".to_owned())));
+
+    let (kind, _, access) = http("google");
+    assert_eq!(kind, "Google");
+    assert_eq!(access.endpoint_mode(), EndpointMode::Base);
+    let (provider, stored, api_key, _) = builtin(&access);
+    assert_eq!(stored, "google/default");
+    assert_eq!(provider.variables, ["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+    assert_eq!(
+        provider.audience,
+        BuiltinAudience::Table("https://generativelanguage.googleapis.com")
+    );
+    assert_eq!(api_key, Some(SecretRef::Stored("google/work".to_owned())));
+
+    let (kind, usage, access) = http("xai");
+    assert_eq!((kind, usage), ("XAi", UsageType::CredentialDependent));
+    assert_eq!(access.api(), ProviderApi::OpenAiChatCompletions);
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "xai/work");
+    assert_eq!(provider.variables, ["XAI_API_KEY"]);
+    assert_eq!(provider.audience, BuiltinAudience::XAi);
+    assert_eq!(
+        (api_key, profile),
+        (
+            Some(SecretRef::Env("X_KEY".to_owned())),
+            Some("work".to_owned())
+        )
+    );
+}

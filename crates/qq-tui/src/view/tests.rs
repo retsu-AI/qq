@@ -5086,6 +5086,35 @@ fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
     assert_eq!(entry.cost, Some(250_000_000));
     let rail = rail_rows(&mut app, 200, 60).join("\n");
     assert!(rail.contains("$0.25"), "{rail}");
+
+    // Inclusive covers immediate children only: a grandchild's direct spend
+    // is added; a child's is already in the inclusive total.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        summary.estimated_cost_usd_nanos = Some(if index == 0 { 30_000_000 } else { 40_000_000 });
+    });
+    app.sessions.get_mut(&root).unwrap().summary.accounting = Some(SessionAccounting {
+        direct: AccountingTotal::default(),
+        inclusive: AccountingTotal {
+            estimated_cost_usd_nanos: Some(100_000_000),
+            ..AccountingTotal::default()
+        },
+    });
+    let grandchild = app.sessions[&ids[1]].summary.clone();
+    app.sessions.upsert_summary(
+        SessionSummary {
+            parent_id: Some(ids[0]),
+            ..grandchild
+        },
+        &app.models,
+        0,
+    );
+    assert_eq!(app.sessions.depth(ids[1]), 2, "fixture: a grandchild");
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, Some(140_000_000));
 }
 
 #[test]
@@ -5462,7 +5491,19 @@ fn a_legacy_session_sums_its_agents_direct_spend() {
         Some(42_000_000),
         "the audit's subtree counts too"
     );
-    let _ = ids;
+    // One agent with no recorded cost makes the total unknown: no spend is
+    // shown rather than an understated one.
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .estimated_cost_usd_nanos = None;
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, None);
 }
 
 #[test]
@@ -5565,6 +5606,164 @@ fn deleting_onto_an_audit_fetches_the_fallback_and_a_revealed_audit_moves_focus(
         },
     )));
     assert_ne!(app.focused(), Some(ids[0]), "a hidden session is not shown");
+}
+
+#[test]
+fn a_revealed_audit_drops_the_answers_and_amendment_in_progress() {
+    // An orphan task is focused, mid-form and with an amendment armed; its
+    // parent arrives and is an audit. Nothing begun there survives the move.
+    for armed in [false, true] {
+        let (mut app, _, ids) = app_with_fanout(1);
+        let missing = SessionId::from_bytes([0x77; 16]);
+        app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+        app.focus_session(ids[0]);
+        if armed {
+            app.approval_amendment = Some(crate::app::ApprovalChoice::Deny);
+        } else {
+            app.question_answers.push("qq-tui".to_owned());
+        }
+        app.composer.replace("half typed".to_owned());
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            missing,
+            SessionEvent::SessionCreated {
+                session: Box::new(SessionSummary {
+                    purpose: qq_protocol::SessionPurpose::Audit,
+                    ..fixtures::session_summary(missing)
+                }),
+            },
+        )));
+        assert_ne!(app.focused(), Some(ids[0]));
+        assert!(app.approval_amendment.is_none(), "armed={armed}");
+        assert!(app.question_answers.is_empty(), "armed={armed}");
+        assert!(app.composer.text.is_empty(), "armed={armed}");
+    }
+    // A deletion moves focus the same way: the partial form goes with it.
+    let (mut app, root, _) = app_with_fanout(1);
+    app.focus_session(root);
+    app.question_answers.push("qq-tui".to_owned());
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    assert_ne!(app.focused(), Some(root));
+    assert!(app.question_answers.is_empty());
+}
+
+#[test]
+fn thirteenth_review_round_on_the_rail() {
+    // 1. `/sessions` and `/agents` list no audit or anything under one.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        }
+    });
+    app.focus_session(root);
+    app.execute(Command::OpenAgents);
+    assert!(!app.filtered_sessions().contains(&ids[0]), "agents picker");
+    app.execute(Command::OpenSessions);
+    assert!(
+        !app.filtered_sessions().contains(&ids[0]),
+        "sessions picker"
+    );
+    app.overlay = None;
+
+    // 2. A running audit has no spinner on screen, so it wakes no frame.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
+    assert!(!app.has_activity(), "a hidden audit run animates nothing");
+
+    // 3. An orphan's grandchild is indented below its child.
+    let (mut app, _, ids) = app_with_fanout(3);
+    let orphan = ids[0];
+    app.sessions.get_mut(&orphan).unwrap().summary.parent_id =
+        Some(SessionId::from_bytes([0x77; 16]));
+    for (child, parent) in [(ids[1], orphan), (ids[2], ids[1])] {
+        let summary = app.sessions[&child].summary.clone();
+        app.sessions.upsert_summary(
+            SessionSummary {
+                parent_id: Some(parent),
+                ..summary
+            },
+            &app.models,
+            0,
+        );
+    }
+    assert_eq!(
+        app.sessions.depth(ids[2]),
+        0,
+        "fixture: outside thread_order"
+    );
+    assert_eq!(super::sidebar::agent_depth(&app, ids[1]), 1);
+    assert_eq!(super::sidebar::agent_depth(&app, ids[2]), 2);
+    // 4. A lone session with an approval and an unseen finish elsewhere in
+    // its tree: the rule names the approval and counts the finish.
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    let parent = app.focused().unwrap();
+    let done = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "done agent".to_owned(),
+            parent_id: Some(parent),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(done)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&done).unwrap().finished_unread = true;
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200)]).join("");
+    assert!(rule.contains("needs approval +1 need you"), "{rule}");
+}
+
+#[test]
+fn the_rule_names_the_approval_that_alt_a_answers() {
+    // A root waits, and so does a newer orphan (its parent not loaded): the
+    // one attention list ranks the newer component first, and the rule's
+    // named approval is the one `Alt-A` would answer.
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.title = "orphan".to_owned();
+        summary.parent_id = Some(SessionId::from_bytes([0x77; 16]));
+        summary.updated_at_ms = 999;
+    });
+    app.layout.rail = PanePref::Hidden;
+    for id in [root, ids[0]] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let attention = app.sessions_needing_attention();
+    assert_eq!(attention.first(), Some(&ids[0]), "newest first");
+    assert_eq!(app.sessions_awaiting_approval().first(), Some(&ids[0]));
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(rule.contains("◇ orphan"), "{rule}");
+}
+
+#[test]
+fn a_revealed_audit_cancels_a_delete_confirmation_against_it() {
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.open_session_picker_with("", Some(ids[0]), Some(SessionConfirm::Delete(ids[0])));
+    assert_eq!(
+        app.session_picker_confirm(),
+        Some(SessionConfirm::Delete(ids[0]))
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_eq!(app.session_picker_confirm(), None);
 }
 
 #[test]
