@@ -740,13 +740,13 @@ fn sidebar_inner(
             })
         };
         let titled = |line: &Line, id: SessionId, title_column: usize| {
-            // The cells at the title's own column kept enough of the title
-            // to read (two characters, or the whole of a shorter title): a
-            // badge that contains the title's text, or a marker glyph a
-            // title happens to start with, sits at another column and does
-            // not count, and a title squeezed to its ellipsis is gone.
+            // The cells at the title's own column kept part of the title (at
+            // least its first character): a badge that contains the title's
+            // text, or a marker glyph a title happens to start with, sits at
+            // another column and does not count, and a title squeezed to
+            // its ellipsis is gone.
             let title = &app.sessions[&id].summary.title;
-            let want: String = title.chars().take(2).collect();
+            let want: String = title.chars().take(1).collect();
             if want.is_empty() {
                 return true;
             }

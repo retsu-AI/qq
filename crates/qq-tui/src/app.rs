@@ -486,6 +486,10 @@ pub(crate) struct App {
     /// the renderer; `None` before the first frame. A background delta for a
     /// session outside it changes no cell.
     pub(crate) rail_painted: Option<Vec<SessionId>>,
+    /// Sessions the last frame named outside the composer rule (painted rail
+    /// rows and child cards). The rule names the first waiting approval not
+    /// in it, and `Alt-A`/`Alt-D` answer that same one.
+    pub(crate) frame_named: Vec<SessionId>,
     /// Terminal width from the last resize event, so update paths can decide
     /// whether a change to an unshown session is visible at all. Zero until
     /// the first resize, which reads as "assume visible".
@@ -558,6 +562,7 @@ impl App {
             terminal_width: 0,
             mouse_capture: true,
             rail_painted: None,
+            frame_named: Vec::new(),
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
             } else {
@@ -2846,10 +2851,18 @@ impl App {
     /// one, without moving focus. The banner names that session; this is
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
-        let Some(session_id) = self
+        // The approval the rule names: the first one the last frame did not
+        // name elsewhere, else (all on the rail) the first in attention order.
+        let waiting: Vec<SessionId> = self
             .sessions_needing_attention()
             .into_iter()
-            .find(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
+            .filter(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
+            .collect();
+        let Some(session_id) = waiting
+            .iter()
+            .find(|id| !self.frame_named.contains(id))
+            .or(waiting.first())
+            .copied()
         else {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);

@@ -185,6 +185,9 @@ pub(crate) struct FrameRenderer {
     cursor: Option<CursorPosition>,
     /// Sessions the last frame's rail window painted; handed to the app.
     rail_painted: Option<Vec<SessionId>>,
+    /// Sessions the last frame named outside the rule (painted rail rows and
+    /// child cards); handed to the app.
+    named: Vec<SessionId>,
 }
 
 impl FrameRenderer {
@@ -198,6 +201,7 @@ impl FrameRenderer {
             }
         }
         app.rail_painted = self.rail_painted.take();
+        app.frame_named = std::mem::take(&mut self.named);
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -404,6 +408,7 @@ impl FrameRenderer {
         if !carded.is_empty() {
             rail_named.get_or_insert_with(Vec::new).extend(carded);
         }
+        self.named = rail_named.clone().unwrap_or_default();
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
         // transcript text once per pane on every frame.

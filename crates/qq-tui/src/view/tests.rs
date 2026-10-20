@@ -5751,6 +5751,38 @@ fn thirteenth_review_round_on_the_rail() {
 }
 
 #[test]
+fn alt_a_answers_the_approval_the_rule_names_beside_a_painted_one() {
+    // `agent 0` ranks first and its rail row is painted; `other` waits too
+    // and is not on the rail's named list, so the rule names it. The answer
+    // chords beside that name act on it (both bodies are cold, so the chord
+    // focuses its target).
+    let (mut app, root, ids) = app_with_fanout(1);
+    let other = SessionId::from_bytes([0x11; 16]);
+    for id in [ids[0], other] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(root);
+    let waiting: Vec<_> = app.sessions_awaiting_approval();
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    let (painted, named) = (waiting[0], waiting[1]);
+    app.frame_named = vec![painted];
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200, Some(&[painted]))]).join("");
+    let title = app.sessions[&named].summary.title.clone();
+    assert!(rule.contains(&format!("◇ {title}")), "{rule}");
+    app.execute(Command::ApproveBackground);
+    assert_eq!(
+        app.focused(),
+        Some(named),
+        "the chord acts on the named one"
+    );
+}
+
+#[test]
 fn the_rule_names_the_approval_that_alt_a_answers() {
     // A root waits, and so does a newer orphan (its parent not loaded): the
     // one attention list ranks the newer component first, and the rule's
@@ -6692,18 +6724,28 @@ fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_no
     assert!(rule.contains("✕ 1") && rule.contains("^G jump"), "{rule}");
 
     // A narrow rail whose badges leave no room for a waiting session's
-    // title does not report that session as named, so the rule names it.
+    // title does not report that session as named, so the rule names it;
+    // one surviving title cell (`F...`) still names it.
     let (mut app, root, _) = app_with_fanout(30);
     {
         let view = app.sessions.get_mut(&root).unwrap();
         view.live
             .awaiting_approval
             .insert(ToolCallId::from_bytes([0x85; 16]));
-        view.unread = 99_999;
+        view.unread = 999_999_999;
     }
     app.focus_session(SessionId::from_bytes([0x11; 16]));
-    let (_, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
-    assert!(!named.contains(&root), "title truncated away: not named");
+    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    assert!(
+        !named.contains(&root),
+        "title truncated away: not named {:#?}",
+        frame_rows(&rows)
+    );
+    app.sessions.get_mut(&root).unwrap().unread = 99_999;
+    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    let texts = frame_rows(&rows);
+    assert!(texts.iter().any(|row| row.contains("◇ F...")), "{texts:#?}");
+    assert!(named.contains(&root), "one title cell names it: {texts:#?}");
     let (_, named, _) = sidebar(&app, 60, 30, RailDensity::Compact);
     assert!(named.contains(&root), "title visible: named");
 }
@@ -7062,7 +7104,10 @@ fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
         .find(|row| row.contains("999999999"))
         .unwrap_or_else(|| panic!("{texts:#?}"));
     assert!(!row.contains("deploy"), "the title is clipped: {row}");
-    assert!(!named.contains(&other), "{texts:#?}");
+    // `│ ◇ ◇...`: the title keeps its own first cell after the state
+    // marker, so it names the session (the `◇ ` marker itself sits at
+    // another column and never counts).
+    assert!(named.contains(&other), "{texts:#?}");
 }
 
 #[test]
