@@ -6,6 +6,7 @@ mod auth;
 mod editor;
 mod engine;
 mod git;
+mod goals;
 mod input;
 mod project;
 mod settings;
@@ -415,6 +416,131 @@ async fn git_create_pr(
         .map_err(|error| error.to_string())
 }
 
+/// Waits for the server to accept or reject a command the actor sent.
+async fn await_receipt(
+    receipt: tokio::sync::oneshot::Receiver<Result<(), String>>,
+) -> Result<(), String> {
+    match tokio::time::timeout(std::time::Duration::from_secs(65), receipt).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("the project closed before the server answered".to_owned()),
+        Err(_) => {
+            Err("the server did not answer in time; check the goal before retrying".to_owned())
+        }
+    }
+}
+
+/// The workspace's goal defaults and ceilings, read from its configuration.
+#[tauri::command]
+async fn goal_defaults(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> Result<goals::GoalDefaultsDto, String> {
+    let path = state.project(&project_id)?.path;
+    tauri::async_runtime::spawn_blocking(move || goals::defaults(&path))
+        .await
+        .map_err(|_| "reading the goal configuration failed".to_owned())?
+}
+
+/// The goal identity a command acts on, as the UI saw it.
+#[derive(serde::Deserialize)]
+struct SeenGoal {
+    goal_id: String,
+    revision: u32,
+}
+
+impl SeenGoal {
+    fn identity(&self) -> Result<qq_protocol::GoalIdentity, String> {
+        Ok(qq_protocol::GoalIdentity {
+            goal_id: self
+                .goal_id
+                .parse()
+                .map_err(|_| format!("invalid goal id {}", self.goal_id))?,
+            revision: self.revision,
+        })
+    }
+}
+
+/// Creates, edits or replaces a session's goal. Setting a goal does not
+/// grant consent for its check command.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn set_goal(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: String,
+    objective: String,
+    check: Option<String>,
+    preset: goals::BudgetPreset,
+    expected: Option<SeenGoal>,
+    replace: bool,
+) -> Result<(), String> {
+    let session_id = parse_session(&session_id)?;
+    let objective = goals::objective(&objective)?;
+    let expected = expected.as_ref().map(SeenGoal::identity).transpose()?;
+    let path = state.project(&project_id)?.path;
+    let defaults = tauri::async_runtime::spawn_blocking(move || goals::defaults(&path))
+        .await
+        .map_err(|_| "reading the goal configuration failed".to_owned())??;
+    let check = goals::check(check.as_deref(), defaults.check_timeout_ms)?;
+    let (reply, receipt) = tokio::sync::oneshot::channel();
+    state.send(
+        &project_id,
+        UiCommand::SetGoal {
+            session_id,
+            objective,
+            check,
+            preset,
+            defaults,
+            expected,
+            replace,
+            reply,
+        },
+    )?;
+    await_receipt(receipt).await
+}
+
+/// Pause, resume, clear, or answer check consent for the goal revision the
+/// user saw; a newer revision is refused rather than acted on.
+#[tauri::command]
+async fn goal_control(
+    state: State<'_, AppState>,
+    project_id: String,
+    session_id: String,
+    expected: SeenGoal,
+    action: goals::GoalAction,
+) -> Result<(), String> {
+    let (reply, receipt) = tokio::sync::oneshot::channel();
+    state.send(
+        &project_id,
+        UiCommand::GoalControl {
+            session_id: parse_session(&session_id)?,
+            expected: expected.identity()?,
+            action: action.into(),
+            reply,
+        },
+    )?;
+    await_receipt(receipt).await
+}
+
+/// Releases the workspace hold of an interrupted check whose uncertain
+/// effects the user has resolved. Does not resume any goal.
+#[tauri::command]
+async fn acknowledge_check_interruption(
+    state: State<'_, AppState>,
+    project_id: String,
+    run_id: String,
+) -> Result<(), String> {
+    let run_id = run_id
+        .parse()
+        .map_err(|_| format!("invalid run id {run_id}"))?;
+    let (reply, receipt) = tokio::sync::oneshot::channel();
+    state.send(
+        &project_id,
+        UiCommand::AcknowledgeCheckInterruption { run_id, reply },
+    )?;
+    await_receipt(receipt).await
+}
+
 /// Opens the project, or `path` inside it, in the first installed editor.
 /// Returns the editor's name for the confirmation.
 #[tauri::command]
@@ -750,6 +876,10 @@ fn main() {
             git_push,
             git_create_pr,
             create_worktree,
+            goal_defaults,
+            set_goal,
+            goal_control,
+            acknowledge_check_interruption,
             remove_worktree,
             select_model,
             delete_session,

@@ -55,6 +55,8 @@ const project: ProjectState = {
     { name: "review", kind: "skill", description: "Repository review checklist" },
   ],
   can_side_question: true,
+  can_goal: true,
+  check_interruption: null,
   focused: "s0",
   sessions: Array.from({ length: 512 }, (_, index) => ({
     id: `s${index}`,
@@ -90,6 +92,7 @@ const project: ProjectState = {
     cost_usd_nanos: 0,
     queued_prompts: 0,
     side_questions: [],
+    goal: null,
     items: Array.from({ length: count }, (_, index) => ({
       kind: "assistant",
       id: `m${index}`,
@@ -138,6 +141,46 @@ if (new URLSearchParams(location.search).has("demo")) {
     " ",
     " #[cfg(test)]",
   ].join("\n");
+  project.transcript!.goal = {
+    session_id: "s0",
+    goal_id: "0123456789abcdef0123456789abcdef",
+    revision: 2,
+    objective: "Make retry backoff exponential, capped at 5 s, with tests.",
+    check: { command: "cargo test -p retry", timeout_ms: 600000 },
+    check_authorization: "pending",
+    budget: { max_goal_runs: 20, deadline_ms: Date.now() + 50 * 60_000 },
+    checklist: [
+      { id: 1, text: "Find the backoff helper", state: "done" },
+      { id: 2, text: "Cap the delay at five seconds", state: "done" },
+      { id: 3, text: "Add tests for the cap", state: "in_progress" },
+      { id: 4, text: "Tune jitter", state: "dropped" },
+    ],
+    notes: "Callers rely on the first retry staying at 100 ms.",
+    status: {
+      type: "paused",
+      reason: { type: "needs_user", cause: { type: "check_approval" } },
+    },
+    counters: {
+      runs: 3,
+      usage: {
+        input_tokens: 41000,
+        cache_read_input_tokens: 9000,
+        cache_write_input_tokens: 0,
+        output_tokens: 3200,
+      },
+      estimated_cost_usd_nanos: 210_000_000,
+      audits: 0,
+      check_failures: 0,
+      no_progress_streak: 0,
+      failure_streak: 0,
+    },
+    next_run_at_ms: 0,
+    wait: null,
+    audit_pending: false,
+    audit_revision: null,
+    pending_run_id: null,
+    check_output: null,
+  };
   project.transcript!.side_questions = [
     {
       id: "sq1",

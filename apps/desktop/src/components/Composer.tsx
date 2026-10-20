@@ -42,6 +42,8 @@ import {
   type Suggestion,
 } from "../lib/mentions";
 import { showSidePanel } from "../lib/side-panel";
+import { parseGoalCommand, seen } from "../lib/goals";
+import { openGoalDialog, openGoalPanel } from "../lib/goal-ui";
 import {
   findSlash,
   insertSlash,
@@ -103,6 +105,7 @@ export function Composer({
       available: Boolean(transcript) && project.can_side_question,
       running: sideRunning,
     },
+    goals: Boolean(transcript) && project.can_goal,
   });
   const [note, setNote] = useState<string | null>(null);
 
@@ -166,6 +169,47 @@ export function Composer({
     if (!value || pending || project.connection !== "live") return;
     setError(null);
     mentions.close();
+    const goal = parseGoalCommand(value);
+    if (goal) {
+      if (!transcript || !project.can_goal) {
+        setError(
+          transcript
+            ? "This engine does not support goals."
+            : "Goals belong to a session: send a first message.",
+        );
+        return;
+      }
+      const sessionId = transcript.session_id;
+      const current = transcript.goal;
+      if (goal.kind === "set" || goal.kind === "edit") {
+        // The dialog confirms budgets, the check and any replacement.
+        drafts.set(key, "");
+        openGoalDialog({
+          projectId: project.project_id,
+          sessionId,
+          objective: goal.kind === "set" ? goal.objective : undefined,
+          edit: goal.kind === "edit",
+        });
+        return;
+      }
+      if (goal.kind === "show" || !current) {
+        drafts.set(key, "");
+        openGoalPanel(sessionId);
+        if (goal.kind !== "show") setError("There is no goal to control yet.");
+        return;
+      }
+      try {
+        await drafts.submit(key, () =>
+          api.goalControl(project.project_id, sessionId, seen(current), {
+            type: goal.kind,
+          }),
+        );
+        openGoalPanel(sessionId);
+      } catch (error) {
+        setError(String(error));
+      }
+      return;
+    }
     const side = parseSideCommand(value);
     if (side) {
       if (!transcript || !project.can_side_question) {
@@ -582,7 +626,11 @@ function ContextMeter({ transcript }: { transcript: Transcript }) {
 function useMentionMenu(
   projectId: string,
   textarea: React.RefObject<HTMLTextAreaElement | null>,
-  slash: { skills: SlashSkill[]; side: { available: boolean; running: boolean } },
+  slash: {
+    skills: SlashSkill[];
+    side: { available: boolean; running: boolean };
+    goals: boolean;
+  },
 ) {
   const [active, setActive] = useState<ActiveToken | null>(null);
   const [dismissed, setDismissed] = useState<number | null>(null);
@@ -595,12 +643,15 @@ function useMentionMenu(
   const slashKey = [
     slash.side.available,
     slash.side.running,
+    slash.goals,
     ...slash.skills.map((skill) => skill.name),
   ].join("|");
   useEffect(() => {
     if (!active?.slash) return;
     sequence.current++;
-    setSuggestions(slashSuggestions(active.query, slash.skills, slash.side));
+    setSuggestions(
+      slashSuggestions(active.query, slash.skills, slash.side, slash.goals),
+    );
     setHighlight(0);
     setLoading(false);
   }, [active?.slash, active?.query, slashKey]);

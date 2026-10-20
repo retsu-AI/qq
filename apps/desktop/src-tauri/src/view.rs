@@ -127,6 +127,12 @@ pub struct ProjectStateDto {
     pub skills: Vec<SkillDto>,
     /// The server answers side questions during a run.
     pub can_side_question: bool,
+    /// The server accepts session goals.
+    pub can_goal: bool,
+    /// An interrupted goal completion check holding this workspace until the
+    /// user acknowledges it.
+    #[cfg_attr(test, ts(type = "{ session_id: string; run_id: string } | null"))]
+    pub check_interruption: Option<qq_protocol::CheckInterruption>,
     pub notice: Option<NoticeDto>,
 }
 
@@ -203,6 +209,9 @@ pub struct TranscriptDto {
     pub items: Vec<ItemDto>,
     /// Oldest first; the server keeps a bounded recent window.
     pub side_questions: Vec<SideQuestionDto>,
+    /// The session's durable goal, as the server last committed it.
+    #[cfg_attr(test, ts(type = "GoalSnapshot | null"))]
+    pub goal: Option<qq_protocol::GoalSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -390,6 +399,7 @@ pub fn transcript(store: &SessionStore, id: SessionId) -> Option<TranscriptDto> 
                 state: side.state,
             })
             .collect(),
+        goal: view.goal.as_deref().cloned(),
     })
 }
 
@@ -559,7 +569,7 @@ mod tests {
     #[test]
     fn typescript_view_contract_is_current() {
         let mut generated = String::from(
-            "// Generated from src-tauri/src/view.rs. Run QQ_EXPORT_TYPES=1 cargo test typescript_view_contract_is_current.\nimport type { SessionStatus, RunActivity, MessageState, ToolCallState, ApprovalMode, Group, RunOutcome, TokenUsage, ShellPreview, Question } from './types';\n\n",
+            "// Generated from src-tauri/src/view.rs. Run QQ_EXPORT_TYPES=1 cargo test typescript_view_contract_is_current.\nimport type { SessionStatus, RunActivity, MessageState, ToolCallState, ApprovalMode, Group, RunOutcome, TokenUsage, ShellPreview, Question, GoalSnapshot } from './types';\n\n",
         );
         for declaration in [
             ConnectionDto::decl(),
@@ -572,6 +582,7 @@ mod tests {
             crate::git::GitStatusDto::decl(),
             crate::git::PullRequestDto::decl(),
             crate::git::WorktreeDto::decl(),
+            crate::goals::GoalDefaultsDto::decl(),
             TranscriptDto::decl(),
             ItemDto::decl(),
             ToolDto::decl(),

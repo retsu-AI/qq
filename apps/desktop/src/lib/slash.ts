@@ -23,6 +23,7 @@ export function slashSuggestions(
   query: string,
   skills: SlashSkill[],
   side: { available: boolean; running: boolean },
+  goals = false,
 ): Suggestion[] {
   const builtins: Suggestion[] = side.available
     ? [
@@ -39,8 +40,17 @@ export function slashSuggestions(
           : []),
       ]
     : [];
+  const goalCommands: Suggestion[] = goals
+    ? [
+        { value: "goal", kind: "builtin", hint: "Show the goal, or /goal <objective> to set one" },
+        { value: "goal edit", kind: "builtin", hint: "Edit the current goal" },
+        { value: "goal pause", kind: "builtin", hint: "Pause the goal" },
+        { value: "goal resume", kind: "builtin", hint: "Resume the goal" },
+      ]
+    : [];
   const entries: Suggestion[] = [
     ...builtins,
+    ...goalCommands,
     ...skills.map<Suggestion>((skill) => ({
       value: skill.name.replace(/^\//, ""),
       kind: skill.kind,
