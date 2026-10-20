@@ -914,7 +914,9 @@ fn sidebar_inner(
             }
         }
         // The collapsed needs are pointed at by this row, but only while the
-        // session's own titled row is on screen to say whose they are.
+        // session's own titled row is on screen to say whose they are. They
+        // are "named" for the rule (nothing names them again) but not
+        // painted: the answer chords never act on one blind.
         if let RailRow::MoreWaiting(session, _, index) = row
             && painted.contains(&session)
         {

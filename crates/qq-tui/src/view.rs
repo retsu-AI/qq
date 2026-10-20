@@ -188,6 +188,8 @@ pub(crate) struct FrameRenderer {
     /// Sessions the last frame named outside the rule (painted rail rows and
     /// child cards); handed to the app.
     named: Vec<SessionId>,
+    /// Children whose card title row the last frame painted.
+    carded: Vec<SessionId>,
     /// Sessions whose transcript the last frame's panes drew; handed to the
     /// app.
     drawn: Vec<SessionId>,
@@ -205,6 +207,7 @@ impl FrameRenderer {
         }
         app.rail_painted = self.rail_painted.take();
         app.frame_named = std::mem::take(&mut self.named);
+        app.frame_carded = std::mem::take(&mut self.carded);
         app.drawn = std::mem::take(&mut self.drawn);
     }
 
@@ -411,6 +414,7 @@ impl FrameRenderer {
         let mut carded: Vec<SessionId> = body.iter().filter_map(|line| line.card).collect();
         carded.sort_unstable();
         carded.dedup();
+        self.carded.clone_from(&carded);
         let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);

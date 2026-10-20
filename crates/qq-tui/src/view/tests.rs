@@ -5893,6 +5893,38 @@ fn thirteenth_review_round_on_the_rail() {
 }
 
 #[test]
+fn alt_a_never_answers_an_approval_folded_into_a_need_you_row() {
+    // `folded` ranks first (its component is newest) but its need is folded
+    // into a `+N need you` row: pointed at, not painted. `shown`'s row is
+    // painted. Alt-A answers `shown`, never `folded` blind.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let (folded, shown) = (ids[0], ids[1]);
+    for id in [folded, shown] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let waiting = app.sessions_awaiting_approval();
+    assert_eq!(
+        waiting.first(),
+        Some(&folded),
+        "fixture: folded ranks first"
+    );
+    app.frame_named = vec![folded, shown];
+    app.rail_painted = Some(vec![shown]);
+    app.execute(Command::ApproveBackground);
+    assert_eq!(
+        app.focused(),
+        Some(shown),
+        "a painted one, never the folded"
+    );
+}
+
+#[test]
 fn alt_a_answers_the_approval_the_rule_names_beside_a_painted_one() {
     // `agent 0` ranks first and its rail row is painted; `other` waits too
     // and is not on the rail's named list, so the rule names it. The answer

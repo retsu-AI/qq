@@ -490,6 +490,8 @@ pub(crate) struct App {
     /// rows and child cards). The rule names the first waiting approval not
     /// in it, and `Alt-A`/`Alt-D` answer that same one.
     pub(crate) frame_named: Vec<SessionId>,
+    /// Children whose live card's title row the last frame painted.
+    pub(crate) frame_carded: Vec<SessionId>,
     /// Sessions whose transcript (or side view) the last frame's panes drew,
     /// committed by the renderer. A workspace view the inspector holds
     /// leaves the transcript it replaced in the main pane; one drawn inline
@@ -568,6 +570,7 @@ impl App {
             mouse_capture: true,
             rail_painted: None,
             frame_named: Vec::new(),
+            frame_carded: Vec::new(),
             drawn: Vec::new(),
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
@@ -2886,17 +2889,26 @@ impl App {
     /// one, without moving focus. The banner names that session; this is
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
-        // The approval the rule names: the first one the last frame did not
-        // name elsewhere, else (all on the rail) the first in attention order.
+        // The approval the rule names: the first one the last frame neither
+        // named nor pointed at elsewhere; else the first whose own row or
+        // card the frame painted. A need folded into a `+N need you` row is
+        // never answered blind.
         let waiting: Vec<SessionId> = self
             .sessions_needing_attention()
             .into_iter()
             .filter(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
             .collect();
+        let painted = |id: &SessionId| {
+            self.rail_painted
+                .as_ref()
+                .is_some_and(|painted| painted.contains(id))
+                || self.drawn.contains(id)
+                || self.frame_carded.contains(id)
+        };
         let Some(session_id) = waiting
             .iter()
             .find(|id| !self.frame_named.contains(id))
-            .or(waiting.first())
+            .or_else(|| waiting.iter().find(|id| painted(id)))
             .copied()
         else {
             self.set_info("no other session is waiting for approval".to_owned());
