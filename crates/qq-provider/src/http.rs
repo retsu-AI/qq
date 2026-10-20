@@ -1911,4 +1911,47 @@ mod tests {
         }
         request
     }
+
+    struct StaticCodex;
+
+    impl RequestCredentialProvider for StaticCodex {
+        fn credential(
+            &self,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<RequestCredential, RequestCredentialError>> + Send + '_>,
+        > {
+            Box::pin(async {
+                RequestCredential::codex("dynamic-codex-token", "dynamic-codex-account", true)
+            })
+        }
+    }
+
+    /// Every secret a multi-header credential sets reaches the rejection's
+    /// redaction set, not only the first, and its non-secret metadata does
+    /// not.
+    #[tokio::test]
+    async fn rejections_redact_every_secret_of_a_multi_header_credential() {
+        let authorizer = RequestAuthorizer::request_time_codex(
+            SharedRequestCredentialProvider::new(StaticCodex),
+        );
+        let (url, server) = serve_authorized_rejection("dynamic-codex-token");
+        let request = build_direct_client().unwrap().get(url).build().unwrap();
+
+        let ExchangeOutcome::Rejected(rejection) = exchange(authorizer, Vec::new())
+            .execute_fresh(request, usize::MAX, messages())
+            .await
+            .unwrap()
+        else {
+            panic!("expected rejection");
+        };
+
+        assert_eq!(
+            rejection.redactions(),
+            &[
+                "dynamic-codex-account".to_owned(),
+                "dynamic-codex-token".to_owned()
+            ]
+        );
+        server.join().unwrap();
+    }
 }

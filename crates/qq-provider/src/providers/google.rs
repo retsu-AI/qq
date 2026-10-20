@@ -71,14 +71,11 @@ impl GoogleGenerateContent {
         endpoint_kind: EndpointKind,
         auth: GoogleAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
+        authorizer: RequestAuthorizer,
     ) -> Result<Self, ProviderError> {
         let (headers, redactions) = build_headers(auth, static_headers)?;
         Ok(Self {
-            exchange: HttpExchange::new(
-                client,
-                RequestAuthorizer::default(),
-                Arc::from(redactions),
-            ),
+            exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
             endpoint_kind,
             headers: Arc::new(headers),
@@ -804,6 +801,7 @@ mod tests {
             EndpointKind::Base,
             GoogleAuth::XGoogApiKey("google-test-secret".into()),
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -910,6 +908,7 @@ mod tests {
             EndpointKind::Base,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1007,6 +1006,7 @@ mod tests {
             EndpointKind::Base,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1100,6 +1100,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1159,6 +1160,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1216,6 +1218,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1354,6 +1357,7 @@ mod tests {
             EndpointKind::Base,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1366,6 +1370,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1381,6 +1386,7 @@ mod tests {
                 EndpointKind::Base,
                 GoogleAuth::XGoogApiKey("secret".into()),
                 [("x-goog-api-key".to_owned(), "override".to_owned())],
+                RequestAuthorizer::default(),
             )
             .is_err()
         );
@@ -1401,6 +1407,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::XGoogApiKey(secret.into()),
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap();
@@ -1433,6 +1440,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap()
@@ -1460,6 +1468,7 @@ mod tests {
             EndpointKind::Exact,
             GoogleAuth::NoAuth,
             [],
+            RequestAuthorizer::default(),
         )
         .map(GoogleGenerateContent::single_shot)
         .unwrap()

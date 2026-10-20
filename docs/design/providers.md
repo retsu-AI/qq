@@ -33,7 +33,7 @@ construction.rs        protocol/auth compatibility and adapter selection
 http.rs                HTTP client, header safety, retry, bounds, redaction
 exchange.rs            shared HTTP-to-SSE exchange driver
 aws.rs                 AWS config, credential lease, SigV4, region rules
-request_auth.rs        request-time bearer/Codex credentials and authorizer
+request_auth.rs        request-time credential header sets and authorizer
 providers.rs           private adapter module declarations
 providers/
   support.rs           protocol-side error and accounting kit
@@ -58,6 +58,30 @@ once into protocol-owned headers and an optional request authorizer. Mantle's
 SigV4 authorizer is an internal field on `HttpConstructionSpec`, so public
 recipes cannot manufacture Mantle-only capability. `EndpointKind` beside
 `EndpointSpec` is the sole Base/Exact representation.
+
+The OpenAI Responses request body is a recipe field, `ResponsesBodyShape`
+(`Standard` or `Codex`), not a consequence of the auth intent.
+`HttpProviderRecipe::new` defaults it from the intent (Codex intents get the
+Codex body) and `with_body_shape` sets it explicitly; a Codex body on any
+other protocol is a configuration error. The root derives the shape from
+the configured route, so the recipe and the `output_token_control`
+capability always agree. The request-shape identity digests the shape too:
+the pairing each credential has always used adds no bytes, so existing
+digests are unchanged, and any other pairing is digested explicitly.
+
+A request-time credential (`RequestCredential`) is a list of prebuilt,
+validated headers, each marked secret or metadata. Secret values are added
+to the attempt's redactions; metadata such as `originator: qq` and
+`x-openai-fedramp: true` is sent but never redacted. The recipe's intent
+names the headers a credential may and must set (bearer: `Authorization`;
+Codex: `Authorization`, `chatgpt-account-id`, `originator`, optionally
+`x-openai-fedramp`). Anything else, a duplicate, more than eight headers or
+more than 64 KiB of values fails the attempt before a header is applied.
+Optional names are cleared first, so a credential that drops one does not
+inherit it. Google GenerateContent accepts request-time bearer credentials
+like the other adapters, and request-time API keys
+(`HttpAuth::RequestTimeGoogleApiKey`, `RequestCredential::google_api_key`)
+sent as `x-goog-api-key`; that intent is valid only for Google.
 
 ## Shared HTTP Execution And Adapter Kit
 

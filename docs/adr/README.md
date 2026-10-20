@@ -65,6 +65,7 @@ written.
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed; implementation merged in #302 (AB2, ENG-1039) |
 | 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 | 0063 | [Opt-in metadata-only structured tracing](0063-opt-in-structured-tracing.md) | Proposed (AF5, ENG-1028) |
+| 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Proposed (auth-providers AP7, ENG-1066) |
 
 Numbers without a file are reserved in
 [`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet

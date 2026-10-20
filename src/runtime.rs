@@ -15,9 +15,10 @@ use qq_auth::{
     resolve_provider_credential_with_aliases,
 };
 use qq_config::{
-    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
-    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, BuiltinAudience, BuiltinProvider, ClientSnapshot, ConfigError,
+    ConfigLoader, ConfigSnapshot, EndpointMode, HttpAccess, HttpCredential, LoadRequest,
+    ProcessTrust, PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth, ProviderConfig,
+    RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer,
@@ -40,7 +41,7 @@ use qq_protocol::{
 };
 use qq_provider::{
     BedrockAuth as ProviderBedrockAuth, EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe,
-    ProviderCompiler, ProviderError, ProviderRecipe, SecretRef,
+    ProviderCompiler, ProviderError, ProviderRecipe, ResponsesBodyShape, SecretRef,
 };
 use qq_server::{
     CommandFuture, DelegationFuture, ModelsFuture, ProfilesFuture, ServerHandler,
@@ -650,23 +651,19 @@ impl RuntimeFactory {
             }
             let remedy = match provider.access() {
                 Some(ProviderAccess::Http(access)) => match access.auth() {
-                    HttpCredential::ApiKey {
-                        explicit: None,
-                        environment_variable,
+                    HttpCredential::Builtin {
+                        provider,
+                        api_key: None,
                         ..
-                    } => format!("run qq auth login {provider_id} or set {environment_variable}"),
-                    HttpCredential::OpenAiCodex { .. } => {
-                        format!("run qq auth login {provider_id}")
-                    }
-                    HttpCredential::XAi { api_key: None, .. } => {
-                        format!("run qq auth login {provider_id} or set XAI_API_KEY")
-                    }
+                    } => match provider.environment_variable() {
+                        Some(variable) => {
+                            format!("run qq auth login {provider_id} or set {variable}")
+                        }
+                        None => format!("run qq auth login {provider_id}"),
+                    },
                     // An operator-supplied reference is the credential; the
                     // built-in remedy would point at the wrong place.
-                    HttpCredential::ApiKey {
-                        explicit: Some(_), ..
-                    }
-                    | HttpCredential::XAi {
+                    HttpCredential::Builtin {
                         api_key: Some(_), ..
                     }
                     | HttpCredential::Configured(_) => continue,
@@ -790,10 +787,8 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
-                if matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                ) && !metadata.explicitly_configured()
+                if provider.kind().discovery().is_authoritative()
+                    && !metadata.explicitly_configured()
                     && discovered
                         .get(provider_id)
                         .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
@@ -1221,44 +1216,27 @@ impl RuntimeFactory {
                         .resolve_with_endpoint(reference, Some(access.endpoint()))
                         .is_ok(),
                 },
-                HttpCredential::ApiKey {
-                    explicit,
-                    stored_name,
-                    environment_variable,
-                    alternate_variables,
-                    audience,
-                } => resolve_provider_credential_with_aliases(
-                    &self.inner.credentials,
-                    explicit.as_ref(),
-                    stored_name,
-                    environment_variable,
-                    alternate_variables,
-                    Some(audience),
-                )
-                .is_ok(),
-                HttpCredential::OpenAiCodex { profile } => self
-                    .inner
-                    .credentials
-                    .resolve_with_endpoint(
-                        &qq_config::SecretRef::Stored(format!(
-                            "openai-codex/{}",
-                            profile.as_deref().unwrap_or("default")
-                        )),
-                        Some(qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
+                HttpCredential::Builtin {
+                    provider,
+                    api_key,
+                    profile,
+                } => match provider.audience {
+                    BuiltinAudience::OpenAiCodex => self
+                        .inner
+                        .credentials
+                        .resolve_with_endpoint(
+                            &qq_config::SecretRef::Stored(provider.stored_name(profile.as_deref())),
+                            Some(qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
+                        )
+                        .is_ok(),
+                    BuiltinAudience::Table(_) | BuiltinAudience::XAi => resolve_builtin_api_key(
+                        &self.inner.credentials,
+                        provider,
+                        api_key.as_ref(),
+                        profile.as_deref(),
                     )
                     .is_ok(),
-                HttpCredential::XAi { api_key, profile } => {
-                    let profile = profile.as_deref().unwrap_or("default");
-                    let stored = format!("xai/{profile}");
-                    resolve_provider_credential(
-                        &self.inner.credentials,
-                        api_key.as_ref(),
-                        &stored,
-                        "XAI_API_KEY",
-                        Some(qq_auth::XAI_CREDENTIAL_ENDPOINT),
-                    )
-                    .is_ok()
-                }
+                },
             },
             Some(
                 ProviderAccess::AmazonBedrock { auth, .. }
@@ -1325,11 +1303,7 @@ impl RuntimeFactory {
             ));
         }
         if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured()
-                || !matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                )
+            metadata.explicitly_configured() || !provider.kind().discovery().is_authoritative()
         }) {
             return Ok(());
         }
@@ -1339,10 +1313,7 @@ impl RuntimeFactory {
                 .discover(provider_id, provider, &self.inner.credentials);
         if provider.models().get(model_id).is_some_and(|metadata| {
             metadata.explicitly_configured()
-                || !matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                )
+                || !provider.kind().discovery().is_authoritative()
                 || discovered.is_none()
         }) || discovered
             .as_ref()
@@ -1398,10 +1369,7 @@ impl RuntimeFactory {
                 .discovery
                 .discover(provider_id, provider, &self.inner.credentials)
         {
-            if matches!(
-                provider.kind(),
-                qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-            ) {
+            if provider.kind().discovery().is_authoritative() {
                 ids.retain(|id| {
                     provider
                         .models()
@@ -1937,10 +1905,11 @@ impl RuntimeFactory {
                 limit: max_output_tokens,
             });
         }
+        // The codec, not the credential, decides whether the output limit
+        // reaches the wire: the Codex body omits `max_output_tokens`.
         let codex = matches!(
             access,
-            ProviderAccess::Http(access)
-                if matches!(access.auth(), HttpCredential::OpenAiCodex { .. })
+            ProviderAccess::Http(access) if responses_body_shape(access) == ResponsesBodyShape::Codex
         );
         // Explicit cache breakpoints exist only where the wire has them: the
         // Anthropic Messages and Bedrock Converse codecs mark the system
@@ -1956,10 +1925,15 @@ impl RuntimeFactory {
         };
         let credential_profile = match access {
             ProviderAccess::Http(access) => match access.auth() {
-                HttpCredential::OpenAiCodex { profile } | HttpCredential::XAi { profile, .. } => {
-                    Some(profile.as_deref().unwrap_or("default").to_owned())
-                }
-                HttpCredential::Configured(_) | HttpCredential::ApiKey { .. } => None,
+                HttpCredential::Builtin {
+                    provider, profile, ..
+                } => match provider.audience {
+                    BuiltinAudience::OpenAiCodex | BuiltinAudience::XAi => {
+                        Some(profile.as_deref().unwrap_or("default").to_owned())
+                    }
+                    BuiltinAudience::Table(_) => None,
+                },
+                HttpCredential::Configured(_) => None,
             },
             ProviderAccess::AmazonBedrock { auth, .. }
             | ProviderAccess::AmazonBedrockMantle { auth, .. } => match auth {
@@ -2055,64 +2029,69 @@ impl RuntimeFactory {
                     credential,
                 )
             }
-            HttpCredential::ApiKey {
-                explicit,
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                audience,
-            } => {
-                let secret = resolve_provider_credential_with_aliases(
-                    &self.inner.credentials,
-                    explicit.as_ref(),
-                    stored_name,
-                    environment_variable,
-                    alternate_variables,
-                    Some(audience),
-                )?;
-                // Built-in providers try the explicit reference, then the
-                // stored name, then the environment variable; the descriptor
-                // names the source that actually applies. An alias variable
-                // (`GOOGLE_API_KEY`) is reported under the canonical name so
-                // the plan digest does not depend on which spelling is set.
-                let credential = match explicit {
-                    Some(reference) => credential_reference(reference),
-                    None => {
-                        if self.inner.credentials.is_registered(stored_name)? {
-                            CredentialReference::Stored((*stored_name).to_owned())
-                        } else {
-                            CredentialReference::Environment(environment_variable.to_string())
+            HttpCredential::Builtin {
+                provider,
+                api_key,
+                profile,
+            } => match provider.audience {
+                BuiltinAudience::Table(_) => {
+                    let secret = resolve_builtin_api_key(
+                        &self.inner.credentials,
+                        provider,
+                        api_key.as_ref(),
+                        profile.as_deref(),
+                    )?;
+                    // Built-in providers try the explicit reference, then the
+                    // stored name, then the environment variable; the
+                    // descriptor names the source that actually applies. An
+                    // alias variable (`GOOGLE_API_KEY`) is reported under the
+                    // canonical name so the plan digest does not depend on
+                    // which spelling is set.
+                    let credential = match api_key {
+                        Some(reference) => credential_reference(reference),
+                        None => {
+                            let stored_name = provider.stored_name(profile.as_deref());
+                            if self.inner.credentials.is_registered(&stored_name)? {
+                                CredentialReference::Stored(stored_name)
+                            } else {
+                                CredentialReference::Environment(
+                                    provider
+                                        .environment_variable()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                )
+                            }
                         }
-                    }
-                };
-                (
-                    ResolvedAuth::ApiKey(secret).into_http()?,
-                    "api_key".to_owned(),
-                    credential,
-                )
-            }
-            HttpCredential::OpenAiCodex { profile } => {
-                let profile = profile.as_deref().unwrap_or("default");
-                (
-                    HttpAuth::RequestTimeCodex(
-                        self.inner.credentials.codex_request_credentials(profile),
-                    ),
-                    "codex".to_owned(),
-                    CredentialReference::Profile(profile.to_owned()),
-                )
-            }
-            HttpCredential::XAi { api_key, profile } => {
-                let profile = profile.as_deref().unwrap_or("default");
-                (
-                    HttpAuth::RequestTimeBearer(
-                        self.inner
-                            .credentials
-                            .xai_request_credentials(profile, api_key.clone()),
-                    ),
-                    "bearer".to_owned(),
-                    CredentialReference::Profile(profile.to_owned()),
-                )
-            }
+                    };
+                    (
+                        ResolvedAuth::ApiKey(secret).into_http()?,
+                        "api_key".to_owned(),
+                        credential,
+                    )
+                }
+                BuiltinAudience::OpenAiCodex => {
+                    let profile = profile.as_deref().unwrap_or("default");
+                    (
+                        HttpAuth::RequestTimeCodex(
+                            self.inner.credentials.codex_request_credentials(profile),
+                        ),
+                        "codex".to_owned(),
+                        CredentialReference::Profile(profile.to_owned()),
+                    )
+                }
+                BuiltinAudience::XAi => {
+                    let profile = profile.as_deref().unwrap_or("default");
+                    (
+                        HttpAuth::RequestTimeBearer(
+                            self.inner
+                                .credentials
+                                .xai_request_credentials(profile, api_key.clone()),
+                        ),
+                        "bearer".to_owned(),
+                        CredentialReference::Profile(profile.to_owned()),
+                    )
+                }
+            },
         };
         let headers = access
             .headers()
@@ -2143,7 +2122,9 @@ impl RuntimeFactory {
             EndpointMode::Exact => EndpointSpec::exact(access.endpoint(), allow_http),
         };
         let recipe = ProviderRecipe::http(
-            HttpProviderRecipe::new(endpoint, protocol, auth).with_headers(headers),
+            HttpProviderRecipe::new(endpoint, protocol, auth)
+                .with_headers(headers)
+                .with_body_shape(responses_body_shape(access)),
         );
         Ok((recipe, descriptor))
     }
@@ -2343,30 +2324,21 @@ fn provider_credential_present(provider: &ProviderConfig, registered: &BTreeSet<
                 | ProviderAuth::Bearer(reference)
                 | ProviderAuth::Header(_, reference) => reference_present(reference),
             },
-            HttpCredential::ApiKey {
-                explicit,
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                ..
-            } => match explicit {
+            // An API key, a stored credential (`<id>/<profile>`, OAuth or
+            // key) or one of the row's variables; OAuth-only rows read none.
+            HttpCredential::Builtin {
+                provider,
+                api_key,
+                profile,
+            } => match api_key {
                 Some(reference) => reference_present(reference),
                 None => {
-                    registered.contains(*stored_name)
-                        || std::iter::once(*environment_variable)
-                            .chain(alternate_variables.iter().copied())
+                    registered.contains(&provider.stored_name(profile.as_deref()))
+                        || provider
+                            .variables
+                            .iter()
+                            .copied()
                             .any(environment_variable_set)
-                }
-            },
-            HttpCredential::OpenAiCodex { profile } => registered.contains(&format!(
-                "openai-codex/{}",
-                profile.as_deref().unwrap_or("default")
-            )),
-            HttpCredential::XAi { api_key, profile } => match api_key {
-                Some(reference) => reference_present(reference),
-                None => {
-                    registered.contains(&format!("xai/{}", profile.as_deref().unwrap_or("default")))
-                        || environment_variable_set("XAI_API_KEY")
                 }
             },
         },
@@ -3734,17 +3706,27 @@ fn provider_request_shape_identity(
                     update_digest(&mut digest, b"configured-header");
                     update_digest(&mut digest, name.as_bytes());
                 }
-                HttpCredential::ApiKey { audience, .. } => {
-                    update_digest(&mut digest, b"built-in-api-key");
-                    update_digest(&mut digest, audience.as_bytes());
-                }
-                HttpCredential::OpenAiCodex { .. } => {
-                    update_digest(&mut digest, b"request-time-codex");
-                }
-                HttpCredential::XAi { .. } => {
-                    update_digest(&mut digest, b"request-time-bearer");
-                }
+                // Each row keeps the marker its pre-ADR-0064 credential
+                // variant wrote, so every version 1 identity stands.
+                HttpCredential::Builtin { provider, .. } => match provider.audience {
+                    BuiltinAudience::Table(audience) => {
+                        update_digest(&mut digest, b"built-in-api-key");
+                        update_digest(&mut digest, audience.as_bytes());
+                    }
+                    BuiltinAudience::OpenAiCodex => {
+                        update_digest(&mut digest, b"request-time-codex");
+                    }
+                    BuiltinAudience::XAi => {
+                        update_digest(&mut digest, b"request-time-bearer");
+                    }
+                },
             }
+            // The body shape is digested in its own right, so two routes that
+            // send different Responses bodies can never share an identity.
+            // The `request-time-codex` marker above already implies the Codex
+            // body, so only a Codex body on any other credential adds bytes:
+            // every existing route keeps its version 1 digest.
+            digest_body_shape(&mut digest, access.auth(), responses_body_shape(access));
         }
         ProviderAccess::AmazonBedrock { region, auth } => {
             let region = region.as_deref()?;
@@ -3764,6 +3746,46 @@ fn provider_request_shape_identity(
             .expect("provider request-shape version must be non-zero"),
         digest: qq_protocol::ContentHash::from_bytes(digest.finalize().into()),
     })
+}
+
+/// The Responses body a configured HTTP route sends. Only the built-in OpenAI
+/// Codex route uses the Codex body. The recipe, the output-limit capability
+/// and the request-shape identity all read the shape from here.
+fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
+    implied_body_shape(access.auth())
+}
+
+/// The body shape a credential has always implied: Codex for the OpenAI
+/// Codex credential, standard for every other.
+fn implied_body_shape(auth: &HttpCredential) -> ResponsesBodyShape {
+    match auth {
+        HttpCredential::Builtin { provider, .. }
+            if provider.audience == BuiltinAudience::OpenAiCodex =>
+        {
+            ResponsesBodyShape::Codex
+        }
+        HttpCredential::Builtin { .. } | HttpCredential::Configured(_) => {
+            ResponsesBodyShape::Standard
+        }
+    }
+}
+
+/// Adds the Responses body shape to a request-shape digest. A Codex body on
+/// the OpenAI Codex credential is already implied by its `request-time-codex`
+/// marker, and a standard body on any other credential is the version 1
+/// default, so neither adds bytes and every existing digest is unchanged;
+/// any other pairing is digested explicitly.
+fn digest_body_shape(digest: &mut Sha256, auth: &HttpCredential, shape: ResponsesBodyShape) {
+    let implied = implied_body_shape(auth);
+    if shape != implied {
+        update_digest(
+            digest,
+            match shape {
+                ResponsesBodyShape::Standard => b"standard-body",
+                ResponsesBodyShape::Codex => b"codex-body",
+            },
+        );
+    }
 }
 
 fn bedrock_auth_shape(auth: &BedrockAuth) -> &'static [u8] {
@@ -3798,6 +3820,40 @@ pub(crate) fn advisory_reviewer() -> Result<Arc<dyn CheckpointReviewer>, Runtime
         &store,
         qq_config::JevReviewMode::Final,
     )?))
+}
+
+/// The audience a built-in provider's credential is bound to: the table's
+/// for an API-key preset, `qq-auth`'s for a provider whose credential it
+/// owns (ADR-0064 §1). The root is the only place the two meet.
+pub(crate) const fn builtin_audience(provider: &BuiltinProvider) -> &'static str {
+    match provider.audience {
+        BuiltinAudience::Table(audience) => audience,
+        BuiltinAudience::OpenAiCodex => qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT,
+        BuiltinAudience::XAi => qq_auth::XAI_CREDENTIAL_ENDPOINT,
+    }
+}
+
+/// Resolves a built-in provider's API key in precedence order: the explicit
+/// reference, the stored `<id>/<profile>` credential, then the row's
+/// variables, all bound to the row's audience.
+pub(crate) fn resolve_builtin_api_key(
+    store: &CredentialStore,
+    provider: &BuiltinProvider,
+    api_key: Option<&qq_config::SecretRef>,
+    profile: Option<&str>,
+) -> Result<Secret, AuthError> {
+    let (variable, aliases) = provider
+        .variables
+        .split_first()
+        .map_or(("", &[][..]), |(first, rest)| (*first, rest));
+    resolve_provider_credential_with_aliases(
+        store,
+        api_key,
+        &provider.stored_name(profile),
+        variable,
+        aliases,
+        Some(builtin_audience(provider)),
+    )
 }
 
 fn typesafe_http_client(store: &CredentialStore) -> Result<reqwest::Client, RuntimeBuildError> {
@@ -5443,6 +5499,62 @@ mod tests {
         );
     }
 
+    /// The request-shape identity of every built-in HTTP preset, recorded
+    /// before the built-in credentials collapsed into one variant
+    /// (ADR-0064 §4). A change here invalidates every durable occupancy
+    /// record for that provider.
+    #[test]
+    fn builtin_request_shape_identities_are_pinned() {
+        let fixture = RuntimeFixture::new();
+        let snapshot = fixture
+            .factory()
+            .load(
+                &LoadRequest::new(fixture.path("work"))
+                    .with_explicit_content(r#"(version: 1, model: "openai/gpt-5.6")"#.to_owned()),
+            )
+            .unwrap();
+        let identities: Vec<(&str, String)> =
+            ["openai", "openai-codex", "anthropic", "google", "xai"]
+                .into_iter()
+                .map(|id| {
+                    let provider = &snapshot.providers()[id];
+                    let access = provider.access().unwrap();
+                    let ProviderAccess::Http(http) = access else {
+                        panic!("{id} is HTTP");
+                    };
+                    let identity =
+                        provider_request_shape_identity(id, provider, access, http.api()).unwrap();
+                    (id, serde_json::to_string(&identity).unwrap())
+                })
+                .collect();
+        assert_eq!(
+            identities,
+            [
+                (
+                    "openai",
+                    "8558c63126894889d476bbfadc94524803fc56961f7b8102132f4e59b26bd980"
+                ),
+                (
+                    "openai-codex",
+                    "70dcd2b048e390dc80d6fa27e12a8c819838e00a7fba8916650d6949d81b1b65"
+                ),
+                (
+                    "anthropic",
+                    "1d2a566ae4dbe4261500fa21d86edc7f674b465d39708b7360d39cd62eb261c0"
+                ),
+                (
+                    "google",
+                    "0c24a335b99c00d28521609e518a339b6958dbcf171b14151f791f01b9e5888c"
+                ),
+                (
+                    "xai",
+                    "9c9b4afdf943d66c972c3949031d95fa8aabacafcf2666b0a3c7f07a970a12d3"
+                ),
+            ]
+            .map(|(id, digest)| (id, format!(r#"{{"version":1,"digest":"{digest}"}}"#)))
+        );
+    }
+
     #[test]
     fn a_new_session_pins_the_output_cap_only_when_it_was_chosen() {
         // RR8.3 review: materialising the compiled default into every new
@@ -5882,7 +5994,7 @@ mod tests {
     #[test]
     fn request_shape_identity_is_canonical_and_tracks_every_safe_wire_input() {
         let trusted_http = ProviderConfig::new(
-            ProviderKind::OpenAi,
+            ProviderKind::Builtin(qq_config::builtin_provider("openai").unwrap()),
             None,
             UsageType::Metered,
             BTreeMap::new(),
@@ -10386,5 +10498,81 @@ mod tests {
         assert!(final_claim.contains("final candidate"));
         assert!(final_instructions.contains("completion claim"));
         assert!(!final_instructions.contains("error result is supported"));
+    }
+
+    /// The recipe body shape and the output-limit capability come from one
+    /// function of the route, so they cannot disagree: only the OpenAI Codex
+    /// route sends the Codex body, and every other credential sends the
+    /// standard body whatever its auth scheme.
+    #[test]
+    fn responses_body_shape_follows_the_route_not_the_auth_scheme() {
+        let access = |auth| {
+            HttpAccess::new(
+                "https://example.test/v1",
+                EndpointMode::Base,
+                ProviderApi::OpenAiResponses,
+                auth,
+                BTreeMap::new(),
+            )
+        };
+        let builtin = |id: &str| HttpCredential::Builtin {
+            provider: qq_config::builtin_provider(id).unwrap(),
+            api_key: None,
+            profile: None,
+        };
+        for (auth, expected) in [
+            (builtin("openai-codex"), ResponsesBodyShape::Codex),
+            (builtin("xai"), ResponsesBodyShape::Standard),
+            (builtin("openai"), ResponsesBodyShape::Standard),
+            (
+                HttpCredential::Configured(ProviderAuth::Bearer(qq_config::SecretRef::Env(
+                    "TOKEN".to_owned(),
+                ))),
+                ResponsesBodyShape::Standard,
+            ),
+            (
+                HttpCredential::Configured(ProviderAuth::NoAuth),
+                ResponsesBodyShape::Standard,
+            ),
+        ] {
+            assert_eq!(
+                responses_body_shape(&access(auth.clone())),
+                expected,
+                "{auth:?}"
+            );
+        }
+    }
+
+    /// The body shape reaches the request-shape digest: the same route with
+    /// a different body never shares an identity, while the shape each
+    /// credential has always used adds nothing, so version 1 digests stand.
+    #[test]
+    fn the_responses_body_shape_is_part_of_the_request_shape_digest() {
+        let digest = |auth: &HttpCredential, shape| {
+            let mut digest = Sha256::new();
+            update_digest(&mut digest, b"route");
+            digest_body_shape(&mut digest, auth, shape);
+            digest.finalize()
+        };
+        let bare = {
+            let mut digest = Sha256::new();
+            update_digest(&mut digest, b"route");
+            digest.finalize()
+        };
+        let codex = HttpCredential::Builtin {
+            provider: qq_config::builtin_provider("openai-codex").unwrap(),
+            api_key: None,
+            profile: None,
+        };
+        let bearer = HttpCredential::Configured(ProviderAuth::NoAuth);
+
+        assert_eq!(digest(&codex, ResponsesBodyShape::Codex), bare);
+        assert_eq!(digest(&bearer, ResponsesBodyShape::Standard), bare);
+        assert_ne!(digest(&codex, ResponsesBodyShape::Standard), bare);
+        assert_ne!(digest(&bearer, ResponsesBodyShape::Codex), bare);
+        assert_ne!(
+            digest(&codex, ResponsesBodyShape::Standard),
+            digest(&bearer, ResponsesBodyShape::Codex)
+        );
     }
 }

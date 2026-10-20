@@ -29,6 +29,7 @@ pub mod test_support;
 pub use bedrock_auth::BedrockAuth;
 pub use compiler::{
     EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe, ProviderCompiler, ProviderRecipe,
+    ResponsesBodyShape,
 };
 pub use credentials::{SecretLiteral, SecretRef};
 pub use http::AttemptPolicy;

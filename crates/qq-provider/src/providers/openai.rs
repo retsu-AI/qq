@@ -9,7 +9,8 @@ use serde_json::value::RawValue;
 
 use crate::{
     ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderStream, ProviderUsage, Role, SharedRequestCredentialProvider, ToolSpec,
+    ProviderEvent, ProviderStream, ProviderUsage, ResponsesBodyShape, Role,
+    SharedRequestCredentialProvider, ToolSpec,
     credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
     http::{
@@ -100,47 +101,56 @@ impl OpenAi {
     ) -> Result<Self, ProviderError> {
         let endpoint = validate_endpoint(exact_endpoint, allow_http)?;
         let client = support::client_for_endpoint(&endpoint)?;
+        let body_shape = if matches!(auth, ResponsesAuth::Codex { .. }) {
+            ResponsesBodyShape::Codex
+        } else {
+            ResponsesBodyShape::Standard
+        };
         Self::with_client_and_auth(
             client,
             endpoint,
             ResponsesConstructionAuth::Static(auth),
             static_headers,
+            body_shape,
         )
         .map(Self::single_shot)
     }
 
+    /// `body_shape` is the recipe's explicit Responses body; the auth intent
+    /// no longer selects it.
     pub(crate) fn with_client_and_auth(
         client: reqwest::Client,
         endpoint: reqwest::Url,
         auth: ResponsesConstructionAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
+        body_shape: ResponsesBodyShape,
     ) -> Result<Self, ProviderError> {
-        let (auth, authorizer, request_kind) = match auth {
-            ResponsesConstructionAuth::Static(auth) => {
-                let request_kind = if matches!(&auth, ResponsesAuth::Codex { .. }) {
-                    ResponsesRequestKind::Codex
-                } else {
-                    ResponsesRequestKind::Standard
-                };
-                (auth, RequestAuthorizer::default(), request_kind)
-            }
+        // Headers a request-time Codex credential owns are protected from
+        // static configuration exactly as a static Codex credential's are.
+        let codex_headers = matches!(
+            &auth,
+            ResponsesConstructionAuth::RequestTimeCodex(_)
+                | ResponsesConstructionAuth::Static(ResponsesAuth::Codex { .. })
+        );
+        let request_kind = match body_shape {
+            ResponsesBodyShape::Standard => ResponsesRequestKind::Standard,
+            ResponsesBodyShape::Codex => ResponsesRequestKind::Codex,
+        };
+        let (auth, authorizer) = match auth {
+            ResponsesConstructionAuth::Static(auth) => (auth, RequestAuthorizer::default()),
             ResponsesConstructionAuth::RequestTimeBearer(credentials) => (
                 ResponsesAuth::NoAuth,
                 RequestAuthorizer::request_time_bearer(credentials),
-                ResponsesRequestKind::Standard,
             ),
             ResponsesConstructionAuth::RequestTimeCodex(credentials) => (
                 ResponsesAuth::NoAuth,
                 RequestAuthorizer::request_time_codex(credentials),
-                ResponsesRequestKind::Codex,
             ),
-            ResponsesConstructionAuth::MantleSigV4(authorizer) => (
-                ResponsesAuth::NoAuth,
-                authorizer,
-                ResponsesRequestKind::Standard,
-            ),
+            ResponsesConstructionAuth::MantleSigV4(authorizer) => {
+                (ResponsesAuth::NoAuth, authorizer)
+            }
         };
-        let (headers, redactions) = build_headers(auth, static_headers)?;
+        let (headers, redactions) = build_headers_for(auth, codex_headers, static_headers)?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
@@ -271,12 +281,25 @@ impl Provider for OpenAi {
     }
 }
 
+#[cfg(test)]
 fn build_headers(
     auth: ResponsesAuth,
     static_headers: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
+    let codex_headers = matches!(&auth, ResponsesAuth::Codex { .. });
+    build_headers_for(auth, codex_headers, static_headers)
+}
+
+/// `codex_headers` protects the Codex credential's headers from static
+/// configuration; it is set for both the static and the request-time Codex
+/// intents, since the latter adds them only per attempt.
+fn build_headers_for(
+    auth: ResponsesAuth,
+    codex_headers: bool,
+    static_headers: impl IntoIterator<Item = (String, String)>,
+) -> Result<(HeaderMap, Vec<String>), ProviderError> {
     let mut redactions = Vec::new();
-    let codex_auth = matches!(&auth, ResponsesAuth::Codex { .. });
+    let codex_auth = codex_headers;
     let mut auth_headers = HeaderMap::new();
     match auth {
         ResponsesAuth::NoAuth => {}
@@ -735,7 +758,7 @@ pub(crate) fn decode_event(
                 redactions,
             ),
             None => ProviderError::ResponseFailed {
-                kind: openai_error_kind(code.as_deref()),
+                kind: openai_error_kind(code.as_deref(), message.as_deref()),
                 message: sanitize_message(
                     message
                         .as_deref()
@@ -750,7 +773,10 @@ pub(crate) fn decode_event(
 
 fn response_failed_from_api_error(error: ApiError, redactions: &[String]) -> ProviderError {
     ProviderError::ResponseFailed {
-        kind: openai_error_kind(error.code.as_deref().or(error.error_type.as_deref())),
+        kind: openai_error_kind(
+            error.code.as_deref().or(error.error_type.as_deref()),
+            error.message.as_deref(),
+        ),
         message: sanitize_message(
             error
                 .message
@@ -789,12 +815,21 @@ fn provider_usage(usage: ResponsesUsage) -> Result<ProviderUsage, ProviderError>
     })
 }
 
-fn openai_error_kind(code: Option<&str>) -> ProviderErrorKind {
+fn openai_error_kind(code: Option<&str>, message: Option<&str>) -> ProviderErrorKind {
     match code {
         Some("invalid_api_key" | "authentication_error") => ProviderErrorKind::Authentication,
-        Some("rate_limit_exceeded" | "insufficient_quota") => ProviderErrorKind::RateLimited,
+        Some("rate_limit_exceeded" | "insufficient_quota" | "slow_down") => {
+            ProviderErrorKind::RateLimited
+        }
         Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
-        Some("server_error" | "service_unavailable") => ProviderErrorKind::Unavailable,
+        Some(
+            "server_error" | "service_unavailable" | "server_is_overloaded" | "overloaded_error",
+        ) => ProviderErrorKind::Unavailable,
+        // Codex reports overload after HTTP 200 with codes that vary or are
+        // absent; the message is the only stable signal that a retry is safe.
+        _ if message.is_some_and(|message| message.contains("overloaded")) => {
+            ProviderErrorKind::Unavailable
+        }
         _ => ProviderErrorKind::Response,
     }
 }
@@ -1170,6 +1205,20 @@ mod tests {
         let undecodable = decode_event(r#"{"type":"response.completed","response":[]}"#, &[])
             .unwrap_err()
             .to_string();
+        // Observed from Codex after HTTP 200; must be retried, not fail the run.
+        let overloaded = [
+            r#"{"type":"response.failed","response":{"error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}"#,
+            r#"{"type":"response.failed","response":{"error":{"message":"Our servers are currently overloaded. Please try again later."}}}"#,
+            r#"{"type":"error","message":"Our servers are currently overloaded. Please try again later."}"#,
+        ];
+        for payload in overloaded {
+            let error = decode_event(payload, &[]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                crate::ProviderErrorKind::Unavailable,
+                "{payload}"
+            );
+        }
 
         assert_eq!(error.to_string(), "provider response failed: rate limited");
         assert_eq!(error.kind(), crate::ProviderErrorKind::RateLimited);

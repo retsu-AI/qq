@@ -700,6 +700,7 @@ impl App {
                 self.workspace_id = None;
                 self.workspace_path.clear();
                 self.sessions.clear();
+                self.drop_focused_interaction();
                 for pane in &mut self.panes {
                     pane.view = View::Transcript(None);
                 }
@@ -974,6 +975,10 @@ impl App {
             snapshot.focused = None;
         }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
+
+        // Retry a budget-starved startup/multi-body response in isolation.
+        // Never retry an already isolated response indefinitely.
+        let may_refetch_focused = initial || !snapshot.included.is_empty();
         let installed_sessions: Vec<_> = snapshot
             .included
             .iter()
@@ -1042,8 +1047,16 @@ impl App {
             {
                 form.refresh = crate::input::GoalFormRefresh::Ready;
             }
-            self.sessions
-                .install_session_snapshot(focused, &self.models, snapshot_sequence);
+            if may_refetch_focused {
+                self.sessions
+                    .install_session_snapshot(focused, &self.models, snapshot_sequence);
+            } else {
+                self.sessions.install_isolated_session_snapshot(
+                    focused,
+                    &self.models,
+                    snapshot_sequence,
+                );
+            }
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.
@@ -1094,6 +1107,20 @@ impl App {
         let mut effects = Effects::redraw(Redraw::Scheduled);
         if let Some(fetch) = fallback_fetch {
             effects.extend(fetch);
+        }
+        if may_refetch_focused
+            && let Some(session_id) = snapshot_focus
+            && self.focused() == Some(session_id)
+            && self
+                .sessions
+                .get(&session_id)
+                .is_some_and(|view| !view.is_warm())
+            && let Some(workspace_id) = self.workspace_id
+        {
+            effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                workspace_id,
+                session_id,
+            ))));
         }
         for event in replay {
             let replayed = self.sessions.replay_event(
@@ -1940,8 +1967,16 @@ impl App {
     }
 
     /// Point the focused pane at `view`. Its viewport returns to the tail on
-    /// the next frame, as `Viewport::update` does for any view change.
+    /// the next frame, as `Viewport::update` does for any view change. When
+    /// the session it follows changes, what was being answered there (a
+    /// partly answered `ask_user` form, an armed amendment and its note) is
+    /// dropped, so it is never applied to another session's call. Keys cannot
+    /// move focus while such a form is open, so only a forced move (a
+    /// deletion, a revealed audit, a reconnect) reaches this with one.
     pub(crate) fn set_view(&mut self, view: View) {
+        if view.session() != self.view().session() {
+            self.drop_focused_interaction();
+        }
         self.pane_mut().view = view;
     }
 
@@ -3335,10 +3370,10 @@ impl App {
                 }
             }
         }
-        let active = self.sessions.values().any(|session| {
-            matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                || self.side_question_shown(session)
-        });
+        let active = self
+            .sessions
+            .values()
+            .any(|session| self.activity_shown(session));
         self.expire_status()
             || active
             || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
@@ -3361,18 +3396,24 @@ impl App {
     pub fn has_activity(&self) -> bool {
         self.has_active_goal()
             || self.status.is_some()
-            || self.sessions.values().any(|session| {
-                matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                    || self.side_question_shown(session)
-            })
+            || self
+                .sessions
+                .values()
+                .any(|session| self.activity_shown(session))
     }
 
-    /// Whether `session` answers a side question whose spinner is on screen:
-    /// in the view that follows it, on its painted rail row or the badge of
-    /// a painted ancestor. While the rail is down (the strip's working count
-    /// may show it) or before the first frame, every one counts.
-    fn side_question_shown(&self, session: &qq_client::state::SessionView) -> bool {
-        if session.summary.running_side_question.is_none() {
+    /// Whether `session`'s activity (a running run, or a side question) has
+    /// a spinner on screen: in the view that follows it, on its painted rail
+    /// row or the badge of a painted ancestor. While the rail is down (the
+    /// strip's working count may show it) or before the first frame, every
+    /// one counts. An audit's activity is never shown.
+    fn activity_shown(&self, session: &qq_client::state::SessionView) -> bool {
+        if session.summary.running_side_question.is_none()
+            && session.summary.status != qq_protocol::SessionStatus::Running
+        {
+            return false;
+        }
+        if self.under_audit(session.summary.id) {
             return false;
         }
         let Some(painted) = self.rail_painted.as_ref() else {
@@ -3474,19 +3515,15 @@ impl App {
             .is_some_and(|session| session.summary.purpose == qq_protocol::SessionPurpose::Audit)
     }
 
-    /// Sessions with a tool call awaiting the human's approval, in tree
-    /// order. Holds an approval delegate still owns are excluded (the human
-    /// is not asked yet), and so are audit sessions and anything under them,
-    /// which are never listed.
+    /// Sessions with a tool call awaiting the human's approval, in the order
+    /// of [`Self::sessions_needing_attention`] (approvals rank first there),
+    /// so the rule names the same session `Alt-A`/`Alt-D` answer. Holds an
+    /// approval delegate still owns are excluded (the human is not asked
+    /// yet), and so are audit sessions and anything under them.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        let mut sessions = self.sessions.awaiting_approval();
-        sessions.extend(
-            self.orphan_trees()
-                .filter(|id| !self.sessions[id].live.awaiting_approval.is_empty()),
-        );
-        sessions
+        self.sessions_needing_attention()
             .into_iter()
-            .filter(|id| self.human_waiting(*id) && !self.under_audit(*id))
+            .take_while(|id| self.human_waiting(*id))
             .collect()
     }
 
@@ -3589,6 +3626,16 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // A picker confirmation against a session now known to sit under an
+        // audit is dropped before `y` can act on it.
+        if let Some(Overlay::Sessions {
+            confirm: Some(SessionConfirm::Delete(target)),
+            ..
+        }) = &self.overlay
+            && self.under_audit(*target)
+        {
+            self.clear_session_picker_confirm();
+        }
         // The session a workspace view returns to (and that `/goal`, `/btw`
         // act on while it is open) is replaced too.
         if self.view_return.is_some_and(|id| self.under_audit(id)) {
@@ -3609,6 +3656,15 @@ impl App {
                 Effects::redraw(Redraw::Scheduled)
             }
         }
+    }
+
+    /// Forget the focus-scoped interaction: a partly answered `ask_user`
+    /// form and an armed Shift-Y/Shift-N amendment with its note.
+    fn drop_focused_interaction(&mut self) {
+        if self.approval_amendment.take().is_some() || !self.question_answers.is_empty() {
+            self.composer.clear();
+        }
+        self.question_answers.clear();
     }
 
     /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,

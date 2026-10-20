@@ -4,12 +4,10 @@
 [ENG-1067](https://linear.app/retsu-ai/issue/ENG-1067). Ledger:
 [`progress/tui-focus.md`](progress/tui-focus.md).
 **Owner:** TUI lane.
-**Owned paths:** `crates/qq-tui/src/**`, `crates/qq-tui/tests/**`,
-`crates/qq-tui/benches/render.rs`, `crates/qq-tui/Cargo.toml` (F6 only: the
-`base64` workspace dependency), `docs/design/layout.md`,
-`docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`.
-`commands.rs`, `input.rs` and `terminal.rs` are shared with other lanes; this
-plan touches them only for the rows and effects named below.
+**Owned paths:** `crates/qq-tui/**`, `docs/design/layout.md`,
+`docs/design/transcript.md`, `docs/guide/tui.md`, `docs/runbooks/tui-qa.md`,
+and, for F1's startup rule only, the client bootstrap
+(`crates/qq-client/src/interactive.rs`, `crates/qq-client/src/lib.rs`).
 
 The [TUI redesign](tui-redesign.md) built the layout engine, tiers, rail and
 inspector. This plan changes *what* those surfaces show. It does not replace
@@ -17,365 +15,193 @@ the open L4 and U8 slices there.
 
 ## Problem
 
-Measured against the `sessions-*` and `tools-*` goldens and the code on
-`2f585b0d`:
+Measured against the `sessions-*` and `tools-*` goldens on `2f585b0d`:
 
-1. Every list is the whole session tree. The rail (`sidebar::rail_entries`),
-   the `/sessions` picker (`App::session_rows`) and the agent strip all walk
-   `thread_order()`, which includes every descendant. One task that fans out
-   to 20 agents adds 20–40 rail rows and 20 picker rows.
+1. Every list is the whole session tree. One task that fans out to 20
+   agents adds 20–40 rail rows and 20 `/sessions` rows.
 2. The rail groups by state but indents by tree depth, so a child is drawn
-   indented under an unrelated session in another group
-   (`sessions-120x40.txt`: `Deploy helper` under `Refactor`, its parent under
-   IDLE).
-3. `Auto` shows the rail when `sessions.len() > 1`, so one conversation that
-   spawned one helper gets a 28-column rail.
-4. One child approval is shown three times in one frame: rail row plus detail
-   row, the composer-rule notice, and the transcript's `related sessions`.
-5. The strip counts agents as peers (`8 agents`). Audit children
-   (`SessionPurpose::Audit`) are listed like user sessions.
-6. The inspector's `Auto` takes 70–80 columns at Wide and Ultra even when it
-   only says `Nothing expanded`.
-7. Mouse capture is on, so a terminal drag does nothing and Shift-drag
-   selects the whole terminal row: transcript, inspector, rail and borders
-   together. There is no way to copy just the model's output.
+   under an unrelated session in another group.
+3. `Auto` shows the rail when more than one session record exists, so one
+   conversation with one helper gets a 28-column rail.
+4. One child approval is shown three times in one frame (rail, composer
+   rule, `related sessions`).
+5. The strip counts agents as peers, and audit children are listed like
+   user sessions.
+6. The inspector's `Auto` takes 70–80 columns while it says only
+   `Nothing expanded`.
+7. With mouse capture on, a drag does nothing and Shift-drag selects whole
+   terminal rows across every pane. There is no way to copy just the
+   model's output.
 
 ## Vocabulary
 
-- **Session**: a root conversation (`parent_id == None`). The unit the user
-  works on and the only thing lists show by default.
-- **Agent**: a sub-agent session under a session (`parent_id == Some`).
-  Shown on its own only when it needs the user, when its session is focused,
-  or when the user opens or searches for it.
-
-The guide, hints and picker titles use these two words consistently.
+- **Session**: a non-audit root conversation (`parent_id == None`), or a
+  non-audit agent whose parent is not loaded (listed as a session until the
+  parent arrives).
+- **Agent**: a sub-agent session under a loaded session.
+- **Audit**: a `SessionPurpose::Audit` session and everything under it.
 
 ## Principles
 
-The five principles of the redesign plan hold. Added:
-
 1. **Sessions by default, agents on request.**
 2. **Attention rises; activity rolls up.** An agent that needs the user
-   surfaces as its own line under its session; an agent that is only working
-   contributes to its session's counts.
-3. **One place per fact.** A pending approval or unread finish has one
-   primary place on screen and at most one pointer elsewhere.
+   surfaces on its own; an agent that is only working adds to its session's
+   counts.
+3. **One place per fact.** A need is named in one place on screen; anything
+   else only points at it.
 4. **A pane exists only while it has content.**
-5. **Shed by rank.** Rows drop their lowest-ranked items one at a time as
-   they narrow.
+5. **Audits are never user-facing.**
 
 ## Slices
 
-Stacked PRs from one worktree, each on the previous branch, in this order.
+Stacked PRs from one worktree, in this order.
 
-| ID | Issue | Goal | Acceptance |
-| --- | --- | --- | --- |
-| P0 | [ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068) | This plan and its ledger | Docs check passes |
-| F1–F2 | [ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069) | Session roll-up and a sessions-only rail | See below |
-| F3 | [ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070) | `/sessions` lists sessions; agents on expand or search | See below |
-| F4–F5 | [ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071) | One place per fact; inspector only with content | See below |
-| F6 | [ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072) | Clickable rail; mouse selection scoped to the transcript, copied with OSC 52 | See below |
+| ID | Issue | Goal |
+| --- | --- | --- |
+| P0 | [ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068) | This plan and its ledger |
+| F1–F2 | [ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069) | Session roll-up and a sessions-only rail |
+| F3 | [ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070) | `/sessions` lists sessions; agents on expand or search |
+| F4–F5 | [ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071) | One place per fact; inspector only with content |
+| F6 | [ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072) | Clickable rail; selection scoped to the transcript, copied with OSC 52 |
+
+Each slice's contract is below; its edge cases are specified by the tests
+in its PR.
 
 ### F1–F2: roll-up and rail
 
-One O(sessions) pass replaces `rail_entries`. For each root session it
-yields its own state, the state rolled up over its agents (most urgent of
-NEEDS YOU > WORKING > the rest), agent counts (total, working), the agents
-waiting on an approval, unread, a live flag, and spend. Spend is the
-session's **inclusive** accounting (`SessionSummary.accounting.inclusive`).
-A summary without `accounting` (written before inclusive accounting) only
-carries its own direct spend in the compatibility alias, so the row sums
-that alias over the session and its loaded agents (audit agents included);
-agents not loaded are then missing from the sum, which is the most such old
-records can say. Audit agents and their subtrees are never listed or
-counted as agents.
+- One linear pass rolls each session up: its state and its agents' (most
+  urgent wins), agent counts, waiting agents, unread, and spend. Spend is
+  the server's `accounting.inclusive` (the session and its immediate
+  children) plus the direct spend of deeper loaded agents; a summary
+  without accounting sums the direct spend of its loaded tree, audits
+  included, since hidden work still costs. If any summed part is unknown
+  (no cost recorded), the total is unknown and no spend is shown, as the
+  protocol never treats a missing cost as zero. Agents that are not loaded
+  are missing from the sum, a recorded limit of the bounded snapshot.
+- An agent **needs the user** when an approval waits on the human (a
+  delegate-owned hold is working until it escalates) or when it failed or
+  finished unseen. The TUI derives this from each summary and its live
+  holds (the client store's `need()` counts delegate holds as approvals, so
+  it is not used here). One attention list feeds every attention surface
+  (`Ctrl-G`, `Alt-A`/`Alt-D`, `/attention`, the rule): human-owned
+  approvals first, then unseen failures, then unseen finishes; within a
+  rank, components (a session's tree) newest first by their top session,
+  and tree order inside one.
+- The rail shows groups NEEDS YOU, WORKING and RECENT, one row per session
+  with an `↳N` agent badge. Agents get their own rows only when they need
+  the user (capped, with a `+N need you` row) or belong to the focused
+  session (capped, with `+N more`; the focused agent is always shown).
+- `Auto` shows the rail when more than one session is listed and the width
+  allows it. Without the rail and with several sessions, a one-row strip
+  counts sessions and needs (`3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`). With one
+  session the breadcrumb names the focused agent and the rule names any
+  need (F4–F5).
+- Audits are never listed, counted, focused or reachable: not on the rail,
+  the strip, in the picker, tree navigation, attention, or a fallback focus.
+  At startup `qq --session ID` opens only a non-audit root (an agent, an
+  audit, or an orphan is refused; an orphan is reachable from the TUI), and
+  a bare `qq` opens the newest non-audit root. Ancestry is
+  known only over loaded sessions; a task agent whose audit ancestor is not
+  loaded shows as a task until that ancestor arrives (closing that needs a
+  protocol change, ENG-1080). When an arrival reveals that a shown or
+  targeted session is under an audit, the UI moves off it as if it had been
+  deleted, and drops anything in progress against it (a picker
+  confirmation, a partly answered question, an armed approval amendment).
 
-Rail rows:
-
-```
-│ NEEDS YOU  1
-│ ○ Session 0      ↳4 ◐1
-│ ↳ ◇ Deploy helper
-│     ◇ approve run
-│
-│ WORKING  1
-│ ◐ Write tests    ↳5 ◐3
-│    compacting context
-│
-│ RECENT  4
-│ ● Refactor       1 new
-│ ○ Notes
-```
-
-- Groups are NEEDS YOU, WORKING, RECENT. RECENT merges the old IDLE and DONE
-  groups; a finished-but-unseen or failed-and-unseen session is already in
-  NEEDS YOU, and RECENT rows keep their state glyphs (`●` seen finish, `◌`
-  stopped, `○` never run) so done and idle stay distinguishable.
-- One row per session with a `↳N` agent badge (and `◐N` while any work).
-- An agent **needs the user** when it has an approval waiting *on the
-  human* (`awaiting_approval` minus the delegate-owned `with_delegate`
-  holds; a delegate-owned hold counts as working until it escalates), or
-  failed or finished while unseen (an unseen outcome still counts while a
-  later run waits on a delegate). Such an agent lifts its session into
-  NEEDS YOU; a focused agent still lifts it (focusing clears an unseen
-  finish, never an approval). Answering in place (`Alt-A`/`Alt-D`) picks a
-  call the human owns, never one a delegate is deciding; an `ask_user`
-  hold is never answered with a yes or no: the chord focuses its session so
-  the question block collects the answers.
-- Agent rows are bounded per session and painted in rank order. Under an
-  unfocused session, at most `WAITING_AGENT_ROWS` (3) agents that need the
-  user get a `↳` row (approval waits first, then failures, then unseen
-  finishes; tree order within a rank; an approval wait adds its status row),
-  then `+N need you  Ctrl-G`. Under the focused session, at most
-  `FOCUSED_AGENT_ROWS` (6) agent rows: the focused agent first, then agents
-  that need the user in the same rank order, then quiet agents in tree order;
-  the rest collapse to `+N more  /agents`. A focused agent is therefore
-  always on the rail when the rail is shown.
-- Audit agents (and anything under them) are never listed, counted, or
-  reachable: not on the rail, the strip, the layout's session count, the
-  picker, tree navigation (`Alt-Down`/`Alt-Left`/`Alt-Right`), `Ctrl-G`,
-  `Alt-A`/`Alt-D`, or the `/attention` list, including an audit whose parent
-  was deleted and which therefore became a root. `qq --session ID` naming an
-  audit is refused like an agent's ID, and a picker confirmation (delete)
-  whose target is revealed to sit under an audit is cancelled before it can
-  act. One audit-filtered
-  attention list (human-owned approvals, then unseen failures, then unseen
-  finishes) feeds every attention surface. Startup, reconnect, and the
-  refocus after a deletion pick a non-audit session (the newest displayed
-  non-audit session, which may be an agent listed because its parent is not
-  loaded; the empty prompt only when nothing else is listed), never an
-  audit.
-- An agent whose session is not loaded (a bounded snapshot can carry a child
-  without its parent) is listed as a session of its own until the parent
-  arrives, so its attention is never dropped. Audit ancestry is decided over
-  the loaded ancestors only: an agent under a loaded audit is hidden. The
-  summary carries no lineage beyond its own `purpose` and `parent_id`, so a
-  task agent whose audit ancestor is not loaded is shown as a task until
-  that ancestor arrives; closing that gap needs a lineage marker in
-  `SessionSummary` (a protocol change) and is recorded as a follow-up
-  (ENG-1080), not done here. When an arriving summary reveals that the
-  focused session is under an audit, focus moves to the newest displayed
-  non-audit session (orphans included), as on deletion; the session a
-  workspace view would return to is replaced the same way.
-- `Auto` shows the rail when more than one *session* exists. The strip
-  counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
-- With one session the rail stays hidden under `Auto` (pinning still shows
-  it). The focused agent is then named by the top-row breadcrumb, and an
-  agent that needs the user (approval, failure or unseen finish) by the
-  composer-rule notice (F4–F5 keeps that notice whenever its row is not on
-  screen), so none is ever invisible.
-- Row planning is linear in sessions: the roll-up groups the needs per
-  session once and the planner reads each session's slice.
-
-Acceptance: unit tests for the roll-up (state rises for approval, failure
-and unseen finish; a delegate-owned hold stays WORKING until escalation; a
-focused waiting agent still lifts its session; counts; inclusive cost with a
-hidden agent's spend; audit subtrees and orphaned audit roots skipped; a
-child without a loaded parent listed; strip and rail agree); view tests for
-the rail shape, both caps, rank ordering, and the focused agent past the cap;
-navigation skipping an audit child; a `fanout` golden scene (sessions with
-many agents, several waiting) at the five golden sizes;
-`sessions_200_with_sidebar` and a `children_20_with_sidebar` bench whose
-fixture is one session with twenty streaming agents that stay agents while
-they stream (recorded on the stack base with the same fixture) within 5 % of
-baseline or faster. Background deltas from an agent that no committed
-surface shows (no rail row, no live card under the focused parent's spawn
-call) schedule no redraw; a focused parent's spawned child still redraws.
+Acceptance: roll-up unit tests (each need, delegate holds, counts, spend,
+audit exclusion, orphans); rail view tests (shape, caps, rank order);
+startup and revealed-audit tests; a `fanout` golden at the five golden
+sizes; the `sessions_200_with_sidebar` and `children_20_with_sidebar`
+benches within the render gate below. Background output from an agent
+that no surface shows schedules no redraw.
 
 ### F3: picker
 
-- `/sessions` lists sessions only, with right-aligned agent badge and state.
-- `Tab` or `Right` expands the highlighted session's agents inline; `Left`
-  collapses (or moves to the parent row from an agent).
-- A non-empty search matches agents too; a matching agent row shows its
-  session's title as a muted prefix (`Session 0 › Deploy helper`).
-- `Ctrl-A` toggles showing every agent (the previous behavior).
-- `/agents` keeps opening the focused tree fully expanded.
-- The cursor stays on the same id across tree changes while that row is
-  listed. When the highlighted agent's row stops being listed (the query is
-  cleared, `Ctrl-A` is toggled off, or its session collapses), the cursor
-  moves to that agent's session row; when the session itself is gone, to
-  the nearest remaining row. `Left` on an agent row always moves the cursor
-  to its session row (and collapses it when not searching). A search that
-  matches only an agent may hide its session row, so `Left` from a found
-  agent clears the search, keeps the session's expansion as it was, and
-  lands on the session row. `Ctrl-A` works even when the current search
-  matches nothing.
+- `/sessions` lists sessions, newest first, with agent badge and state.
+- `Tab`/`Right` expands a session's agents inline; `Left` collapses or goes
+  to the session row. A search also matches agents (shown as
+  `Session › Agent`). `Ctrl-A` lists every agent. `/agents` opens the
+  focused tree expanded.
+- The cursor keeps its row across updates; when the row goes, it moves to
+  the agent's session, or the nearest row.
 
-Acceptance: app tests for default rows, expand/collapse, search hits,
-`Ctrl-A`, focus-preserving refresh, and the agent-to-session cursor
-fallback; an audit case showing no audit row (nor anything under one) in
-`/sessions`, an agent search, `Ctrl-A`, or `/agents`; existing `/agents`
-tests otherwise unchanged.
+Acceptance: app tests for the default rows, expand/collapse, search, `Ctrl-A`,
+cursor fallback, and audit exclusion in every mode.
 
 ### F4–F5: one place per fact, panes on demand
 
-- The composer-rule notice names attention the rail does not paint: every
-  session or agent with an approval waiting on the human, an unseen failure,
-  or an unseen finish whose own rail row is not on screen. When the rail is
-  **not** on screen (Compact, a single session under `Auto`, or the rail
-  hidden) that is all of them; the strip's `◇ N` is an anonymous count, a
-  pointer and not a naming, so the notice stays beside it. When the rail is
-  on screen its rows name what they paint and the notice names only the
-  rest: rows scrolled out of the rail's window, and rows collapsed into a
-  `+N need you` row. A collapsed row is already pointed at by that `+N`
-  row, so the notice does not name it again; it is named only when nothing
-  on screen points at it (the rail is hidden, or its session row itself is
-  scrolled out or its title clipped away). A row names its session only when
-  the title span itself keeps cells; a badge that happens to contain the
-  title's text does not count. A spawned child's live card under the
-  focused parent's spawn call names that child too, so the rule does not
-  repeat it, but only while the card's title row is painted inside the
-  transcript's viewport (a viewport that keeps only the card's status row
-  names nothing); the card is identified by the child's id carried through
-  the layout, not by matching its title text;
-  and the rail does not list that child again under the focused session
-  while its card is on screen. A collapsed group counts as pointed at only
-  while its `+N need you` row itself is painted (a window can keep the
-  session row and clip the `+N` row). With the rail up the strip is not
-  shown, so each need has at most its one row or pointer on the rail plus
-  the rule. The notice is
-  one row, so it names the most urgent one
-  (approval, then failure, then unseen finish; tree order within a rank) and
-  counts the rest (`◇ Deploy helper +3 need you`), truncating the name
-  before the count; `Ctrl-G` walks them and `/attention` lists them all.
-  With nothing left over the rule omits the notice and leads with the
-  in-place `Alt-A`/`Alt-D` and `Ctrl-G` chords. A transient notice (info,
-  warning, error) takes the left side while it lasts; any unpainted
-  attention then keeps a compact pointer on the right: the answer chords
-  while an approval waits, plus `✕ N` / `● N` for unseen failures and
-  finishes, and `^G jump`, so a sticky error never hides a need. The pointer
-  is reserved first and the notice truncates to make room, shedding to a
-  bare `◇` or count at the narrowest widths. When the strip is on screen its
-  `◇ N` / `● N new` already points at those needs, so the rule keeps only
-  the answer and jump chords, never a second count. A finish
-  that arrives while a side view (`/goal`, `/btw`) hides its own session's
-  transcript is attention like any other: only a session whose transcript
-  is on screen is excluded. A rail row counts as naming its session only
-  when the title
-  survives the row's badges.
-- `related sessions` becomes one muted summary row: `↳ 3 agents · ◐ 2
-  /agents`, counting working agents by the rail's definition (running,
-  queued, a side question, or a delegate deciding). It carries no `◇` count:
-  the waiting agent is already named on the rail or the rule, and the strip
-  points at it, so a third pointer would repeat the fact.
-- Inspector `Auto` shows only when it has content (an expanded call or a
-  workspace view); `Shown` still pins it.
-- The top row omits a known zero cost.
+- A need is **named** (its title on screen) at most once outside its own
+  transcript: by its rail row, by a child's live card under the spawn call
+  in the focused transcript, or by the composer-rule notice. Something
+  counts as naming a need only while it is painted in the committed frame
+  (title cells visible, not scrolled out or clipped), and a card is
+  identified by its child's id, not by its text.
+- The rule's notice considers the needs that nothing on screen names or
+  points at, names the first of them in attention order, and counts the
+  rest (`◇ Deploy helper +3 need you`). A painted `+N need you` rail row
+  points at the needs it collapses, so those are neither named nor counted
+  again. The strip only counts, so beside it the notice still names.
+- A transient notice (info, warning, error) takes the rule's left side. If
+  needs are unnamed, the right side keeps a pointer to them (answer and jump
+  chords, plus a count unless the strip already shows one), and the notice
+  truncates first.
+- `related sessions` becomes one muted summary row with no attention count.
+- The inspector's `Auto` shows only while it has content. The top row omits
+  a known zero cost.
 
-Acceptance: view tests that each waiting item is named at most once per
-frame outside its own transcript (a rail row or the rule notice, never both)
-and that every item is either named or counted, at Compact, Regular with the
-rail shown, Regular with the rail hidden, with more waiting agents under one
-session than `WAITING_AGENT_ROWS` (the collapsed ones pointed at only by the
-rail's `+N need you` row, not named again on the rule), at a narrow width
-with a long title, for a
-single session whose agent failed or finished unseen, for an unfocused
-session that failed unseen at Compact, for a failed agent whose rail row is
-scrolled out, for a notice beside both an approval and an unseen failure,
-and for a finish that arrives behind `/goal`; a Compact frame with a waiting
-agent of the focused session shows the named notice and the strip's pointer
-and no third count; `Ctrl-G` and `/attention` skip an audit with a pending
-approval; `Alt-A` with a delegate-owned and a human-owned hold in one
-session answers the human-owned one; inspector `Auto`
-hidden with nothing expanded and shown with an expansion; goldens moved
-deliberately.
+Acceptance: frame tests that every need is named or pointed at and never
+named twice, at Compact, Regular with and without the rail, past the agent
+cap, under a transient notice, and at narrow widths; inspector `Auto` hidden
+and shown; goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
 
-Mouse capture stays on so the wheel keeps scrolling the transcript. QQ owns
-selection:
+Mouse capture stays on, so the wheel still scrolls; QQ owns selection.
 
-- **Click** on a rail session or agent row focuses it. The hit map is the
-  row → session list committed with the drawn frame, never recomputed from
-  current state, so a click focuses the row under the pointer even when an
-  update reordered the rail since that frame was drawn.
-- **Drag** that starts inside a transcript pane selects text in that pane
-  only. The selection is clamped to the pane's columns and to body rows, so
-  the rail, inspector, borders, top row and composer are never included.
-  It is a linear (stream) selection like a terminal's: from the earlier
-  endpoint to the end of its row, whole rows between, and the start of the
-  later endpoint's row through it, whichever way the drag went. Endpoints
-  snap to whole characters: a cell inside a double-width glyph selects the
-  glyph, and a combining mark travels with its base character, so a copy
-  never splits a grapheme or emits a blank for a continuation cell. The
-  selected cells repaint on the `selection` background; a press without a
-  drag paints nothing.
-- **Release** copies the selected text to the system clipboard with OSC 52
-  (the transport Codex and most modern terminals and multiplexers support)
-  and shows `copied N lines`. A release at a different cell from the press
-  is a selection even when no drag event arrived between them. Each row is
-  the pane's text with the measure inset and trailing spaces removed; rows
-  joined by a soft wrap (prose the renderer wrapped at the pane width, not
-  a newline in the text) are copied as one line joined by a space, and code
-  blocks keep their own lines.
-- `Esc`, a key press, scrolling, a resize, or any frame whose selected
-  cells changed (streamed text arriving under the selection, the body
-  moving) clears the selection, so a copy is always of the cells the user
-  saw. Native terminal selection stays available: `Shift`-drag where the
-  terminal handles it (QQ never sees those events, so an old QQ highlight
-  stays until the next key or click), and `/mouse` hands the mouse back to
-  the terminal entirely.
+- A **click** on a rail row focuses the session drawn there in the
+  committed frame, if it still exists and is not an audit.
+- A **drag** that starts in a transcript pane selects a terminal-style
+  stream of text within that pane only, snapped to whole grapheme clusters,
+  and painted on the `selection` background. A press and release at
+  different cells is a drag.
+- On **release** the text is copied over OSC 52 with `copied N lines`. A
+  copy holds only text: no pane inset, message rail, panel gutter or fill,
+  list or quote prefix, or trailing spaces. Soft-wrapped prose rejoins with
+  a space; code and long tokens rejoin with nothing; real newlines stay.
+  Copies are bounded (`MAX_COPY_BYTES`) and cut at a cluster boundary; a
+  cut copy says so (`copied the first N lines; the selection was too
+  large`) as a warning instead of the plain notice.
+- `Esc`, keys, scrolling, resize, another button, or a change to the
+  selected cells clears the selection, so a copy is always what the user
+  saw. `Shift`-drag (where the terminal supports it) and `/mouse` still give
+  native selection.
+- Grapheme clusters (ZWJ, combining-mark, flag, modifier and virama
+  sequences) are kept whole and measured with one deterministic rule in
+  layout, wrapping, truncation, previews and selection alike: a cluster's
+  width is `unicode-width`'s `UnicodeWidthStr::width` of the whole cluster
+  (so `☀️` and `👩‍💻` are two cells). A terminal or font that draws a cluster
+  at another width (ambiguous-width characters, older emoji tables) can
+  disagree with that layout; that, rarer clusters, and full UAX #29 (which
+  needs a crate) are recorded limits.
 
-The selection is screen-anchored (`Selection { pane, anchor, head }` in cell
-coordinates) and resolved against the last committed frame, so no
-transcript cache changes. Cells are grapheme clusters as the terminal
-draws them for the scripts a transcript carries: a ZWJ emoji, a base with
-its marks, a regional-indicator flag pair, an emoji with its modifier, and
-an Indic consonant joined to the next by a virama are each one cell group.
-The wrappers break rows on the same boundaries, and truncation and
-previews cut on them, so a cluster at the pane edge or the ellipsis moves
-or goes whole and never straddles two rows or loses half. A cluster is
-measured as it renders (an emoji ZWJ, modifier or presentation sequence is
-two cells), the same in layout, wrapping, and selection.
-Full UAX #29 segmentation would add a crate, which this plan's non-goals
-rule out; the remaining rare clusters (Hangul jamo sequences, prepended
-concatenation marks) are a recorded limit. Each frame row carries how it
-continues into the row below (`Line::wrapped`): a prose wrap that dropped
-the space it broke on joins with a space, a wrap without a separator (a
-prose token wider than the pane, broken by characters; a code or table line
-broken by `wrap_line_chars`) joins with nothing, and anything else is a
-real line break. That is how a copy tells a wrap from a newline and keeps
-code lines and long tokens whole. Each row drops only its own non-text
-prefix (the measure inset, plus the 3-column message rail on message rows;
-workspace views have no rail; a code panel's gutter, a list item's hanging
-indent, or a blockquote's rail, counted after whatever prefix a row gains;
-a code panel's trailing fill). Copy payloads are bounded
-(`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
-first part, cut back to a grapheme boundary, and says so. A click focuses a
-rail target only while that session still exists and is not under an audit
-(an ancestor that arrived after the frame was drawn hides it). Any press
-of a button the terminal reports clears a QQ selection; a modified press
-or drag that the terminal does forward to QQ starts none.
-
-Acceptance: app tests for click-to-focus (including a rail reordered between
-draw and click, and a deleted target), drag clamped to the pane, a press and
-release at different cells with no drag between, forward and reverse
-partial-row copies, forward and reverse copies whose endpoints land inside a
-wide glyph, a joined emoji, or a flag, a soft-wrapped paragraph copied as
-one line beside an explicit newline, a `/goal` header copied whole, the copy
-effect's text (inset and rail excluded), clearing rules (a click leaves no
-highlight; a forwarded modified press clears an old one; a content-only
-redraw under a selection clears it), and the bound with a grapheme
-straddling it; terminal test for the OSC 52 bytes; frame test that only
-selected cells take the selection style; the seven render gates recorded
-before and after.
+Acceptance: app tests for click-to-focus against a stale frame, a clamped
+drag, copies in both directions, wide and joined glyphs, wraps against
+newlines, each excluded prefix, the clearing rules and the bound; a terminal
+test for the OSC 52 bytes; a frame test that only selected cells restyle.
 
 ## Non-goals
 
-No new crates in `Cargo.lock`: F6 adds `base64.workspace = true` to
-`crates/qq-tui/Cargo.toml` for OSC 52 encoding (the workspace already pins
-`base64` 0.22 and the root package uses it, so the build graph is unchanged).
-No protocol change, no persisted layout preference, no split transcripts
-(L4), no word or line double-click selection.
+No new crates in `Cargo.lock`. F6 adds `base64.workspace = true` to
+`crates/qq-tui/Cargo.toml`: the workspace already pins it, so the build
+graph is unchanged. No protocol change, no persisted layout preference, no
+split transcripts (L4), no double-click word or line selection.
 
 ## Gates
 
 - Workspace gates per `AGENTS.md`; `cargo xtask smoke` on each code slice.
 - `cargo bench -p qq-tui --bench render` before and after each code slice:
-  `steady_state`, `streaming_focused`, `streaming_run_on_32kb`,
+  the `steady_state`, `streaming_focused`, `streaming_run_on_32kb`,
   `golden_path_first_minute`, `sessions_200_with_sidebar`,
-  `children_20_with_sidebar`, `resize_horizontal` medians within 5 %.
-- Goldens updated deliberately in the PR that moves them.
-- Each PR is complete when the Codex review on it reports no major issues
-  (the 👍 reaction).
+  `children_20_with_sidebar` and `resize_horizontal` medians no more than
+  5 % slower than the stack base (any speed-up passes).
+- Each PR is done when its Codex review reports no major issues.
