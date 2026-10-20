@@ -135,7 +135,10 @@ Rail rows:
   reachable: not on the rail, the strip, the layout's session count, the
   picker, tree navigation (`Alt-Down`/`Alt-Left`/`Alt-Right`), `Ctrl-G`,
   `Alt-A`/`Alt-D`, or the `/attention` list, including an audit whose parent
-  was deleted and which therefore became a root. One audit-filtered
+  was deleted and which therefore became a root. `qq --session ID` naming an
+  audit is refused like an agent's ID, and a picker confirmation (delete)
+  whose target is revealed to sit under an audit is cancelled before it can
+  act. One audit-filtered
   attention list (human-owned approvals, then unseen failures, then unseen
   finishes) feeds every attention surface. Startup, reconnect, and the
   refocus after a deletion pick a non-audit session (the newest displayed
@@ -151,8 +154,9 @@ Rail rows:
   that ancestor arrives; closing that gap needs a lineage marker in
   `SessionSummary` (a protocol change) and is recorded as a follow-up
   (ENG-1080), not done here. When an arriving summary reveals that the
-  focused session is under an audit, focus moves to the newest non-audit
-  root, as on deletion.
+  focused session is under an audit, focus moves to the newest displayed
+  non-audit session (orphans included), as on deletion; the session a
+  workspace view would return to is replaced the same way.
 - `Auto` shows the rail when more than one *session* exists. The strip
   counts sessions: `3 sessions  ◐ 1  ◇ 1 (^G)  ● 1 new`.
 - With one session the rail stays hidden under `Auto` (pinning still shows
@@ -240,7 +244,11 @@ tests otherwise unchanged.
   warning, error) takes the left side while it lasts; any unpainted
   attention then keeps a compact pointer on the right: the answer chords
   while an approval waits, plus `✕ N` / `● N` for unseen failures and
-  finishes, and `^G jump`, so a sticky error never hides a need. A finish
+  finishes, and `^G jump`, so a sticky error never hides a need. The pointer
+  is reserved first and the notice truncates to make room, shedding to a
+  bare `◇` or count at the narrowest widths. When the strip is on screen its
+  `◇ N` / `● N new` already points at those needs, so the rule keeps only
+  the answer and jump chords, never a second count. A finish
   that arrives while a side view (`/goal`, `/btw`) hides its own session's
   transcript is attention like any other: only a session whose transcript
   is on screen is excluded. A rail row counts as naming its session only
@@ -315,8 +323,11 @@ transcript cache changes. Cells are grapheme clusters as the terminal
 draws them for the scripts a transcript carries: a ZWJ emoji, a base with
 its marks, a regional-indicator flag pair, an emoji with its modifier, and
 an Indic consonant joined to the next by a virama are each one cell group.
-The wrappers break rows on the same boundaries, so a cluster that
-crosses the pane edge moves to the next row whole and never straddles two.
+The wrappers break rows on the same boundaries, and truncation and
+previews cut on them, so a cluster at the pane edge or the ellipsis moves
+or goes whole and never straddles two rows or loses half. A cluster is
+measured as it renders (an emoji ZWJ, modifier or presentation sequence is
+two cells), the same in layout, wrapping, and selection.
 Full UAX #29 segmentation would add a crate, which this plan's non-goals
 rule out; the remaining rare clusters (Hangul jamo sequences, prepended
 concatenation marks) are a recorded limit. Each frame row carries how it
@@ -327,8 +338,9 @@ broken by `wrap_line_chars`) joins with nothing, and anything else is a
 real line break. That is how a copy tells a wrap from a newline and keeps
 code lines and long tokens whole. Each row drops only its own non-text
 prefix (the measure inset, plus the 3-column message rail on message rows;
-workspace views have no rail; a code panel's gutter counted after whatever
-prefix a row gains). Copy payloads are bounded
+workspace views have no rail; a code panel's gutter, a list item's hanging
+indent, or a blockquote's rail, counted after whatever prefix a row gains;
+a code panel's trailing fill). Copy payloads are bounded
 (`MAX_COPY_BYTES`, 1 MiB before encoding); a larger selection copies the
 first part, cut back to a grapheme boundary, and says so. A click focuses a
 rail target only while that session still exists and is not under an audit

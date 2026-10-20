@@ -1103,32 +1103,36 @@ impl App {
         expanded: &BTreeSet<SessionId>,
         every_agent: bool,
     ) -> Vec<SessionRow> {
-        // `thread_order`, then each component whose topmost session's parent
-        // is not loaded (listed as a session until the parent arrives), in
-        // the same depth-first order with depths relative to that session.
-        let mut order: Vec<(SessionId, usize, bool)> = self
-            .sessions
-            .thread_order()
-            .iter()
-            .map(|id| (*id, self.sessions.depth(*id), false))
-            .collect();
-        if order.len() < self.sessions.len() {
-            let mut orphans: Vec<SessionId> = self
-                .sessions
-                .values()
-                .filter(|session| {
-                    session
-                        .summary
-                        .parent_id
-                        .is_some_and(|parent| !self.sessions.contains_key(&parent))
-                })
-                .map(|session| session.summary.id)
-                .collect();
-            orphans.sort();
-            for orphan in orphans {
-                let mut stack = vec![(orphan, 0usize)];
+        // Components (a root's tree from `thread_order`, or a tree whose
+        // topmost session's parent is not loaded, listed as a session until
+        // the parent arrives), newest first by their top session, each in
+        // depth-first order with depths relative to that top.
+        // `(updated, is an orphan, top id, rows)`: an orphan sorts after a
+        // root updated at the same moment, and orphans tie-break by id so
+        // the order never follows the map's iteration.
+        type Rows = Vec<(SessionId, usize, bool)>;
+        let mut components: Vec<(u64, bool, SessionId, Rows)> = Vec::new();
+        for &id in self.sessions.thread_order() {
+            let depth = self.sessions.depth(id);
+            if depth == 0 {
+                let updated = self.sessions[&id].summary.updated_at_ms;
+                components.push((updated, false, id, Vec::new()));
+            }
+            if let Some((_, _, _, rows)) = components.last_mut() {
+                rows.push((id, depth, false));
+            }
+        }
+        if self.sessions.thread_order().len() < self.sessions.len() {
+            for orphan in self.sessions.values().filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !self.sessions.contains_key(&parent))
+            }) {
+                let mut rows = Vec::new();
+                let mut stack = vec![(orphan.summary.id, 0usize)];
                 while let Some((id, depth)) = stack.pop() {
-                    order.push((id, depth, depth == 0));
+                    rows.push((id, depth, depth == 0));
                     stack.extend(
                         self.sessions
                             .children_of(id)
@@ -1137,8 +1141,23 @@ impl App {
                             .map(|child| (*child, depth + 1)),
                     );
                 }
+                components.push((orphan.summary.updated_at_ms, true, orphan.summary.id, rows));
             }
         }
+        // Stable, so roots keep `thread_order`'s own tie-breaking.
+        components.sort_by(|a, b| {
+            b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then_with(|| {
+                if a.1 {
+                    a.2.cmp(&b.2)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
+        let order: Vec<(SessionId, usize, bool)> = components
+            .into_iter()
+            .flat_map(|(_, _, _, rows)| rows)
+            .collect();
         let mut rows: Vec<SessionRow> = Vec::new();
         let mut root: Option<(SessionId, usize)> = None;
         let mut audit_depth: Option<usize> = None;
@@ -1210,7 +1229,18 @@ impl App {
             _ => return,
         };
         let rows = self.session_rows(scope, &expanded, every_agent);
-        if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay {
+        if let Some(Overlay::Sessions {
+            picker, confirm, ..
+        }) = &mut self.overlay
+        {
+            // A delete confirmation whose target lost its row (it was
+            // revealed to sit under an audit) is cancelled before `y` can
+            // act on it.
+            if let Some(SessionConfirm::Delete(target)) = confirm
+                && !rows.iter().any(|row| row.id == *target)
+            {
+                *confirm = None;
+            }
             let before = picker.current().map(|row| row.id);
             picker.replace_items(rows, |row| row.id);
             // When the highlighted agent is no longer listed, fall back to the
@@ -1353,6 +1383,10 @@ impl App {
             KeyCode::Char('y' | 'Y') => {
                 self.clear_session_picker_confirm();
                 match confirm {
+                    // Revalidated here too: an audit is never acted on.
+                    SessionConfirm::Delete(session_id) if self.under_audit(session_id) => {
+                        Effects::redraw(Redraw::Immediate)
+                    }
                     SessionConfirm::Delete(session_id) => self.delete_session(session_id),
                     SessionConfirm::Prune => self.prune_sessions(),
                 }

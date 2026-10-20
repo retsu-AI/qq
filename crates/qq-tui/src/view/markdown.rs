@@ -1196,6 +1196,7 @@ impl PanelStyles {
             fill_at: 0,
             fill: 0,
             spans: Vec::with_capacity(content.spans.len() + 2),
+            ..Line::default()
         };
         // Rail glyph, its trailing space, and the padding cell in one span:
         // the glyph color is invisible on the spaces, and a frame of 32

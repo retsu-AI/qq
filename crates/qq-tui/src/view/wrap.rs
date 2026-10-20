@@ -228,6 +228,7 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
         fill_at: 0,
         fill: 0,
         spans: Vec::new(),
+        card: line.card,
     };
     let mut used = 0_usize;
     let content_width = width - 3;
@@ -327,6 +328,7 @@ mod tests {
                 text: "┃ body".to_owned(),
                 style: normal(),
             }],
+            ..Line::default()
         };
         let [out] = <[Line; 1]>::try_from(indent_lines(vec![row], "│ ", muted(), 40))
             .expect("one row in, one out");

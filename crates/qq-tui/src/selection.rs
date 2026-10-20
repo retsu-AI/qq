@@ -197,6 +197,7 @@ impl Selection {
             // indent so a copy from the painted frame still skips it.
             let mut painted = Line {
                 indent: 0,
+                card: line.card,
                 wrapped: line.wrapped,
                 chrome: if line.chrome > 0 {
                     line.chrome + line.indent

@@ -119,6 +119,11 @@ pub(crate) struct Line {
     /// fill (side panes) are outside the copy's area anyway.
     pub(crate) fill_at: usize,
     pub(crate) fill: usize,
+    /// The child session whose live card this row titles (`child_rows`).
+    /// The frame reads it to know which children a drawn card already
+    /// names; matching the row's text instead would let message content
+    /// that looks like a card (`↳ **title**`) stand in for one.
+    pub(crate) card: Option<qq_protocol::SessionId>,
 }
 
 /// See [`Line::wrapped`].
@@ -142,6 +147,7 @@ impl Line {
                 text: text.into(),
                 style,
             }],
+            card: None,
         }
     }
 
