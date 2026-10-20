@@ -171,11 +171,11 @@ async fn run_tui_client(
         }
     };
     let mut cursor = snapshot.cursor;
-    // An attached client with an empty workspace creates one session once
-    // the catalog has validated the model. `New` already created; `Open`
-    // never creates.
+    // An attached client with no session to open (an empty workspace, or
+    // only agents and audits) creates one once the catalog has validated
+    // the model. `New` already created; `Open` never creates.
     let create_after_validation =
-        initial == InitialSession::Existing && snapshot.sessions.is_empty();
+        initial == InitialSession::Existing && newest_entry_point(&snapshot.sessions).is_none();
     if updates
         .send(ClientUpdate::Snapshot(snapshot))
         .await
@@ -217,7 +217,7 @@ async fn run_tui_client(
                         workspace.clone(),
                         workspace_id,
                         selection.clone(),
-                        snapshot.sessions.is_empty(),
+                        newest_entry_point(&snapshot.sessions).is_none(),
                         updates.clone(),
                     ));
                     reconnect_delay = Duration::from_millis(50);
@@ -315,7 +315,7 @@ async fn run_tui_client(
                     workspace.clone(),
                     workspace_id,
                     selection.clone(),
-                    snapshot.sessions.is_empty(),
+                    newest_entry_point(&snapshot.sessions).is_none(),
                     updates.clone(),
                 ));
                 reconnect_delay = Duration::from_millis(50);
@@ -408,14 +408,14 @@ async fn load_tui_models(
             workspace_id,
             focused_session_id: None,
             include_sessions: Vec::new(),
-            session_limit: 1,
+            session_limit: 512,
             message_limit: 1,
         })
         .await
     else {
         return;
     };
-    if !snapshot.sessions.is_empty() {
+    if newest_entry_point(&snapshot.sessions).is_some() {
         return;
     }
     let Ok(command_id) = CommandId::generate() else {

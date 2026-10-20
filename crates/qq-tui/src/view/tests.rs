@@ -5568,6 +5568,17 @@ fn a_revealed_audit_drops_the_answers_and_amendment_in_progress() {
         assert!(app.question_answers.is_empty(), "armed={armed}");
         assert!(app.composer.text.is_empty(), "armed={armed}");
     }
+    // A deletion moves focus the same way: the partial form goes with it.
+    let (mut app, root, _) = app_with_fanout(1);
+    app.focus_session(root);
+    app.question_answers.push("qq-tui".to_owned());
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    assert_ne!(app.focused(), Some(root));
+    assert!(app.question_answers.is_empty());
 }
 
 #[test]

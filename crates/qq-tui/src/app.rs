@@ -692,6 +692,7 @@ impl App {
                 self.workspace_id = None;
                 self.workspace_path.clear();
                 self.sessions.clear();
+                self.drop_focused_interaction();
                 for pane in &mut self.panes {
                     pane.view = View::Transcript(None);
                 }
@@ -1049,7 +1050,7 @@ impl App {
                     // `focus_session` fetches the fallback's body: it may be
                     // a summary only.
                     match self.first_listed_root() {
-                        Some(target) => fallback_fetch = Some(self.focus_away_from_audit(target)),
+                        Some(target) => fallback_fetch = Some(self.focus_session(target)),
                         None => self.set_view(View::Transcript(None)),
                     }
                 }
@@ -1224,7 +1225,7 @@ impl App {
                     match target.filter(|id| !self.under_audit(*id)) {
                         Some(target) => self.set_view(View::Transcript(Some(target))),
                         None => match self.first_listed_root() {
-                            Some(fallback) => effects.extend(self.focus_away_from_audit(fallback)),
+                            Some(fallback) => effects.extend(self.focus_session(fallback)),
                             None => self.set_view(View::Transcript(None)),
                         },
                     }
@@ -1822,8 +1823,16 @@ impl App {
     }
 
     /// Point the focused pane at `view`. Its viewport returns to the tail on
-    /// the next frame, as `Viewport::update` does for any view change.
+    /// the next frame, as `Viewport::update` does for any view change. When
+    /// the session it follows changes, what was being answered there (a
+    /// partly answered `ask_user` form, an armed amendment and its note) is
+    /// dropped, so it is never applied to another session's call. Keys cannot
+    /// move focus while such a form is open, so only a forced move (a
+    /// deletion, a revealed audit, a reconnect) reaches this with one.
     pub(crate) fn set_view(&mut self, view: View) {
+        if view.session() != self.view().session() {
+            self.drop_focused_interaction();
+        }
         self.pane_mut().view = view;
     }
 
@@ -3491,21 +3500,12 @@ impl App {
             return Effects::none();
         }
         match self.first_listed_root() {
-            Some(fallback) => self.focus_away_from_audit(fallback),
+            Some(fallback) => self.focus_session(fallback),
             None => {
-                self.drop_focused_interaction();
                 self.set_view(View::Transcript(None));
                 Effects::redraw(Redraw::Scheduled)
             }
         }
-    }
-
-    /// A forced move off a session the user cannot see any more (it was
-    /// revealed to sit under an audit): what was being answered there is
-    /// dropped first, so it is never submitted against the fallback's call.
-    fn focus_away_from_audit(&mut self, fallback: SessionId) -> Effects {
-        self.drop_focused_interaction();
-        self.focus_session(fallback)
     }
 
     /// Forget the focus-scoped interaction: a partly answered `ask_user`
