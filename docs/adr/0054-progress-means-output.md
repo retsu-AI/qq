@@ -293,7 +293,7 @@ with the AP0 runbook and changed with evidence.
 ## Evidence / references
 
 - Store queries: [`../runbooks/run-output-queries.md`](../runbooks/run-output-queries.md);
-  baseline recorded in `plans/progress/root.md` (2026-09-30).
+  baseline recorded in [historical progress/root.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/root.md) (2026-09-30).
 - QQ source:
   - `crates/qq-core/src/lib.rs:106–122`, `352–379`, `1712–1731`,
     `2722–2743`, `3288–3298`, `3455–3467`;

@@ -104,8 +104,8 @@ pub use sessions::{
     SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
     WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
-/// Merkle index over the workspace tree the tools see: the change-detection
-/// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
+/// Merkle index over the workspace tree the tools see.
+/// Detects changed paths between bounded workspace scans.
 pub use workspace::index::{
     IndexBudget, IndexDiff, IndexError, IndexOutcome, IndexStop, IndexedDirectory, IndexedFile,
     PartialIndex, WorkspaceIndex,

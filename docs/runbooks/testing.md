@@ -117,8 +117,8 @@ function in `xtask/src/smoke.rs` plus a row in `SCENARIOS`.
   Show it failing first.
 - `#[ignore]` needs a reason string that says how to run the test.
 
-Auditing existing tests (flakes, sleeps, mutation testing, duplicates) is
-`.qq/skills/qq-mode/playbooks/test-audit.md`.
+Repository work conventions are in
+[qq-mode](../../.qq/skills/qq-mode/SKILL.md).
 
 ## nextest
 

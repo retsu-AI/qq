@@ -1,10 +1,9 @@
 # Architecture decisions
 
-Use [the template](0000-template.md) for new decisions. An Accepted decision
-changes only through a superseding ADR; implementation evidence and
-clarifications may be appended. Allocate numbers through
-[`../plans/progress/root.md`](../plans/progress/root.md) while more than one
-agent is writing, and reserve the number there before opening the PR.
+Use [the template](0000-template.md) when an ADR is needed. An Accepted
+decision changes only through a superseding ADR; implementation evidence
+and clarifications may be appended. Choose an unused number when writing
+the decision. No reservation or progress ledger is required.
 
 ADR-0001 through ADR-0010 were backfilled on 2026-09-08 from decisions already
 in force; their dates record when the decision was made, not when the ADR was
@@ -67,9 +66,8 @@ written.
 | 0063 | [Opt-in metadata-only structured tracing](0063-opt-in-structured-tracing.md) | Proposed (AF5, ENG-1028) |
 | 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Proposed (auth-providers AP7, ENG-1066) |
 
-Numbers without a file are reserved in
-[`../plans/progress/root.md`](../plans/progress/root.md) for a decision not yet
-written, or were released unused:
+The following numbers were reserved or released by retired plans. These
+historical reservations do not schedule work or require new ADRs:
 
 | ADR | State |
 | --- | --- |
@@ -92,15 +90,11 @@ be inferred from the merge. This index preserves those statuses.
 
 ## When to write one
 
-Write an ADR when a change:
+Write an ADR when the user asks for one or a decision is genuinely
+contested. Explain routine implementation choices, validation and measured
+regressions in the PR. Update the as-built design or guide only when the
+change makes it inaccurate.
 
-- alters a system boundary, dependency direction, or crate ownership;
-- changes a durability, ordering, retry, approval, or bounding invariant;
-- bumps `PROTOCOL_VERSION`, `DESCRIPTOR_VERSION`, or the store schema with a
-  behavioral meaning change;
-- adds or removes a Cargo feature, build profile, or budget;
-- rejects a design the plan had accepted (supersede it explicitly); or
-- is something a future agent would otherwise re-litigate.
-
-Do not write one for a bug fix, a refactor with no behavior change, or a
-measurement receipt; those go in the plan ledger.
+If a change supersedes an accepted decision, preserve the old decision and
+explain the replacement. A protocol or schema bump, refactor, benchmark, or
+bug fix does not by itself require another ADR.

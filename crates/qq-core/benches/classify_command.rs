@@ -3,7 +3,7 @@
 //! table. Runs on every shell call before policy, so it sits on the tool
 //! hot path.
 //!
-//! Budget (per `docs/plans/tool-layer.md` T6): parse + classify ≤ 200 µs
+//! Measurement target: parse + classify ≤ 200 µs
 //! for a 1 KiB command.
 
 use std::{hint::black_box, time::Instant};

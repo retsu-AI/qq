@@ -114,4 +114,4 @@ warning that the descriptors are untrusted and the digest grants nothing.
   `invalid_tool_names_are_not_omitted_from_a_pin_candidate`;
   `plan::tests::canonical_encoding_and_digest_are_stable` (v10 fixture).
 - Review of the contributed heads `4dcb062` / `448d6bd` / `932f953` is
-  recorded in [`progress/root.md`](../plans/progress/root.md) (2026-09-25).
+  recorded in [`progress/root.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/root.md) (2026-09-25).

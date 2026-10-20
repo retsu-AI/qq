@@ -150,7 +150,7 @@ On the lead's store, a compaction takes 110–390 s (`progress/compaction.md`,
 
 ## Evidence / references
 
-- Baseline query and table: `docs/plans/progress/compaction.md`.
+- Baseline query and table: [historical progress/compaction.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/compaction.md).
 - `crates/qq-core/src/sessions.rs` (instruction, sections, preambles);
   `sessions/compaction.rs` (validation, commit) and
   `sessions/compaction/record.rs` (record);

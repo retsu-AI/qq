@@ -3,8 +3,8 @@
 **Status:** Accepted (`Interactive` merged in #49, `Network` in #50)
 **Date:** 2026-09-15
 **Deciders:** tool-layer plan T8/T9
-**Implements:** [`tool-layer.md` § D7](../plans/tool-layer.md#d7--fetch-ask_user-view_image-select_tools-t8-t9-t11),
-[`tool-layer.md` § New effect classes](../plans/tool-layer.md#new-effect-classes-and-wire-impact),
+**Implements:** [`tool-layer.md` § D7](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md#d7--fetch-ask_user-view_image-select_tools-t8-t9-t11),
+[`tool-layer.md` § New effect classes](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md#new-effect-classes-and-wire-impact),
 [`tools.md` § Approval Policy](../design/tools.md#approval-policy),
 [`tools.md` § Asking The User](../design/tools.md#asking-the-user)
 

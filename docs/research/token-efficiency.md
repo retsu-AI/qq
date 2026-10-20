@@ -1,15 +1,16 @@
 # Token efficiency: baseline and opportunities
 
 This research inventory describes QQ at `8089a0e` (2026-09-23). It is not
-an implementation claim or a performance receipt. Future work belongs to the
-[token-efficiency plan](../plans/token-efficiency.md); the decision proposed
-for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
+an implementation claim or a performance receipt. The original proposal is in the
+[token-efficiency plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/token-efficiency.md); the decision proposed
+for review was [ADR-0043](../adr/0043-verified-task-efficiency.md). Current work
+follows the [core stabilization plan](../plans/README.md).
 
 ## Existing mechanisms
 
 | Mechanism | Evidence | What this does not establish |
 | --- | --- | --- |
-| Hash-aware reads, outlines/ranges, bounded search, batched edits, spills and exact recall | [Tool contracts](../design/tools.md); [tool-layer plan](../plans/tool-layer.md) | That defaults minimize tokens per successful task; T13 remains an evaluation owner |
+| Hash-aware reads, outlines/ranges, bounded search, batched edits, spills and exact recall | [Tool contracts](../design/tools.md); [tool-layer plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md) | That defaults minimize tokens per successful task; evaluation was proposed under T13 |
 | Provider prompt-cache breakpoints | [Providers](../design/providers.md), prompt-cache discussion | Cross-turn cache-hit rate, prefix stability, or savings across compaction |
 | Bounded delegation and experimental worker/depth arms | [Delegation plan](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md); `benchmarks/arms/` | That more agents beat root-only work on tokens or dollars per pass |
 | Durable history and bounded model-facing tool output | [Transcript](../design/transcript.md); [ADR-0019](../adr/0019-spill-handles.md) | A shared cross-agent evidence protocol or arbitrary permission to read another session |
@@ -17,8 +18,8 @@ for review is [ADR-0043](../adr/0043-verified-task-efficiency.md).
 | Evaluation comparison and usage accounting | [Delegation evaluation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md); [evaluation program ENG-809](https://linear.app/retsu-ai/issue/ENG-809) | A complete, deduplicated task-tree waste report with uncertain usage explicitly represented |
 
 These are source/document observations, not fresh benchmark results. Tracker
-status and merged implementation can differ; the owning ledger and exact commit
-must be checked before an implementation starts.
+status and merged implementation can differ; verify the current source before
+acting on these historical proposals.
 
 ## Cost model
 

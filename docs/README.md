@@ -10,8 +10,7 @@ below is for people changing QQ.
 | why something is the way it is | [`adr/README.md`](adr/README.md) |
 | what evidence motivated a plan | `research/` below |
 | what is being built next and how it is accepted | [`plans/README.md`](plans/README.md) |
-| what is in flight right now and its evidence | [`plans/progress/README.md`](plans/progress/README.md) |
-| how to do a unit of work or review one | [`plans/workflow.md`](plans/workflow.md) |
+| how to do a unit of work or review one | [`AGENTS.md`](../AGENTS.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | how to run, measure, or qualify something | `runbooks/` below |
 
 ## Design — `design/`, the system as built
@@ -46,23 +45,21 @@ date and the plan that acts on it.
   adapter placement, acceptance criteria.
 - [`run-reliability.md`](research/run-reliability.md) (2026-09-21) — why
   sessions do not finish: failure taxonomy from the live session store,
-  findings R01–R12. Acted on by [runtime reliability](plans/reliability.md).
+  findings R01–R12. Current work: [core stabilization](plans/README.md).
 - [`onboarding.md`](research/onboarding.md) (2026-09-22) — first-run and
   configuration UX, findings O01–O20. The onboarding plan that acted on it
   has closed.
 - [`token-efficiency.md`](research/token-efficiency.md) (2026-09-23) —
-  baseline mechanisms and hypotheses. Acted on by
-  [`plans/token-efficiency.md`](plans/token-efficiency.md).
+  baseline mechanisms and hypotheses. Current work: [core stabilization](plans/README.md).
 - [`core-autonomy.md`](research/core-autonomy.md) (2026-09-28) — what stops
   `qq-core` from running one task unattended for hours and from being
-  embedded. Acted on by [runtime reliability](plans/reliability.md).
+  embedded. Current work: [core stabilization](plans/README.md).
 - [`goal-pursuit.md`](research/goal-pursuit.md) (2026-09-28) — how the
   reference harnesses pursue one objective over time, and the positions
-  QQ's `/goal` takes. Acted on by [`plans/goals.md`](plans/goals.md).
+  QQ's `/goal` takes. Current work: [core stabilization](plans/README.md).
 - [`action-bias.md`](research/action-bias.md) (2026-10-13) — why runs read
   instead of finishing: shell reads counted as work, re-reads, delegation
-  wall time, and what the reference harnesses do instead. Acted on by
-  [runtime reliability](plans/reliability.md).
+  wall time, and what the reference harnesses do instead. Current work: [core stabilization](plans/README.md).
 
 ## Decisions — `adr/`
 
@@ -72,16 +69,10 @@ write one" in [`adr/README.md`](adr/README.md).
 
 ## Plans — `plans/`
 
-Active plans only, each with a status block, task index, and acceptance.
-Priority order and ownership in [`plans/README.md`](plans/README.md). Process
-in [`plans/workflow.md`](plans/workflow.md). Templates in
-[`plans/templates/`](plans/templates/).
-
-## Progress — `plans/progress/`
-
-One ledger per active plan, a root ledger for shared-file work and ADR
-numbering, [`decisions-needed.md`](plans/progress/decisions-needed.md), and
-phase-gate evidence.
+One [core stabilization plan](plans/README.md) defines the remaining work
+and its acceptance. Issues and PRs carry assignments and verification. Retired
+plans and evidence remain recoverable through Git history; no progress ledger
+or reservation document is required.
 
 ## Runbooks — `runbooks/`
 
@@ -118,13 +109,10 @@ these files at build time ([`runbooks/website.md`](runbooks/website.md)).
 1. Design docs are stateless: no status lines, checklists, or pending markers.
    Amend them in the commit that changes behavior.
 2. ADRs are one decision, one page, immutable once accepted.
-3. Plans are mortal: phases collapse to one row when they close; a fully
-   shipped plan moves its durable content to `design/` and is deleted,
-   with navigation updated. Historical evidence ledgers may remain when ADRs
-   or research require them; mark them historical and link their successor.
-4. Ledgers are append-only evidence with one writer each; raw measurements
-   stay under `target/qq-perf/` and out of Git.
-5. Research that motivated a plan lives in `research/`, not in the plan or in
-   `design/`. It is a dated snapshot and is not amended as work ships.
-6. File names say what the file is about, without dates or slice IDs. A plan
-   and its ledger share one name.
+3. Keep one current stabilization plan. Remove completed work; move a durable
+   contract to `design/` only when it describes shipped behavior. Historical
+   links can point to the original commit instead of maintaining old ledgers.
+4. Keep raw measurements under `target/` and out of Git. Record relevant
+   results with the issue or PR.
+5. Research is dated evidence, not a work queue or an implementation claim.
+6. File names describe their contents, without dates or slice IDs.

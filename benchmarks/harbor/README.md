@@ -226,9 +226,11 @@ The comparison reports the discordant-pair table (`both_passed`,
 McNemar p-value, both arms' scorecards and their delta, and the candidate's
 dollars-per-pass as a ratio of the baseline's with a percentile bootstrap
 interval over task pairs (deterministic from `--seed`; `--resamples` defaults
-to 2000). A ratio below 1.0 favors the candidate. The R7 promotion gate in
-`docs/plans/terminal-bench.md` reads: ratio interval entirely below
-0.80 with no meaningful pass-rate loss.
+to 2000). A ratio below 1.0 favors the candidate. The historical R7 proposal in the
+[terminal-bench plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/terminal-bench.md)
+used a ratio interval entirely below 0.80 with no meaningful pass-rate loss.
+That proposal is not a current delivery gate; current work follows the
+[core stabilization plan](../../docs/plans/README.md).
 
 ## Compare Against Other Harnesses
 

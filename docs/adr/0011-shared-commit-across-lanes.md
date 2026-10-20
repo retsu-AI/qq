@@ -81,5 +81,5 @@ every store call the runtime makes on behalf of already-admitted work.
   the_runtime`, `saturated_prepared_rejection_settles_and_keeps_priced_
   accounting_known_zero`, `saturated_reserved_reload_waits_after_auto_
   compaction` (`sessions.rs`).
-- Ledger: `docs/plans/progress/speed-first.md` 2026-09-09 entries, including
+- Ledger: [historical progress/speed-first.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/speed-first.md) 2026-09-09 entries, including
   the probe timelines.

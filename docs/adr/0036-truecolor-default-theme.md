@@ -13,7 +13,7 @@ fixed RGB values for `brand` and `surface`. That palette varies with every
 terminal emulator and user color scheme: "dark grey" is unreadable on some
 and indistinguishable from "white" on others, and the surface tint the
 redesign depends on (code panels, inline code, selection rows, diff tints in
-`docs/plans/tui-redesign.md` § S3–S4) cannot be expressed in ANSI colors at
+[historical tui-redesign.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tui-redesign.md) § S3–S4) cannot be expressed in ANSI colors at
 all. The redesign's contrast and rhythm work was being reviewed against a
 default nobody could reproduce.
 
@@ -87,5 +87,5 @@ in user configuration, which named the ANSI palette.
   `the_default_theme_rule_picks_ink_on_truecolor_and_terminal_otherwise`,
   `the_qq_alias_resolves_to_ink_or_terminal_by_truecolor_and_explicit_names_win`,
   `the_theme_picker_lists_ink_and_terminal_and_marks_the_default_rule_pick_active`
-- `docs/plans/tui-redesign.md` § S6, decision D1; ledger
-  `docs/plans/progress/tui-redesign.md` U5 receipt
+- [historical tui-redesign.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tui-redesign.md) § S6, decision D1; ledger
+  [historical progress/tui-redesign.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/tui-redesign.md) U5 receipt

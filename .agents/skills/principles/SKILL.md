@@ -1,12 +1,12 @@
 ---
 name: principles
-description: Engineering principles for qq work, one section each (prove it works, root causes, testing behavior, subtraction, encoding lessons, explaining numbers, context, Rust style). Load when qq-mode names one.
+description: QQ engineering principles for observable behavior, root causes, subtraction, focused tests, and meaningful measurements.
 ---
 
 # Principles
 
-Each section: when it applies, the rule, and what it changes in practice
-here. Cite the section name in your reply when it changed a decision.
+Use the sections relevant to the task. The user's scope and `AGENTS.md`
+govern; reading this reference creates no extra work or reporting gates.
 
 ## Prove it works
 
@@ -16,9 +16,9 @@ Verify against the real artifact: run the feature, read the value, inspect
 the diff. Not a proxy ("it compiles"), not a self-report ("tests should
 pass"), not a different surface ("the unit test passes" for a CLI bug).
 
-- The proof for a CLI or server behavior is a `cargo xtask smoke` scenario
-  or a `verify-qq` drive, not only a unit test.
-- Paste `cargo xtask check --evidence`; never retype results.
+- Exercise changed CLI, TUI, or server behavior directly or through an
+  existing smoke scenario or `verify-qq` drive.
+- Report the relevant observed result. Read-only work needs no build gate.
 - If you could not verify something, say so and say why.
 
 ## Fix root causes
@@ -43,7 +43,7 @@ replaced by `Default::default()`, rewrite the assertion or delete the test.
   `#[tokio::test(start_paused = true)]`. `cargo xtask lint` counts sleeps.
 - No wall-clock upper bounds in tests; those are benches or perf budgets.
 - Prefer a new row in an existing table-driven test over a new function.
-- Every bug fix has a test that fails before the fix and passes after.
+- Every runtime bug fix has a test that fails before the fix and passes after.
   Show it failing first.
 
 ## Subtract before you add
@@ -53,15 +53,15 @@ replaced by `Default::default()`, rewrite the assertion or delete the test.
 Delete dead code, one-caller wrappers, duplicate tests, and stale
 compatibility paths first; then build on the smaller base. The smallest
 change that solves the problem wins. No placeholder crates, extension
-points, or options without a caller (`AGENTS.md` § Engineering priorities).
+points, or options without a caller (`AGENTS.md` § Code rules).
 
 ## Encode lessons in structure
 
 **When:** you, a reviewer, or the user correct the same thing twice.
 
 Turn the rule into a type, a lint (`xtask/src/lint.rs`, `[workspace.lints]`),
-a CI step, or a test, in that order of preference. Add the rule and its
-enforcer. Run `.qq/skills/qq-mode/playbooks/correct.md`.
+a CI step, or a focused behavioral test when it prevents the actual mistake.
+Do not create a separate process or document merely to record a correction.
 
 ## Explain the number
 
@@ -76,8 +76,8 @@ the command, host load, and raw output path.
 
 **When:** a search or output is large, or you are about to read many files.
 
-Send wide searches and long logs to a subagent with a precise question and
-a required answer shape. Keep conclusions, `file:line` citations, and
+When delegation helps, give a subagent a precise question and owned paths.
+Keep conclusions, `file:line` citations, and
 decisions in the main thread; not raw output. Read
 `target/qq-check/last.json` instead of rerunning a gate to see its output.
 
@@ -85,7 +85,7 @@ decisions in the main thread; not raw output. Read
 
 **When:** writing Rust here.
 
-`AGENTS.md` § Rust style is the rule. The ones reviewers correct most:
+`AGENTS.md` § Code rules is the rule. The ones reviewers correct most:
 handle expected failures explicitly instead of a reflexive `?`; typed
 `thiserror` errors with sources; exhaustive `match` with no silent `_`
 fallback; no blocking work or sync lock across `.await` on a Tokio worker;

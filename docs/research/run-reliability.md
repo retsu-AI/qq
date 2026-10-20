@@ -4,8 +4,9 @@ Research snapshot: 2026-09-21, QQ `2e5e2ce`. Reference trees under `.source/`
 at the revisions recorded in
 [`harness-comparison.md`](harness-comparison.md)
 § Scope. This document records evidence and proposes work; it does not claim
-implementation. Implementation status lives in
-[`../plans/progress/autonomous-core.md`](../plans/progress/autonomous-core.md).
+implementation. Historical implementation receipts are in the
+[autonomous-core ledger](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/autonomous-core.md).
+Current work follows the [core stabilization plan](../plans/README.md).
 
 ## Question
 

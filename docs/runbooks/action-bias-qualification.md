@@ -1,5 +1,10 @@
 # Action-bias qualification
 
+This is a reference for the existing historical-cohort export tool, not a
+required stabilization gate. For immediate investigation, use
+[`run-output-queries.md`](run-output-queries.md). No multi-day observation
+period is required for current work.
+
 `cargo xtask action-bias` exports and recounts a fixed observation cohort without
 contacting a model or opening the migrating session runtime. Export reads one
 SQLite snapshot in read-only mode. Format 3 records the store ID, schema, UTC
@@ -110,9 +115,8 @@ Historical NULL/V1 receipts cannot recover inherited PATH/TMPDIR or producer
 provenance and remain unqualified. No current manifest or build identity is
 attached retrospectively. A missing receipt does not prove a process never ran.
 
-A tooling receipt does not establish the seven-day treatment cohort or mark AB6
-research accepted. Observation requires one pinned deployed runtime build,
-retirement of earlier writers, seven complete UTC days and the research appendix's
-other metrics, read identity and instruction coverage evidence. Mixed or
-unverifiable producers leave the cohort unqualified. Paid evaluations require
-ENG-809 authorization.
+A tooling receipt describes the exported records and their provenance; it
+does not prove task completion or a causal improvement. Mixed or unverifiable
+producers leave the tool's cohort qualification unavailable. Historical AB6
+acceptance requirements are retained in Git history, not imposed on current
+work. Paid evaluations require an explicitly agreed task set and spend cap.

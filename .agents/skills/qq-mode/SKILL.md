@@ -1,105 +1,63 @@
 ---
 name: qq-mode
-description: Start here for any non-trivial task in the qq repo (feature, bug fix, refactor, perf, tests, protocol change, review, PR). Picks the playbook, sets the todo list, and names the gates that prove the work.
+description: Complete a QQ task with a narrow reproduction, the smallest fix, relevant verification, and the review the user requested.
 ---
 
-# qq mode
+# QQ work
 
-The operating procedure for agents in this repository. `AGENTS.md` holds the
-repository facts and rules; this skill holds the procedure. When the two
-disagree on process, this skill wins; on Rust style or architecture,
-`AGENTS.md` wins.
+The user's request sets the scope and stopping point. `AGENTS.md` governs
+repository work; this skill adds no approval gates, ledgers, or mandatory
+documents. Planned work starts at `docs/plans/README.md`.
 
-## Non-negotiables
+Work within the authorized task, workspace, and tool permissions. Ask only
+when the next action crosses that boundary; do not request approval for each
+shell command or repeat permission already granted. Enforce the boundary
+through the available tools and policy, without bypassing a denial.
 
-1. **Pick a playbook** that matches the task and follow its steps where they
-   help. Skip steps that don't apply; the user's request is the scope.
-2. **Every claim of "works" carries evidence from the real artifact.** A test
-   name and its pass, `cargo xtask check` output, a `cargo xtask smoke`
-   scenario, or a `verify-qq` drive. "It compiles" and "the change is small"
-   are not evidence. Label anything you did not observe as *inferred* or
-   *guess* in the same sentence.
-3. **Iterate on the narrowest check; run the gate once at the end.**
-   - While editing: `cargo nextest run -p <crate> -E 'test(/<name>/)'`.
-   - Before pushing: `cargo xtask check`, once.
-   - User-visible behavior: `cargo xtask smoke`.
-   - Perf, release builds, and `--full` belong to CI unless the task is
-     specifically about them. Never `sleep` to wait on a command.
-4. **Read failures from the report, not the scrollback.**
-   `target/qq-check/last.json` lists each failing test, its first panic
-   lines, and the exact rerun command. Smoke failures keep their evidence in
-   `target/qq-smoke/<scenario>/` (stdout, stderr, `provider-requests.txt`,
-   the session store).
-5. **Fix the cause, not the gate.** Never weaken an assertion, add a sleep,
-   add `#[ignore]`, raise `SLEEP_CEILING`, or add `#[allow(...)]` to get
-   green. If a gate is wrong, fix the gate in its own commit and say why.
-6. **Encode repeated corrections** in a lint rule or test when the same
-   mistake recurs. Prose is the last resort.
+## Do the work
 
-## Playbooks
+1. Read `git status` and the relevant code. Use your own worktree when other
+   agents are active; give delegated work explicit owned paths. Preserve
+   other people's changes.
+2. Identify the requested observable result. For a runtime defect, reproduce
+   it with the narrowest behavioral test and show that test failing before
+   fixing the cause. For a refactor, preserve the observable contract.
+   Read-only and documentation tasks do not need invented runtime tests.
+3. Make the smallest justified change. Delete obsolete code and conflicting
+   instructions instead of adding layers. Update guide or design docs only
+   when the change makes them wrong.
+4. Iterate with the relevant narrow test:
+   `cargo nextest run -p <crate> -E 'test(/<pattern>/)'`.
+   Exercise the changed CLI, TUI, or server behavior directly or through an
+   existing smoke scenario or `verify-qq` drive. A simulated provider
+   proves the exercised runtime behavior, not the model's ability to work.
+5. Review the final diff against the branch base, including delegated edits.
+   Check for unrelated reversions, missing requested behavior, and weakened
+   assertions. For a PR, commit before the final gate so its evidence
+   identifies the commit. If the pre-push hook is enabled, let it run that
+   gate during push; otherwise run `cargo xtask check` once before pushing.
+   On failure, read `target/qq-check/last.json` and use the named rerun
+   command while fixing the cause. Do not loop the full gate.
 
-| Task | Playbook |
-| --- | --- |
-| A read-only question: how does X work, why, are we sure | `.qq/skills/qq-mode/playbooks/investigation.md` |
-| A defect to reproduce, root-cause, and fix | `.qq/skills/qq-mode/playbooks/bug-fix.md` |
-| New or changed behavior | `.qq/skills/qq-mode/playbooks/feature.md` |
-| Wire type, plan descriptor, or store schema change | `.qq/skills/qq-mode/playbooks/feature.md` plus the `protocol-bump` skill (`.qq/packs/protocol/skills/protocol-bump/SKILL.md`) |
-| Behavior-preserving restructure (rename, extract, move, dedupe) | `.qq/skills/qq-mode/playbooks/refactoring.md` |
-| A measured slowness or a hot-path change | `.qq/skills/qq-mode/playbooks/perf.md` |
-| Flaky, slow, duplicated, or low-value tests | `.qq/skills/qq-mode/playbooks/test-audit.md` |
-| TUI rendering or layout change | `.qq/skills/qq-mode/playbooks/feature.md`; goldens via `QQ_UPDATE_GOLDENS=1`, then review `git diff crates/qq-tui/tests/goldens/` |
-| Docs-only change | `cargo xtask check` (fmt and lint; guide edits also run `docs_truth`), then `.qq/skills/qq-mode/playbooks/opening-a-pr.md` |
-| CI, xtask, or skill change | `.qq/skills/qq-mode/playbooks/feature.md`; prove it with `cargo nextest run -p xtask` and one real run of the changed command |
-| A slice from a plan in `docs/plans/` | `.qq/skills/qq-mode/playbooks/slice.md` (wraps one of the above) |
-| Review someone else's PR | `.qq/skills/qq-mode/playbooks/review.md` |
-| Drive an open PR to merge-ready | `.qq/skills/qq-mode/playbooks/babysit.md` |
-| Resume another agent's work or hand yours off | `.qq/skills/qq-mode/playbooks/session-pickup.md` |
-| A recurring mistake to encode as a rule | `.qq/skills/qq-mode/playbooks/correct.md` |
-| Dependency bump or release | stop and ask; then `docs/runbooks/release.md` for releases |
-| Any of the above is ready for review | `.qq/skills/qq-mode/playbooks/opening-a-pr.md` (every playbook ends here) |
+Do not run perf, release builds, mutation testing, or soak tests unless the
+task calls for them. Report observed limitations and budget overruns; do not
+invent new blockers. Encode a recurring defect in a focused behavioral test,
+type, or lint when it prevents the actual mistake.
 
-No row fits: write a five-step plan in the same shape (reproduce or
-baseline, change, verify on the real surface, encode, PR) and say so.
+## Deliver the requested result
 
-## Principles
+Push, open a PR, or merge only when the user has authorized it. Existing
+authorization persists; do not ask again. A requested final PR is non-draft
+unless the user says otherwise. Keep its description to the user-visible
+change, relevant verification, and known impact; link an existing issue.
 
-Load the `principles` skill (`.qq/skills/principles/SKILL.md`) and read
-the section before you apply it. Name
-the principle in your reply when it changed a decision.
+When review is requested, check findings against the code and fix valid ones
+in new commits. Explain incorrect findings with evidence. Do not game the
+reviewer, dismiss findings to obtain approval, or substitute a clean receipt
+for a required Codex 👍. When the user requires that reaction, obtain it for
+the final non-draft PR head after the last change.
 
-- **Prove it works**: before saying done.
-- **Fix root causes**: debugging; reproduce first.
-- **Test behavior, not implementation**: writing, changing, or keeping a test.
-- **Subtract before you add**: sizing a diff; tempted to add a layer.
-- **Encode lessons in structure**: correcting the same thing twice.
-- **Explain the number**: before trusting a timing or benchmark.
-- **Guard the context window**: large outputs, wide searches.
-- **Rust style**: writing Rust here (`AGENTS.md` § Rust style is the rule).
-
-## Autonomy
-
-- Proceed without asking on reversible work: edits, tests, local commits,
-  branches, worktrees.
-- **Always stop and ask before:** force-pushing a shared branch, tagging or
-  releasing, deleting user data or sessions, editing another agent's
-  worktree, or bumping a workspace dependency.
-- When the user asks "can I merge?", answer yes or no in the first word,
-  with the single blocker if no. Budgets and bot emoji are not blockers.
-- Work in your own worktree when another agent is active
-  (`git worktree add .worktrees/<name> -b <branch> origin/main`). Do not
-  share `CARGO_TARGET_DIR` with a worktree whose builds you depend on at the
-  same moment; `cargo xtask` reports and homes stay per checkout regardless.
-
-## Subagents
-
-Give a subagent: the playbook file to follow, the owned paths, the exact
-gate it must pass (`cargo xtask check`, named smoke scenarios), and what to
-return (diff summary plus the `cargo xtask check --evidence` block). Review
-its diff yourself; do not forward its summary as your own.
-
-## The reply
-
-Lead with what changed for the user of `qq` and for the next maintainer.
-Then: what you verified and how (paste the evidence block), what you did not
-verify and why, and open decisions. Short declarative sentences. Link only
-artifacts you produced or read.
+Keep working while an actionable step remains. When review is requested, wait
+only after the concrete changes are pushed and actionable work is complete.
+Stop at the user's requested boundary. Finish with the result, what was
+verified, and any remaining blocker.

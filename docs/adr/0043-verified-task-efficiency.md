@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-23
 **Deciders:** QQ lead / token-efficiency plan review
-**Proposed by:** [TE0](../plans/token-efficiency.md); governs planned TE1 and
+**Proposed by:** [TE0](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/token-efficiency.md); governs planned TE1 and
 promotion gates, not an implementation receipt.
 
 ## Context
@@ -57,6 +57,6 @@ a paid run or any new runtime default.
 
 - [Baseline inventory](../research/token-efficiency.md), source `8089a0e`.
 - [Delegation evaluation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md), ENG-812.
-- [Tool ablations](../plans/tool-layer.md), ENG-813.
+- [Tool ablations](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md), ENG-813.
 - [Evaluation program](https://linear.app/retsu-ai/issue/ENG-809).
 - No new benchmark, live qualification or implemented saving is claimed.

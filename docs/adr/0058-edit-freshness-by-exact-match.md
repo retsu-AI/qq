@@ -3,7 +3,7 @@
 **Status:** Accepted (2026-10-13, #281)
 **Date:** 2026-10-11
 **Deciders:** lead; second reviewer required (changes a safety rule)
-**Implements:** [`tool-layer.md`](../plans/tool-layer.md) § D10, T19 (ENG-1030). Amends [`tools.md`](../design/tools.md) § Edit Semantics and § Optimistic Concurrency step 2
+**Implements:** [`tool-layer.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md) § D10, T19 (ENG-1030). Amends [`tools.md`](../design/tools.md) § Edit Semantics and § Optimistic Concurrency step 2
 
 ## Context
 
@@ -107,5 +107,5 @@ is there. None of these meet the bar, so they keep the old rule.
 - Regressions in `tools/edit.rs` tests: the traced shapes (a)–(i) of the
   plan, including `a_write_between_plan_and_apply_is_stale_and_not_clobbered`
   and `a_duplicate_old_on_an_unread_file_is_not_read`.
-- D10 audit: [`progress/tool-layer.md`](../plans/progress/tool-layer.md)
+- D10 audit: [`progress/tool-layer.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/tool-layer.md)
   2026-10-11.
