@@ -1585,6 +1585,37 @@ async fn manual_compaction_folds_all_portions_and_commits_only_the_final_summary
 }
 
 #[tokio::test]
+async fn manual_fold_restart_discards_abandoned_truncated_summary() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::Truncated("ABANDONED partial summary".to_owned()),
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("intermediate")),
+            AutoCompactScript::Text(valid_summary("FINAL_RESTART")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("FINAL_RESTART"));
+    assert!(!summary.contains("ABANDONED"));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(!request_texts(&requests[4]).join("\n").contains("ABANDONED"));
+}
+
+#[tokio::test]
 async fn a_single_inherited_summary_recovers_at_the_same_cutoff() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text("evidence ".repeat(12_000)),

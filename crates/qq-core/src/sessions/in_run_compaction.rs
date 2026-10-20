@@ -333,6 +333,7 @@ async fn compact_in_run(
                 }
             }
             Some(Ok(crate::runtime::SummarizeStep::TurnCompleted {
+                model_work,
                 ordinal,
                 message,
                 usage,
@@ -352,7 +353,7 @@ async fn compact_in_run(
                     .persist_in_run_summary_turn(
                         &compaction,
                         ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            model_work,
                             goal_notices: Vec::new(),
                             reserved_goal_notices: 0,
                             turn_ordinal: ordinal,

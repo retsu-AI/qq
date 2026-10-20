@@ -1,7 +1,7 @@
 crates/qq-auth/src/tests.rs	2505	async fn independent_codex_stores_share_one_refresh_owner_and_newest_epoch() {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-client/src/lib.rs	1015	async fn a_dripping_body_times_out_rather_than_waiting_for_completion() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/lib.rs	7205	async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {	tokio::time::sleep(Duration::from_millis(600)).await;
-crates/qq-core/src/lib.rs	9282	fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {	tokio::time::sleep(Duration::from_secs(5)).await;
+crates/qq-core/src/lib.rs	7305	async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {	tokio::time::sleep(Duration::from_millis(600)).await;
+crates/qq-core/src/lib.rs	9382	fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {	tokio::time::sleep(Duration::from_secs(5)).await;
 crates/qq-core/src/plan/fingerprint.rs	129	fn fingerprint_tracks_creation_modification_replacement_and_deletion() {	std::thread::sleep(std::time::Duration::from_millis(20));
 crates/qq-core/src/sessions/store.rs	2772	async fn grouped_output_jobs_commit_once_and_a_failing_job_rolls_back_alone() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/store.rs	2853	async fn a_waiting_control_write_joins_the_output_group_and_a_read_does_not() {	tokio::time::sleep(Duration::from_millis(20)).await;
@@ -27,7 +27,7 @@ crates/qq-core/src/sessions/tests/approvals.rs	2440	async fn ask_mode_with_the_d
 crates/qq-core/src/sessions/tests/approvals.rs	2623	async fn the_session_off_switch_withdraws_the_reviewer_at_the_next_hold_without_a_restart() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/commands.rs	2064	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/compaction.rs	1458	async fn saturated_reserved_reload_waits_after_auto_compaction() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/compaction.rs	4567	async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {	tokio::time::sleep(Duration::from_millis(10)).await;
+crates/qq-core/src/sessions/tests/compaction.rs	4598	async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/contract.rs	103	async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime() {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-core/src/sessions/tests/deadlines.rs	267	async fn duration_stops_shell_while_output_persistence_is_blocked() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/deadlines.rs	435	fn stream(&self, request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(1_000)).await;

@@ -1314,6 +1314,14 @@ impl Runtime {
                             && ordinal < 64
                             && fold.split(&mut messages)
                         {
+                            ordinal += 1;
+                            yield Ok(runtime::SummarizeStep::TurnCompleted {
+                                model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                                ordinal,
+                                message: Message::assistant(String::new()),
+                                usage: Some(TokenUsage::default()),
+                                truncated: false,
+                            });
                             summary.clear();
                             continuations = 0;
                             continue 'requests;
@@ -1354,6 +1362,7 @@ impl Runtime {
                 None => completed,
             };
             yield Ok(runtime::SummarizeStep::TurnCompleted {
+                model_work: runtime::ModelWorkDisposition::Committed,
                 ordinal, message: completed, usage, truncated: truncated.is_some(),
             });
             // Overflowing the sum is a provider protocol fault; fail the
@@ -1428,6 +1437,7 @@ impl Runtime {
                 if let Some(next) = fold.advance(summary.clone()) {
                     messages = next;
                     summary.clear();
+                    continuations = 0;
                     continue;
                 }
                 yield Ok(runtime::SummarizeStep::Summary(summary)); return;
@@ -2675,6 +2685,96 @@ mod tests {
         }
         let requests = requests.lock().unwrap().clone();
         (result, requests)
+    }
+
+    #[tokio::test]
+    async fn summary_fold_resets_continuations_and_reports_rejected_work() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let complete = |text: &str| {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: text.to_owned(),
+                }),
+                Ok(ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]
+        };
+        let truncated = || {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "part ".to_owned(),
+                }),
+                Ok(ProviderEvent::Incomplete {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]
+        };
+        let mut turns = vec![vec![Err(ProviderError::ResponseFailed {
+            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+            message: "context length exceeded".to_owned(),
+        })]];
+        for _ in 0..2 {
+            for _ in 0..MAX_OUTPUT_CONTINUATIONS {
+                turns.push(truncated());
+            }
+            turns.push(complete("finished"));
+        }
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(turns.into()),
+                requests: requests.clone(),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let steps = runtime.summarize(
+            vec![
+                Message::user("evidence ".repeat(2000)),
+                Message::user(sessions::COMPACTION_INSTRUCTION),
+            ],
+            Arc::from("system"),
+            Arc::from([]),
+            256,
+            None,
+        );
+        tokio::pin!(steps);
+        let mut rejected = 0;
+        let mut summary = None;
+        while let Some(step) = steps.next().await {
+            match step.unwrap() {
+                runtime::SummarizeStep::TurnCompleted {
+                    model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                    usage,
+                    ..
+                } => {
+                    rejected += 1;
+                    assert_eq!(usage, Some(TokenUsage::default()));
+                }
+                runtime::SummarizeStep::Summary(text) => summary = Some(text),
+                _ => {}
+            }
+        }
+        assert_eq!(rejected, 1);
+        assert!(summary.unwrap().ends_with("finished"));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1 + 2 * (usize::from(MAX_OUTPUT_CONTINUATIONS) + 1)
+        );
     }
 
     #[tokio::test]

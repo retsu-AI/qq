@@ -175,6 +175,7 @@ pub(crate) enum SummarizeStep {
         input_tokens: Option<u64>,
     },
     TurnCompleted {
+        model_work: crate::runtime::ModelWorkDisposition,
         ordinal: u32,
         message: Message,
         usage: Option<qq_protocol::TokenUsage>,

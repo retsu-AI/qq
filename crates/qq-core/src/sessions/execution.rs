@@ -3706,6 +3706,12 @@ async fn execute_started_run(
             // is about to compact. The run continues; nothing to persist.
             RunInput::Event(Some(RuntimeEvent::ProviderOverflow { .. })) => {
                 current_occupancy_basis = None;
+                if internal {
+                    // A split restarts summarization, not the abandoned
+                    // truncated response's continuation.
+                    summary_text.clear();
+                    summary_continues_truncated_turn = false;
+                }
             }
             RunInput::Event(Some(RuntimeEvent::SteeringApplied {
                 message_id,

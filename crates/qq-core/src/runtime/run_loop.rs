@@ -2015,6 +2015,10 @@ impl RunState {
                                         window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
                                         window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
                                         window.compatible_request = None;
+                                        yield TurnStep::Emit(RuntimeEvent::ProviderOverflow {
+                                            turn_ordinal,
+                                            message: error.to_string(),
+                                        });
                                         yield TurnStep::NextTurn; return;
                                     }
                                     // The provider's window verdict overrides the
