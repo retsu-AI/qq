@@ -1175,6 +1175,7 @@ impl Runtime {
         stream! {
         let mut messages = messages;
         let mut summary = String::new();
+        let mut emitted_text_bytes = 0_usize;
         let mut total_usage = Some(TokenUsage::default());
         let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
@@ -1229,11 +1230,8 @@ impl Runtime {
                 match event {
                     Ok(ProviderEvent::Replay { data }) => replay = Some(data),
                     Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
-                        if summary
-                            .len()
-                            .saturating_add(text.len())
-                            .saturating_add(delta.len())
-                            > MAX_RUN_MODEL_TEXT_BYTES
+                        emitted_text_bytes = emitted_text_bytes.saturating_add(delta.len());
+                        if emitted_text_bytes > MAX_RUN_MODEL_TEXT_BYTES
                         {
                             yield Err(runtime::SummarizeError::Rejected(
                                 "summarizer output exceeded the run text bound".to_owned(),
@@ -2688,6 +2686,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_fold_preserves_the_cumulative_run_text_bound() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let portion = "x".repeat(MAX_RUN_MODEL_TEXT_BYTES / 2 + 1);
+        let turn = || {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: portion.clone(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ]
+        };
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(
+                    vec![
+                        vec![Err(ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "overflow".to_owned(),
+                        })],
+                        turn(),
+                        turn(),
+                    ]
+                    .into(),
+                ),
+                requests: requests.clone(),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let steps = runtime.summarize(
+            vec![
+                Message::user("evidence ".repeat(2000)),
+                Message::user(sessions::COMPACTION_INSTRUCTION),
+            ],
+            Arc::from("system"),
+            Arc::from([]),
+            256,
+            None,
+        );
+        tokio::pin!(steps);
+        let mut rejected = false;
+        let mut completed = false;
+        while let Some(step) = steps.next().await {
+            match step {
+                Err(runtime::SummarizeError::Rejected(message)) => {
+                    rejected = message.contains("run text bound")
+                }
+                Ok(runtime::SummarizeStep::Summary(_)) => completed = true,
+                _ => {}
+            }
+        }
+        assert!(rejected);
+        assert!(!completed);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
     async fn summary_fold_resets_continuations_and_reports_rejected_work() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let complete = |text: &str| {
@@ -3001,7 +3057,16 @@ mod tests {
                         })],
                         vec![
                             Ok(ProviderEvent::OutputTextDelta {
-                                text: "partial".to_owned(),
+                                text: "PREFIX_FRAGMENT ".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Incomplete {
+                                reason: qq_provider::IncompleteReason::OutputTokens,
+                                usage: None,
+                            }),
+                        ],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "SUFFIX_FRAGMENT".to_owned(),
                             }),
                             Ok(ProviderEvent::Completed { usage: None }),
                         ],
@@ -3062,10 +3127,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert_eq!(weights.len(), 3);
-        for (weight, request) in weights.iter().zip(requests.iter()) {
-            let boundary = request.messages().len() - 1;
+        assert_eq!(requests.len(), 4);
+        assert_eq!(weights.len(), 4);
+        let final_input = requests[3]
+            .messages()
+            .iter()
+            .flat_map(|message| message.content())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(final_input.contains("PREFIX_FRAGMENT SUFFIX_FRAGMENT"));
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { model_work: runtime::ModelWorkDisposition::RejectedBeforeWork, usage: Some(usage), .. } if *usage == TokenUsage::default())));
+        for (index, (weight, request)) in weights.iter().zip(requests.iter()).enumerate() {
+            let boundary = if index == 2 {
+                requests[1].messages().len() - 1
+            } else {
+                request.messages().len() - 1
+            };
             assert_eq!(
                 weight.reducible_message_bytes,
                 measure_messages(&request.messages()[..boundary])

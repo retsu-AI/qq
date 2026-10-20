@@ -425,6 +425,7 @@ const MODELS: &[ModelDefinition] = &[
 /// Only the context limit is portable across gateway aliases, not pricing
 /// or wire capabilities. Explicit deployment configuration takes precedence.
 pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
+    let original = model;
     let model = model
         .strip_prefix("us.")
         .or_else(|| model.strip_prefix("eu."))
@@ -436,7 +437,9 @@ pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
     MODELS
         .iter()
         .filter(|definition| {
-            definition.wire_id == model
+            definition.wire_id == original
+                || definition.canonical_id == original
+                || definition.wire_id == model
                 || definition.canonical_id == model
                 || anthropic.is_some_and(|id| {
                     definition.catalogs & ANTHROPIC_API != 0 && definition.wire_id == id
@@ -504,6 +507,10 @@ mod tests {
         ] {
             assert_eq!(gateway_context_window(id), Some(1_000_000), "{id}");
         }
+        assert_eq!(
+            gateway_context_window("us.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            Some(200_000)
+        );
         assert_eq!(gateway_context_window("gpt-6.1-sol"), Some(272_000));
         for id in [
             "unknown",

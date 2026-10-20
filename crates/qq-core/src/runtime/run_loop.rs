@@ -37,6 +37,7 @@ struct RunScope {
     inherited_compaction_attempted: bool,
     summary_fold: runtime::SummaryFold,
     summary_fold_requests: u8,
+    summary_fold_text: String,
     stall: runtime::StallScope,
     loop_guard: LoopGuard,
     guard_eligible: Vec<(ToolCallId, CallKey)>,
@@ -882,6 +883,7 @@ impl plan::CompiledAgentPlan {
                        inherited_compaction_attempted: false,
                        summary_fold: runtime::SummaryFold::default(),
                        summary_fold_requests: 0,
+                       summary_fold_text: String::new(),
                        stall,
                        loop_guard: LoopGuard::default(),
                        guard_eligible: Vec::new(),
@@ -2010,6 +2012,18 @@ impl RunState {
                                         && run.summary_fold.split(Arc::make_mut(messages))
                                     {
                                         run.summary_fold_requests += 1;
+                                        run.summary_fold_text.clear();
+                                        yield TurnStep::Emit(RuntimeEvent::AssistantTurnCompleted {
+                                            model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                                            turn_ordinal,
+                                            message: Message::assistant(String::new()),
+                                            usage: Some(TokenUsage::default()),
+                                            calls: Vec::new(),
+                                            truncated: false,
+                                            notice: None,
+                                            goal_notices: Vec::new(),
+                                            reserved_goal_notices: 0,
+                                        });
                                         env.reducible_messages = messages.len().saturating_sub(1);
                                         env.inherited_effects.clear();
                                         window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
@@ -2302,6 +2316,17 @@ impl RunState {
                             run.budget.charge_turn(terminal_usage);
                         }
                         run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
+                        if summarizer.is_some() {
+                            if calls.is_empty() {
+                                for block in assistant.content() {
+                                    if let ContentBlock::Text { text } = block {
+                                        run.summary_fold_text.push_str(text);
+                                    }
+                                }
+                            } else {
+                                run.summary_fold_text.clear();
+                            }
+                        }
                         if summarizer.is_some() && !calls.is_empty() {
                             run.summarizer_rejected_turns += 1;
                             if run.summarizer_rejected_turns > 1 {
@@ -3142,11 +3167,8 @@ impl RunState {
                         for steer in applied { yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }); }
                         yield TurnStep::NextTurn; return;
                     }
-                     if summarizer.is_some() {
-                         let summary = assistant.content().iter().filter_map(|block| match block {
-                             ContentBlock::Text { text } => Some(text.as_str()), _ => None,
-                         }).collect::<String>();
-                         if let Some(next) = run.summary_fold.advance(summary) {
+                     if summarizer.is_some()
+                         && let Some(next) = run.summary_fold.advance(std::mem::take(&mut run.summary_fold_text)) {
                              *messages = Arc::new(next);
                              env.reducible_messages = messages.len().saturating_sub(1);
                              env.inherited_effects.clear();
@@ -3154,7 +3176,6 @@ impl RunState {
                              window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
                              window.compatible_request = None;
                              yield TurnStep::NextTurn; return;
-                         }
                      }
                     yield TurnStep::Emit( RuntimeEvent::Completed { final_output });
                     yield TurnStep::Stop; return;
