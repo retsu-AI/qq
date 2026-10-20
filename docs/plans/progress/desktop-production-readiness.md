@@ -17,7 +17,7 @@
 
 - Base 8170d4f7 on feat/desktop-app; created feat/desktop-production-readiness.
 - Protected original edits: AGENTS.md and apps/desktop/src-tauri/capabilities/default.json.
-- Read workflow, architecture, protocol, ADR-0042/0062, multi-surface plan and desktop README.
+- Read workflow, architecture, protocol, ADR-0042/0065, multi-surface plan and desktop README.
 - All five reference `git pull --ff-only` operations succeeded: already current.
   Read-only parallel source investigation; no copied code or reference builds.
 - Baseline: desktop cargo test --locked 1 passed; cargo fmt --check,
@@ -117,7 +117,7 @@
   Windows CI workflow with locked installs, frontend/native gates, generated
   contract validation and manual NSIS artifact retention; it never publishes.
 - README and new guide cover controls, local metadata, input limits, diagnostics,
-  retained-history behavior, manual upgrades and signing. ADR-0062 evidence is
+  retained-history behavior, manual upgrades and signing. ADR-0065 evidence is
   appended without changing its Decision. Architecture now describes the desktop.
 - Root formatting passed. Root binary tests initially showed 15 failures because
   cmd could not find cp/rm. Retried with Git usr/bin on this process's PATH and
@@ -167,7 +167,7 @@ pushed, published, merged, rebased or written to a PR.
 | DP4 | Native options/actions/files, actor recovery/lifetime, single instance, notifications and generated view contracts |
 | DP5 | Settings, command palette, pickers, remount-safe drafts and modal approval safeguards |
 | DP7 | Measured transcript virtualization, isolated fixture and release version guard |
-| DP8 | Windows CI, guide/README, architecture and appended ADR-0062 evidence |
+| DP8 | Windows CI, guide/README, architecture and appended ADR-0065 evidence |
 
 No engine/protocol change needs a separate upstream PR. Root src/, crates/,
 Cargo.toml and Cargo.lock match the base. The native desktop remains its own
