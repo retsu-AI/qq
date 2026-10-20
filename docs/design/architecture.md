@@ -303,7 +303,7 @@ xtask/
   supervises the same `qq serve` binary; it does not embed another runtime.
   File mentions reuse `qq-core::mentions` on bounded blocking work. Desktop
   preferences, aliases and archive flags do not alter authoritative sessions.
-  See ADR-0062 and the desktop README for native integration and packaging.
+  See ADR-0065 and the desktop README for native integration and packaging.
 
 The direct workspace dependency graph is:
 
