@@ -55,10 +55,12 @@ pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
 /// is no deadline; this bounds what "a deadline" may mean.
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
-/// Every environment variable [`LoadRequest::from_process_env`] reads, in
-/// the order it reads them. Provider credential variables are not here: they
-/// are resolved at request time and listed by
-/// [`provider_credential_variables`].
+/// Every supported environment variable [`LoadRequest::from_process_env`]
+/// reads, in the order it reads them. It also checks
+/// [`REMOVED_ENVIRONMENT_VARIABLES`] and fails when one is set, so a caller
+/// that captures or clears process inputs must cover both lists. Provider
+/// credential variables are not here: they are resolved at request time and
+/// listed by [`provider_credential_variables`].
 pub const ENVIRONMENT_VARIABLES: [&str; 5] = [
     "QQ_CONFIG",
     "QQ_CONFIG_CONTENT",
