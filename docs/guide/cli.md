@@ -114,7 +114,7 @@ A successful control exits 0 even when the resulting goal is paused.
 | `sources` | every file consulted in precedence order, and `pending trust:` lines |
 | `check` | `configuration is valid (model: …)` or the first error; exit 1 on error |
 | `show` | the merged configuration with secrets redacted, then TUI settings |
-| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`, `approval_timeout`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `pack.ID`, `grant.tool.NAME`, `grant.shell.PREFIX`, `tui.theme`, `tui.bindings.ACTION` |
+| `explain FIELD` | which source set `FIELD`: `model`, `organization`, `worker_model`, `delegation`, `audit`, `approval_delegate`, `approval_timeout`, `reasoning_effort`, `max_output_tokens`, `provider.NAME`, `profile.NAME`, `pack.ID`, `grant.tool.NAME`, `grant.shell.PREFIX`, `tui.theme`, `tui.bindings.ACTION` |
 
 ## `qq auth …`
 
@@ -208,18 +208,6 @@ between global packs and your global config.
 | `use NAME` | make one the default (`--organization` / `QQ_ORGANIZATION` override) |
 | `refresh NAME` | refetch, keeping the last good copy on failure |
 | `remove NAME` | forget it |
-
-## `qq jev …`
-
-Optional TypeSafe Jev. `setup [--allow-file]` stores the API key and enables nothing;
-`observe` assesses completed runs on the running local server without gating
-them. [`../runbooks/jev.md`](../runbooks/jev.md) explains what the observer
-reads and how its receipts resume.
-
-| Subcommand | Effect |
-| --- | --- |
-| `setup [--allow-file]` | prompt for and store the TypeSafe API key; `--allow-file` permits a user-only plaintext file when no OS keyring exists |
-| `observe --workspace-id UUID --receipts PATH --max-cost-usd V [--session-id ID] [--max-requests N] [--max-total-tokens N] [--duration-seconds N]` | follow the workspace (or one session) and write one JSONL receipt per assessed run to `--receipts`; stops at the spend cap, `--max-requests` (default and limit 32), `--max-total-tokens` (default 4194304), or `--duration-seconds` (default 300, at most 86400) |
 
 ## `qq version`
 

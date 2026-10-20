@@ -42,7 +42,6 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [token efficiency](token-efficiency.md) | Remaining TE1 accounting and TE2–TE8 experiments; consumes D6b/T13/cache receipts |
 | [speed first](speed-first.md) | Residual backend performance gates, H22 deferrals and gated H10–H12; shipped backend design is in architecture |
 | [TUI](tui-redesign.md) | L4 split transcripts, U8 chrome |
-| [Jev](jev.md) | Remaining JV3–JV13 precision, hold lifecycle, receipts, UX and qualification |
 | [multi-surface clients](multi-surface-clients.md) | Enrollment/exposure before remote clients; remaining W/S/U/D/M work |
 | [run snapshots](run-snapshots.md) | Unscheduled proposal; no active delivery inferred |
 | [v0.1.8 preparation](release-0.1.8.md) | Pre-bump gates, contract deltas and the draft Upgrading block for the v0.1.8 bump PR |

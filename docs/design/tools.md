@@ -1533,7 +1533,7 @@ calls the mode already holds. It is a top-level or per-profile configuration
 key (`on`, `off`, or absent) and the `QQ_APPROVAL_DELEGATE` override; absent
 means the mode's own default above, so a configuration that never mentions it
 behaves exactly as before. It is a sensitive declaration under project trust
-like `jev_routing`. Who is consulted, by mode and setting:
+like `reviewer_model`. Who is consulted, by mode and setting:
 
 | mode | absent | `on` | `off` |
 | --- | --- | --- | --- |
@@ -1557,35 +1557,15 @@ authority check applies: every value asks at least as much of a human as the
 configured choice could. The override is `SessionSummary.approval_delegate`,
 absent when none is set.
 
-"The reviewer" in the table is a chain (ADR-0041). With `jev_approval: true`
-and a stored TypeSafe key, Jev is asked first: one typed `choice` over
-`approve` / `deny` / `abstain` against the approval preview (command or diff,
-host, task brief, recent action names, grants, mode), each section bounded to
-8 KiB and secret-masked, the whole request refused past 64 KiB, the call
-bounded at 5 s. A confident `approve` or `deny` (confidence and winning
-probability both at least 0.7 under the pinned `jev-1.13.0` contract) is the
-delegate's verdict. `abstain`, low confidence, a malformed reply, a transport
-failure, a timeout, or a missing key falls through to `reviewer_model`, then
-to the human, with the reason attached to the escalation. Jev is never failed
-open to approve. Whether Jev is consulted is the held call's compiled plan
-([ADR-0052](../adr/0052-jev-approval-activation-from-plan.md)):
-the run's `jev_approval` after profile and override merging
-(`ReviewRequest::jev_approval`), so a profile's `jev_approval: false` wins
-over a top-level on, a profile-only on enables, and a configuration edit
-applies to the next root run with no credential change or restart. The value
-is in the plan descriptor as `approval_delegate` (so it is durable run
-identity and an edit yields a new plan), and a run's routed reload and owned
-children inherit it rather than re-reading configuration. The
-reviewer never reloads configuration itself; it caches only a built TypeSafe
-client, one entry per credential epoch (a failed key read is retried at the
-next hold). A stored key with `jev_approval` off
-is never read (ADR-0030). `ReviewVerdict` names the
-delegate that decided; a delegate-recorded grant row carries it as
-`source = 'jev'` or `source = 'delegate'` (§ Grant Lifetimes), and the
-`tool_approval_resolved` event carries it as `delegate: jev | reviewer`
-beside `approved_by_reviewer` / `denied_by_reviewer` (protocol 28), so a
-supervisor can tell the two apart from the stream alone. Human, timeout, and
-answer resolutions carry no `delegate`.
+"The reviewer" in the table is `reviewer_model`, then the human (ADR-0041).
+`ReviewVerdict` names the delegate that decided; a delegate-recorded grant
+row carries `source = 'delegate'` (§ Grant Lifetimes), and the
+`tool_approval_resolved` event carries `delegate: reviewer` beside
+`approved_by_reviewer` / `denied_by_reviewer` (protocol 28), so a supervisor
+can tell a delegate resolution from the stream alone. Recorded `source =
+'jev'` rows and `delegate: jev` events from older versions still decode but
+are never written. Human, timeout, and answer resolutions carry no
+`delegate`.
 
 Decision by effect class before grants (ADR-0021):
 
@@ -1604,8 +1584,8 @@ refused before the mode, like a shell `Forbidden` (§ Network Tools).
 **Two clocks.** A held call is bounded by two independent timers, neither
 of which consumes the other. The delegate's: the gate waits
 `SessionRuntimeOptions::delegate_timeout` (20 s) for a verdict, past which
-the pending review is dropped and treated as an `escalate`; Jev bounds
-itself at 5 s and the reviewer model at 10 s, so this is a backstop for a
+the pending review is dropped and treated as an `escalate`; the reviewer
+model bounds itself at 10 s, so this is a backstop for a
 delegate that breaks its contract, never the normal path. The human's:
 `approval_timeout` is `None` by default, meaning **no server deadline**. An
 interactive hold waits for the client, the run's own deadline
@@ -1644,12 +1624,11 @@ carry three lifetimes:
   than that, or past the session cap still approves the call, but as a
   once-approval: nothing is recorded and nothing is promoted. The
   approval command never fails because a grant cannot be stored.
-- **Delegate** — when the configured delegate (Jev with `jev_approval`, else
-  `reviewer_model`) approves a held call, it records a session grant of its
+- **Delegate** — when the configured delegate (`reviewer_model`) approves a held call, it records a session grant of its
   own in the same transaction as the approval: the exact command string for
   shell, the exact host for `fetch`, nothing for other tool classes. Every
-  `session_grants` row carries `source` (`human`, `delegate` for the
-  reviewer model, `jev` for Jev) and, for a delegate, the `run_id` that
+  `session_grants` row carries `source` (`human` or `delegate` for the
+  reviewer model; a historical `jev` still decodes) and, for a delegate, the `run_id` that
   recorded it. A delegate grant is deliberately narrower
   than a human one. It matches only the byte-exact command or host,
   never a prefix and never a `*.suffix`; it does not lift a `Forbidden`

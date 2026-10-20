@@ -917,9 +917,6 @@ pub(super) fn admit_side_question(
         },
         profile: parse_profile(row.5.as_deref())?,
         reasoning_effort: parse_reasoning_effort(row.6.as_deref())?,
-        checkpoint: None,
-        routing: None,
-        approval_delegate: None,
     };
     let mut messages = transcript::capture_side_context(transaction, session_id)?;
     let (status, active): (String, Option<String>) = transaction.query_row(

@@ -18,27 +18,6 @@ pub type SpawnModelValidationFuture =
 #[derive(Clone)]
 pub struct LoadedRuntime {
     pub plan: Arc<CompiledAgentPlan>,
-    pub router: Option<Arc<dyn TaskRouter>>,
-    pub(crate) routing_spend: Option<qq_protocol::CheckpointSpend>,
-}
-
-pub type TaskRoutingFuture = Pin<Box<dyn Future<Output = qq_protocol::RoutingDecision> + Send>>;
-
-/// Optional task selection performed once before ordinary run preparation.
-/// Implementations return a declared fallback on inference failure.
-pub trait TaskRouter: Send + Sync + 'static {
-    fn identity(&self) -> &'static str;
-    fn configuration_identity(&self) -> &str;
-    fn route(&self, task: String) -> TaskRoutingFuture;
-    fn max_cost_usd_nanos(&self) -> Option<u64>;
-    /// Conservative billed input ceiling, including cached input.
-    fn max_input_tokens(&self) -> Option<u64> {
-        None
-    }
-    /// Conservative billed output ceiling, including hidden reasoning.
-    fn max_output_tokens(&self) -> Option<u64> {
-        None
-    }
 }
 
 impl LoadedRuntime {
@@ -68,11 +47,7 @@ impl LoadedRuntime {
 
     #[must_use]
     pub fn new(plan: Arc<CompiledAgentPlan>) -> Self {
-        Self {
-            router: plan.runtime.task_router.clone(),
-            plan,
-            routing_spend: None,
-        }
+        Self { plan }
     }
 
     /// Compiles a plan from an already constructed runtime and its resolved
@@ -136,22 +111,10 @@ impl LoadedRuntime {
         if let Some(effort) = runtime.reasoning_effort {
             profile = profile.with_reasoning_effort(effort);
         }
-        if let Some(router) = &runtime.task_router {
-            profile = profile.with_task_router(Arc::clone(router));
-        }
-        if let Some(reviewer) = &runtime.checkpoint {
-            profile = profile.with_checkpoint_reviewer(Arc::clone(reviewer));
-        }
         profile = profile
             .with_context_cache(Arc::clone(&runtime.context_cache))
             .with_turn_recovery(runtime.turn_recovery)
             .with_approval_delegate(runtime.approval_delegate)
-            .with_approval_delegate_identity(
-                runtime
-                    .approval_delegate_identity
-                    .as_deref()
-                    .map(str::to_owned),
-            )
             .with_output_ceiling(runtime.output_ceiling);
         Ok(Self::new(CompiledAgentPlan::compile_blocking(profile)?))
     }
@@ -221,7 +184,6 @@ pub enum RuntimeLoadStage {
     LoadingConfiguration,
     ReadingCredentialMetadata,
     CompilingProvider,
-    ResolvingCheckpointCredential,
     LoadingTools,
     CompilingPlan,
     Complete,
@@ -236,7 +198,6 @@ impl RuntimeLoadStage {
             Self::LoadingConfiguration => "loading configuration",
             Self::ReadingCredentialMetadata => "reading credential metadata",
             Self::CompilingProvider => "compiling the model provider",
-            Self::ResolvingCheckpointCredential => "resolving checkpoint reviewer credentials",
             Self::LoadingTools => "loading tool integrations",
             Self::CompilingPlan => "compiling the agent plan",
             Self::Complete => "finishing runtime preparation",
@@ -294,9 +255,6 @@ impl RuntimeLoadProgress {
             value if value == RuntimeLoadStage::CompilingProvider as u8 => {
                 RuntimeLoadStage::CompilingProvider
             }
-            value if value == RuntimeLoadStage::ResolvingCheckpointCredential as u8 => {
-                RuntimeLoadStage::ResolvingCheckpointCredential
-            }
             value if value == RuntimeLoadStage::LoadingTools as u8 => {
                 RuntimeLoadStage::LoadingTools
             }
@@ -309,85 +267,9 @@ impl RuntimeLoadProgress {
     }
 }
 
-/// A child inherits the parent's resolved reviewer, never a newly enabled
-/// workspace default. Roots leave this selection absent to resolve config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckpointSelection {
-    Disabled,
-    ReviewerIdentity(String),
-}
-
-impl CheckpointSelection {
-    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
-        match identity {
-            None => Self::Disabled,
-            Some(identity) => Self::ReviewerIdentity(identity.to_owned()),
-        }
-    }
-
-    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
-        match self {
-            Self::Disabled => identity.is_none(),
-            Self::ReviewerIdentity(expected) => identity == Some(expected.as_str()),
-        }
-    }
-}
-
-/// A run that reloads its runtime (routing, owned children) keeps the first
-/// approval delegate its plan was compiled with, never a newly enabled or
-/// disabled workspace default. Roots leave this absent to resolve config.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalDelegateSelection {
-    Disabled,
-    DelegateIdentity(String),
-}
-
-impl ApprovalDelegateSelection {
-    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
-        match identity {
-            None => Self::Disabled,
-            Some(identity) => Self::DelegateIdentity(identity.to_owned()),
-        }
-    }
-
-    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
-        match self {
-            Self::Disabled => identity.is_none(),
-            Self::DelegateIdentity(expected) => identity == Some(expected.as_str()),
-        }
-    }
-}
-
-/// Owned children retain the parent's routing policy, including disabled.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RoutingSelection {
-    Disabled,
-    RouterIdentity(String),
-}
-
-impl RoutingSelection {
-    pub(crate) fn from_identity(identity: Option<&str>) -> Self {
-        match identity {
-            None => Self::Disabled,
-            Some(identity) => Self::RouterIdentity(identity.to_owned()),
-        }
-    }
-    pub(crate) fn matches(&self, identity: Option<&str>) -> bool {
-        match self {
-            Self::Disabled => identity.is_none(),
-            Self::RouterIdentity(expected) => identity == Some(expected.as_str()),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    pub checkpoint: Option<CheckpointSelection>,
-    pub routing: Option<RoutingSelection>,
-    /// The first approval delegate a reload must keep; `None` for a root,
-    /// which resolves configuration.
-    pub approval_delegate: Option<ApprovalDelegateSelection>,
     pub workspace: String,
     pub model: ModelSelection,
     /// Configured agent profile the session selected. Loaders that know no
@@ -516,11 +398,6 @@ pub struct ReviewRequest {
     /// Tool names and shell prefixes the session has been granted.
     pub granted_tools: Vec<String>,
     pub granted_shell_prefixes: Vec<String>,
-    /// The run's compiled plan opted Jev in as the first delegate
-    /// (`jev_approval` after profile and override merging). A reviewer that
-    /// composes Jev consults it only when this is set; it never re-derives
-    /// the choice from configuration.
-    pub jev_approval: bool,
 }
 
 /// What the reviewer's own provider call cost, charged to the reviewed run.
@@ -540,8 +417,7 @@ pub struct ReviewSpend {
 pub use qq_protocol::DelegateIdentity;
 
 /// The `session_grants.source` value a grant from this delegate carries.
-/// `delegate` predates Jev as a second writer and is kept for the rows
-/// already stored.
+/// `jev` is historical: only rows written while Jev existed carry it.
 #[must_use]
 pub(super) const fn delegate_grant_source(delegate: DelegateIdentity) -> &'static str {
     match delegate {
@@ -556,8 +432,7 @@ pub(super) const fn delegate_grant_source(delegate: DelegateIdentity) -> &'stati
 pub struct ReviewVerdict {
     pub decision: ReviewDecision,
     pub spend: ReviewSpend,
-    /// Who decided. A composed reviewer that falls through from Jev to the
-    /// model reports whichever one produced `decision`.
+    /// Who decided.
     pub delegate: DelegateIdentity,
 }
 

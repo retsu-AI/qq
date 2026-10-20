@@ -519,101 +519,32 @@ fn reasoning_effort_clear_and_workspace_changes_obey_trust() {
 }
 
 #[test]
-fn jev_is_off_by_default_and_can_be_explicitly_disabled() {
-    let tree = TempTree::new();
-    let bare = tree.loader().load(&tree.request()).unwrap();
-    assert_eq!(bare.jev_review(), JevReviewMode::Off);
-    assert!(!bare.jev_routing());
-    assert!(!bare.jev_approval());
-    assert!(bare.provenance().jev_review().is_none());
-    assert!(bare.provenance().jev_approval().is_none());
-
-    let enabled = tree.request().with_explicit_content(
-        r#"(version: 1, jev_review: final, jev_routing: true, jev_approval: true)"#,
-    );
-    let snapshot = tree.loader().load(&enabled).unwrap();
-    assert_eq!(snapshot.jev_review(), JevReviewMode::Final);
-    assert!(snapshot.jev_routing());
-    assert!(snapshot.jev_approval());
-    assert_eq!(
-        snapshot.provenance().jev_review().unwrap().kind(),
-        SourceKind::Inline
-    );
-    assert_eq!(
-        snapshot.provenance().jev_approval().unwrap().kind(),
-        SourceKind::Inline
-    );
-
-    let disabled = tree
-        .loader()
-        .load(
-            &enabled.with_overrides(
-                RuntimeOverrides::new()
-                    .with_model("openai/test-model")
-                    .with_jev_review(JevReviewMode::Off)
-                    .with_jev_routing(false)
-                    .with_jev_approval(false),
-            ),
-        )
-        .unwrap();
-    assert_eq!(disabled.jev_review(), JevReviewMode::Off);
-    assert!(!disabled.jev_routing());
-    assert!(!disabled.jev_approval());
-    assert_eq!(
-        disabled.provenance().jev_review().unwrap().kind(),
-        SourceKind::Runtime
-    );
-    assert_eq!(
-        disabled.provenance().jev_approval().unwrap().kind(),
-        SourceKind::Runtime
-    );
-}
-
-#[test]
-fn jev_approval_is_independent_of_review_and_routing_and_requires_trust() {
-    // DA5 / ADR-0041: a third Jev capability. Turning it on enables neither
-    // review nor routing; a project file or profile that sets it is sensitive.
-    let tree = TempTree::new();
-    let alone = tree
-        .loader()
-        .load(
-            &tree
-                .request()
-                .with_explicit_content(r#"(version: 1, jev_approval: true)"#),
-        )
-        .unwrap();
-    assert!(alone.jev_approval());
-    assert_eq!(alone.jev_review(), JevReviewMode::Off);
-    assert!(!alone.jev_routing());
-
-    tree.write(
-        "work/qq.ron",
-        r#"(version: 1, jev_approval: true,
-        profiles: { "hands-off": Profile(approval_mode: ask, jev_approval: true) })"#,
-    );
-    let request = tree.request();
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let trusted = tree.loader().load(&request).unwrap();
-    assert!(trusted.jev_approval());
-    assert_eq!(
-        trusted.profile("hands-off").unwrap().jev_approval(),
-        Some(true)
-    );
-    assert!(
-        trusted
-            .source_reports()
-            .iter()
-            .any(|report| report.touched().contains(&ConfigKey::JevApproval))
-    );
-    tree.write("work/qq.ron", r#"(version: 1, jev_approval: false)"#);
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
+fn removed_jev_keys_are_rejected_by_name() {
+    // Jev review, routing, and approval were removed. A configuration that
+    // still sets one fails to parse and names the key, rather than silently
+    // running without the reviewer it asked for.
+    for (document, named) in [
+        ("(version: 1, jev_review: final)", true),
+        ("(version: 1, jev_routing: true)", true),
+        ("(version: 1, jev_approval: true)", true),
+        // Profile entries parse through an untagged enum, whose error cannot
+        // name the field; the load still fails.
+        (
+            r#"(version: 1, profiles: { "p": Profile(jev_approval: true) })"#,
+            false,
+        ),
+    ] {
+        let tree = TempTree::new();
+        let error = tree
+            .loader()
+            .load(&tree.request().with_explicit_content(document))
+            .unwrap_err();
+        assert!(
+            matches!(&error, ConfigError::Parse { .. })
+                && (!named || error.to_string().contains("jev_")),
+            "{document}: {error}"
+        );
+    }
 }
 
 #[test]
@@ -727,7 +658,7 @@ fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
     ));
     assert!(matches!(
         "maybe".parse::<ApprovalDelegateSetting>(),
-        Err(ConfigError::InvalidJevSetting { .. })
+        Err(ConfigError::InvalidSetting { .. })
     ));
     assert_eq!(
         "on".parse::<ApprovalDelegateSetting>().unwrap(),
@@ -738,7 +669,7 @@ fn approval_delegate_is_absent_by_default_and_reads_on_off_from_every_layer() {
 #[test]
 fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
     // DA3: the delegate choice widens who may settle a hold, so a project
-    // file that sets it is a sensitive declaration exactly like `jev_routing`.
+    // file that sets it is a sensitive declaration.
     let tree = TempTree::new();
     tree.write(
         "work/qq.ron",
@@ -772,37 +703,6 @@ fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
     );
     // Changing the value invalidates the trust the same way.
     tree.write("work/qq.ron", r#"(version: 1, approval_delegate: off)"#);
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-}
-
-#[test]
-fn jev_workspace_and_profile_activation_require_current_trust() {
-    let tree = TempTree::new();
-    tree.write(
-        "work/qq.ron",
-        r#"(version: 1, jev_review: enforce,
-        profiles: { "review": Profile(jev_review: final, jev_routing: true) })"#,
-    );
-    let request = tree.request();
-    assert!(matches!(
-        tree.loader().load(&request),
-        Err(ConfigError::TrustRequired { .. })
-    ));
-    tree.loader().grant_pending_trust(&request).unwrap();
-    let trusted = tree.loader().load(&request).unwrap();
-    assert_eq!(trusted.jev_review(), JevReviewMode::Enforce);
-    assert_eq!(
-        trusted.profile("review").unwrap().jev_review(),
-        Some(JevReviewMode::Final)
-    );
-    tree.write(
-        "work/qq.ron",
-        r#"(version: 1, jev_review: enforce,
-        profiles: { "review": Profile(jev_review: enforce, jev_routing: true) })"#,
-    );
     assert!(matches!(
         tree.loader().load(&request),
         Err(ConfigError::TrustRequired { .. })
@@ -4618,8 +4518,6 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             }
             "audit" => "(mode: off, max_revisions: 1, role: strong)".to_owned(),
             "goals" => "(default_max_runs: 40)".to_owned(),
-            "jev_review" => "off".to_owned(),
-            "jev_routing" | "jev_approval" => "false".to_owned(),
             "approval_delegate" => "on".to_owned(),
             "approval_timeout_seconds" => "60".to_owned(),
             "reasoning_effort" => "low".to_owned(),
@@ -4701,9 +4599,6 @@ fn environment_variables_are_the_ones_from_process_env_reads() {
         "(version: 1)",
         "openai/gpt-5.6",
         "acme",
-        "final",
-        "on",
-        "off",
         "off",
     ];
     let mut child = std::process::Command::new(std::env::current_exe().unwrap());
@@ -4738,9 +4633,6 @@ fn environment_variables_child() {
     assert_eq!(request.explicit_content(), Some("(version: 1)"));
     assert_eq!(request.overrides().model(), Some("openai/gpt-5.6"));
     assert_eq!(request.overrides().organization(), Some("acme"));
-    assert_eq!(request.overrides().jev_review(), Some(JevReviewMode::Final));
-    assert_eq!(request.overrides().jev_routing(), Some(true));
-    assert_eq!(request.overrides().jev_approval(), Some(false));
     assert_eq!(
         request.overrides().approval_delegate(),
         Some(ApprovalDelegateSetting::Off)

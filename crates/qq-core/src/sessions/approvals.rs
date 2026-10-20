@@ -10,7 +10,6 @@ pub(super) struct SessionToolGate {
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
     delegate: approval::ApprovalDelegate,
-    jev_approval: bool,
 }
 
 impl SessionToolGate {
@@ -20,7 +19,6 @@ impl SessionToolGate {
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
         delegate: approval::ApprovalDelegate,
-        jev_approval: bool,
     ) -> Self {
         Self {
             inner,
@@ -28,7 +26,6 @@ impl SessionToolGate {
             cancellation,
             network,
             delegate,
-            jev_approval,
         }
     }
 }
@@ -41,7 +38,6 @@ impl ToolGate for SessionToolGate {
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
-        let jev_approval = self.jev_approval;
         Box::pin(async move {
             let (mode, grants, session_delegate) = match inner
                 .store
@@ -253,7 +249,6 @@ impl ToolGate for SessionToolGate {
                                 recent_actions,
                                 granted_tools: grants.tools.iter().cloned().collect(),
                                 granted_shell_prefixes: grants.shell_prefixes.clone(),
-                                jev_approval,
                             }))
                         }
                         _ => None,

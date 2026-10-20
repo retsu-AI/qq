@@ -19,7 +19,7 @@ use super::{
     BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
     ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality, JevReviewMode,
+    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality,
     MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
     MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
     MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
@@ -544,7 +544,7 @@ pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 4] = [
 
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
-pub const DOCUMENT_FIELD_NAMES: [&str; 20] = [
+pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
     "version",
     "organization",
     "model",
@@ -553,9 +553,6 @@ pub const DOCUMENT_FIELD_NAMES: [&str; 20] = [
     "delegation",
     "audit",
     "goals",
-    "jev_review",
-    "jev_routing",
-    "jev_approval",
     "approval_delegate",
     "approval_timeout_seconds",
     "reasoning_effort",
@@ -653,14 +650,6 @@ pub(super) struct Document {
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     goals: Field<GoalsPatch>,
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    jev_review: Field<JevReviewMode>,
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    jev_routing: Field<bool>,
-    /// Jev as the approval delegate. A third Jev capability beside review
-    /// and routing, default off; a stored key enables nothing by itself.
-    #[serde(default, skip_serializing_if = "Field::is_missing")]
-    jev_approval: Field<bool>,
     /// Who settles held approvals: `on` sends `ask`-mode holds to the
     /// configured reviewer too, `off` sends every hold to a human. Missing
     /// keeps the mode's own default (reviewer under `auto` and `supervised`).
@@ -749,12 +738,6 @@ enum ProfilePatch {
         #[serde(default)]
         approval_mode: Option<ProfileApprovalMode>,
         #[serde(default)]
-        jev_review: Option<JevReviewMode>,
-        #[serde(default)]
-        jev_routing: Option<bool>,
-        #[serde(default)]
-        jev_approval: Option<bool>,
-        #[serde(default)]
         approval_delegate: Option<ApprovalDelegateSetting>,
         #[serde(default)]
         reasoning_effort: Option<qq_provider::ReasoningEffort>,
@@ -841,9 +824,6 @@ impl Document {
             || self.delegation.is_present()
             || self.audit.is_present()
             || self.goals.is_present()
-            || self.jev_review.is_present()
-            || self.jev_routing.is_present()
-            || self.jev_approval.is_present()
             || self.approval_delegate.is_present()
             || self.reasoning_effort.is_present()
             || self.profiles.is_present()
@@ -877,15 +857,6 @@ impl Document {
         }
         if self.goals.is_present() {
             sections.push("goals");
-        }
-        if self.jev_review.is_present() {
-            sections.push("jev_review");
-        }
-        if self.jev_routing.is_present() {
-            sections.push("jev_routing");
-        }
-        if self.jev_approval.is_present() {
-            sections.push("jev_approval");
         }
         if self.approval_delegate.is_present() {
             sections.push("approval_delegate");
@@ -948,15 +919,6 @@ impl Document {
         }
         if self.goals.is_present() {
             declarations.push(TrustDeclaration::Other("goals"));
-        }
-        if self.jev_review.is_present() {
-            declarations.push(TrustDeclaration::Other("jev_review"));
-        }
-        if self.jev_routing.is_present() {
-            declarations.push(TrustDeclaration::Other("jev_routing"));
-        }
-        if self.jev_approval.is_present() {
-            declarations.push(TrustDeclaration::Other("jev_approval"));
         }
         if self.approval_delegate.is_present() {
             declarations.push(TrustDeclaration::Other("approval_delegate"));
@@ -1086,12 +1048,6 @@ impl Document {
             #[serde(skip_serializing_if = "Option::is_none")]
             goals: Option<&'a Field<GoalsPatch>>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            jev_review: Option<&'a Field<JevReviewMode>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            jev_routing: Option<&'a Field<bool>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            jev_approval: Option<&'a Field<bool>>,
-            #[serde(skip_serializing_if = "Option::is_none")]
             approval_delegate: Option<&'a Field<ApprovalDelegateSetting>>,
             #[serde(skip_serializing_if = "Option::is_none")]
             reasoning_effort: Option<&'a Field<qq_provider::ReasoningEffort>>,
@@ -1122,9 +1078,6 @@ impl Document {
             delegation: present(&self.delegation),
             audit: present(&self.audit),
             goals: present(&self.goals),
-            jev_review: present(&self.jev_review),
-            jev_routing: present(&self.jev_routing),
-            jev_approval: present(&self.jev_approval),
             approval_delegate: present(&self.approval_delegate),
             reasoning_effort: present(&self.reasoning_effort),
             profiles: present(&self.profiles),
@@ -1172,17 +1125,8 @@ impl Document {
         if self.delegation.is_present() {
             touched.push(ConfigKey::Delegation);
         }
-        if self.jev_review.is_present() {
-            touched.push(ConfigKey::JevReview);
-        }
         if self.reasoning_effort.is_present() {
             touched.push(ConfigKey::ReasoningEffort);
-        }
-        if self.jev_routing.is_present() {
-            touched.push(ConfigKey::JevRouting);
-        }
-        if self.jev_approval.is_present() {
-            touched.push(ConfigKey::JevApproval);
         }
         if self.approval_delegate.is_present() {
             touched.push(ConfigKey::ApprovalDelegate);
@@ -1750,9 +1694,6 @@ pub(super) struct MergeState {
     delegation: Option<DelegationPatch>,
     audit: Option<AuditPatch>,
     goals: GoalsConfig,
-    jev_review: JevReviewMode,
-    jev_routing: bool,
-    jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout_seconds: Option<u64>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
@@ -1830,9 +1771,6 @@ impl MergeState {
                 delegation: None,
                 audit: None,
                 goals: GoalsConfig::default(),
-                jev_review: JevReviewMode::Off,
-                jev_routing: false,
-                jev_approval: false,
                 approval_delegate: None,
                 approval_timeout_seconds: None,
                 reasoning_effort: None,
@@ -1941,13 +1879,6 @@ impl MergeState {
                 self.provenance.delegation = Some(source.clone());
             }
         }
-        apply_default(
-            &document.jev_review,
-            &mut self.jev_review,
-            JevReviewMode::Off,
-        );
-        apply_default(&document.jev_routing, &mut self.jev_routing, false);
-        apply_default(&document.jev_approval, &mut self.jev_approval, false);
         match document.approval_delegate {
             Field::Missing => {}
             Field::Set(setting) => self.approval_delegate = Some(setting),
@@ -1963,15 +1894,6 @@ impl MergeState {
         }
         if document.reasoning_effort.is_present() {
             self.provenance.reasoning_effort = Some(source.clone());
-        }
-        if document.jev_review.is_present() {
-            self.provenance.jev_review = Some(source.clone());
-        }
-        if document.jev_routing.is_present() {
-            self.provenance.jev_routing = Some(source.clone());
-        }
-        if document.jev_approval.is_present() {
-            self.provenance.jev_approval = Some(source.clone());
         }
         match &document.audit {
             Field::Missing => {}
@@ -2033,9 +1955,6 @@ impl MergeState {
                             organization,
                             max_output_tokens,
                             approval_mode,
-                            jev_review,
-                            jev_routing,
-                            jev_approval,
                             approval_delegate,
                             reasoning_effort,
                         } => {
@@ -2046,9 +1965,6 @@ impl MergeState {
                                     organization: organization.clone(),
                                     max_output_tokens: *max_output_tokens,
                                     approval_mode: *approval_mode,
-                                    jev_review: *jev_review,
-                                    jev_routing: *jev_routing,
-                                    jev_approval: *jev_approval,
                                     approval_delegate: *approval_delegate,
                                     reasoning_effort: *reasoning_effort,
                                     pack: None,
@@ -2074,21 +1990,6 @@ impl MergeState {
             self.reasoning_effort = Some(effort);
             self.provenance.reasoning_effort = Some(source.clone());
             touched.push(ConfigKey::ReasoningEffort);
-        }
-        if let Some(mode) = overrides.jev_review {
-            self.jev_review = mode;
-            self.provenance.jev_review = Some(source.clone());
-            touched.push(ConfigKey::JevReview);
-        }
-        if let Some(enabled) = overrides.jev_routing {
-            self.jev_routing = enabled;
-            self.provenance.jev_routing = Some(source.clone());
-            touched.push(ConfigKey::JevRouting);
-        }
-        if let Some(enabled) = overrides.jev_approval {
-            self.jev_approval = enabled;
-            self.provenance.jev_approval = Some(source.clone());
-            touched.push(ConfigKey::JevApproval);
         }
         if let Some(setting) = overrides.approval_delegate {
             self.approval_delegate = Some(setting);
@@ -2443,9 +2344,6 @@ impl MergeState {
                             organization: profile.organization().map(str::to_owned),
                             max_output_tokens: profile.max_output_tokens(),
                             approval_mode: profile.approval_mode(),
-                            jev_review: None,
-                            jev_routing: None,
-                            jev_approval: None,
                             approval_delegate: None,
                             reasoning_effort: None,
                             pack: Some(crate::PackProfileRef::new(pack, profile.clone())),
@@ -2667,9 +2565,6 @@ impl MergeState {
             reviewer_model,
             delegation,
             audit,
-            jev_review: self.jev_review,
-            jev_routing: self.jev_routing,
-            jev_approval: self.jev_approval,
             approval_delegate: self.approval_delegate,
             approval_timeout,
             reasoning_effort: self.reasoning_effort,
@@ -2704,9 +2599,6 @@ impl ClientSnapshot {
             delegation: self.delegation,
             audit: self.audit,
             goals: self.goals,
-            jev_review: self.jev_review,
-            jev_routing: self.jev_routing,
-            jev_approval: self.jev_approval,
             approval_delegate: self.approval_delegate,
             approval_timeout: self.approval_timeout,
             reasoning_effort: self.reasoning_effort,

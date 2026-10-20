@@ -1,6 +1,6 @@
 # ADR-0052 — Jev approval activation comes from the run's compiled plan
 
-**Status:** Accepted
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-28
 **Deciders:** v0.1.5 release review (ENG-971, PR #214; Jev plan JV1)
 **Supersedes:** [ADR-0041](0041-jev-delegated-approval.md) decision 5, the

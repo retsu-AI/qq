@@ -48,10 +48,6 @@ use qq_provider::{ModelRequest, Provider, ProviderStream};
 
 use tempfile::TempDir;
 
-use crate::{
-    CheckpointFuture, CheckpointOutcome, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
-};
-
 fn usage(input_tokens: u64, output_tokens: u64) -> TokenUsage {
     TokenUsage {
         input_tokens,
@@ -611,32 +607,6 @@ struct DelayedProvider {
 
 struct ToolLoopLoader {
     requests: Arc<StdMutex<Vec<ModelRequest>>>,
-}
-
-struct BlockingCheckpointLoader {
-    requests: Arc<StdMutex<Vec<ModelRequest>>>,
-}
-
-impl RuntimeLoader for BlockingCheckpointLoader {
-    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        let requests = Arc::clone(&self.requests);
-        Box::pin(async move {
-            struct BlockingReviewer;
-            impl CheckpointReviewer for BlockingReviewer {
-                fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
-                    Box::pin(std::future::pending())
-                }
-            }
-
-            Runtime::new(ToolLoopProvider { requests }, "test-model", 256)
-                .map(|runtime| runtime.with_checkpoint_reviewer(Arc::new(BlockingReviewer)))
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
-    }
 }
 
 impl RuntimeLoader for ToolLoopLoader {
@@ -2191,9 +2161,6 @@ fn denial_capacity_fixture(
         goal_admission: None,
         check_deadline: None,
         origin: None,
-        checkpoint: None,
-        routing: None,
-        approval_delegate: None,
         identity: RunIdentity {
             workspace_id,
             session_id,
@@ -4704,53 +4671,6 @@ impl RuntimeLoader for QueueLoader {
                 .map(|runtime| {
                     loaded_runtime(
                         runtime.with_spawn_model_routes(spawn_model_routes),
-                        &request.workspace,
-                        None,
-                    )
-                })
-                .map_err(|error| RuntimeLoadError {
-                    kind: RunFailureKind::Configuration,
-                    message: error.to_string(),
-                })
-        })
-    }
-}
-
-struct CheckpointQueueLoader {
-    inner: QueueLoader,
-    reviewed: Arc<StdMutex<Vec<CheckpointRequest>>>,
-}
-
-impl RuntimeLoader for CheckpointQueueLoader {
-    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-        let spawn_model_routes = self
-            .inner
-            .routed
-            .iter()
-            .map(|(model, _)| (*model).to_owned())
-            .collect::<Vec<_>>();
-        let provider = self.inner.next_provider(&request);
-        let reviewed = Arc::clone(&self.reviewed);
-        Box::pin(async move {
-            struct Supports(Arc<StdMutex<Vec<CheckpointRequest>>>);
-            impl CheckpointReviewer for Supports {
-                fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                    self.0.lock().unwrap().push(request);
-                    Box::pin(std::future::ready(CheckpointVerdict {
-                        spend: qq_protocol::CheckpointSpend::default(),
-                        outcome: CheckpointOutcome::Supported,
-                        confidence: Some(1.0),
-                        feedback: "supported".to_owned(),
-                    }))
-                }
-            }
-
-            Runtime::with_provider(provider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime
-                            .with_spawn_model_routes(spawn_model_routes)
-                            .with_checkpoint_reviewer(Arc::new(Supports(reviewed))),
                         &request.workspace,
                         None,
                     )

@@ -14,7 +14,6 @@ use qq_config as config;
 use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
-mod advisory;
 mod catalog;
 mod cli;
 #[cfg(test)]
@@ -131,12 +130,6 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
         }
-        Some(cli::Command::Jev {
-            command: cli::JevCommand::Observe(args),
-        }) => advisory::run(args).await?,
-        Some(cli::Command::Jev {
-            command: cli::JevCommand::Setup { allow_file },
-        }) => run_blocking_command(move || jev_setup(allow_file)).await?,
         Some(cli::Command::Mcp {
             command: cli::McpCommand::Inspect { name },
         }) => {
@@ -226,25 +219,7 @@ async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Err
     let factory =
         runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())?;
     let load = overrides.load_request()?;
-    let compiler = factory.clone();
-    let mut plan = tokio::task::spawn_blocking(move || compiler.plan_for(&load)).await??;
-    if plan.descriptor().routing.is_some() {
-        eprintln!("[jev] routing pending: selecting model and effort");
-        let (selected, decision) = factory.route_direct(plan, prompt.clone()).await;
-        plan = selected;
-        let cost = decision.estimated_cost_usd_nanos.map_or_else(
-            || "unknown".to_owned(),
-            |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0),
-        );
-        eprintln!(
-            "[jev] routing {:?}: {} ({:?}); {}; estimated routing cost {}",
-            decision.outcome,
-            decision.model.model.as_deref().unwrap_or("configured"),
-            decision.reasoning_effort,
-            decision.reason,
-            cost
-        );
-    }
+    let plan = tokio::task::spawn_blocking(move || factory.plan_for(&load)).await??;
     render_events(plan.run(RunCommand::new(prompt))).await
 }
 
@@ -503,7 +478,6 @@ async fn prepare_headless(
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?;
     let model_is_fallback = load.overrides().model().is_none();
-    let overrides_jev_approval = load.overrides().jev_approval();
     let overrides_approval_delegate = load.overrides().approval_delegate();
     let config_factory = factory.clone();
     let snapshot = tokio::task::spawn_blocking(move || config_factory.load(&load))
@@ -566,12 +540,8 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
         })?;
 
-    let (reviewer_configured, configured_delegate) = headless_delegate_options(
-        &snapshot,
-        &profile,
-        overrides_jev_approval,
-        overrides_approval_delegate,
-    );
+    let (reviewer_configured, configured_delegate) =
+        headless_delegate_options(&snapshot, &profile, overrides_approval_delegate);
     let goal = args.goal.map(|objective| headless::GoalInvocation {
         objective,
         check: args.check,
@@ -651,8 +621,8 @@ async fn serve(
                 overrides.approved_read_images.clone(),
             )?;
             // The server's own configuration decides the approval wait for
-            // every session it serves: a server-side control like the Jev
-            // settings, not one a client forwards. Absent is no deadline. A
+            // every session it serves: a server-side control, not one a
+            // client forwards. Absent is no deadline. A
             // configuration that does not load yet (no model, untrusted
             // project) still serves; it simply has no bound.
             let request = config::LoadRequest::from_current_process(None)?;
@@ -1225,9 +1195,7 @@ async fn render_events(
         output::OutputMode::Raw
     };
     let mut stdout = stdout.lock();
-    let stderr = io::stderr();
-    let mut stderr = stderr.lock();
-    output::render(events, &mut stdout, &mut stderr, mode).await?;
+    output::render(events, &mut stdout, mode).await?;
     Ok(())
 }
 
@@ -1332,9 +1300,6 @@ fn config_command(
                     "worker_model" => snapshot.provenance().worker_model(),
                     "delegation" => snapshot.provenance().delegation(),
                     "audit" => snapshot.provenance().audit(),
-                    "jev_review" => snapshot.provenance().jev_review(),
-                    "jev_routing" => snapshot.provenance().jev_routing(),
-                    "jev_approval" => snapshot.provenance().jev_approval(),
                     "approval_delegate" => snapshot.provenance().approval_delegate(),
                     "approval_timeout" => snapshot.provenance().approval_timeout(),
                     "reasoning_effort" => snapshot.provenance().reasoning_effort(),
@@ -1448,9 +1413,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
         serde_json::to_string(snapshot.policy().goal_ceilings())
             .expect("numeric goal ceilings serialize")
     );
-    println!("jev_review: {}", snapshot.jev_review().as_str());
-    println!("jev_routing: {}", snapshot.jev_routing());
-    println!("jev_approval: {}", snapshot.jev_approval());
     println!(
         "approval_delegate: {}",
         snapshot
@@ -1532,17 +1494,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             }
             if let Some(delegate) = profile.approval_delegate() {
                 parts.push(format!("approval_delegate={}", delegate.as_str()));
-            }
-            // A profile's Jev settings override the top level for its runs;
-            // listed so `qq config show` answers what a profile will do.
-            if let Some(enabled) = profile.jev_approval() {
-                parts.push(format!("jev_approval={enabled}"));
-            }
-            if let Some(enabled) = profile.jev_routing() {
-                parts.push(format!("jev_routing={enabled}"));
-            }
-            if let Some(mode) = profile.jev_review() {
-                parts.push(format!("jev_review={}", mode.as_str()));
             }
             if let Some(tokens) = profile.max_output_tokens() {
                 parts.push(format!("max_output_tokens={tokens}"));
@@ -1745,24 +1696,16 @@ fn trust_notices(pending: &[config::PendingTrust]) -> Vec<qq_tui::PendingTrustNo
 
 /// The headless run's delegate options, from the loaded configuration as
 /// `prepare_headless` builds them: whether a delegate exists (a
-/// `reviewer_model`, or Jev as the run resolves `jev_approval`), and the
+/// `reviewer_model`), and the
 /// resolved `approval_delegate` (override, then the selected profile, then
 /// the top level; absent is `by_mode`).
 fn headless_delegate_options(
     snapshot: &config::ConfigSnapshot,
     profile: &qq_protocol::AgentProfileId,
-    override_jev_approval: Option<bool>,
     override_approval_delegate: Option<config::ApprovalDelegateSetting>,
 ) -> (bool, qq_protocol::ApprovalDelegate) {
     let selected = snapshot.profile(profile.as_str());
-    let reviewer_configured = approval_delegate_configured(
-        snapshot.reviewer_model().is_some(),
-        snapshot.jev_approval(),
-        selected
-            .as_ref()
-            .and_then(config::AgentProfileConfig::jev_approval),
-        override_jev_approval,
-    );
+    let reviewer_configured = snapshot.reviewer_model().is_some();
     let configured_delegate = match override_approval_delegate
         .or_else(|| {
             selected
@@ -1776,24 +1719,6 @@ fn headless_delegate_options(
         Some(config::ApprovalDelegateSetting::Off) => qq_protocol::ApprovalDelegate::Off,
     };
     (reviewer_configured, configured_delegate)
-}
-
-/// Whether a held call of a headless run has an approval delegate to wait
-/// for: a `reviewer_model`, or Jev as the run's plan will resolve
-/// `jev_approval` (an explicit override, then the selected profile, then the
-/// top level, as `compile_generation` merges them). Without one, `auto`
-/// denies a held call at once; with one it waits for the delegate's verdict.
-const fn approval_delegate_configured(
-    reviewer_model: bool,
-    top_level_jev_approval: bool,
-    profile_jev_approval: Option<bool>,
-    override_jev_approval: Option<bool>,
-) -> bool {
-    let jev = match (override_jev_approval, profile_jev_approval) {
-        (Some(enabled), _) | (None, Some(enabled)) => enabled,
-        (None, None) => top_level_jev_approval,
-    };
-    reviewer_model || jev
 }
 
 fn trust_command(overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
@@ -2025,41 +1950,6 @@ fn codex_device_prompt(verification_url: &str, user_code: &str) -> String {
     format!(
         "Open this exact URL on any device to sign in with OpenAI Codex:\n{}\n\nEnter code: {}\n\nThis code expires within 15 minutes. Enter it only at the URL shown above.",
         verification_url, user_code
-    )
-}
-
-const TYPESAFE_JEV_CREDENTIAL: &str = "typesafe-jev";
-const TYPESAFE_JEV_ENDPOINT: &str = "https://api.typesafe.ai";
-
-fn jev_setup(allow_file: bool) -> Result<(), Box<dyn Error>> {
-    let secret = read_secret("TypeSafe API key: ")?;
-    let store = auth::CredentialStore::system()?;
-    let backend = store_typesafe_jev_credential(&store, &secret, allow_file)?;
-    println!("stored {TYPESAFE_JEV_CREDENTIAL} in {backend}");
-    println!("credentials stored; Jev remains off until explicitly enabled");
-    println!(
-        "Jev sends task and selected tool evidence to TypeSafe; enable only for work you allow it to process"
-    );
-    println!("enable final-answer review: QQ_JEV_CHECKPOINTS=final qq");
-    println!("enable review after every tool and final answer:");
-    println!("  QQ_JEV_CHECKPOINTS=enforce qq");
-    println!("disable reviews without removing credentials: QQ_JEV_CHECKPOINTS=off qq");
-    println!("inspect: qq config show; qq auth status {TYPESAFE_JEV_CREDENTIAL}");
-    println!("remove:  qq auth logout {TYPESAFE_JEV_CREDENTIAL}");
-    Ok(())
-}
-
-fn store_typesafe_jev_credential(
-    store: &auth::CredentialStore,
-    secret: &auth::Secret,
-    allow_file: bool,
-) -> Result<auth::CredentialBackend, auth::AuthError> {
-    store.set_with_metadata(
-        TYPESAFE_JEV_CREDENTIAL,
-        secret.expose_secret_bytes(),
-        allow_file,
-        Some("typesafe-jev"),
-        Some(TYPESAFE_JEV_ENDPOINT),
     )
 }
 
@@ -2478,42 +2368,6 @@ mod tests {
     }
 
     #[test]
-    fn headless_auto_waits_for_jev_when_the_run_resolves_jev_approval_on() {
-        // Audit finding 4: a Jev-only configuration (no reviewer_model)
-        // made headless `auto` deny root held calls before Jev answered.
-        // Precedence matches plan compilation: override, profile, top level.
-        assert!(!approval_delegate_configured(false, false, None, None));
-        assert!(approval_delegate_configured(true, false, None, None));
-        assert!(approval_delegate_configured(false, true, None, None));
-        assert!(!approval_delegate_configured(
-            false,
-            true,
-            Some(false),
-            None
-        ));
-        assert!(approval_delegate_configured(false, false, Some(true), None));
-        assert!(!approval_delegate_configured(
-            false,
-            true,
-            Some(true),
-            Some(false)
-        ));
-        assert!(approval_delegate_configured(
-            false,
-            false,
-            Some(false),
-            Some(true)
-        ));
-        // A reviewer model is a delegate whatever Jev's setting.
-        assert!(approval_delegate_configured(
-            true,
-            true,
-            Some(false),
-            Some(false)
-        ));
-    }
-
-    #[test]
     fn isolated_tui_qa_profile_rejects_remote_or_credential_bearing_routes() {
         let cases = [
             (
@@ -2523,12 +2377,6 @@ mod tests {
             (
                 r#"(version: 1, model: "custom/test-model", providers: { "custom": Custom(connection: (base_url: "http://localhost:9080/v1", api: OpenAiResponses, auth: NoAuth, headers: {"authorization": "secret"}), models: { "test-model": (name: "Test model") }) })"#,
                 "no static headers",
-            ),
-            // DA5: Jev as approver is a Jev capability like review and
-            // routing; the credential-free fixture rejects it the same way.
-            (
-                r#"(version: 1, model: "custom/test-model", jev_approval: true, providers: { "custom": Custom(connection: (base_url: "http://127.0.0.1:9080/v1", api: OpenAiResponses, auth: NoAuth), models: { "test-model": (name: "Test model") }) })"#,
-                "enabled Jev capabilities",
             ),
         ];
         for (document, expected) in cases {
@@ -2845,7 +2693,7 @@ mod tests {
     }
 
     #[test]
-    fn isolated_tui_qa_rejects_registered_jev_without_reading_its_value() {
+    fn isolated_tui_qa_rejects_a_registered_credential_without_reading_its_value() {
         let root = private_tempdir();
         let canonical = root.path().canonicalize().unwrap();
         let config = canonical.join("config");
@@ -2870,11 +2718,11 @@ mod tests {
             Arc::new(TestKeyring::default()),
         );
         seed.set_with_metadata(
-            TYPESAFE_JEV_CREDENTIAL,
+            "openai",
             b"fake-test-value",
             false,
-            Some("typesafe-jev"),
-            Some(TYPESAFE_JEV_ENDPOINT),
+            Some("openai"),
+            Some("https://api.openai.com/v1"),
         )
         .unwrap();
         let store = auth::CredentialStore::with_backend(credential_paths, Arc::new(PanicKeyring));
@@ -2889,30 +2737,6 @@ mod tests {
             .plan_for(&config::LoadRequest::new(workspace))
             .unwrap_err();
         assert!(error.to_string().contains("stored credentials"), "{error}");
-    }
-
-    #[test]
-    fn jev_setup_registers_the_endpoint_bound_runtime_credential() {
-        let directory = tempfile::tempdir().unwrap();
-        let store = auth::CredentialStore::with_backend(
-            auth::CredentialPaths::new(directory.path()),
-            Arc::new(TestKeyring::default()),
-        );
-        let secret = auth::Secret::from_secret_bytes(b"secret-test-value".to_vec());
-
-        let backend = store_typesafe_jev_credential(&store, &secret, false).unwrap();
-
-        assert_eq!(backend, auth::CredentialBackend::Keyring);
-        let metadata = store.status(TYPESAFE_JEV_CREDENTIAL).unwrap().unwrap();
-        assert_eq!(metadata.kind.as_deref(), Some("typesafe-jev"));
-        assert_eq!(metadata.endpoint.as_deref(), Some(TYPESAFE_JEV_ENDPOINT));
-        let resolved = store
-            .resolve_with_endpoint(
-                &qq_provider::SecretRef::Stored(TYPESAFE_JEV_CREDENTIAL.to_owned()),
-                Some(TYPESAFE_JEV_ENDPOINT),
-            )
-            .unwrap();
-        assert_eq!(resolved.expose_secret_bytes(), b"secret-test-value");
     }
 
     fn run_args(prompt: &str, extra: &[&str]) -> cli::RunArgs {

@@ -1806,7 +1806,6 @@ mod tests {
             "Delegate",
             "Reviewer",
             "Trust",
-            "Jev",
         ] {
             if !headings.contains(&term) {
                 problems.push(format!("  no `### {term}` heading"));
