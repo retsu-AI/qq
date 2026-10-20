@@ -961,6 +961,10 @@ impl App {
             snapshot.focused = None;
         }
         let snapshot_focus = snapshot.focused.as_ref().map(|focused| focused.summary.id);
+
+        // Retry a budget-starved startup/multi-body response in isolation.
+        // Never retry an already isolated response indefinitely.
+        let may_refetch_focused = initial || !snapshot.included.is_empty();
         let installed_sessions: Vec<_> = snapshot
             .included
             .iter()
@@ -1061,6 +1065,20 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
+        if may_refetch_focused
+            && let Some(session_id) = snapshot_focus
+            && self.focused() == Some(session_id)
+            && self
+                .sessions
+                .get(&session_id)
+                .is_some_and(|view| !view.is_warm())
+            && let Some(workspace_id) = self.workspace_id
+        {
+            effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                workspace_id,
+                session_id,
+            ))));
+        }
         for event in replay {
             let replayed = self.sessions.replay_event(
                 &event,

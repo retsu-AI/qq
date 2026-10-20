@@ -409,11 +409,10 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
         merge_base,
         "HEAD",
     ])?;
-    // A blob id, or empty when the path does not exist at that revision.
-    let blob = |revision: &str, path: &str| {
-        git(&["rev-parse", "-q", "--verify", &format!("{revision}:{path}")])
-            .map(|id| id.trim().to_owned())
-            .unwrap_or_default()
+    // A tree entry includes permissions as well as object identity. The
+    // path is literal so metacharacters cannot select a different entry.
+    let entry = |revision: &str, path: &str| {
+        git(&["--literal-pathspecs", "ls-tree", revision, "--", path]).unwrap_or_default()
     };
     let mut reverted = Vec::new();
     for path in files.split('\0').filter(|path| !path.is_empty()) {
@@ -422,10 +421,11 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
         if last.is_empty() {
             continue;
         }
-        let before = blob(&format!("{last}^"), path);
-        // Only restoring an existing old blob is evidence of a stale tree.
+        let before = entry(&format!("{last}^"), path);
+        // Only restoring an existing old entry is evidence of a stale tree.
         // Absence on both sides also describes a legitimate file deletion.
-        if !before.is_empty() && blob("HEAD", path) == before && blob(merge_base, path) != before {
+        if !before.is_empty() && entry("HEAD", path) == before && entry(merge_base, path) != before
+        {
             reverted.push(format!("{path} (undoes {})", short(last)));
         }
     }
@@ -1313,6 +1313,16 @@ mod tests {
             super::reverted_base_changes(root, "main").unwrap(),
             Vec::<String>::new()
         );
+        // Modes belong to tree entries, not blob IDs.
+        git(&["checkout", "main"]);
+        git(&["update-index", "--chmod=+x", "mine.rs"]);
+        git(&["commit", "-qm", "make auth executable"]);
+        git(&["checkout", "-qb", "stale-mode"]);
+        git(&["update-index", "--chmod=-x", "mine.rs"]);
+        git(&["commit", "-qm", "restore stale permissions"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("mine.rs (undoes "), "{reverted:?}");
         // A branch that commits its stale tree on top of the new main reverts it.
         git(&["checkout", "-qb", "bad", "main"]);
         write("auth.rs", "old auth");
