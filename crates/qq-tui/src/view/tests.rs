@@ -5692,6 +5692,20 @@ fn thirteenth_review_round_on_the_rail() {
     // 2. A running audit has no spinner on screen, so it wakes no frame.
     app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
     assert!(!app.has_activity(), "a hidden audit run animates nothing");
+    // ...but the transcript the inspector's `/attention` left in the main
+    // pane still spins, though its rail row is not painted.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Idle;
+    app.sessions.get_mut(&root).unwrap().summary.status = SessionStatus::Running;
+    app.layout.rail = PanePref::Shown;
+    app.handle_terminal_event(TerminalEvent::Resize(240, 60));
+    FrameRenderer::default().frame_and_commit(&mut app, 240, 60);
+    app.execute(Command::ShowAttention);
+    app.rail_painted = Some(Vec::new());
+    assert_eq!(app.view(), crate::viewport::View::Attention);
+    assert!(
+        app.has_activity(),
+        "the drawn transcript's spinner animates"
+    );
 
     // 3. An orphan's grandchild is indented below its child.
     let (mut app, _, ids) = app_with_fanout(3);
