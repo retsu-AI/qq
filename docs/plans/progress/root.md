@@ -95,7 +95,7 @@ docs. Root owns required architecture/protocol/doc-index amendments and any
 benchmark registration. No dependency additions planned. R2/R3 work in this
 stack follows explicit optional routing; it does not inherit mandatory global
 checkpoint activation. Ledger: `progress/jev-opt-in.md` (since consolidated
-into `progress/jev.md`, 2026-09-28).
+into `progress/jev.md`, 2026-09-28; deleted when Jev was removed).
 
 2026-09-18 — JEV checkpoint hardening remains in progress on
 `feat/jev-runtime-checkpoints`: complete task/tool payloads now fail closed

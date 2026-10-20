@@ -374,9 +374,10 @@ impl ApprovalDelegate {
 }
 
 /// Which delegate settled a held call (protocol 28): the configured
-/// `reviewer_model`, or TypeSafe Jev when the operator opted it in as an
-/// approver. Carried on `tool_approval_resolved` for the reviewer
+/// `reviewer_model`. Carried on `tool_approval_resolved` for the reviewer
 /// resolutions so a supervisor can tell them apart from the stream.
+/// `jev` is historical: the Jev delegate was removed in protocol 36 and
+/// is never written again, but journals recorded before then still carry it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DelegateIdentity {
@@ -2510,36 +2511,19 @@ pub enum SessionEvent {
     ToolCallFinished {
         tool_call: ToolCallSnapshot,
     },
-    /// A mandatory JEV checkpoint settled after a tool result or against the
-    /// root final candidate. Persisted before publication and correlated to
-    /// the reviewed boundary. `supported` permits progress; every other
-    /// outcome is fail-closed.
-    RoutingStarted {
-        run_id: RunId,
-    },
-    RoutingCompleted {
-        run_id: RunId,
-        decision: Box<RoutingDecision>,
-    },
-    CheckpointStarted {
-        run_id: RunId,
-        correlation: String,
-        phase: CheckpointPhase,
-        tool_call_id: Option<ToolCallId>,
-    },
-    CheckpointReviewed {
-        run_id: RunId,
-        correlation: String,
-        phase: CheckpointPhase,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_call_id: Option<ToolCallId>,
-        outcome: CheckpointOutcome,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        confidence_basis_points: Option<u16>,
-        feedback: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        spend: Option<CheckpointSpend>,
-    },
+    /// Decode-only: a journal entry from a removed feature. Protocol 36
+    /// removed Jev routing and checkpoints; their recorded events
+    /// (`routing_started`, `routing_completed`, `checkpoint_started`,
+    /// `checkpoint_reviewed`) still decode, as this, so old stores and
+    /// recorded streams replay. QQ never writes it; clients ignore it.
+    #[serde(
+        rename = "retired",
+        alias = "routing_started",
+        alias = "routing_completed",
+        alias = "checkpoint_started",
+        alias = "checkpoint_reviewed"
+    )]
+    Retired,
     CancellationRequested {
         session: Box<SessionSummary>,
         run_id: RunId,
@@ -2597,50 +2581,6 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         final_output: Option<Box<FinalOutput>>,
     },
-}
-
-/// One optional routing request, including the declared fallback on failure.
-/// Missing usage or cost means unknown spend, never a free request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoutingDecision {
-    pub model: ModelSelection,
-    pub reasoning_effort: Option<qq_reasoning::ReasoningEffort>,
-    pub outcome: RoutingOutcome,
-    pub reason: String,
-    pub usage: Option<TokenUsage>,
-    pub estimated_cost_usd_nanos: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RoutingOutcome {
-    Selected,
-    Fallback,
-}
-
-/// One reviewer request's accounting. Missing usage or price means unknown,
-/// including a request interrupted after dispatch; it never means free.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CheckpointSpend {
-    pub usage: Option<TokenUsage>,
-    pub estimated_cost_usd_nanos: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointPhase {
-    ToolResult,
-    FinalCandidate,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CheckpointOutcome {
-    Supported,
-    PartiallySupported,
-    Contradicted,
-    InsufficientEvidence,
-    Unavailable,
 }
 
 #[cfg(test)]
@@ -3450,22 +3390,44 @@ mod tests {
         let SessionEvent::ToolApprovalResolved { tool_call, .. } = resolved else {
             unreachable!()
         };
-        let by_jev = SessionEvent::ToolApprovalResolved {
+        let by_reviewer = SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
-            delegate: Some(DelegateIdentity::Jev),
+            delegate: Some(DelegateIdentity::Reviewer),
         };
-        let encoded = serde_json::to_value(&by_jev).unwrap();
+        let encoded = serde_json::to_value(&by_reviewer).unwrap();
         assert_eq!(encoded["resolution"], "approved_by_reviewer");
-        assert_eq!(encoded["delegate"], "jev");
-        assert_eq!(
-            serde_json::to_value(DelegateIdentity::Reviewer).unwrap(),
-            "reviewer"
-        );
+        assert_eq!(encoded["delegate"], "reviewer");
         assert_eq!(
             serde_json::from_value::<SessionEvent>(encoded).unwrap(),
-            by_jev
+            by_reviewer
         );
+        // Journals from before protocol 36 still name the removed Jev
+        // delegate; they keep decoding.
+        let mut legacy = serde_json::to_value(&by_reviewer).unwrap();
+        legacy["delegate"] = "jev".into();
+        assert!(matches!(
+            serde_json::from_value::<SessionEvent>(legacy).unwrap(),
+            SessionEvent::ToolApprovalResolved {
+                delegate: Some(DelegateIdentity::Jev),
+                ..
+            }
+        ));
+        // Protocol 36: recorded Jev routing and checkpoint events replay as
+        // `Retired`, whatever fields they carried.
+        for legacy in [
+            r#"{"type":"routing_started","run_id":"run_00000000000000000000000000000000"}"#,
+            r#"{"type":"routing_completed","decision":{"outcome":"selected"}}"#,
+            r#"{"type":"checkpoint_started","phase":"tool_result","tool_call_id":null}"#,
+            r#"{"type":"checkpoint_reviewed","outcome":"supported","feedback":"ok"}"#,
+        ] {
+            assert_eq!(
+                serde_json::from_str::<SessionEvent>(legacy).unwrap(),
+                SessionEvent::Retired,
+                "{legacy}"
+            );
+        }
+        assert!(serde_json::from_str::<SessionEvent>(r#"{"type":"not_an_event"}"#).is_err());
         // Protocol 28: a delegate that passed says why; a timed-out delegate
         // has no identity.
         let escalated = SessionEvent::ToolApprovalEscalated {
@@ -4443,7 +4405,9 @@ mod tests {
         // `approval_delegate_set`, and the optional
         // `SessionSummary.approval_delegate` override. Older clients reject
         // the new command, outcome, event tag, and summary field.
-        assert_eq!(crate::PROTOCOL_VERSION, 35);
+        // Version 36 removes Jev routing and checkpoint events; recorded ones
+        // decode as `retired`.
+        assert_eq!(crate::PROTOCOL_VERSION, 36);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

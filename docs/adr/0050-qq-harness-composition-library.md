@@ -84,6 +84,7 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
      `RuntimeLoadStage` stays a closed, exhaustive `#[repr(u8)]` enum (so
      `RuntimeLoadProgress`'s `AtomicU8` still round-trips). The Jev stage is
      renamed `ResolvingExtensionCredential`, not replaced by a string.
+     (Jev was later removed.)
 
 ## Consequences
 

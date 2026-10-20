@@ -42,9 +42,8 @@ The binary has multiple process modes:
   It admits only the selected loopback-HTTP `Custom` provider with `NoAuth`
   and no static headers, and omits authentication probes for every unselected
   provider. MCP, additional agent routes, delegation, audit, profiles, packs,
-  and enabled Jev capabilities are rejected rather than disabled. The ordinary
-  no-flag path uses the user-scoped system directories. Jev review defaults off
-  even when a credential is stored (ADR-0030). This fixture demonstrates TUI behavior only; it is not
+  are rejected rather than disabled. The ordinary
+  no-flag path uses the user-scoped system directories. This fixture demonstrates TUI behavior only; it is not
   evidence for a real provider or reviewer integration.
 - `qq serve [ARGS]` runs the server without a TUI. It is suitable for a
   persistent process on a desktop or home server.
@@ -54,16 +53,6 @@ The binary has multiple process modes:
 - Additional direct CLI commands must reuse the same runtime rather than create
   another agent implementation.
 
-`qq jev observe` is an explicitly launched client of the existing local server's
-committed event stream. It assesses completed task runs independently of runtime
-review and routing. The observer reuses the bounded Jev reviewer with selected
-run-specific snapshot evidence, an explicit finite spending allowance and a
-synced external receipt journal. It cannot change authoritative outcomes or gate
-the next run. Pending dispatch is recorded before inference; interrupted requests
-remain unknown and are not automatically retried. External advisory accounting
-stays separate from the completed run, and combined totals preserve uncertainty.
-See [`jev.md`](jev.md) for the Jev design and the [Jev runbook](../runbooks/jev.md)
-for scope and restart behavior.
 
 Keeping the TUI and server in one executable provides a zero-setup local path
 while still allowing several TUI or future browser clients to attach to a
@@ -115,11 +104,10 @@ Cargo.toml
 src/
   main.rs        process entry and mode dispatch
   cli.rs         argument parsing and command dispatch
-  runtime.rs     configuration-to-runtime composition (runtime/approval.rs, runtime/routing.rs)
+  runtime.rs     configuration-to-runtime composition
   headless.rs    `qq run` durable non-interactive execution
   goals.rs       `qq goal` authenticated server client; no store ownership
   catalog.rs     authenticated model discovery
-  advisory.rs    `qq jev observe` post-commit observer
   doctor.rs      `qq doctor`
   init.rs        `qq init`
   output.rs      plain-text command output
@@ -553,7 +541,7 @@ takes precedence for that session's next run. Descriptor version 9 records the
 choice and its cache key distinguishes overrides. Every model turn uses the
 compiled choice; omission uses provider defaults, while explicit `none` requests
 disabled reasoning and explicit `default` overrides a configured value with the
-provider's own choice. This does not enable Jev. HTTP OpenAI Responses/Chat
+provider's own choice. HTTP OpenAI Responses/Chat
 adapters and Anthropic Messages (`output_config.effort`, `low` through `max`)
 carry effort; other adapter families reject it before credential lookup.
 Capability means transport support, not that every remote model accepts every
@@ -576,11 +564,10 @@ running it against an unreviewed tool set; see [`tools.md` § MCP](tools.md#mcp)
 
 Plan compilation reads the selected provider's credential from secure
 storage and nothing else on the provider path. The `spawn_agent` route list
-and Jev routing candidates admit a provider when its credential is *present*
+admits a provider when its credential is *present*
 (a name in the credential index, a set environment variable, an inline value,
-`NoAuth`, or a configured AWS source) without reading the secret; a child or
-routed choice whose credential then fails to resolve fails at its own load,
-where the router already falls back to the configured choice. The isolated
+`NoAuth`, or a configured AWS source) without reading the secret; a child
+choice whose credential then fails to resolve fails at its own load. The isolated
 TUI QA profile offers only its fixture route. The optional model-discovery
 cache lookup uses a cached result only when the cache scope can be derived
 without secure-store I/O: Codex, XAI, stored secret references, and a
@@ -1289,8 +1276,8 @@ ended by this rule. A model-spawned task child that reports
 `MAX_CHILD_REPORTS_WITHOUT_WORK = 3` times without other progress gets a
 final-answer turn instead of its fourth report: its tools stay declared with
 `ToolChoice::None`, any call it makes is admitted with a not-executed result,
-and the run completes with the turn whatever it returned, bypassing Jev
-final review and the audit hook. An interrupting steer resends the turn
+and the run completes with the turn whatever it returned, bypassing the
+audit hook. An interrupting steer resends the turn
 under the same notice: a placed report or final-answer notice pins the
 turn's kind until it settles. When that reply is empty the parent's
 `spawn_agent` result is the child's latest report with text, under an
@@ -1863,9 +1850,7 @@ until a subsequent request actually carries its notice.
 The session scheduler queues due active goals in batches of at most32. The
 idle-session check, absence of queued prompts/checks, fresh Goal-origin run,
 immutable goal notice and pending guard commit together. Each run starts from
-the current goal, rather than a previous user's prompt. Automatic task routing
-uses the captured objective; user-prompt routing keeps the submitted prompt.
-Both use the existing bounded, secret-masked routing input. Queue admission applies
+the current goal, rather than a previous user's prompt. Queue admission applies
 the goal's per-run bounds and known remaining token/cost/deadline allowance;
 spent or unknown capped allowances transition to budget exhausted. The scheduler
 uses one nearest-wake timer for idle goal waits and deadlines and publishes the
@@ -1913,17 +1898,7 @@ allowance without widening the prompt's own bounds. Effective limits commit
 with RunStarted. Duration is expressed against one fixed admission
 anchor, so rechecking the absolute goal deadline does not subtract preparation
 time again. Initial goal-owned and sponsored-child provider output is capped by the accepted total
-and output token limits. When task routing precedes that request, the runtime
-meter charges its reported spend once and caps initial output by the positive
-remaining total/output allowance. Before routing dispatch, the same transaction
-checks declared maximum input, output and cost against caller limits and every
-paid owner's current remainder, including pending spend. Unknown relevant bounds
-refuse finite caps before committing a pending marker. The TypeSafe adapter
-bounds input by its64KiB request limit but has no billed-output ceiling; finite
-output or total caps therefore require disabling multi-candidate routing. Its
-single-candidate path declares zero spend. Exhausted or unknown routing remainder
-stops before the main provider dispatch. Durable limits remain inclusive of routing
-spend; request shaping does not subtract it from the allowance a second time.
+and output token limits.
 
 Initial delegated prompt runs persist their immediate paid-owner run in the
 child-creation transaction. Bounded ancestry follows exact run origins,
@@ -2148,8 +2123,6 @@ Application configuration types must not leak into `qq-core`.
 | Native tools | Static Rust registration | Build/startup | Direct dispatch | Fully trusted; capability-scoped execution |
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
-| Jev review | Typed `CheckpointReviewer` | Trusted `jev_review` setting/profile, default off | `final`: final candidate only; `enforce`: each tool result and final candidate | Fixed endpoint/model/policy; bounded evidence; fail closed; durable correlated status |
-| Jev approval | Typed `ApprovalReviewer`, composed ahead of `reviewer_model` | Trusted `jev_approval` setting/profile, default off | Only a call the approval mode already holds; one typed yes/no/abstain, 5 s bound | Fixed endpoint/model/policy; bounded masked preview; falls through to the reviewer model then the human, never approves on failure (ADR-0041) |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
 | Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
@@ -2159,83 +2132,10 @@ path and are never wrapped in RPC or a plugin abstraction; the hot path
 selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
-limited to typed approval, exact tool validation, budget admission, and the
-explicit Jev review and approval modes from ADR-0030 and ADR-0041; provider
+limited to typed approval (including the `reviewer_model` delegate, ADR-0041),
+exact tool validation, and budget admission; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.
-
-Review activation is independent of credential storage. Environment/runtime
-choices override named profiles and top-level settings; workspace/profile changes
-participate in the trust fingerprint and compiled cache identity. Off runs create
-no reviewer client or evidence projection. `final` preserves normal tool batching;
-`enforce` retains the strict one-executable-call-per-turn contract.
-
-Review uses the latest user task, all its text blocks and subsequently applied
-steering. Earlier user context and tool observations enter a bounded selection:
-at most 32 items and 16 KiB, with 2 KiB excerpts marked with source IDs and masked
-content hashes. Final requests select recent observations within the 24 KiB
-payload allowance and state that omissions are not proof. Oversized tasks and
-final candidates are recorded as unreviewed and the run completes; large
-history alone does not permanently disable completion. Strict individual tool requests still require their full bounded
-arguments/result. There is no cross-request verdict cache.
-
-Cancellation does not wait for remote review: when a tool result is already durable but its checkpoint is not, the
-session durably records a local `unavailable`/not-performed checkpoint before
-any cancellation, deadline, runtime/provider failure, premature stream end, or
-defensive nominal completion settlement. The marker means no reviewer verdict
-was durably recorded; it does not claim whether remote work started. A nominal
-completion with such a pending result fails closed. Direct automation preserves answer-only stdout and writes
-human-readable checkpoint notices to stderr.
-The `LoadedRuntime` adapter preserves the reviewer when compiling an embedded
-runtime into a session plan, so every execution surface shares the same gate.
-A parent receives a `spawn_agent` result only after the child final checkpoint
-and child terminal outcome are durable; the parent then checkpoints that tool
-result before its next model turn.
-Steering accepted during final assessment is applied before completion; an
-interrupting steer drops the in-flight reviewer, records an unavailable marker,
-and regenerates the candidate for the updated task instead of dropping input.
-
-### Jev assessment bounds and accounting
-
-Each opted-in run admits at most 32 assessments and two correction attempts;
-each request has a five-second deadline and a 64 KiB response cap (including
-chunked bodies). Final claims may be corrected using existing evidence within
-the same finite repair allowance; no extra tool call is forced merely to revise
-wording. Existing run cancellation and deadlines drop inference futures.
-
-A verdict is evidence, not the run's outcome. A RED verdict redirects the run
-while a correction attempt remains; once both are spent, later RED verdicts
-stay on record (`checkpoint_reviewed` events and the `[JEV RED …]` marker on
-retained tool results) and the run completes with the candidate. A review the
-harness could not obtain (reviewer timeout, malformed reply, oversized task or
-evidence) is recorded as `unavailable` and the run continues. The reviewer's
-request limit and cost admission remain run failures because they are harness
-bounds.
-
-`checkpoint_started` commits before dispatch and marks the in-flight charge
-unknown in durable totals. `checkpoint_reviewed.spend` carries typed usage and
-estimated cost; its transaction updates run accounting before publication.
-Interrupted requests remain unknown rather than free. Jev's pinned 1.13 input
-price is estimated at 42 nanodollars per input token (42 USD per billion
-tokens; output free); price source checked 2026-09-18:
-[TypeSafe models](https://docs.typesafe.ai/models). Hard cost admission reserves
-capacity for its documented 64k input limit; custom reviewers without a maximum
-charge cannot run against a hard cost allowance. Actual receipts charge the
-shared token/cost budget, including a final assessment.
-
-The criteria-2026-09-18.1 policy assesses task coverage, direct evidence and
-consistency independently. Feedback names unsupported criterion IDs and the next
-evidence/correction action. Each selected probability and reported confidence
-must be at least 0.7 to permit a criterion's supported verdict. This conservative
-initial policy is not calibrated accuracy; real quality/savings remain subject
-to paired evaluation. Missing/invalid responses are unavailable, distinct from
-contradiction. Clients receive pending and settled events through normal replay.
-
-Spawned work preserves the parent run's reviewer identity and selected profile
-through admission and durable claiming. User-submitted prompts resolve current
-configuration even in previously spawned or publicly parented sessions. Unknown
-inherited reviewer identities fail before credential lookup; legacy owned work
-without a recorded reviewer stays disabled.
 
 Invariants every lane keeps:
 
@@ -2250,56 +2150,6 @@ Invariants every lane keeps:
   live registry under the run loop; active runs never wait for an unrelated
   addon reload.
 - All runtime traces identify the exact plan and addon generations.
-
-### Optional task routing during session preparation
-
-A compiled runtime may contain a `TaskRouter`. The session
-executor calls it once before ordinary preparation, outside the compaction loop.
-Absent routers allocate no task projection and dispatch no inference. Compaction
-and non-task internal runs skip routing. The production Jev adapter is constructed only when trusted `jev_routing` is enabled.
-
-The routing projection contains at most 16 KiB of the latest task text, masked
-before dispatch; oversized or textless tasks retain the configured model. A
-five-second inference deadline falls back visibly. A selected route goes through
-the ordinary loader again, with fixed workspace, profile and reviewer identity;
-an unavailable or incompatible selection retains the original plan. Explicit
-effort on that original plan remains authoritative.
-
-Schema 31 adds nullable `runs.routing_json`. A committed pending marker precedes
-dispatch and clears usage/cost to unknown; a bounded completed receipt restores
-reported spend atomically with its event. Reported spend is also persisted before
-loading a selected provider, so cancellation during that load retains it. All
-writes require the live queued
-reservation and reject cancellation, duplicate dispatch and terminal mutations.
-Cancelled/failed preparation retains the receipt. Recovery interrupts billed
-reservations rather than requeueing another paid decision. Session and child
-accounting distinguish these requests from never-started zero-spend runs.
-
-Routing spend seeds the runtime budget and durable accumulator once, without
-pretending a main-model turn occurred or resetting context occupancy. The budget
-is checked again before main-model work. Internal compaction does not receive
-that seed again. Client notices expose pending, selected and fallback decisions.
-
-Session model choices distinguish configured fallbacks from explicit pins
-(ADR-0033). Schema 32 stores `model_is_fallback`; older sessions remain pinned.
-The composition root reloads the configured route for fallback selections and
-applies explicit selections as overrides. Optional routing cannot replace a pin.
-CLI/environment overrides, TUI picks and explicit child choices establish pins;
-this provenance does not itself enable routing.
-
-The concrete adapter considers at most eight authenticated, authorized configured
-models and 32 combined model/effort choices, without live model discovery.
-Automatic effort values come only from model `reasoning_efforts` declarations on
-supported adapters; unknown capabilities retain omission. Pinned effort limits
-alternative models to those declaring support for that value. Descriptor 9
-records both the routing policy and the candidate/constraint fingerprint, so
-cache refresh cannot discard changed candidate metadata or profile pin intent.
-One-choice plans skip inference. Invalid or uncertain answers retain the fallback;
-confidence and winning probability must each reach the initial 0.7 threshold.
-Owned children inherit enabled/disabled routing from the parent's persisted
-plan; user followups resolve current configuration. Direct `ask` uses the same
-router and loader before its existing core run and prints pending/outcome/spend
-to stderr; its execution remains ephemeral. No live speed benefit is asserted.
 
 ## Performance Discipline
 

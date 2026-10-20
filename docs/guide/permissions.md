@@ -63,7 +63,7 @@ sections (providers, MCP servers, grants, model) load only after that.
 
 Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
 `organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `jev_review`, `jev_routing`, `jev_approval`, `approval_delegate`,
+`audit`, `approval_delegate`,
 `reasoning_effort`, or a `policy` grant (`allow_tools`,
 `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
 A project file that only sets `policy.exposed_tools` or `max_output_tokens`
@@ -108,9 +108,7 @@ your own session. `full` is authority over the workspace, not the machine:
 
 The mode says what is held. `approval_delegate` says who settles it when a
 delegate is configured; without one, every held call is yours. The delegate
-is Jev when `jev_approval: true` and a TypeSafe key is stored, otherwise
-`reviewer_model`; when Jev abstains or is unavailable the reviewer model is
-asked next, then you.
+is `reviewer_model`; when it abstains or is unavailable, you are asked.
 
 | Profile | Set | What happens |
 | --- | --- | --- |
@@ -128,8 +126,7 @@ the reviewer.
 Set it at the top level, in a profile
 (`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
 with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
-any other sensitive key. `jev_approval` works the same way
-(`QQ_JEV_APPROVAL=on|off`); a stored key with it off is never read.
+any other sensitive key.
 
 ### Stop delegating for this session
 
@@ -146,12 +143,12 @@ model do more than the mode allows.
 ### Seeing who decided
 
 A settled call says who settled it. In the TUI the expanded call detail
-reads `approved by jev` or `approved by reviewer` beside its timing, and a
-delegate's denial shows as `denied by jev` / `denied by reviewer` on the
+reads `approved by reviewer` beside its timing, and a
+delegate's denial shows as `denied by reviewer` on the
 row; your own decisions read `approved for session`, `denied by you`, or
 nothing for a plain once-approval. In `qq run --format text` the log line is
-`[tool] NAME approved by jev`; in JSONL the `tool_approval_resolved` event
-carries `"delegate": "jev"` or `"reviewer"`. When a delegate abstains and
+`[tool] NAME approved by reviewer`; in JSONL the `tool_approval_resolved`
+event carries `"delegate": "reviewer"`. When a delegate abstains and
 the prompt reaches you, the prompt's reason line says why.
 
 ## What the shell classifier decides

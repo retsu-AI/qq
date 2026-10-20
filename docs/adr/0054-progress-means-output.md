@@ -110,7 +110,7 @@ without producing anything.
    - A report turn never settles the run, even when it has text and no
      calls. It takes the path the slice checkpoint takes today
      (`lib.rs:2729–2743`), so it never reaches the final-answer, audit or
-     Jev final-review paths.
+     Jev final-review paths (Jev was later removed).
    - A report with text is a progress event. A report without text is a
      *missed* report. It is not a failure: it resets the count and is
      counted toward decision 3.
@@ -150,7 +150,7 @@ without producing anything.
      guarantee, not the model's obedience: models answered 23 of 25
      checkpoint turns with calls. A call made on it is admitted with a
      not-executed result and never runs, and the run completes once those
-     results are durable. Jev final review and the audit hook do not
+     results are durable. Jev final review (later removed) and the audit hook do not
      redirect it. Steering that arrives during the turn is applied, and an
      interrupting steer resends the turn under the same notice, so the run
      still ends on it. A turn with calls still settles as
@@ -195,7 +195,7 @@ without producing anything.
      mark on the child's spawn row and the notice are committed in **one
      transaction**, before the next request is built. Delivery has its own
      path and its own byte bound; it is not steering. It is not given to Jev
-     as user input, and it does not use the steering queue.
+     (later removed) as user input, and it does not use the steering queue.
    - The child's spend is charged to the parent exactly once, at delivery or
      at cancellation. Today it is charged when the tool call returns.
    - If the parent settles before delivery (interrupted, cancelled or

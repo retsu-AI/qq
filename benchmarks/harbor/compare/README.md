@@ -39,10 +39,9 @@ unfixable, and fake-success labels test summary classification only.
 
 A side-by-side summary does **not** certify that jobs match on model, task,
 budget, source, or any other controlled variable, and it does not isolate the
-value of QQ or JEV. Claims require the exact frozen model, provider and version;
+value of QQ. Claims require the exact frozen model, provider and version;
 harness and configuration; task and evaluator hashes; starting source; total
-budgets; attempt IDs; and independent review. QQ off/on and JEV off/on are
-separate experimental axes and must not be conflated.
+budgets; attempt IDs; and independent review.
 
 This script reports fields already present in Harbor results. It does not prove
 supplier charge containment, reconstruct missing costs, validate a broader

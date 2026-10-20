@@ -74,7 +74,7 @@ impl StallScope {
     }
 
     /// One settled call. Runtime rejections (over the per-turn cap, made in
-    /// a report turn, Jev's one-call rule, unknown or malformed) are never
+    /// a report turn, unknown or malformed) are never
     /// passed here; denied calls are, so a run that keeps asking for denied
     /// calls still reaches its report.
     pub(crate) fn settled(&mut self, progress: bool) {
