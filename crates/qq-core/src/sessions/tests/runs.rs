@@ -978,7 +978,12 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
     let focused = snapshot.focused.unwrap();
     assert_eq!(focused.runs.len(), 1);
     assert_eq!(focused.runs[0].outcome, Some(RunOutcome::Completed));
-    assert_eq!(focused.tool_calls.len(), crate::MAX_TOOL_CALLS_PER_SLICE);
+    // The snapshot carries the newest window; the rest stay reachable as older.
+    assert_eq!(
+        focused.tool_calls.len(),
+        crate::sessions::MAX_SNAPSHOT_TOOL_CALLS
+    );
+    assert!(focused.has_older_tool_calls);
     assert!(
         focused
             .tool_calls
@@ -992,7 +997,10 @@ async fn one_durable_run_continues_across_the_internal_tool_budget() {
         .collect::<Vec<_>>();
     provider_call_ids.sort_unstable();
     provider_call_ids.dedup();
-    assert_eq!(provider_call_ids.len(), crate::MAX_TOOL_CALLS_PER_SLICE);
+    assert_eq!(
+        provider_call_ids.len(),
+        crate::sessions::MAX_SNAPSHOT_TOOL_CALLS
+    );
     assert_eq!(
         std::fs::read_to_string(directory.path().join("slice-effects.txt")).unwrap(),
         "seedx",
@@ -2985,6 +2993,143 @@ fn snapshots_stay_under_the_wire_cap_for_large_sessions() {
     let focused = snapshot.focused.unwrap();
     assert!(!focused.has_older_tool_calls);
     assert_eq!(focused.tool_calls.len(), 3);
+}
+
+/// The TUI's startup snapshot focuses one session and pre-warms the next few
+/// in a single request whose byte budget they share. Tool results are the
+/// heavy rows; sending thousands of them per body (the client keeps 64)
+/// spent the budget on the first body and left the later ones with no
+/// messages, which the TUI showed as an empty "Ask QQ to begin" session.
+#[test]
+fn prewarmed_bodies_keep_their_messages_when_an_earlier_body_has_many_tool_results() {
+    let directory = tempfile::tempdir().unwrap();
+    // 120 runs x 1 turn x 96 KiB results: ~11 MiB of results in one session,
+    // more than the whole 6 MiB body budget.
+    let (mut connection, heavy) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        0,
+        120,
+        1,
+        96 * 1024,
+    );
+    let workspace_id = WorkspaceId::from_bytes([1; 16]);
+    // Real stores pre-warm several busy sessions together: give two more
+    // sessions a copy of the heavy one's history before the light one.
+    let mut include_sessions = Vec::new();
+    for byte in [11_u8, 12] {
+        let busy = SessionId::from_bytes([byte; 16]);
+        connection
+            .execute(
+                "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
+                 VALUES (?1, ?2, 'busy', 'idle', 1, 1)",
+                params![busy.to_string(), workspace_id.to_string()],
+            )
+            .unwrap();
+        let runs: Vec<(String, String, String)> = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, user_message_id, assistant_message_id FROM runs
+                     WHERE session_id = ?1",
+                )
+                .unwrap();
+            statement
+                .query_map([heavy.to_string()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        for (old_run, old_user, old_assistant) in runs {
+            let (run, user, assistant) = (
+                RunId::generate().unwrap().to_string(),
+                MessageId::generate().unwrap().to_string(),
+                MessageId::generate().unwrap().to_string(),
+            );
+            let busy = busy.to_string();
+            connection
+                .execute(
+                    "INSERT INTO runs(id, session_id, command_id, user_message_id,
+                                      assistant_message_id, status, outcome_json, created_at_ms,
+                                      started_at_ms, finished_at_ms)
+                     SELECT ?1, ?2, ?3, ?4, ?5, status, outcome_json, created_at_ms,
+                            started_at_ms, finished_at_ms FROM runs WHERE id = ?6",
+                    params![
+                        run,
+                        busy,
+                        CommandId::generate().unwrap().to_string(),
+                        user,
+                        assistant,
+                        old_run
+                    ],
+                )
+                .unwrap();
+            for (new, old) in [(&user, &old_user), (&assistant, &old_assistant)] {
+                connection
+                    .execute(
+                        "INSERT INTO messages(id, session_id, run_id, ordinal, role, state,
+                                              output, created_at_ms)
+                         SELECT ?1, ?2, ?3, ordinal, role, state, output, created_at_ms
+                         FROM messages WHERE id = ?4",
+                        params![new, busy, run, old],
+                    )
+                    .unwrap();
+            }
+            connection
+                .execute(
+                    "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal,
+                                            provider_call_id, name, arguments_json, state,
+                                            result, requested_at_ms, effect)
+                     SELECT ?1, ?2, turn_ordinal, call_ordinal, provider_call_id, name,
+                            arguments_json, state, result, requested_at_ms, effect
+                     FROM tool_calls WHERE run_id = ?3",
+                    params![ToolCallId::generate().unwrap().to_string(), run, old_run],
+                )
+                .unwrap();
+        }
+        include_sessions.push(busy);
+    }
+    let light = SessionId::from_bytes([9; 16]);
+    include_sessions.push(light);
+    let run = RunId::generate().unwrap();
+    let user = MessageId::generate().unwrap();
+    let assistant = MessageId::generate().unwrap();
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO sessions(id, workspace_id, title, status, created_at_ms, updated_at_ms)
+                 VALUES ('{light}', '{workspace_id}', 'light', 'idle', 1, 1);
+             INSERT INTO runs(id, session_id, command_id, user_message_id, assistant_message_id,
+                              status, created_at_ms)
+                 VALUES ('{run}', '{light}', '{}', '{user}', '{assistant}', 'completed', 1);
+             INSERT INTO messages(id, session_id, run_id, ordinal, role, state, output, created_at_ms)
+                 VALUES ('{user}', '{light}', '{run}', 1, 'user', 'complete', 'hello', 1),
+                        ('{assistant}', '{light}', '{run}', 2, 'assistant', 'complete', 'hi', 1);",
+            CommandId::generate().unwrap()
+        ))
+        .unwrap();
+    let snapshot = load_snapshot(
+        &mut connection,
+        StoreId::from_bytes([7; 16]),
+        SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(heavy),
+            include_sessions,
+            session_limit: 512,
+            message_limit: 256,
+        },
+    )
+    .unwrap();
+    assert!(serde_json::to_vec(&snapshot).unwrap().len() <= qq_protocol::MAX_SNAPSHOT_BYTES);
+    let focused = snapshot.focused.unwrap();
+    assert!(focused.has_older_tool_calls);
+    for body in std::iter::once(&focused).chain(&snapshot.included) {
+        assert!(
+            !body.messages.is_empty() && !body.has_older_messages,
+            "{} kept {} messages; a prewarmed body must not be starved by earlier tool results",
+            body.summary.title,
+            body.messages.len()
+        );
+    }
 }
 
 /// Steering queued while the slice report is in flight joins at the next

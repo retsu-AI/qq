@@ -1472,13 +1472,23 @@ then advances the client from `cursor`.
 
 `session_limit` and `message_limit` are count bounds. Body rows are also
 admitted under one byte budget (6 MiB of escaped text plus a fixed per-row
-charge) spent by the focused body first and then by `included` bodies in
-request order, so a response always serializes under the 8 MiB snapshot cap
-however large the transcripts are. Within a body, messages and tool calls are
-admitted newest-first; when the budget runs out the body keeps a contiguous
-newest tail and sets `has_older_messages` / `has_older_tool_calls`, exactly
-as a count cut does. Older rows remain reachable through a later snapshot
-(the TUI already fetches non-prewarmed bodies cold) and tool-result recall.
+charge). Allocation makes two passes: first the focused body's messages and
+then each `included` body's messages in request order; only then the focused
+body's tool-call tail and each included body's tool-call tail in the same
+order. Thus tool results cannot starve later transcripts, and a response
+always serializes under the 8 MiB snapshot cap however large the transcripts
+are. Within each pass rows are admitted newest-first; when the budget runs
+out the body keeps a contiguous newest tail and sets `has_older_messages` /
+`has_older_tool_calls`, exactly as a count cut does. Tool tails also have a
+64-call count bound. Older rows remain reachable through a later snapshot
+and tool-result recall. The TUI conservatively keeps any shared body with
+`has_older_messages` or `has_older_tool_calls` cold for a single-body fetch,
+since these flags do not distinguish byte-budget cuts from count cuts.
+A rejected focused startup/multi-body snapshot triggers that fetch immediately.
+
+An isolated response installs its available rows even if one row class still
+cannot fit, so unavoidable truncation neither hides usable history nor
+causes an endless retry.
 Session summaries and run rows are never cut by transcript size.
 
 ### `POST /v1/models`

@@ -2116,3 +2116,64 @@ fn automatic_compaction_releases_drafts_only_after_its_queued_owner_is_cancelled
         );
     }
 }
+
+#[test]
+fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
+    // One snapshot request shares a byte budget across its focused and
+    // pre-warmed bodies. A body the budget never reached carries no rows but
+    // `has_older_messages`; caching it rendered "Ask QQ to begin this
+    // session." for a session with history, and the warm view never refetched.
+    let session_id = SessionId::from_bytes([7; 16]);
+    let starved = SessionSnapshot {
+        goal: None,
+        side_questions: Vec::new(),
+        summary: summary(session_id),
+        messages: Vec::new(),
+        runs: Vec::new(),
+        tool_calls: Vec::new(),
+        has_older_tool_calls: true,
+        has_older_messages: true,
+    };
+    let mut store = SessionStore::default();
+    store.install_session_snapshot(starved.clone(), &[], 5);
+    let view = store.get(&session_id).expect("the summary is kept");
+    assert!(!view.is_warm(), "focusing it must fetch its own body");
+    assert_eq!(view.summary.title, starved.summary.title);
+
+    // Transcripts are loaded before tools, so a later prewarmed body can
+    // have messages but no tool rows. It must still refetch on focus.
+    let tool_starved = SessionSnapshot {
+        messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
+        has_older_messages: false,
+        ..starved.clone()
+    };
+    store.install_session_snapshot(tool_starved, &[], 6);
+    assert!(
+        !store.get(&session_id).unwrap().is_warm(),
+        "missing tool rows must not become a permanently warm transcript"
+    );
+
+    // Partially truncated shared bodies must refetch, including when a
+    // previous isolated response already warmed the session.
+    let partial = SessionSnapshot {
+        messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
+        has_older_tool_calls: false,
+        ..starved.clone()
+    };
+    store.install_session_snapshot(partial.clone(), &[], 6);
+    assert!(!store[&session_id].is_warm());
+    store.install_isolated_session_snapshot(partial.clone(), &[], 6);
+    assert!(store[&session_id].is_warm());
+    store.install_session_snapshot(partial, &[], 7);
+    assert!(!store[&session_id].is_warm());
+    assert_eq!(store[&session_id].loaded_through, 7);
+
+    // A genuinely empty session is still installed warm.
+    let empty = SessionSnapshot {
+        has_older_messages: false,
+        has_older_tool_calls: false,
+        ..starved
+    };
+    store.install_session_snapshot(empty, &[], 6);
+    assert!(store.get(&session_id).unwrap().is_warm());
+}
