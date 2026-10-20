@@ -178,7 +178,10 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
     if width <= 3 {
         return Line::styled(".".repeat(width), muted());
     }
-    let mut output = Line::default();
+    let mut output = Line {
+        card: line.card,
+        ..Line::default()
+    };
     let mut used = 0_usize;
     let content_width = width - 3;
     for span in line.spans {
@@ -273,6 +276,7 @@ mod tests {
                 text: "┃ body".to_owned(),
                 style: normal(),
             }],
+            ..Line::default()
         };
         let [out] = <[Line; 1]>::try_from(indent_lines(vec![row], "│ ", muted(), 40))
             .expect("one row in, one out");

@@ -214,8 +214,23 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
         };
         let mut diamond = Line::default();
         diamond.push("◇", warning().bold());
+        // With the strip on screen its `◇ N` / `● N new` already points
+        // at these needs: the rule keeps only the chords that answer or
+        // reach them, never a second count.
+        let sessions = crate::view::listed_sessions(app);
+        let strip = sessions > 1 && !crate::view::rail_visible(width, app.layout, sessions);
+        let jump_chord = app
+            .chord_label(crate::commands::Command::FocusNextApproval)
+            .map(|jump| {
+                let mut chord = Line::default();
+                chord.push(compact_chord(&jump), warning());
+                chord.push(" jump", muted());
+                chord
+            });
         let mut candidates: Vec<Line> = Vec::new();
         match (waiting, &count) {
+            (true, _) if strip => candidates.push(approval_chords(app)),
+            (false, Some(_)) if strip => candidates.extend(jump_chord),
             (true, Some(count)) => {
                 let chords = approval_chords(app);
                 candidates.push(join(&[&chords, count]));
@@ -227,11 +242,8 @@ pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[Sessio
                 candidates.push(diamond.clone());
             }
             (false, Some(count)) => {
-                if let Some(jump) = app.chord_label(crate::commands::Command::FocusNextApproval) {
-                    let mut chord = Line::default();
-                    chord.push(compact_chord(&jump), warning());
-                    chord.push(" jump", muted());
-                    candidates.push(join(&[count, &chord]));
+                if let Some(chord) = &jump_chord {
+                    candidates.push(join(&[count, chord]));
                 }
                 candidates.push(count.clone());
             }

@@ -6655,6 +6655,45 @@ fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
 }
 
 #[test]
+fn message_text_shaped_like_a_card_does_not_card_the_child() {
+    // The real card scrolls away above; the last message renders a row that
+    // reads like one (`↳ ` then the bold title as its own span). Only the
+    // card row itself names the child, so the rule still does.
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let focused = app.focused().unwrap();
+    if let Some(messages) = app.sessions.get_mut(&focused).unwrap().messages.as_mut() {
+        for byte in 0..12u8 {
+            let text = if byte == 11 {
+                "↳ **survey callers**".to_owned()
+            } else {
+                format!("later line {byte}")
+            };
+            messages.push(MessageSnapshot {
+                turn_ordinal: 5,
+                ..fixtures::message(MessageId::from_bytes([0xa0 + byte; 16]), focused, &text)
+            });
+        }
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ survey callers"))
+            && !rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "the forged row is drawn, the card is not: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey callers"), "{rule}");
+}
+
+#[test]
 fn a_drawn_card_does_not_card_a_child_whose_title_it_contains() {
     // `survey` is spawned by a call of a run the transcript does not draw,
     // so it has no card; `survey callers`'s card contains its title.
@@ -8196,7 +8235,9 @@ fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
 }
 
 #[test]
-fn a_sticky_error_keeps_a_pointer_to_every_need_at_minimum_width() {
+fn a_sticky_error_beside_the_strip_keeps_chords_and_no_second_count() {
+    // Two sessions at Compact: the strip is on screen and already points at
+    // the waiting agent and the unseen finish; the rule keeps the chords.
     let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
     let other = SessionId::from_bytes([0x5e; 16]);
     app.sessions.upsert_summary(
@@ -8214,12 +8255,60 @@ fn a_sticky_error_keeps_a_pointer_to_every_need_at_minimum_width() {
         qq_client::state::NoticeLevel::Error,
         "boom happened".to_owned(),
     );
-    for width in [32, 33] {
-        let rule = frame_rows(&[super::chrome::composer_rule(&app, width, None)]).join("");
+    for width in [32, 33, 80] {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, width, 16));
+        let strip = rows
+            .iter()
+            .position(|row| row.contains("2 sessions"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(rows[strip].contains("◇ 2"), "{rows:#?}");
+        let rule = &rows[strip + 1];
+        assert!(rule.contains("jump"), "{width}: {rule}");
         assert!(
-            rule.contains('◇') && rule.contains("● 1"),
+            !rule.contains('◇') && !rule.contains("● 1"),
+            "no second count: {width}: {rule}"
+        );
+    }
+}
+
+#[test]
+fn a_long_sticky_error_without_the_strip_reserves_the_pointer() {
+    // One session (no rail, no strip): a waiting agent and an unseen
+    // finished agent are pointed at only by the rule. A notice far wider
+    // than the terminal truncates; the pointer stays at every width.
+    let (mut app, parent, _, _, _) = app_with_child_awaiting_approval();
+    let done = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "done agent".to_owned(),
+            parent_id: Some(parent),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(done)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&done).unwrap().finished_unread = true;
+    app.apply_notice(
+        None,
+        qq_client::state::NoticeLevel::Error,
+        "the provider rejected the request ".repeat(8),
+    );
+    for width in [32, 33, 60, 79] {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, width, 16));
+        assert!(
+            !rows.iter().any(|row| row.contains("sessions ")),
+            "{rows:#?}"
+        );
+        let rule = rows
+            .iter()
+            .find(|row| row.contains("error:"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(
+            (rule.contains('◇') || rule.contains("answer")) && rule.contains("● 1"),
             "{width}: {rule}"
         );
+        assert!(unicode_width::UnicodeWidthStr::width(rule.as_str()) <= width);
     }
 }
 

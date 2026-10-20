@@ -384,48 +384,12 @@ impl FrameRenderer {
         // viewport: the card's `↳ title` row must be among the body rows
         // drawn. Such a child is named once: the rule does not repeat it and
         // the rail does not list it again under the focused session. The
-        // card's title is a span of its own after the `↳` prefix
-        // (`session_line` styles it apart from the glyph and the badges), so
-        // it is matched whole: a child titled `API` is not carded by a drawn
-        // `API tests` card.
-        let mut carded: Vec<SessionId> = Vec::new();
-        if let Some(shown) = app.view().transcript()
-            && let Some(calls) = app
-                .sessions
-                .get(&shown)
-                .and_then(|session| session.tool_calls.as_deref())
-        {
-            let card_spans: Vec<&str> = body
-                .iter()
-                .filter_map(|line| {
-                    let arrow = line.spans.iter().position(|span| span.text.contains('↳'))?;
-                    Some(
-                        line.spans[arrow + 1..]
-                            .iter()
-                            .map(|span| span.text.as_str()),
-                    )
-                })
-                .flatten()
-                .collect();
-            // A title shared by several children is ambiguous: they count as
-            // carded only when every one of their cards is drawn, so an
-            // off-screen namesake is still named (at worst twice, never not
-            // at all).
-            let children: Vec<SessionId> = calls
-                .iter()
-                .filter_map(|call| app.sessions.child_spawned_by(call.id))
-                .collect();
-            let title_of = |child: &SessionId| app.sessions[child].summary.title.as_str();
-            carded.extend(children.iter().copied().filter(|child| {
-                let title = title_of(child);
-                let drawn = card_spans.iter().filter(|span| **span == title).count();
-                let namesakes = children
-                    .iter()
-                    .filter(|other| title_of(other) == title)
-                    .count();
-                drawn >= namesakes
-            }));
-        }
+        // card row carries its child's id (`Line::card`), so neither a
+        // namesake's card nor message text that looks like a card stands in
+        // for it.
+        let mut carded: Vec<SessionId> = body.iter().filter_map(|line| line.card).collect();
+        carded.sort_unstable();
+        carded.dedup();
         let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
@@ -454,6 +418,7 @@ impl FrameRenderer {
                 let mut row = Line {
                     indent: first.indent,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
+                    card: first.card,
                 };
                 row.spans.extend(first.spans);
                 for (x, column) in &mut columns {

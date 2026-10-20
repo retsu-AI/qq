@@ -934,7 +934,9 @@ pub(super) fn child_rows(app: &App, tool_call_id: ToolCallId, width: usize) -> V
     if !parts.is_empty() {
         line.push(format!("  {}", parts.join(" · ")), muted());
     }
-    let mut rows = vec![truncate_line(line, width)];
+    let mut title = truncate_line(line, width);
+    title.card = Some(child);
+    let mut rows = vec![title];
     if let Some((text, style)) = live_status_line(app, child)
         && view.live.active_tool.is_none()
     {
