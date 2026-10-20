@@ -270,8 +270,10 @@ pub(super) fn decode_device_authorization(
     response: Response,
 ) -> Result<DeviceAuthorization, CodexAuthError> {
     decode_device_start(
-        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, true)
-            .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, || {
+            oauth::TransportError::DeadlineReached
+        })
+        .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
     )
 }
 
@@ -321,8 +323,10 @@ fn decode_device_start(
 #[cfg(test)]
 pub(super) fn decode_device_poll(response: Response) -> Result<DevicePoll, CodexAuthError> {
     decode_poll(
-        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, true)
-            .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, || {
+            oauth::TransportError::DeadlineReached
+        })
+        .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
     )
 }
 

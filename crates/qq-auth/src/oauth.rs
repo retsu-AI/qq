@@ -136,14 +136,18 @@ impl OAuthResponse {
     }
 
     /// Reads at most `limit` bytes of `response`. The request's timeout
-    /// stays active while the body streams, so a body that stalls past it
-    /// is a timeout, not an unreadable body.
+    /// stays active while the body streams, so a success body that stalls
+    /// past it is a timeout (`timed_out` says which kind), not an unreadable
+    /// body. A rejection keeps its status whatever happens to its body:
+    /// providers map most rejections from the status alone, as they did
+    /// before the body was read.
     pub(crate) fn read(
         mut response: Response,
         limit: usize,
-        deadline_bound: bool,
+        timed_out: impl FnOnce() -> TransportError,
     ) -> Result<Self, TransportError> {
         let status = response.status().as_u16();
+        let success = response.status().is_success();
         let mut bytes = Vec::new();
         let body = match (&mut response)
             .take((limit + 1) as u64)
@@ -151,13 +155,7 @@ impl OAuthResponse {
         {
             Ok(_) if bytes.len() <= limit => Some(bytes),
             Ok(_) => None,
-            Err(error) if is_timeout(&error) => {
-                return Err(if deadline_bound {
-                    TransportError::DeadlineReached
-                } else {
-                    TransportError::Failed
-                });
-            }
+            Err(error) if success && is_timeout(&error) => return Err(timed_out()),
             Err(_) => None,
         };
         Ok(Self { status, body })
@@ -237,22 +235,38 @@ impl OAuthTransport for SystemTransport {
             OAuthBody::Form(fields) => builder.form(&fields),
             OAuthBody::Json(value) => builder.json(&value),
         };
-        // The caller's deadline can only shorten the transport's cap, and
-        // only a timeout it caused is reported as reaching it.
-        let deadline_bound = request.timeout.is_some_and(|timeout| timeout < self.cap);
+        // The caller's deadline can only shorten the transport's cap.
         builder = builder.timeout(
             request
                 .timeout
                 .map_or(self.cap, |timeout| timeout.min(self.cap)),
         );
+        let started = Instant::now();
+        let timed_out = || classify_timeout(request.timeout, self.cap, started.elapsed());
         let response = builder.send().map_err(|error| {
-            if deadline_bound && error.is_timeout() {
-                TransportError::DeadlineReached
+            if error.is_timeout() {
+                timed_out()
             } else {
                 TransportError::Failed
             }
         })?;
-        OAuthResponse::read(response, request.max_body, deadline_bound)
+        OAuthResponse::read(response, request.max_body, timed_out)
+    }
+}
+
+/// What a timed-out call reports. Only a timeout the caller's own deadline
+/// caused reaches it: the call must have run out that deadline, and that
+/// deadline must have been shorter than the transport's cap. Every other
+/// timeout (the 30-second connect bound, the cap itself) is an ordinary
+/// transport failure, however much of the caller's deadline is left.
+fn classify_timeout(
+    deadline: Option<Duration>,
+    cap: Duration,
+    elapsed: Duration,
+) -> TransportError {
+    match deadline {
+        Some(deadline) if deadline < cap && elapsed >= deadline => TransportError::DeadlineReached,
+        _ => TransportError::Failed,
     }
 }
 
@@ -558,6 +572,15 @@ pub(crate) mod tests {
         transport: &SystemTransport,
         timeout: Option<Duration>,
     ) -> Result<OAuthResponse, TransportError> {
+        post_to_a_stalled_status(transport, 200, timeout)
+    }
+
+    /// [`post_to_a_stalled_body`] with response status `status`.
+    pub(crate) fn post_to_a_stalled_status(
+        transport: &SystemTransport,
+        status: u16,
+        timeout: Option<Duration>,
+    ) -> Result<OAuthResponse, TransportError> {
         use std::{io::Write as _, net::TcpListener};
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -569,7 +592,10 @@ pub(crate) mod tests {
             let _ = std::io::Read::read(&mut stream, &mut request);
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{",
+                    format!(
+                        "HTTP/1.1 {status} Status\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{{"
+                    )
+                    .as_bytes(),
                 )
                 .unwrap();
             stream.flush().unwrap();
@@ -615,6 +641,44 @@ pub(crate) mod tests {
             let result = post_to_a_stalled_body(&transport, timeout);
             assert_eq!(result.err(), Some(TransportError::Failed), "{timeout:?}");
         }
+    }
+
+    /// A timeout reaches the caller's deadline only if the call ran it out
+    /// and it was the shorter bound: a connect timeout with time left, or
+    /// the cap, is a transport failure.
+    #[test]
+    fn only_a_timeout_the_deadline_caused_reaches_it() {
+        let secs = Duration::from_secs;
+        let cap = secs(60);
+        // A poll with 45 s left reaches its deadline at 45 s...
+        assert_eq!(
+            classify_timeout(Some(secs(45)), cap, secs(45)),
+            TransportError::DeadlineReached
+        );
+        // ...but the 30 s connect bound firing first is a failure.
+        assert_eq!(
+            classify_timeout(Some(secs(45)), cap, secs(30)),
+            TransportError::Failed
+        );
+        // A deadline at or beyond the cap never wins, nor does no deadline.
+        assert_eq!(
+            classify_timeout(Some(secs(1800)), cap, secs(60)),
+            TransportError::Failed
+        );
+        assert_eq!(
+            classify_timeout(None, cap, secs(60)),
+            TransportError::Failed
+        );
+    }
+
+    /// A rejection whose body stalls keeps its status, so the provider maps
+    /// it from the status as before instead of waiting it out as a timeout.
+    #[test]
+    fn a_rejection_with_a_stalled_body_keeps_its_status() {
+        let response =
+            post_to_a_stalled_status(&loopback_transport(), 401, Some(Duration::from_millis(200)))
+                .unwrap();
+        assert_eq!((response.status, response.body), (401, None));
     }
 
     #[test]
