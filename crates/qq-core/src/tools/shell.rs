@@ -14,7 +14,7 @@ use super::{
 
 /// Combined output captured (head+tail) and streamed per command. The full
 /// capture is what a spill store keeps; the model sees [`SHELL_BOUNDS`].
-pub(super) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 /// Model-facing bound: the head of a command's output and its tail, where the
 /// verdict lives, are what the model reads; the middle of a long build log
 /// is noise it should page into deliberately.

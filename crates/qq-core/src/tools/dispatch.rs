@@ -3,8 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[cfg(test)]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
@@ -59,7 +58,7 @@ type ProcessRecorder = Box<
 >;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ToolDrainError {
+pub enum ToolDrainError {
     #[error("the command process receipt could not be persisted")]
     UnrecordedProcess,
     #[error("local shell process termination could not be confirmed")]
@@ -365,7 +364,7 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
 /// model context; `ui_payload` is persisted for clients and never sent back
 /// to the model. Constructors are the one bounding boundary: they mask
 /// secrets, then bound the text to the tool's [`Bounds`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ResultDisposition {
     Observed,
     Refused,
@@ -374,7 +373,7 @@ pub(crate) enum ResultDisposition {
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
     pub(crate) disposition: ResultDisposition,
     /// Result identity before masking, output bounds or citations.
@@ -449,7 +448,7 @@ impl ReadSideOutput {
 /// A complete tool output awaiting storage: the text, its SHA-256 (the
 /// handle's digest), and the line the bounded text omits from so the marker
 /// can point at it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SpillRecord {
     pub(crate) text: String,
     pub(crate) digest: String,

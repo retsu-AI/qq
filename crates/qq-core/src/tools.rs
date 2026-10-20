@@ -1,5 +1,5 @@
 pub(crate) mod ask;
-mod dispatch;
+pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
@@ -18,6 +18,7 @@ pub(crate) mod walk;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
+pub(crate) use shell::MAX_SHELL_OUTPUT_BYTES;
 #[cfg(unix)]
 pub(crate) use shell::ProcessGroupGuard;
 

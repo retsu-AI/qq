@@ -1,0 +1,657 @@
+//! Native execution owned independently of its observers.
+//!
+//! Only a trusted host may submit an already-authorized command. This module
+//! records execution lifetime; it does not grant authority or claim containment.
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use qq_protocol::ToolCallId;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Semaphore, watch};
+
+use crate::tools::{ToolOutput, ToolTasks, process_context::ExecutionContextReceipt};
+use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellation, ShellPolicy};
+
+mod journal;
+use journal::Journal;
+
+pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;
+
+const MAX_ACTIVE: u32 = 128;
+const MAX_RETAINED: usize = 10_000;
+const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const MAX_LIVE_OUTPUT_BYTES: usize = 3 * crate::tools::MAX_SHELL_OUTPUT_BYTES;
+
+/// An authorized invocation. Its ID is an idempotency key, not a new attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeCommand {
+    pub id: ToolCallId,
+    pub workspace: PathBuf,
+    pub tool: String,
+    pub arguments: String,
+    pub shell_policy: ShellPolicy,
+    pub approved_images: Vec<ApprovedReadImage>,
+    /// Absolute task deadline, captured by the admitting host. Reconnecting
+    /// cannot grant a fresh duration. The owner converts it to a monotonic wait.
+    pub not_after_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandStatus {
+    Queued,
+    Running,
+    Finished,
+    /// The owner stopped without recording an exit. Never replay this ID.
+    Lost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProcessReceipt(Box<ExecutionContextReceipt>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandResult(ToolOutput);
+
+impl CommandResult {
+    pub fn text(&self) -> &str {
+        &self.0.model_text
+    }
+    pub fn is_error(&self) -> bool {
+        self.0.is_error
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSnapshot {
+    pub id: ToolCallId,
+    pub version: u64,
+    pub status: CommandStatus,
+    pub process: Option<ProcessReceipt>,
+    pub output: String,
+    pub result: Option<CommandResult>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CommandOwnerError {
+    #[error("another command owner holds this journal")]
+    Busy,
+    #[error("command owner state is not private or is not a regular file")]
+    PrivateState,
+    #[error("command identity was reused for another invocation")]
+    Conflict,
+    #[error("command owner capacity is exhausted")]
+    Full,
+    #[error("command was not found")]
+    NotFound,
+    #[error("invalid native command")]
+    Invalid,
+    #[error("command owner is stopping or has lost durable execution state")]
+    Unavailable,
+    #[error("command owner filesystem operation failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("command journal failed: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("command journal encoding failed: {0}")]
+    Codec(#[from] serde_json::Error),
+    #[error("unsupported command journal schema {0}")]
+    Schema(i64),
+    #[error("command cleanup failed: {0}")]
+    Cleanup(#[source] CommandCleanupError),
+    #[error("command owner shutdown failed: {0}")]
+    Shutdown(#[source] Arc<CommandOwnerError>),
+}
+
+#[derive(Clone)]
+pub struct CommandOwner(Arc<OwnerState>);
+
+type ShutdownResult = Result<(), Arc<CommandOwnerError>>;
+
+struct OwnerState {
+    journal: Journal,
+    jobs: Arc<Mutex<HashMap<ToolCallId, LiveCommand>>>,
+    slots: Arc<Semaphore>,
+    controls: Arc<Semaphore>,
+    tools: ToolTasks,
+    producer: Arc<ProcessProducer>,
+    failed: watch::Sender<bool>,
+    closing: AtomicBool,
+    stopped: watch::Sender<Option<ShutdownResult>>,
+}
+
+struct LiveCommand {
+    changed: watch::Sender<u64>,
+    cancellation: RunCancellation,
+}
+
+impl CommandOwner {
+    pub async fn open(
+        directory: PathBuf,
+        source_revision: &str,
+    ) -> Result<Self, CommandOwnerError> {
+        let journal = Journal::open(directory).await?;
+        let (failed, _) = watch::channel(false);
+        let (stopped, _) = watch::channel(None);
+        let jobs = Arc::new(Mutex::new(HashMap::<ToolCallId, LiveCommand>::new()));
+        let tools = ToolTasks::default();
+        let record_journal = journal.clone();
+        let record_failed = failed.clone();
+        let record_jobs = Arc::clone(&jobs);
+        tools
+            .set_process_recorder(move |id, receipt| {
+                let journal = record_journal.clone();
+                let failed = record_failed.clone();
+                let jobs = Arc::clone(&record_jobs);
+                async move {
+                    match journal.started(id, receipt).await {
+                        Ok(version) => {
+                            if let Some(job) = jobs
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner())
+                                .get(&id)
+                            {
+                                job.changed.send_replace(version);
+                            }
+                            Ok(())
+                        }
+                        Err(_) => {
+                            fail(&failed, &jobs);
+                            Err(crate::sessions::SessionRuntimeError::Unavailable)
+                        }
+                    }
+                }
+            })
+            .map_err(|_| CommandOwnerError::Unavailable)?;
+        Ok(Self(Arc::new(OwnerState {
+            journal,
+            jobs,
+            slots: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
+            controls: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
+            tools,
+            producer: Arc::new(ProcessProducer::new(source_revision)),
+            failed,
+            closing: AtomicBool::new(false),
+            stopped,
+        })))
+    }
+
+    /// Commit admission before starting execution. An identical retry observes
+    /// the existing command; it never executes the invocation a second time.
+    pub async fn submit(&self, mut request: NativeCommand) -> Result<(), CommandOwnerError> {
+        self.available()?;
+        let images = ApprovedReadImages::new(std::mem::take(&mut request.approved_images))
+            .map_err(|_| CommandOwnerError::Invalid)?;
+        request.approved_images = images.entries().to_vec();
+        if !request.workspace.is_absolute()
+            || !matches!(request.tool.as_str(), "shell" | "exec")
+            || request.arguments.len() > 64 * 1024
+            || crate::tools::process_context::arguments_digest(&request.tool, &request.arguments)
+                .is_none()
+            || request.shell_policy.env_allowlist.len() > crate::MAX_SHELL_ENV_ALLOWLIST
+            || request
+                .shell_policy
+                .env_allowlist
+                .iter()
+                .any(|name| !crate::runtime::valid_env_name(name))
+        {
+            return Err(CommandOwnerError::Invalid);
+        }
+        let encoded = serde_json::to_string(&request)?;
+        if encoded.len() > MAX_REQUEST_BYTES {
+            return Err(CommandOwnerError::Invalid);
+        }
+        if self.0.journal.existing(request.id, encoded.clone()).await? {
+            return Ok(());
+        }
+        let slot = Arc::clone(&self.0.slots)
+            .try_acquire_owned()
+            .map_err(|_| CommandOwnerError::Full)?;
+        self.available()?;
+        let (changed, _) = watch::channel(0);
+        let cancellation = RunCancellation::new();
+        // Register before admission so a concurrent observer cannot miss the
+        // first committed transition. Duplicates retain the original watcher.
+        {
+            self.0
+                .jobs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .entry(request.id)
+                .or_insert_with(|| LiveCommand {
+                    changed,
+                    cancellation: cancellation.clone(),
+                });
+        }
+        let (reply, admitted) = tokio::sync::oneshot::channel();
+        let owner = self.clone();
+        // Admission and execution have the same owner. Losing the response
+        // must not strand a committed invocation between these two phases.
+        tokio::spawn(async move {
+            let mut guard = DriverGuard {
+                failed: owner.0.failed.clone(),
+                jobs: Arc::clone(&owner.0.jobs),
+                completed: false,
+            };
+            let id = request.id;
+            let admission = owner.0.journal.admit(id, encoded).await;
+            match admission {
+                Ok(false) => {
+                    let _ = reply.send(Ok(()));
+                    guard.completed = true;
+                }
+                Err(CommandOwnerError::Conflict) => {
+                    let _ = reply.send(Err(CommandOwnerError::Conflict));
+                    guard.completed = true;
+                }
+                Err(CommandOwnerError::Full) => {
+                    owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(&id);
+                    let _ = reply.send(Err(CommandOwnerError::Full));
+                    guard.completed = true;
+                }
+                Err(error) => {
+                    tracing::error!(target: "qq::command_owner", error = %error, "could not persist command admission");
+                    let _ = reply.send(Err(error));
+                    owner.failure();
+                }
+                Ok(true) => {
+                    let cancellation = owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(&id)
+                        .expect("admitted command has a watcher")
+                        .cancellation
+                        .clone();
+                    if owner.0.closing.load(Ordering::Acquire) || *owner.0.failed.borrow() {
+                        cancellation.cancel();
+                    }
+                    let _ = reply.send(Ok(()));
+                    let result = owner.execute(request, images, cancellation).await;
+                    match result {
+                        Ok(result) if !*owner.0.failed.borrow() => {
+                            match owner.0.journal.finished(id, result).await {
+                                Ok(version) => {
+                                    if let Some(job) = owner
+                                        .0
+                                        .jobs
+                                        .lock()
+                                        .unwrap_or_else(|error| error.into_inner())
+                                        .get(&id)
+                                    {
+                                        job.changed.send_replace(version);
+                                    }
+                                    guard.completed = true;
+                                }
+                                Err(error) => {
+                                    tracing::error!(target: "qq::command_owner", error = %error, "could not persist command completion");
+                                    owner.failure();
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(target: "qq::command_owner", error = %error, "command execution failed");
+                            owner.failure();
+                        }
+                        Ok(_) => owner.failure(),
+                    }
+                }
+            }
+            // Releasing the last execution slot proves the driver has also
+            // dropped its journal reference, so shutdown/reopen cannot race it.
+            drop(guard);
+            drop(owner);
+            drop(slot);
+        });
+        admitted.await.map_err(|_| CommandOwnerError::Unavailable)?
+    }
+
+    async fn execute(
+        &self,
+        request: NativeCommand,
+        images: ApprovedReadImages,
+        cancellation: RunCancellation,
+    ) -> Result<ToolOutput, CommandOwnerError> {
+        let path = request.workspace;
+        let workspace = match blocking(move || {
+            crate::workspace::Workspace::open(&path).map_err(CommandOwnerError::Io)
+        })
+        .await
+        {
+            Ok(workspace) => workspace,
+            Err(CommandOwnerError::Io(error)) => {
+                return Ok(ToolOutput::refused(format!(
+                    "could not open command workspace: {error}"
+                )));
+            }
+            Err(error) => return Err(error),
+        };
+        let cancelled = self.0.journal.cancel_requested(request.id).await?;
+        if cancelled {
+            cancellation.cancel();
+        }
+        let task_deadline = request
+            .not_after_ms
+            .map(|deadline| {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|_| CommandOwnerError::Unavailable)?;
+                let now_ms =
+                    u64::try_from(now.as_millis()).map_err(|_| CommandOwnerError::Invalid)?;
+                if deadline <= now_ms {
+                    cancellation.cancel();
+                }
+                tokio::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(
+                        deadline.saturating_sub(now_ms),
+                    ))
+                    .ok_or(CommandOwnerError::Invalid)
+            })
+            .transpose()?;
+        let (output, mut deltas) = tokio::sync::mpsc::channel(16);
+        let execution = crate::tools::dispatch::execute_with_images(
+            workspace,
+            Arc::default(),
+            request.tool,
+            request.arguments,
+            cancellation.clone(),
+            Some(output),
+            self.0.tools.clone(),
+            Arc::new(request.shell_policy),
+            Arc::default(),
+            Arc::new(images),
+            Arc::clone(&self.0.producer),
+            Some(request.id),
+        );
+        tokio::pin!(execution);
+        let expired = async {
+            match task_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(expired);
+        let mut output_closed = false;
+        let output = loop {
+            tokio::select! {
+                biased;
+                () = &mut expired => { cancellation.cancel(); break execution.await; }
+                chunk = deltas.recv(), if !output_closed => match chunk {
+                    Some(chunk) => { self.persist_output(request.id, chunk).await?; }
+                    None => output_closed = true,
+                },
+                output = &mut execution => break output,
+            }
+        };
+        // The final poll can enqueue output before returning the result.
+        while let Ok(chunk) = deltas.try_recv() {
+            self.persist_output(request.id, chunk).await?;
+        }
+        self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;
+        Ok(output)
+    }
+
+    async fn persist_output(&self, id: ToolCallId, chunk: String) -> Result<(), CommandOwnerError> {
+        let version = self.0.journal.output(id, chunk).await?;
+        if let Some(job) = self
+            .0
+            .jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+        {
+            job.changed.send_replace(version);
+        }
+        Ok(())
+    }
+
+    pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
+        self.0.journal.snapshot(id).await
+    }
+
+    /// Wait for a committed transition without polling. Dropping this future
+    /// only drops an observer; cancellation is a separate durable operation.
+    pub async fn wait(
+        &self,
+        id: ToolCallId,
+        after: u64,
+    ) -> Result<CommandSnapshot, CommandOwnerError> {
+        let mut failed = self.0.failed.subscribe();
+        let mut changed = self
+            .0
+            .jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+            .map(|job| job.changed.subscribe());
+        loop {
+            if *failed.borrow() {
+                return Err(CommandOwnerError::Unavailable);
+            }
+            let snapshot = self.snapshot(id).await?;
+            if snapshot.version > after
+                || matches!(
+                    snapshot.status,
+                    CommandStatus::Finished | CommandStatus::Lost
+                )
+            {
+                return Ok(snapshot);
+            }
+            let Some(changed) = &mut changed else {
+                return Err(CommandOwnerError::Unavailable);
+            };
+            tokio::select! {
+                result = changed.changed() => if result.is_err() { return Err(CommandOwnerError::Unavailable); },
+                result = failed.changed() => if result.is_err() { return Err(CommandOwnerError::Unavailable); },
+            }
+        }
+    }
+
+    pub async fn cancel(&self, id: ToolCallId) -> Result<(), CommandOwnerError> {
+        let slot = Arc::clone(&self.0.controls)
+            .try_acquire_owned()
+            .map_err(|_| CommandOwnerError::Full)?;
+        // Enter the drain scope before checking admission, so shutdown cannot
+        // return between accepting a cancellation and its durable application.
+        let lease = self.0.tools.enter();
+        self.available()?;
+        let (reply, applied) = tokio::sync::oneshot::channel();
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let mut guard = DriverGuard {
+                failed: owner.0.failed.clone(),
+                jobs: Arc::clone(&owner.0.jobs),
+                completed: false,
+            };
+            let result = owner.0.journal.cancel(id).await;
+            match &result {
+                Ok(()) => {
+                    if let Some(job) = owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .get(&id)
+                    {
+                        job.cancellation.cancel();
+                    }
+                    guard.completed = true;
+                }
+                Err(CommandOwnerError::Full) => guard.completed = true,
+                Err(error) => {
+                    tracing::error!(target: "qq::command_owner", error = %error, "could not persist command cancellation");
+                    owner.failure();
+                }
+            }
+            let _ = reply.send(result);
+            drop(guard);
+            drop(owner);
+            drop(lease);
+            drop(slot);
+        });
+        applied.await.map_err(|_| CommandOwnerError::Unavailable)?
+    }
+
+    pub async fn shutdown(&self) -> Result<(), CommandOwnerError> {
+        let mut stopped = self.0.stopped.subscribe();
+        if !self.0.closing.swap(true, Ordering::AcqRel) {
+            let owner = self.clone();
+            let mut guard = ShutdownGuard {
+                stopped: self.0.stopped.clone(),
+                completed: false,
+            };
+            tokio::spawn(async move {
+                let result = owner.stop_owned().await.map_err(Arc::new);
+                guard.stopped.send_replace(Some(result));
+                guard.completed = true;
+                drop(guard);
+                drop(owner);
+            });
+        }
+        loop {
+            let result = stopped.borrow().clone();
+            if let Some(result) = result {
+                return result.map_err(CommandOwnerError::Shutdown);
+            }
+            stopped
+                .changed()
+                .await
+                .map_err(|_| CommandOwnerError::Unavailable)?;
+        }
+    }
+
+    async fn stop_owned(&self) -> Result<(), CommandOwnerError> {
+        for job in self
+            .0
+            .jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            job.cancellation.cancel();
+        }
+        let _slots = Arc::clone(&self.0.slots)
+            .acquire_many_owned(MAX_ACTIVE)
+            .await
+            .map_err(|_| CommandOwnerError::Unavailable)?;
+        self.0
+            .tools
+            .drain()
+            .await
+            .map_err(CommandOwnerError::Cleanup)?;
+        self.0.journal.close().await?;
+        if *self.0.failed.borrow() {
+            Err(CommandOwnerError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn available(&self) -> Result<(), CommandOwnerError> {
+        if self.0.closing.load(Ordering::Acquire) || *self.0.failed.borrow() {
+            Err(CommandOwnerError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+    fn failure(&self) {
+        fail(&self.0.failed, &self.0.jobs);
+    }
+}
+
+struct ShutdownGuard {
+    stopped: watch::Sender<Option<ShutdownResult>>,
+    completed: bool,
+}
+
+impl Drop for ShutdownGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.stopped
+                .send_replace(Some(Err(Arc::new(CommandOwnerError::Unavailable))));
+        }
+    }
+}
+
+struct DriverGuard {
+    failed: watch::Sender<bool>,
+    jobs: Arc<Mutex<HashMap<ToolCallId, LiveCommand>>>,
+    completed: bool,
+}
+impl Drop for DriverGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            fail(&self.failed, &self.jobs);
+        }
+    }
+}
+
+fn fail(failed: &watch::Sender<bool>, jobs: &Mutex<HashMap<ToolCallId, LiveCommand>>) {
+    failed.send_replace(true);
+    for job in jobs
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .values()
+    {
+        job.cancellation.cancel();
+    }
+}
+
+async fn blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, CommandOwnerError> + Send + 'static,
+) -> Result<T, CommandOwnerError> {
+    let permit = crate::workspace::blocking_permits()
+        .acquire_owned()
+        .await
+        .map_err(|_| CommandOwnerError::Unavailable)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(|_| CommandOwnerError::Unavailable)?
+}
+
+#[cfg(test)]
+struct AdmissionHook {
+    id: ToolCallId,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+#[cfg(test)]
+static ADMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static CANCELLATION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
+    let hook = {
+        let mut hooks = hooks.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.id == id)
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        let _ = hook.entered.send(());
+        let _ = hook.release.blocking_recv();
+    }
+}
+
+#[cfg(test)]
+mod tests;

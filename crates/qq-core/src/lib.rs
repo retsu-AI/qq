@@ -38,6 +38,8 @@ use thiserror::Error;
 mod approval;
 mod cancellation;
 pub mod catalog;
+#[doc(hidden)]
+pub mod command_owner;
 pub mod context_source;
 pub mod hosts;
 mod input;
