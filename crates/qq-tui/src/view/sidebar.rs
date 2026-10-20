@@ -242,9 +242,12 @@ fn own_cost(session: &SessionView) -> Option<u64> {
         .unwrap_or(session.summary.estimated_cost_usd_nanos)
 }
 
-/// Add a loaded agent's direct spend to a legacy session's sum.
-fn add_legacy_cost(pending: &mut Pending, agent: &SessionView) {
-    if !pending.legacy_cost {
+/// Add a loaded agent's direct spend to its session's sum, `depth` levels
+/// below it. The server's inclusive accounting covers the session and its
+/// immediate children only, so deeper agents are added; a legacy session
+/// (no accounting) adds every agent. Audits count: hidden work still costs.
+fn add_agent_cost(pending: &mut Pending, agent: &SessionView, depth: usize) {
+    if !pending.legacy_cost && depth < 2 {
         return;
     }
     let direct = agent
@@ -338,7 +341,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
         if let Some(depth) = audit_depth {
             if !root && app.sessions.depth(id) > depth {
                 if let Some(pending) = current.as_mut() {
-                    add_legacy_cost(pending, session);
+                    add_agent_cost(pending, session, app.sessions.depth(id));
                 }
                 continue;
             }
@@ -351,7 +354,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if root && let Some(pending) = current.take() {
                 finish(pending, &mut rollup);
             } else if let Some(pending) = current.as_mut() {
-                add_legacy_cost(pending, session);
+                add_agent_cost(pending, session, app.sessions.depth(id));
             }
             audit_depth = Some(app.sessions.depth(id));
             continue;
@@ -367,7 +370,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
         let Some(pending) = current.as_mut() else {
             continue;
         };
-        add_legacy_cost(pending, session);
+        add_agent_cost(pending, session, app.sessions.depth(id));
         pending.entry.agents += 1;
         if is_working(session) {
             pending.entry.agents_working += 1;
@@ -389,27 +392,27 @@ pub(super) fn rollup(app: &App) -> Rollup {
         // A temporary session: its loaded descendants roll into it the
         // same way a root's do, depth-first in spawn order.
         let mut pending = session_entry(id, &app.sessions[&id], rollup.needs.len());
-        // `(agent, under an audit)`: an audit's subtree is never listed but
-        // its spend still counts toward a legacy session's total.
-        let mut stack: Vec<(SessionId, bool)> = app
+        // `(agent, depth below the orphan, under an audit)`: an audit's
+        // subtree is never listed but its spend still counts.
+        let mut stack: Vec<(SessionId, usize, bool)> = app
             .sessions
             .children_of(id)
             .iter()
             .rev()
-            .map(|child| (*child, false))
+            .map(|child| (*child, 1, false))
             .collect();
-        while let Some((agent, hidden)) = stack.pop() {
+        while let Some((agent, depth, hidden)) = stack.pop() {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
-            add_legacy_cost(&mut pending, session);
+            add_agent_cost(&mut pending, session, depth);
             let hidden = hidden || is_audit(session);
             stack.extend(
                 app.sessions
                     .children_of(agent)
                     .iter()
                     .rev()
-                    .map(|child| (*child, hidden)),
+                    .map(|child| (*child, depth + 1, hidden)),
             );
             if hidden {
                 continue;

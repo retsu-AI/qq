@@ -1049,7 +1049,7 @@ impl App {
                     // `focus_session` fetches the fallback's body: it may be
                     // a summary only.
                     match self.first_listed_root() {
-                        Some(target) => fallback_fetch = Some(self.focus_session(target)),
+                        Some(target) => fallback_fetch = Some(self.focus_away_from_audit(target)),
                         None => self.set_view(View::Transcript(None)),
                     }
                 }
@@ -1224,7 +1224,7 @@ impl App {
                     match target.filter(|id| !self.under_audit(*id)) {
                         Some(target) => self.set_view(View::Transcript(Some(target))),
                         None => match self.first_listed_root() {
-                            Some(fallback) => effects.extend(self.focus_session(fallback)),
+                            Some(fallback) => effects.extend(self.focus_away_from_audit(fallback)),
                             None => self.set_view(View::Transcript(None)),
                         },
                     }
@@ -3485,12 +3485,30 @@ impl App {
             return Effects::none();
         }
         match self.first_listed_root() {
-            Some(fallback) => self.focus_session(fallback),
+            Some(fallback) => self.focus_away_from_audit(fallback),
             None => {
+                self.drop_focused_interaction();
                 self.set_view(View::Transcript(None));
                 Effects::redraw(Redraw::Scheduled)
             }
         }
+    }
+
+    /// A forced move off a session the user cannot see any more (it was
+    /// revealed to sit under an audit): what was being answered there is
+    /// dropped first, so it is never submitted against the fallback's call.
+    fn focus_away_from_audit(&mut self, fallback: SessionId) -> Effects {
+        self.drop_focused_interaction();
+        self.focus_session(fallback)
+    }
+
+    /// Forget the focus-scoped interaction: a partly answered `ask_user`
+    /// form and an armed Shift-Y/Shift-N amendment with its note.
+    fn drop_focused_interaction(&mut self) {
+        if self.approval_amendment.take().is_some() || !self.question_answers.is_empty() {
+            self.composer.clear();
+        }
+        self.question_answers.clear();
     }
 
     /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,

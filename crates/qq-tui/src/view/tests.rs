@@ -5028,6 +5028,35 @@ fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
     assert_eq!(entry.cost, Some(250_000_000));
     let rail = rail_rows(&mut app, 200, 60).join("\n");
     assert!(rail.contains("$0.25"), "{rail}");
+
+    // Inclusive covers immediate children only: a grandchild's direct spend
+    // is added; a child's is already in the inclusive total.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        summary.estimated_cost_usd_nanos = Some(if index == 0 { 30_000_000 } else { 40_000_000 });
+    });
+    app.sessions.get_mut(&root).unwrap().summary.accounting = Some(SessionAccounting {
+        direct: AccountingTotal::default(),
+        inclusive: AccountingTotal {
+            estimated_cost_usd_nanos: Some(100_000_000),
+            ..AccountingTotal::default()
+        },
+    });
+    let grandchild = app.sessions[&ids[1]].summary.clone();
+    app.sessions.upsert_summary(
+        SessionSummary {
+            parent_id: Some(ids[0]),
+            ..grandchild
+        },
+        &app.models,
+        0,
+    );
+    assert_eq!(app.sessions.depth(ids[1]), 2, "fixture: a grandchild");
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, Some(140_000_000));
 }
 
 #[test]
@@ -5507,6 +5536,38 @@ fn deleting_onto_an_audit_fetches_the_fallback_and_a_revealed_audit_moves_focus(
         },
     )));
     assert_ne!(app.focused(), Some(ids[0]), "a hidden session is not shown");
+}
+
+#[test]
+fn a_revealed_audit_drops_the_answers_and_amendment_in_progress() {
+    // An orphan task is focused, mid-form and with an amendment armed; its
+    // parent arrives and is an audit. Nothing begun there survives the move.
+    for armed in [false, true] {
+        let (mut app, _, ids) = app_with_fanout(1);
+        let missing = SessionId::from_bytes([0x77; 16]);
+        app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+        app.focus_session(ids[0]);
+        if armed {
+            app.approval_amendment = Some(crate::app::ApprovalChoice::Deny);
+        } else {
+            app.question_answers.push("qq-tui".to_owned());
+        }
+        app.composer.replace("half typed".to_owned());
+        app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+            2,
+            missing,
+            SessionEvent::SessionCreated {
+                session: Box::new(SessionSummary {
+                    purpose: qq_protocol::SessionPurpose::Audit,
+                    ..fixtures::session_summary(missing)
+                }),
+            },
+        )));
+        assert_ne!(app.focused(), Some(ids[0]));
+        assert!(app.approval_amendment.is_none(), "armed={armed}");
+        assert!(app.question_answers.is_empty(), "armed={armed}");
+        assert!(app.composer.text.is_empty(), "armed={armed}");
+    }
 }
 
 #[test]
