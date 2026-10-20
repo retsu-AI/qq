@@ -1481,9 +1481,10 @@ are. Within each pass rows are admitted newest-first; when the budget runs
 out the body keeps a contiguous newest tail and sets `has_older_messages` /
 `has_older_tool_calls`, exactly as a count cut does. Tool tails also have a
 64-call count bound. Older rows remain reachable through a later snapshot
-and tool-result recall. The TUI keeps bodies with no messages but older
-messages, or no tool calls but older tool calls, cold for a single-body
-fetch; a rejected focused multi-body snapshot triggers that fetch immediately.
+and tool-result recall. The TUI conservatively keeps any shared body with
+`has_older_messages` or `has_older_tool_calls` cold for a single-body fetch,
+since these flags do not distinguish byte-budget cuts from count cuts.
+A rejected focused startup/multi-body snapshot triggers that fetch immediately.
 
 An isolated response installs its available rows even if one row class still
 cannot fit, so unavoidable truncation neither hides usable history nor

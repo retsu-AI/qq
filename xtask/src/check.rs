@@ -86,7 +86,7 @@ pub enum CheckError {
     #[error("failed to read {0}")]
     Read(PathBuf, #[source] io::Error),
     #[error(
-        "this branch restores the previous version of files {base} changed since, undoing merged work:\n  {files}\nre-apply only your own diff onto {base} (`git diff <old-base> HEAD | git apply --3way` on a fresh branch)"
+        "this branch restores a historical version of files {base} changed, undoing merged work:\n  {files}\nre-apply only your own diff onto {base} (`git diff <old-base> HEAD | git apply --3way` on a fresh branch), or acknowledge each intentional rollback with a committed `QQ-Allow-Revert: <exact path>` trailer"
     )]
     RevertsBase { base: String, files: String },
 }
@@ -415,7 +415,17 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
         git(&["--literal-pathspecs", "ls-tree", revision, "--", path]).unwrap_or_default()
     };
     let mut reverted = Vec::new();
+
+    // An explicit committed trailer records a deliberate rollback per path.
+    let acknowledgements = git(&[
+        "log",
+        "--format=%(trailers:key=QQ-Allow-Revert,valueonly)",
+        &format!("{merge_base}..HEAD"),
+    ])?;
     for path in files.split('\0').filter(|path| !path.is_empty()) {
+        if acknowledgements.lines().any(|allowed| allowed == path) {
+            continue;
+        }
         let history = git(&[
             "--literal-pathspecs",
             "log",
@@ -1353,6 +1363,24 @@ mod tests {
         let reverted = super::reverted_base_changes(root, "main").unwrap();
         assert_eq!(reverted.len(), 1, "{reverted:?}");
         assert!(reverted[0].starts_with("[id].tsx (undoes "), "{reverted:?}");
+
+        git(&[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Intentional rollback\n\nQQ-Allow-Revert: [id].tsx",
+        ]);
+        assert!(
+            super::reverted_base_changes(root, "main")
+                .unwrap()
+                .is_empty()
+        );
+        // Acknowledgement is exact, not a wildcard or a blanket bypass.
+        write("auth.rs", "old auth");
+        git(&["commit", "-qam", "unacknowledged stale auth"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
 
         // Deleting a file created on main is subtraction, not a stale blob.
         git(&["checkout", "-qb", "delete", "main"]);

@@ -425,13 +425,14 @@ impl SessionStore {
         isolated: bool,
     ) {
         let session_id = snapshot.summary.id;
-        // The shared budget can starve either transcript messages or tool
-        // rows. Keep an incomplete shared body cold for an isolated fetch.
-        if !isolated
-            && ((snapshot.messages.is_empty() && snapshot.has_older_messages)
-                || (snapshot.tool_calls.is_empty() && snapshot.has_older_tool_calls))
-        {
+        // Truncation flags do not distinguish count cuts from byte-budget
+        // cuts. Conservatively refetch every incomplete shared body alone.
+        if !isolated && (snapshot.has_older_messages || snapshot.has_older_tool_calls) {
             self.upsert_summary(snapshot.summary, models, loaded_through);
+            if let Some(view) = self.body_mut(&session_id) {
+                view.evict_body();
+                view.loaded_through = loaded_through;
+            }
             return;
         }
         let mut messages = snapshot.messages;

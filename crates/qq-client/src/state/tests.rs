@@ -2153,6 +2153,21 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
         "missing tool rows must not become a permanently warm transcript"
     );
 
+    // Partially truncated shared bodies must refetch, including when a
+    // previous isolated response already warmed the session.
+    let partial = SessionSnapshot {
+        messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
+        has_older_tool_calls: false,
+        ..starved.clone()
+    };
+    store.install_session_snapshot(partial.clone(), &[], 6);
+    assert!(!store[&session_id].is_warm());
+    store.install_isolated_session_snapshot(partial.clone(), &[], 6);
+    assert!(store[&session_id].is_warm());
+    store.install_session_snapshot(partial, &[], 7);
+    assert!(!store[&session_id].is_warm());
+    assert_eq!(store[&session_id].loaded_through, 7);
+
     // A genuinely empty session is still installed warm.
     let empty = SessionSnapshot {
         has_older_messages: false,
