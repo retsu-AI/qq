@@ -71,13 +71,14 @@ in its PR.
 
 - One linear pass rolls each session up: its state and its agents' (most
   urgent wins), agent counts, waiting agents, unread, and spend. Spend is
-  the server's `accounting.inclusive` (the session and its immediate
-  children) plus the direct spend of deeper loaded agents; a summary
+  the server's `accounting.inclusive` (the session's whole subtree, as
+  `ACCOUNTING_ROWS_SQL` folds it), taken once; a summary
   without accounting sums the direct spend of its loaded tree, audits
   included, since hidden work still costs. If any summed part is unknown
   (no cost recorded), the total is unknown and no spend is shown, as the
-  protocol never treats a missing cost as zero. Agents that are not loaded
-  are missing from the sum, a recorded limit of the bounded snapshot.
+  protocol never treats a missing cost as zero. For such legacy summaries
+  agents that are not loaded are missing from the sum, a recorded limit of
+  the bounded snapshot.
 - An agent **needs the user** when an approval waits on the human (a
   delegate-owned hold is working until it escalates) or when it failed or
   finished unseen. The TUI derives this from each summary and its live
@@ -141,10 +142,14 @@ cursor fallback, and audit exclusion in every mode.
   rest (`◇ Deploy helper +3 need you`). A painted `+N need you` rail row
   points at the needs it collapses, so those are neither named nor counted
   again. The strip only counts, so beside it the notice still names.
-- `Alt-A`/`Alt-D` answer the approval the rule names when it names one,
-  and otherwise the first human-owned approval in attention order outside
-  the focused transcript; so the chords beside a named approval always act
-  on that approval, never on another the rail paints.
+- `Alt-A`/`Alt-D` act on one target: the first human-owned approval in
+  attention order, outside the focused transcript, that the last frame did
+  not name elsewhere (the one the rule names, or would name were a
+  transient notice not covering it); with every one named elsewhere, the
+  first of them. So the chords on the rule always act on the approval the
+  rule names or points at. An `ask_user` target is never answered yes or
+  no: the chord focuses its session, whose question block takes the
+  answers.
 - A transient notice (info, warning, error) takes the rule's left side. If
   needs are unnamed, the right side keeps a pointer to them (answer and jump
   chords, plus a count unless the strip already shows one), and the notice
@@ -156,8 +161,9 @@ cursor fallback, and audit exclusion in every mode.
 Acceptance: frame tests that every need is named or pointed at and never
 named twice, at Compact, Regular with and without the rail, past the agent
 cap, under a transient notice, and at narrow widths; with the rail painting
-the first approval and the rule naming the second, `Alt-A` answers the
-second; inspector `Auto` hidden and shown; goldens moved deliberately.
+the first approval and the rule naming (or a transient notice covering) the
+second, `Alt-A` answers the second; inspector `Auto` hidden and shown;
+goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
 
