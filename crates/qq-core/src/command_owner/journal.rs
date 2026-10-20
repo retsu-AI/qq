@@ -25,7 +25,7 @@ struct StoredSnapshot {
     status: String,
     receipt: Option<String>,
     result: Option<String>,
-    output: String,
+    output: Vec<u8>,
 }
 
 impl Journal {
@@ -68,7 +68,7 @@ impl Journal {
         let _database_file = private_file(&path)?;
         let connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 0 | 1) {
+        if !matches!(version, 0 | 2) {
             return Err(CommandOwnerError::Schema(version));
         }
         if version == 0 {
@@ -90,11 +90,11 @@ impl Journal {
                     status TEXT NOT NULL CHECK(status IN ('queued','running','finished','lost')),
                     version INTEGER NOT NULL DEFAULT 0 CHECK(version>=0),
                     cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK(cancel_requested IN (0,1)),
-                    output TEXT NOT NULL DEFAULT '' CHECK(length(CAST(output AS BLOB))<=393216),
+                    output BLOB NOT NULL DEFAULT X'' CHECK(typeof(output)='blob' AND length(output)<=131072),
                     receipt TEXT CHECK(receipt IS NULL OR length(CAST(receipt AS BLOB))<=16384),
                     result TEXT CHECK(result IS NULL OR length(CAST(result AS BLOB))<=1048576)
                 );
-                PRAGMA user_version=1;
+                PRAGMA user_version=2;
                 COMMIT;",
             )?;
         }
@@ -247,21 +247,23 @@ impl Journal {
     pub(super) async fn output(
         &self,
         id: ToolCallId,
-        chunk: String,
+        chunk: Vec<u8>,
     ) -> Result<u64, CommandOwnerError> {
+        #[cfg(test)]
+        super::wait_before_output(id).await;
         self.call(move |db| {
             let tx = db.transaction()?;
-            let (mut output, version): (String, u64) = tx.query_row(
+            let (mut output, version): (Vec<u8>, u64) = tx.query_row(
                 "SELECT output,version FROM commands WHERE id=?1 AND status='running'",
                 [id.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
             let remaining = MAX_LIVE_OUTPUT_BYTES.saturating_sub(output.len());
-            let end = chunk.floor_char_boundary(remaining.min(chunk.len()));
+            let end = remaining.min(chunk.len());
             if end == 0 {
                 return Ok(version);
             }
-            output.push_str(&chunk[..end]);
+            output.extend_from_slice(&chunk[..end]);
             tx.execute(
                 "UPDATE commands SET output=?2,version=version+1 WHERE id=?1",
                 params![id.to_string(), output],
@@ -347,7 +349,10 @@ impl Journal {
                 id,
                 version,
                 status,
-                output,
+                output: rendered_output(
+                    &output,
+                    matches!(status, CommandStatus::Finished | CommandStatus::Lost),
+                ),
                 process: receipt
                     .map(|text| serde_json::from_str(&text))
                     .transpose()?,
@@ -382,6 +387,22 @@ impl Journal {
         })
         .await
     }
+}
+
+fn rendered_output(bytes: &[u8], terminal: bool) -> String {
+    let mut end = bytes.len();
+    if !terminal {
+        let mut offset = 0;
+        while let Err(error) = std::str::from_utf8(&bytes[offset..]) {
+            if let Some(invalid) = error.error_len() {
+                offset += error.valid_up_to() + invalid;
+            } else {
+                end = offset + error.valid_up_to();
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 fn private_file(path: &Path) -> Result<File, CommandOwnerError> {

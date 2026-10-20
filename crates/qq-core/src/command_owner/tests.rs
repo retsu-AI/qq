@@ -6,7 +6,8 @@ use super::*;
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
         id,
-        workspace: path.to_owned(),
+        // Existing fixture roots may be reached through macOS's /var alias.
+        workspace: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
         tool: "shell".to_owned(),
         arguments: serde_json::json!({"command":script}).to_string(),
         shell_policy: ShellPolicy::default(),
@@ -155,7 +156,11 @@ async fn dropping_admission_waiter_does_not_abandon_a_committed_command() {
         "an admitted command must execute after its caller disconnects"
     );
     let completed = completed.unwrap();
-    assert!(!completed.result.as_ref().unwrap().is_error());
+    assert!(
+        !completed.result.as_ref().unwrap().is_error(),
+        "{}",
+        completed.result.as_ref().unwrap().text()
+    );
     assert!(completed.result.unwrap().text().contains("completed"));
 }
 
@@ -393,11 +398,11 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
     owner.shutdown().await.unwrap();
     drop(owner);
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
-    db.pragma_update(None, "user_version", 2).unwrap();
+    db.pragma_update(None, "user_version", 3).unwrap();
     drop(db);
     assert!(matches!(
         CommandOwner::open(directory.clone(), "unknown").await,
-        Err(CommandOwnerError::Schema(2))
+        Err(CommandOwnerError::Schema(3))
     ));
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
     let count: u64 = db
@@ -695,4 +700,100 @@ async fn an_expired_task_deadline_refuses_launch_before_any_process_exists() {
     assert!(terminal.process.is_none());
     assert!(!workspace.path().join("unexpected").exists());
     owner.shutdown().await.unwrap();
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(workspace.path()).unwrap();
+    crate::tools::limit_shell_read_chunks(&canonical, 1);
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let text = "x".repeat(32);
+    owner
+        .submit(command(&canonical, id, &format!("echo {text}")))
+        .await
+        .unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    #[cfg(unix)]
+    let expected = format!("{text}\n");
+    #[cfg(windows)]
+    let expected = format!("{text}\r\n");
+    assert_eq!(
+        terminal.output, expected,
+        "durable output must retain every byte within its bound"
+    );
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn a_stalled_output_write_cannot_extend_the_task_execution_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    OUTPUT_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered,
+        release: gate,
+    });
+    #[cfg(unix)]
+    let script = "printf ready; sleep 300";
+    #[cfg(windows)]
+    let script = "echo ready & for /L %i in (1,1,2147483647) do @rem waiting";
+    let mut request = command(workspace.path(), id, script);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    request.not_after_ms = Some(u64::try_from(now.as_millis()).unwrap() + 60_000);
+    owner.submit(request).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), blocked)
+        .await
+        .unwrap()
+        .unwrap();
+    let running = owner.snapshot(id).await.unwrap();
+    let pid = running.process.as_ref().unwrap().0.facts().pid;
+    let stopped = crate::tools::observe_shell_termination(pid);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    let terminated = tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await;
+    release.send(()).unwrap();
+    let terminal = wait_finished(&owner, id, running.version).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        matches!(terminated, Ok(Ok(()))),
+        "the child must be reaped before the journal write is unblocked"
+    );
+    assert!(terminal.result.as_ref().unwrap().is_error());
+    assert!(terminal.output.contains("ready"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn utf8_split_across_native_reads_is_preserved_in_durable_output() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(workspace.path()).unwrap();
+    crate::tools::limit_shell_read_chunks(&canonical, 1);
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(&canonical, id, "printf 'π🦀'"))
+        .await
+        .unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    assert_eq!(terminal.output, "π🦀");
 }

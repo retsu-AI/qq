@@ -129,7 +129,7 @@ use tokio::sync::mpsc;
 #[cfg(all(test, unix))]
 pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
-pub(crate) use shell::observe_shell_spawn;
+pub(crate) use shell::{limit_shell_read_chunks, observe_shell_spawn, observe_shell_termination};
 
 #[cfg(all(test, unix))]
 pub(crate) async fn create_test_fifo(path: &std::path::Path) {
@@ -4476,6 +4476,21 @@ mod tests {
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process(pid).is_err());
         assert!(!cancelled.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn dropped_durable_output_recording_is_not_a_clean_drain() {
+        let tasks = ToolTasks::default();
+        tasks
+            .set_output_recorder(|_, _| std::future::pending())
+            .unwrap();
+        let lease = tasks.enter();
+        let write = lease
+            .output_record(qq_protocol::ToolCallId::generate().unwrap(), b"checkpoint")
+            .unwrap();
+        drop(write);
+        drop(lease);
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedOutput));
     }
 
     #[cfg(unix)]

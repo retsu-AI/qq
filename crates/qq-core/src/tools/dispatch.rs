@@ -39,28 +39,34 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 #[derive(Default)]
 struct ToolTaskState {
     process_recorder: OnceLock<ProcessRecorder>,
+    output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
+    unrecorded_output: AtomicBool,
     active: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
 }
 
-type ProcessRecordFuture = std::pin::Pin<
+pub(super) type RecordFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>> + Send>,
 >;
 type ProcessRecorder = Box<
     dyn Fn(
             qq_protocol::ToolCallId,
             Box<super::process_context::ExecutionContextReceipt>,
-        ) -> ProcessRecordFuture
+        ) -> RecordFuture
         + Send
         + Sync,
 >;
+
+type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ToolDrainError {
     #[error("the command process receipt could not be persisted")]
     UnrecordedProcess,
+    #[error("command output could not be persisted")]
+    UnrecordedOutput,
     #[error("local shell process termination could not be confirmed")]
     UnconfirmedProcessExit,
 }
@@ -82,11 +88,26 @@ impl ToolTasks {
             .map_err(|_| ToolDrainError::UnrecordedProcess)
     }
 
+    pub(crate) fn set_output_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .output_recorder
+            .set(Box::new(move |id, chunk| Box::pin(recorder(id, chunk))))
+            .map_err(|_| ToolDrainError::UnrecordedOutput)
+    }
+
     pub(crate) fn check(&self) -> Result<(), ToolDrainError> {
         if self.0.unconfirmed_process_exit.load(Ordering::Acquire) {
             Err(ToolDrainError::UnconfirmedProcessExit)
         } else if self.0.unrecorded_process.load(Ordering::Acquire) {
             Err(ToolDrainError::UnrecordedProcess)
+        } else if self.0.unrecorded_output.load(Ordering::Acquire) {
+            Err(ToolDrainError::UnrecordedOutput)
         } else {
             Ok(())
         }
@@ -133,11 +154,42 @@ impl ToolTaskLease {
         Ok(())
     }
 
+    pub(super) fn output_record(
+        &self,
+        id: qq_protocol::ToolCallId,
+        bytes: &[u8],
+    ) -> Option<RecordFuture> {
+        let recorder = self.tasks.output_recorder.get()?;
+        let write = recorder(id, bytes.to_vec());
+        let mut record = OutputRecordGuard {
+            tasks: Arc::clone(&self.tasks),
+            completed: false,
+        };
+        Some(Box::pin(async move {
+            let result = write.await;
+            record.completed = result.is_ok();
+            drop(record);
+            result
+        }))
+    }
+
     pub(crate) fn process_started(&mut self) {
         self.process_pending = true;
     }
     pub(crate) fn process_reaped(&mut self) {
         self.process_pending = false;
+    }
+}
+
+struct OutputRecordGuard {
+    tasks: Arc<ToolTaskState>,
+    completed: bool,
+}
+impl Drop for OutputRecordGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.tasks.unrecorded_output.store(true, Ordering::Release);
+        }
     }
 }
 

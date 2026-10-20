@@ -10,15 +10,20 @@ use qq_protocol::ToolCallId;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = tempfile::tempdir()?;
-    let workspace = tempfile::tempdir()?;
+    let (root, workspace, workspace_path) = tokio::task::spawn_blocking(|| {
+        let root = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let workspace_path = std::fs::canonicalize(workspace.path())?;
+        Ok::<_, std::io::Error>((root, workspace, workspace_path))
+    })
+    .await??;
     let directory = root.path().join("owner");
     let owner = CommandOwner::open(directory.clone(), "unknown").await?;
     let id = ToolCallId::generate()?;
     owner
         .submit(NativeCommand {
             id,
-            workspace: workspace.path().to_owned(),
+            workspace: workspace_path,
             tool: "shell".to_owned(),
             arguments: r#"{"command":"echo owned"}"#.to_owned(),
             shell_policy: ShellPolicy::default(),
@@ -43,5 +48,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reopened = CommandOwner::open(directory, "unknown").await?;
     assert_eq!(reopened.snapshot(id).await?, snapshot);
     reopened.shutdown().await?;
+    drop(reopened);
+    tokio::task::spawn_blocking(move || {
+        drop(workspace);
+        drop(root);
+    })
+    .await?;
     Ok(())
 }

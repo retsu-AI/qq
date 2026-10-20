@@ -77,6 +77,29 @@ pub(crate) fn hold_shell_receipt(
 static READ_FAULTS: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>> =
     std::sync::Mutex::new(Vec::new());
 
+#[cfg(test)]
+static READ_CHUNK_LIMITS: std::sync::Mutex<Vec<(std::path::PathBuf, usize)>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static STOP_OBSERVERS: std::sync::Mutex<Vec<(u32, tokio::sync::oneshot::Sender<()>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+pub(crate) fn limit_shell_read_chunks(workspace: &std::path::Path, bytes: usize) {
+    assert!(bytes > 0 && bytes <= SHELL_READ_CHUNK_BYTES);
+    READ_CHUNK_LIMITS
+        .lock()
+        .unwrap()
+        .push((workspace.to_owned(), bytes));
+}
+
+#[cfg(test)]
+pub(crate) fn observe_shell_termination(pid: u32) -> tokio::sync::oneshot::Receiver<()> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    STOP_OBSERVERS.lock().unwrap().push((pid, sender));
+    receiver
+}
+
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ShellArgs {
@@ -258,6 +281,7 @@ enum ShellOutcome {
     },
     TimedOut,
     Cancelled,
+    OutputFailed(Box<crate::sessions::SessionRuntimeError>),
 }
 
 /// Executes one bounded shell command on the async runtime: `sh -c` in its own
@@ -435,8 +459,21 @@ pub(super) async fn run_shell(
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut identity = ShellResultIdentity::default();
     let mut streamed = 0_usize;
-    let mut stdout_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
-    let mut stderr_buffer = vec![0_u8; SHELL_READ_CHUNK_BYTES];
+    let mut recorded = 0_usize;
+    let mut pending_output = None;
+    #[cfg(test)]
+    let read_chunk_bytes = {
+        let mut limits = READ_CHUNK_LIMITS.lock().unwrap();
+        limits
+            .iter()
+            .position(|(path, _)| path == workspace.path())
+            .map(|index| limits.remove(index).1)
+            .unwrap_or(SHELL_READ_CHUNK_BYTES)
+    };
+    #[cfg(not(test))]
+    let read_chunk_bytes = SHELL_READ_CHUNK_BYTES;
+    let mut stdout_buffer = vec![0_u8; read_chunk_bytes];
+    let mut stderr_buffer = vec![0_u8; read_chunk_bytes];
     // One timer and one cancellation wait for the whole call: this loop wakes
     // once per output chunk, and re-creating either per iteration would
     // re-register on each of them.
@@ -460,8 +497,12 @@ pub(super) async fn run_shell(
                     Ok(read) => {
                         identity.stdout.update(&stdout_buffer[..read]);
                         identity.stdout_bytes += read as u64;
-                        forward_shell_chunk(output, &mut streamed, &stdout_buffer[..read]);
                         capture.push(&stdout_buffer[..read]);
+                        if let Err(stop) = persist_shell_chunk(process, call_id, &stdout_buffer[..read], &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
+                            pending_output = stop.pending;
+                            break stop.outcome;
+                        }
+                        forward_shell_chunk(output, &mut streamed, &stdout_buffer[..read]);
                     }
                 }
             }
@@ -477,8 +518,12 @@ pub(super) async fn run_shell(
                     Ok(read) => {
                         identity.stderr.update(&stderr_buffer[..read]);
                         identity.stderr_bytes += read as u64;
-                        forward_shell_chunk(output, &mut streamed, &stderr_buffer[..read]);
                         capture.push(&stderr_buffer[..read]);
+                        if let Err(stop) = persist_shell_chunk(process, call_id, &stderr_buffer[..read], &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
+                            pending_output = stop.pending;
+                            break stop.outcome;
+                        }
+                        forward_shell_chunk(output, &mut streamed, &stderr_buffer[..read]);
                     }
                 }
             }
@@ -555,6 +600,14 @@ pub(super) async fn run_shell(
                 result.result_digest = identity.finish(None, None, true);
                 result
             }
+            ShellOutcome::OutputFailed(error) => {
+                if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
+                    return ToolOutput::unobserved(format!(
+                        "could not persist command output: {error}; {message}"
+                    ));
+                }
+                ToolOutput::unobserved(format!("could not persist command output: {error}"))
+            }
             ShellOutcome::Cancelled => {
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
@@ -564,6 +617,14 @@ pub(super) async fn run_shell(
         }
     }
     .await;
+    // Stop execution before waiting for a stalled durable write. The owned
+    // task retains that write through acknowledgement, so neither output nor
+    // termination proof depends on the result observer staying attached.
+    if let Some(write) = pending_output
+        && let Err(error) = write.await
+    {
+        result = ToolOutput::unobserved(format!("could not persist command output: {error}"));
+    }
     result.execution_context = receipt;
     drop(prepared);
     result
@@ -574,6 +635,8 @@ async fn stop_shell(
     guard: &mut ProcessGroupGuard,
     process: &mut super::ToolTaskLease,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    let observed_pid = child.id();
     if let Err(error) = guard.kill() {
         return Err(format!(
             "could not terminate the command process group: {error}"
@@ -586,6 +649,19 @@ async fn stop_shell(
     match child.wait().await {
         Ok(_) => {
             process.process_reaped();
+            #[cfg(test)]
+            if let Some(pid) = observed_pid {
+                let sender = {
+                    let mut observers = STOP_OBSERVERS.lock().unwrap();
+                    observers
+                        .iter()
+                        .position(|(expected, _)| *expected == pid)
+                        .map(|index| observers.remove(index).1)
+                };
+                if let Some(sender) = sender {
+                    let _ = sender.send(());
+                }
+            }
             Ok(())
         }
         Err(error) => Err(format!("could not confirm the command exit: {error}")),
@@ -615,6 +691,41 @@ where
     match reader.as_mut() {
         Some(reader) => reader.read(buffer).await,
         None => std::future::pending().await,
+    }
+}
+
+struct OutputWriteInterrupted {
+    outcome: ShellOutcome,
+    pending: Option<super::dispatch::RecordFuture>,
+}
+
+async fn persist_shell_chunk(
+    process: &super::ToolTaskLease,
+    call_id: Option<qq_protocol::ToolCallId>,
+    bytes: &[u8],
+    recorded: &mut usize,
+    mut cancelled: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
+    mut timeout: std::pin::Pin<&mut tokio::time::Sleep>,
+) -> Result<(), OutputWriteInterrupted> {
+    let Some(id) = call_id else {
+        return Ok(());
+    };
+    let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(*recorded);
+    if remaining == 0 {
+        return Ok(());
+    }
+    let bytes = &bytes[..bytes.len().min(remaining)];
+    let Some(mut write) = process.output_record(id, bytes) else {
+        return Ok(());
+    };
+    tokio::select! {
+        biased;
+        () = &mut cancelled => Err(OutputWriteInterrupted { outcome: ShellOutcome::Cancelled, pending: Some(write) }),
+        () = &mut timeout => Err(OutputWriteInterrupted { outcome: ShellOutcome::TimedOut, pending: Some(write) }),
+        result = &mut write => match result {
+            Ok(()) => { *recorded += bytes.len(); Ok(()) }
+            Err(error) => Err(OutputWriteInterrupted { outcome: ShellOutcome::OutputFailed(Box::new(error)), pending: None }),
+        },
     }
 }
 

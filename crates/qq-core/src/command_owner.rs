@@ -26,13 +26,14 @@ pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;
 const MAX_ACTIVE: u32 = 128;
 const MAX_RETAINED: usize = 10_000;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
-const MAX_LIVE_OUTPUT_BYTES: usize = 3 * crate::tools::MAX_SHELL_OUTPUT_BYTES;
+const MAX_LIVE_OUTPUT_BYTES: usize = crate::tools::MAX_SHELL_OUTPUT_BYTES;
 
 /// An authorized invocation. Its ID is an idempotency key, not a new attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCommand {
     pub id: ToolCallId,
+    /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
     pub tool: String,
     pub arguments: String,
@@ -77,6 +78,8 @@ pub struct CommandSnapshot {
     pub version: u64,
     pub status: CommandStatus,
     pub process: Option<ProcessReceipt>,
+    /// UTF-8 view of the persisted byte prefix. Incomplete trailing codepoints
+    /// remain buffered while execution is live.
     pub output: String,
     pub result: Option<CommandResult>,
 }
@@ -163,7 +166,8 @@ impl CommandOwner {
                             }
                             Ok(())
                         }
-                        Err(_) => {
+                        Err(error) => {
+                            tracing::error!(target: "qq::command_owner", error = %error, "could not persist command start");
                             fail(&failed, &jobs);
                             Err(crate::sessions::SessionRuntimeError::Unavailable)
                         }
@@ -171,6 +175,29 @@ impl CommandOwner {
                 }
             })
             .map_err(|_| CommandOwnerError::Unavailable)?;
+        let output_journal = journal.clone();
+        let output_failed = failed.clone();
+        let output_jobs = Arc::clone(&jobs);
+        tools.set_output_recorder(move |id, chunk| {
+            let journal = output_journal.clone();
+            let failed = output_failed.clone();
+            let jobs = Arc::clone(&output_jobs);
+            async move {
+                match journal.output(id, chunk).await {
+                    Ok(version) => {
+                        if let Some(job) = jobs.lock().unwrap_or_else(|error| error.into_inner()).get(&id) {
+                            job.changed.send_replace(version);
+                        }
+                        Ok(())
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "qq::command_owner", error = %error, "could not persist command output");
+                        fail(&failed, &jobs);
+                        Err(crate::sessions::SessionRuntimeError::Unavailable)
+                    }
+                }
+            }
+        }).map_err(|_| CommandOwnerError::Unavailable)?;
         Ok(Self(Arc::new(OwnerState {
             journal,
             jobs,
@@ -362,14 +389,13 @@ impl CommandOwner {
                     .ok_or(CommandOwnerError::Invalid)
             })
             .transpose()?;
-        let (output, mut deltas) = tokio::sync::mpsc::channel(16);
         let execution = crate::tools::dispatch::execute_with_images(
             workspace,
             Arc::default(),
             request.tool,
             request.arguments,
             cancellation.clone(),
-            Some(output),
+            None,
             self.0.tools.clone(),
             Arc::new(request.shell_policy),
             Arc::default(),
@@ -385,38 +411,13 @@ impl CommandOwner {
             }
         };
         tokio::pin!(expired);
-        let mut output_closed = false;
-        let output = loop {
-            tokio::select! {
-                biased;
-                () = &mut expired => { cancellation.cancel(); break execution.await; }
-                chunk = deltas.recv(), if !output_closed => match chunk {
-                    Some(chunk) => { self.persist_output(request.id, chunk).await?; }
-                    None => output_closed = true,
-                },
-                output = &mut execution => break output,
-            }
+        let output = tokio::select! {
+            biased;
+            () = &mut expired => { cancellation.cancel(); execution.await }
+            output = &mut execution => output,
         };
-        // The final poll can enqueue output before returning the result.
-        while let Ok(chunk) = deltas.try_recv() {
-            self.persist_output(request.id, chunk).await?;
-        }
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;
         Ok(output)
-    }
-
-    async fn persist_output(&self, id: ToolCallId, chunk: String) -> Result<(), CommandOwnerError> {
-        let version = self.0.journal.output(id, chunk).await?;
-        if let Some(job) = self
-            .0
-            .jobs
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .get(&id)
-        {
-            job.changed.send_replace(version);
-        }
-        Ok(())
     }
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
@@ -650,6 +651,24 @@ fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
     if let Some(hook) = hook {
         let _ = hook.entered.send(());
         let _ = hook.release.blocking_recv();
+    }
+}
+
+#[cfg(test)]
+static OUTPUT_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+async fn wait_before_output(id: ToolCallId) {
+    let hook = {
+        let mut hooks = OUTPUT_HOOKS.lock().unwrap();
+        hooks
+            .iter()
+            .position(|hook| hook.id == id)
+            .map(|index| hooks.remove(index))
+    };
+    if let Some(hook) = hook {
+        let _ = hook.entered.send(());
+        let _ = hook.release.await;
     }
 }
 
