@@ -1,0 +1,7 @@
+{
+  "type": "check_interruption_changed",
+  "interruption": {
+    "session_id": "03030303030303030303030303030303",
+    "run_id": "04040404040404040404040404040404"
+  }
+}

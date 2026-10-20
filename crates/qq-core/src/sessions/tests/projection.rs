@@ -230,7 +230,7 @@ async fn projection_fixture(
 }
 
 #[tokio::test]
-async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
+async fn ab2_replay_uses_exact_persisted_replies_and_a_legacy_correction_notice() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let store = Store::open(path.clone()).await.unwrap();
@@ -253,14 +253,18 @@ async fn ab2_replay_uses_exact_persisted_replies_and_correction_notice() {
                 is_error: true,
             },
         ]),
-        correction_notice: Some(
-            "Correct the next action using the checkpoint feedback.".to_owned(),
-        ),
     });
     store
         .persist_tool_projection(&claimed, 1, projected)
         .await
         .unwrap();
+    // Rows written while Jev checkpoints existed carry a correction notice;
+    // replay keeps honouring it.
+    let run = claimed.identity.run_id.to_string();
+    store.call(Priority::Control, move |connection| {
+        connection.execute("UPDATE model_turns SET tool_results_projection_json=json_set(tool_results_projection_json,'$.correction_notice','Correct the next action using the checkpoint feedback.') WHERE run_id=?1 AND turn_ordinal=1", [run])?;
+        Ok(())
+    }).await.unwrap();
     store
         .finish_run(
             &claimed,
@@ -317,7 +321,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
         .await
         .unwrap();
     let (_, claimed, _) = projection_fixture(&store, directory.path()).await;
-    let projection = |ids: &[&str], content: &str, notice: Option<String>| {
+    let projection = |ids: &[&str], content: &str| {
         Arc::new(crate::runtime::ProjectedToolTurn {
             message: Message::tool_results(
                 ids.iter()
@@ -328,7 +332,6 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
                     })
                     .collect(),
             ),
-            correction_notice: notice,
         })
     };
     for ids in [
@@ -339,18 +342,14 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
     ] {
         assert!(
             store
-                .persist_tool_projection(&claimed, 1, projection(ids, "reply", None))
+                .persist_tool_projection(&claimed, 1, projection(ids, "reply"))
                 .await
                 .is_err()
         );
     }
     assert!(
         store
-            .persist_tool_projection(
-                &claimed,
-                2,
-                projection(&["call-0", "call-1"], "reply", None)
-            )
+            .persist_tool_projection(&claimed, 2, projection(&["call-0", "call-1"], "reply"))
             .await
             .is_err()
     );
@@ -359,21 +358,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
             .persist_tool_projection(
                 &claimed,
                 1,
-                projection(&["call-0", "call-1"], &"x".repeat(48 * 1024 + 1), None)
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        store
-            .persist_tool_projection(
-                &claimed,
-                1,
-                projection(
-                    &["call-0", "call-1"],
-                    "reply",
-                    Some("x".repeat(32 * 1024 + 1))
-                )
+                projection(&["call-0", "call-1"], &"x".repeat(48 * 1024 + 1))
             )
             .await
             .is_err()
@@ -382,11 +367,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
     wrong_owner.identity.session_id = SessionId::from_bytes([0xEE; 16]);
     assert!(
         store
-            .persist_tool_projection(
-                &wrong_owner,
-                1,
-                projection(&["call-0", "call-1"], "reply", None)
-            )
+            .persist_tool_projection(&wrong_owner, 1, projection(&["call-0", "call-1"], "reply"))
             .await
             .is_err()
     );
@@ -403,11 +384,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
         .unwrap();
     assert!(
         store
-            .persist_tool_projection(
-                &claimed,
-                1,
-                projection(&["call-0", "call-1"], "reply", None)
-            )
+            .persist_tool_projection(&claimed, 1, projection(&["call-0", "call-1"], "reply"))
             .await
             .is_err()
     );
@@ -417,11 +394,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
         Ok(())
     }).await.unwrap();
     // Worst-case control-character escaping still fits the serialized ceiling.
-    let accepted = projection(
-        &["call-0", "call-1"],
-        &"\0".repeat(48 * 1024),
-        Some("\0".repeat(32 * 1024)),
-    );
+    let accepted = projection(&["call-0", "call-1"], &"\0".repeat(48 * 1024));
     store
         .persist_tool_projection(&claimed, 1, Arc::clone(&accepted))
         .await
@@ -435,7 +408,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
             .persist_tool_projection(
                 &claimed,
                 1,
-                projection(&["call-0", "call-1"], "conflicting", None)
+                projection(&["call-0", "call-1"], "conflicting")
             )
             .await
             .is_err()
@@ -446,10 +419,7 @@ async fn ab2_projection_retries_and_invalid_writes_preserve_first_commit() {
     }).await.unwrap();
     let saved = super::super::projection::SavedProjection::decode(&raw).unwrap();
     assert_eq!(saved.results[0].content, "\0".repeat(48 * 1024));
-    assert_eq!(
-        saved.correction_notice.as_deref(),
-        accepted.correction_notice.as_deref()
-    );
+    assert_eq!(saved.correction_notice, None);
     store.close().await.unwrap();
 }
 
@@ -678,35 +648,29 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
         connection.execute("UPDATE runs SET plan_descriptor_json=json_set(plan_descriptor_json,'$.checkpoint','custom/enforce') WHERE id=?1", [run])?;
         Ok(())
     }).await.unwrap();
-    if reviewed {
-        store
-            .record_checkpoint(
-                &claimed,
-                super::super::streaming::CheckpointRecord {
-                    correlation: "checkpoint-proof".to_owned(),
-                    phase: qq_protocol::CheckpointPhase::ToolResult,
-                    tool_call_id: Some(ids[0]),
-                    outcome: qq_protocol::CheckpointOutcome::Contradicted,
-                    confidence_basis_points: Some(10_000),
-                    feedback: "the result contradicts the task".to_owned(),
-                    spend: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
+    // Jev checkpoints were removed; a store written before then still holds
+    // their events. Rewrite the run's latest event into the legacy shape.
+    let kind = if reviewed {
+        "checkpoint_reviewed"
     } else {
         // The process died after the review started and before its verdict.
-        store
-            .record_checkpoint_started(
-                &claimed,
-                "checkpoint-proof".to_owned(),
-                qq_protocol::CheckpointPhase::ToolResult,
-                Some(ids[0]),
-            )
-            .await
-            .unwrap();
-    }
+        "checkpoint_started"
+    };
+    let run = claimed.identity.run_id.to_string();
+    let call = ids[0].to_string();
+    store
+        .call(Priority::Control, move |connection| {
+            let changed = connection.execute(
+                "UPDATE events SET envelope_json=json_set(envelope_json,'$.event',json_object('type',?2,'run_id',?1,'tool_call_id',?3))
+                 WHERE sequence=(SELECT MAX(sequence) FROM events WHERE json_extract(envelope_json,'$.run_id')=?1)
+                   AND json_extract(envelope_json,'$.run_id')=?1",
+                params![run, kind, call],
+            )?;
+            assert_eq!(changed, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
     store
         .finish_run(
             &claimed,
@@ -731,312 +695,4 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
         "durable checkpoint consequences must not disappear: {result:?}"
     );
     reopened.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn ab2_oversized_checkpoint_feedback_persists_the_corrective_request() {
-    struct RedTools;
-    impl CheckpointReviewer for RedTools {
-        fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-            Box::pin(std::future::ready(CheckpointVerdict {
-                spend: qq_protocol::CheckpointSpend::default(),
-                confidence: Some(1.0),
-                outcome: if request.phase == crate::runtime::CheckpointPhase::ToolResult {
-                    CheckpointOutcome::Contradicted
-                } else {
-                    CheckpointOutcome::Supported
-                },
-                feedback: "界".repeat(12 * 1024),
-            }))
-        }
-    }
-    struct Loader(Arc<StdMutex<Vec<ModelRequest>>>);
-    impl RuntimeLoader for Loader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            let provider = ScriptedRunProvider {
-                requests: Arc::clone(&self.0),
-                script: vec![("read_file", r#"{"path":"note.txt"}"#.to_owned())],
-                turn: StdMutex::new(0),
-            };
-            Box::pin(async move {
-                let runtime = Runtime::new(provider, "test-model", 256)
-                    .unwrap()
-                    .with_checkpoint_reviewer(Arc::new(RedTools));
-                Ok(loaded_runtime(runtime, &request.workspace, None))
-            })
-        }
-    }
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
-    let path = directory.path().join("sessions.sqlite3");
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(path.clone()),
-        Arc::new(Loader(Arc::clone(&requests))),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created =
-        create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::ReadOnly).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    queue_prompt(&runtime, session_id, "inspect".to_owned()).await;
-    let observed = collect_through_finished(&mut events).await;
-    assert!(
-        observed.iter().any(|event| matches!(
-            &event.event,
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            }
-        )),
-        "{observed:?}"
-    );
-    let notice = {
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        requests[1]
-            .messages()
-            .iter()
-            .flat_map(Message::content)
-            .find_map(|block| match block {
-                ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap()
-    };
-    assert!(notice.len() <= 32 * 1024);
-    assert!(notice.contains("…[truncated]"));
-    runtime.close().await.unwrap();
-    let reopened = Store::open(path.clone()).await.unwrap();
-    let context = reopened
-        .call(Priority::Control, move |connection| {
-            load_model_context(connection, session_id, u64::MAX)
-        })
-        .await
-        .unwrap();
-    assert!(context.contains(&Message::user(notice)));
-    assert!(context.iter().flat_map(Message::content).any(|block| matches!(block, ContentBlock::ToolResult { content, .. } if content.contains("[JEV RED"))));
-    // Reproduce the crash gap after the actual checkpoint event, retaining
-    // its per-call row but removing the projection that would follow it.
-    reopened
-        .call(Priority::Control, |connection| {
-            connection.execute(
-                "UPDATE model_turns SET tool_results_projection_json=NULL WHERE turn_ordinal=1",
-                [],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    reopened.close().await.unwrap();
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(path),
-        Arc::new(Loader(Arc::clone(&requests))),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, after) = resolve_workspace(&runtime, directory.path()).await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after,
-        })
-        .unwrap();
-    queue_prompt(&runtime, session_id, "continue".to_owned()).await;
-    let observed = collect_through_finished(&mut events).await;
-    assert!(observed.iter().any(|event| matches!(&event.event,
-        SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. }
-        if failure.message.contains("exact tool-result projection"))));
-    assert_eq!(requests.lock().unwrap().len(), 2);
-    assert!(!*runtime.inner.failed.borrow());
-    runtime.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn cancelling_a_reviewed_run_awaiting_tool_approval_keeps_the_session_usable() {
-    reviewed_run_ended_while_awaiting_tool_approval(false).await;
-}
-
-#[tokio::test]
-async fn restarting_during_a_reviewed_runs_tool_approval_keeps_the_session_usable() {
-    reviewed_run_ended_while_awaiting_tool_approval(true).await;
-}
-
-async fn reviewed_run_ended_while_awaiting_tool_approval(restart: bool) {
-    struct Supported;
-    impl CheckpointReviewer for Supported {
-        fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-            Box::pin(std::future::ready(CheckpointVerdict {
-                spend: qq_protocol::CheckpointSpend::default(),
-                confidence: Some(1.0),
-                outcome: CheckpointOutcome::Supported,
-                feedback: String::new(),
-            }))
-        }
-    }
-    struct Loader(Arc<StdMutex<Vec<ModelRequest>>>, StdMutex<usize>);
-    impl RuntimeLoader for Loader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            let mut loads = self.1.lock().unwrap();
-            let script = if *loads == 0 {
-                vec![(
-                    "write_file",
-                    r#"{"path":"note.txt","content":"changed\n"}"#.to_owned(),
-                )]
-            } else {
-                Vec::new()
-            };
-            *loads += 1;
-            let provider = ScriptedRunProvider {
-                requests: Arc::clone(&self.0),
-                script,
-                turn: StdMutex::new(0),
-            };
-            Box::pin(async move {
-                let runtime = Runtime::new(provider, "test-model", 256)
-                    .unwrap()
-                    .with_checkpoint_reviewer(Arc::new(Supported));
-                Ok(loaded_runtime(runtime, &request.workspace, None))
-            })
-        }
-    }
-    let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("note.txt"), "noted\n").unwrap();
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(Loader(Arc::clone(&requests), StdMutex::new(0))),
-    )
-    .await
-    .unwrap();
-    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
-    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-        panic!("session receipt")
-    };
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id,
-            after: created.committed_through,
-        })
-        .unwrap();
-    let run_id = submit_prompt_to(&runtime, session_id, "edit the note").await;
-    collect_until_approval_requested(&mut events).await;
-    let runtime = if restart {
-        runtime.close().await.unwrap();
-        let reopened = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-            Arc::new(Loader(Arc::clone(&requests), StdMutex::new(1))),
-        )
-        .await
-        .unwrap();
-        let (_, after) = resolve_workspace(&reopened, directory.path()).await;
-        events = reopened
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after,
-            })
-            .unwrap();
-        reopened
-    } else {
-        runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::CancelRun { run_id },
-            )
-            .await
-            .unwrap();
-        let cancelled = collect_through_finished(&mut events).await;
-        assert!(
-            cancelled.iter().any(|event| matches!(
-                &event.event,
-                SessionEvent::RunFinished {
-                    outcome: RunOutcome::Cancelled,
-                    ..
-                }
-            )),
-            "{cancelled:?}"
-        );
-        runtime
-    };
-    let reviewed: bool = runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT json_type(plan_descriptor_json,'$.checkpoint') NOT IN ('null') FROM runs WHERE id=?1",
-                [run_id.to_string()],
-                |row| row.get(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert!(reviewed, "the cancelled run must be a reviewed run");
-    let before = requests.lock().unwrap().len();
-    submit_prompt_to(&runtime, session_id, "continue").await;
-    let continued = collect_through_finished(&mut events).await;
-    assert!(
-        continued.iter().any(|event| matches!(
-            &event.event,
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            }
-        )),
-        "ending a held reviewed run must not make the conversation unusable: {continued:?}"
-    );
-    assert_eq!(requests.lock().unwrap().len(), before + 1);
-    {
-        let requests = requests.lock().unwrap();
-        let messages = requests[before].messages();
-        let original_prompt = messages
-            .iter()
-            .position(|message| message == &Message::user("edit the note"))
-            .expect("continuation must retain the original user prompt");
-        let call = messages
-            .iter()
-            .position(|message| {
-                message.role() == Role::Assistant
-                    && message.content().iter().any(|block| {
-                        matches!(
-                            block,
-                            ContentBlock::ToolCall { id, name, .. }
-                                if id == "call_0" && name == "write_file"
-                        )
-                    })
-            })
-            .expect("continuation must retain the assistant's write_file call_0");
-        let result = messages
-            .iter()
-            .position(|message| {
-                message.role() == Role::User
-                    && message.content().iter().any(|block| matches!(
-                        block,
-                        ContentBlock::ToolResult { call_id, content, is_error: true }
-                            if call_id == "call_0"
-                                && matches!(content.as_str(),
-                                    "Tool execution did not start before the run was cancelled."
-                                    | "Tool execution did not start before the run was interrupted.")
-                    ))
-            })
-            .expect("continuation must retain call_0's explicit cancelled/interrupted error result");
-        let continuation = messages
-            .iter()
-            .position(|message| message == &Message::user("continue"))
-            .expect("continuation must include the new user prompt");
-        assert!(
-            original_prompt < call && call < result && result < continuation,
-            "continuation must preserve prompt, call, interrupted result, then new prompt: {messages:?}"
-        );
-    }
-    runtime.close().await.unwrap();
 }

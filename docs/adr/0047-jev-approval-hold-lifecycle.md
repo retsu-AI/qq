@@ -1,7 +1,6 @@
 # ADR-0047 — Explicit Jev consent and a durable held-approval lifecycle
 
-**Status:** Proposed. Nothing in this document changes behavior; JV1–JV6
-and JV9 (server-side Off) implement it. Pending maintainer acceptance.
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-28 (drafted 2026-09-25 as #193's "ADR-0046", renumbered
 because 0046 is MCP tool-set pinning).
 **Would supersede:** [ADR-0041](0041-jev-delegated-approval.md) decision 5's
@@ -9,8 +8,8 @@ workspace/credential-epoch activation and decisions 6–7's final-only
 approval receipt and accounting. Decision 3 is superseded only when a
 separately qualified question/precision policy ships (JV3, JV8). All approval
 ceilings and independent consent remain.
-**Plan:** [Jev](../plans/jev.md) JV1–JV6, JV9. **Basis:**
-[`design/jev.md` § 3](../design/jev.md#3-why-jev-mostly-hands-work-back).
+**Plan:** [Jev](https://github.com/retsu-AI/qq/blob/bda6668f8f0707aa5f96f2f656799123b2b63eed/docs/plans/jev.md) JV1–JV6, JV9. **Basis:**
+[`design/jev.md` § 3](https://github.com/retsu-AI/qq/blob/bda6668f8f0707aa5f96f2f656799123b2b63eed/docs/design/jev.md#3-why-jev-mostly-hands-work-back).
 
 ## Context
 
@@ -127,7 +126,7 @@ human consent. Billing, evidence egress and tail latency remain the costs of
 opting in. Masking is not a complete privacy boundary.
 
 Qualification follows the plan's
-[procedure](../plans/jev.md#qualification-procedure-jv7-jv13). Success never
+[procedure](https://github.com/retsu-AI/qq/blob/bda6668f8f0707aa5f96f2f656799123b2b63eed/docs/plans/jev.md#qualification-procedure-jv7-jv13). Success never
 turns a default on.
 
 ## Alternatives considered

@@ -12,7 +12,6 @@ use thiserror::Error;
 pub async fn render(
     events: impl Stream<Item = RunEvent>,
     writer: &mut impl Write,
-    notices: &mut impl Write,
     mode: OutputMode,
 ) -> Result<(), OutputError> {
     let mut events = Box::pin(events);
@@ -27,36 +26,6 @@ pub async fn render(
             | RunEvent::ReasoningDelta { .. }
             | RunEvent::ReasoningCompleted { .. }
             | RunEvent::Usage { .. } => {}
-            RunEvent::CheckpointStarted {
-                correlation, phase, ..
-            } => {
-                writeln!(
-                    notices,
-                    "[jev] pending {phase:?} {correlation}: assessing selected evidence"
-                )?;
-                notices.flush()?;
-            }
-            RunEvent::CheckpointReviewed {
-                correlation,
-                phase,
-                outcome,
-                feedback,
-                spend,
-                ..
-            } => {
-                let cost = match spend {
-                    Some(spend) => spend.estimated_cost_usd_nanos.map_or_else(
-                        || "unknown".to_owned(),
-                        |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0),
-                    ),
-                    None => "not dispatched or legacy receipt".to_owned(),
-                };
-                writeln!(
-                    notices,
-                    "[jev] {outcome:?} {phase:?} {correlation}: {feedback}; estimated reviewer cost {cost}"
-                )?;
-                notices.flush()?;
-            }
             RunEvent::OutputTextDelta { text } | RunEvent::RefusalDelta { text } => {
                 let text = output_text(&text, mode);
                 writer.write_all(text.as_bytes())?;
@@ -137,11 +106,8 @@ mod tests {
             RunEvent::Completed,
         ]);
         let mut output = Vec::new();
-        let mut notices = Vec::new();
 
-        render(events, &mut output, &mut notices, OutputMode::Raw)
-            .await
-            .unwrap();
+        render(events, &mut output, OutputMode::Raw).await.unwrap();
 
         assert_eq!(output, b"hello\n");
     }
@@ -165,11 +131,8 @@ mod tests {
             RunEvent::Completed,
         ]);
         let mut output = Vec::new();
-        let mut notices = Vec::new();
 
-        render(events, &mut output, &mut notices, OutputMode::Raw)
-            .await
-            .unwrap();
+        render(events, &mut output, OutputMode::Raw).await.unwrap();
 
         assert_eq!(output, b"answer\n");
     }
@@ -184,11 +147,8 @@ mod tests {
             RunEvent::Completed,
         ]);
         let mut output = Vec::new();
-        let mut notices = Vec::new();
 
-        render(events, &mut output, &mut notices, OutputMode::Raw)
-            .await
-            .unwrap();
+        render(events, &mut output, OutputMode::Raw).await.unwrap();
 
         assert_eq!(output, b"cannot help\n");
     }
@@ -202,42 +162,11 @@ mod tests {
             RunEvent::Completed,
         ]);
         let mut output = Vec::new();
-        let mut notices = Vec::new();
 
-        render(events, &mut output, &mut notices, OutputMode::Terminal)
+        render(events, &mut output, OutputMode::Terminal)
             .await
             .unwrap();
 
         assert_eq!(output, b"safe]52;clipboard\n\ttext\n");
-    }
-
-    #[tokio::test]
-    async fn writes_checkpoint_notices_separately_from_answer_stdout() {
-        let events = stream::iter([
-            RunEvent::CheckpointReviewed {
-                spend: None,
-                correlation: "tool:call-1".to_owned(),
-                phase: qq_protocol::CheckpointPhase::ToolResult,
-                tool_call_id: Some(qq_protocol::ToolCallId::generate().unwrap()),
-                outcome: qq_protocol::CheckpointOutcome::Supported,
-                confidence_basis_points: Some(9_900),
-                feedback: "evidence is usable".to_owned(),
-            },
-            RunEvent::OutputTextDelta {
-                text: "answer".to_owned(),
-            },
-            RunEvent::Completed,
-        ]);
-        let mut output = Vec::new();
-        let mut notices = Vec::new();
-
-        render(events, &mut output, &mut notices, OutputMode::Raw)
-            .await
-            .unwrap();
-
-        assert_eq!(output, b"answer\n");
-        let notices = String::from_utf8(notices).unwrap();
-        assert!(notices.contains("[jev] Supported ToolResult tool:call-1"));
-        assert!(notices.contains("evidence is usable"));
     }
 }

@@ -36,27 +36,27 @@ written.
 | 0025 | [SSE bodies are framed per chunk with one allocation per event; adapters parse once](0025-sse-chunk-framing.md) | Accepted |
 | 0026 | [Run cancellation is a token that wakes waiters, not a flag that is polled](0026-run-cancellation-token.md) | Accepted |
 | 0027 | [`qq-core` is a public embedding API; its exports are a contract, not leakage](0027-qq-core-public-embedding-api.md) | Accepted |
-| 0028 | [Mandatory typed JEV checkpoints after tool results and final candidates](0028-mandatory-typed-jev-checkpoints.md) | Accepted; narrowly supersedes ADR-0003's synchronous-decision list |
-| 0030 | [Explicit, independent Jev capabilities](0030-optional-jev-decisions.md) | Accepted; supersedes ADR-0028 activation |
+| 0028 | [Mandatory typed JEV checkpoints after tool results and final candidates](0028-mandatory-typed-jev-checkpoints.md) | Superseded: Jev removed |
+| 0030 | [Explicit, independent Jev capabilities](0030-optional-jev-decisions.md) | Superseded: Jev removed |
 | 0031 | [Explicit reasoning effort belongs to the compiled plan](0031-explicit-reasoning-effort.md) | Accepted |
-| 0032 | [Routing spend belongs to the reserved run](0032-durable-task-routing.md) | Accepted |
+| 0032 | [Routing spend belongs to the reserved run](0032-durable-task-routing.md) | Superseded: Jev removed |
 | 0033 | [Keep model pins distinct from configured fallbacks](0033-model-choice-provenance.md) | Accepted |
-| 0034 | [Route only among declared, authorized choices](0034-concrete-jev-routing.md) | Accepted |
+| 0034 | [Route only among declared, authorized choices](0034-concrete-jev-routing.md) | Superseded: Jev removed |
 | 0035 | [Global configuration may be a leaf symlink to a regular file](0035-global-leaf-config-symlinks.md) | Accepted |
 | 0036 | [Designed truecolor default theme `ink` with `terminal` ANSI fallback](0036-truecolor-default-theme.md) | Accepted (ENG-851) |
 | 0038 | [Session retention: archive by session, never by row; receipts and cursors outlive their sessions](0038-session-retention.md) | Proposed (ENG-803) |
 | 0039 | [A run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) | Accepted (ENG-793, #92) |
 | 0040 | [Two-phase retry ownership: the provider owns sends, the run owns turns](0040-two-phase-retry-ownership.md) | Accepted (run-reliability RR4); supersedes ADR-0005 in part |
-| 0041 | [Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) | Accepted (ENG-862); supersedes ADR-0030's "never authorizes side effects" for the `jev_approval` lane only; decision 5's activation superseded by ADR-0052 |
+| 0041 | [Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) | Superseded: Jev removed |
 | 0042 | [The trust prompt is a client-side hold fed by the composition root; no protocol change](0042-in-tui-trust-prompt.md) | Accepted (onboarding OB7, ENG-881) |
 | 0043 | [Optimize verified task efficiency, not individual turn size](0043-verified-task-efficiency.md) | Proposed (token-efficiency TE0) |
 | 0046 | [Pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch, not only at discovery](0046-mcp-tool-set-pinning.md) | Accepted (ENG-939); `DESCRIPTOR_VERSION` 9 → 10 |
-| 0047 | [Explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) | Proposed (Jev JV1–JV6) |
+| 0047 | [Explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) | Superseded: Jev removed |
 | 0048 | [A run's bounds reset at its seams, and a stopped unattended run continues itself](0048-run-bounds-reset-at-seams-and-continuation.md) | Proposed (autonomous-core AC2–AC6); extends ADR-0039/0040 |
 | 0049 | [A session goal is pursued by the runtime across runs, restarts and days; completion is checked, budgets are enforced, loops are guarded](0049-durable-run-goal-and-loop-guard.md) | Proposed (goals G0–G5; autonomous-core AC4) |
 | 0050 | [Composition moves from the binary into a `qq-harness` library; `qq-core` gets tool features and a tested embedding example](0050-qq-harness-composition-library.md) | Proposed (autonomous-core AC10–AC13); refines ADR-0027 |
 | 0051 | [0ver product versioning; compatibility is carried by contract versions](0051-zerover-product-versioning.md) | Accepted (ENG-969) |
-| 0052 | [Jev approval activation comes from the run's compiled plan](0052-jev-approval-activation-from-plan.md) | Accepted (ENG-971); supersedes ADR-0041 decision 5's per-hold configuration read |
+| 0052 | [Jev approval activation comes from the run's compiled plan](0052-jev-approval-activation-from-plan.md) | Superseded: Jev removed |
 | 0054 | [Progress means output: a run reports when it stops changing things, a sub-agent answers its brief, and delegation does not block the parent](0054-progress-means-output.md) | Proposed (autonomous-core AP1–AP5); takes ADR-0048 § 2's empty-checkpoint fault |
 | 0056 | [A compaction summary is a short model narrative plus an exact record that QQ renders from the store](0056-compaction-narrative-and-record.md) | Proposed (compaction CX0–CX5); amends how ADR-0039 § 3's summarizer request is built |
 | 0058 | [Edit freshness: a unique exact match proves the region was seen](0058-edit-freshness-by-exact-match.md) | Accepted (tool-layer T19, ENG-1030); amends `tools.md` § Optimistic Concurrency step 2 |

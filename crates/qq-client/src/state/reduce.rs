@@ -502,71 +502,8 @@ impl SessionStore {
                     text,
                 });
             }
-            SessionEvent::RoutingStarted { .. } => {
-                effects.push(StateEffect::Notice {
-                    session: Some(session_id),
-                    level: NoticeLevel::Info,
-                    text: "Jev routing pending; selecting an authorized model".to_owned(),
-                });
-            }
-            SessionEvent::RoutingCompleted { decision, .. } => {
-                effects.push(StateEffect::Notice {
-                    session: Some(session_id),
-                    level: NoticeLevel::Info,
-                    text: format!(
-                        "Jev routing {:?}: {}; {}; routing spend {}",
-                        decision.outcome,
-                        decision
-                            .model
-                            .model
-                            .as_deref()
-                            .unwrap_or("configured model"),
-                        decision.reason,
-                        decision.estimated_cost_usd_nanos.map_or_else(
-                            || "unknown".to_owned(),
-                            |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0)
-                        )
-                    ),
-                });
-            }
-            SessionEvent::CheckpointStarted {
-                correlation, phase, ..
-            } => {
-                effects.push(StateEffect::Notice {
-                    session: Some(session_id),
-                    level: NoticeLevel::Info,
-                    text: format!(
-                        "Jev review pending ({phase:?}, {correlation}); assessing selected evidence"
-                    ),
-                });
-            }
-            SessionEvent::CheckpointReviewed {
-                correlation,
-                outcome,
-                feedback,
-                spend,
-                ..
-            } => {
-                let supported = matches!(outcome, qq_protocol::CheckpointOutcome::Supported);
-                effects.push(StateEffect::Notice {
-                    session: Some(session_id),
-                    level: if supported {
-                        NoticeLevel::Info
-                    } else {
-                        NoticeLevel::Error
-                    },
-                    text: format!(
-                        "Jev {outcome:?} {correlation}: {feedback}; reviewer spend {}",
-                        spend
-                            .as_ref()
-                            .and_then(|spend| spend.estimated_cost_usd_nanos)
-                            .map_or_else(
-                                || "unknown or not dispatched".to_owned(),
-                                |cost| format!("${:.6}", cost as f64 / 1_000_000_000.0)
-                            )
-                    ),
-                });
-            }
+            // A journal row from a removed feature changes nothing.
+            SessionEvent::Retired => {}
             // The truncated turn's message was already completed with its
             // `truncated` flag by the turn commit; the next turn's message
             // continues the same answer. Surface the continuation so the

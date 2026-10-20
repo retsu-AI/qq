@@ -31,9 +31,6 @@ below is for people changing QQ.
   hosts.
 - [`side-questions.md`](design/side-questions.md) — `/btw` side questions:
   captured context, least-authority tools, bounds, durability.
-- [`jev.md`](design/jev.md) — optional TypeSafe Jev: what it is, the four
-  capabilities as built, and why it hands work back today. The only Jev
-  design doc; the [Jev plan](plans/jev.md) owns what comes next.
 - [`layout.md`](design/layout.md), [`transcript.md`](design/transcript.md),
   [`theme.md`](design/theme.md) — TUI layout tiers and panes, transcript
   rendering, themes.
@@ -104,8 +101,6 @@ phase-gate evidence.
   bounded snapshot export, pinned classifier recount and cohort provenance.
 - [`tui-qa.md`](runbooks/tui-qa.md) — credential-free, loopback-only TUI
   diagnostic fixture and cleanup.
-- [`jev.md`](runbooks/jev.md) — enable, inspect, and turn off Jev review,
-  routing, approval, and the advisory observer.
 - [`release.md`](runbooks/release.md) — `cargo xtask release`, the tag-driven
   release workflow, targets, and `qq --version`.
 - [`website.md`](runbooks/website.md) — how the docs site is generated from
