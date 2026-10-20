@@ -1470,18 +1470,7 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     println!("max_output_tokens: {}", snapshot.max_output_tokens());
     println!("providers:");
     for (name, provider) in snapshot.providers() {
-        let kind = match provider.kind() {
-            config::ProviderKind::OpenAi => "OpenAi",
-            config::ProviderKind::OpenAiCodex => "OpenAiCodex",
-            config::ProviderKind::Anthropic => "Anthropic",
-            config::ProviderKind::Google => "Google",
-            config::ProviderKind::XAi => "XAi",
-            config::ProviderKind::LiteLlm => "LiteLlm",
-            config::ProviderKind::AmazonBedrock => "AmazonBedrock",
-            config::ProviderKind::AmazonBedrockMantle => "AmazonBedrockMantle",
-            config::ProviderKind::Custom => "Custom",
-        };
-        println!("  {name}: {kind}");
+        println!("  {name}: {}", provider.kind().name());
     }
     // Grants are not secrets; they render unredacted.
     let grants = snapshot.grants();
@@ -1868,64 +1857,71 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
     // endpoint; a name outside the built-in set would store a credential
     // nothing can resolve. Arbitrary names go through `auth set`. Checked
     // before the store opens so a typo never touches the keyring.
-    if let cli::AuthCommand::Login(arguments) = &command
-        && built_in_endpoint(&arguments.provider).is_none()
-    {
-        return Err(format!(
-            "{:?} is not a built-in provider; `qq auth login` accepts {}. \
-             For a gateway or MCP bearer use `qq auth set NAME` and reference Stored(\"NAME\")",
-            arguments.provider,
-            LOGIN_PROVIDERS.join(", ")
-        )
-        .into());
-    }
-    if let cli::AuthCommand::Login(arguments) = &command {
-        validate_login_mode(arguments)?;
-    }
+    let login_method = match &command {
+        cli::AuthCommand::Login(arguments) => {
+            let Some(provider) = login_provider(&arguments.provider) else {
+                return Err(format!(
+                    "{:?} is not a built-in provider; `qq auth login` accepts {}. \
+                     For a gateway or MCP bearer use `qq auth set NAME` and reference Stored(\"NAME\")",
+                    arguments.provider,
+                    login_providers().join(", ")
+                )
+                .into());
+            };
+            Some(login_method(arguments, &provider)?)
+        }
+        _ => None,
+    };
     let store = auth::CredentialStore::system()?;
     match command {
         cli::AuthCommand::Login(arguments) => {
             let name = format!("{}/{}", arguments.provider, arguments.profile);
-            let backend = if arguments.provider == "openai-codex" && arguments.device_auth {
-                auth::validate_credential_name(&name)?;
-                let login = auth::CodexDeviceLogin::start(&store)?;
-                eprintln!(
-                    "{}",
-                    codex_device_prompt(login.verification_url(), login.user_code())
-                );
-                login.complete(&store, &arguments.profile, arguments.allow_file)?
-            } else if arguments.provider == "openai-codex" {
-                auth::validate_credential_name(&name)?;
-                let login = auth::CodexLogin::start()?;
-                eprintln!(
-                    "Open this URL to sign in with OpenAI Codex:\n{}",
-                    login.authorization_url()
-                );
-                if webbrowser::open(login.authorization_url()).is_err() {
-                    eprintln!("The browser could not be opened automatically.");
+            let method = login_method.expect("a login resolved its method");
+            let backend = match method {
+                config::LoginMethod::OpenAiCodexDevice => {
+                    auth::validate_credential_name(&name)?;
+                    let login = auth::CodexDeviceLogin::start(&store)?;
+                    eprintln!(
+                        "{}",
+                        codex_device_prompt(login.verification_url(), login.user_code())
+                    );
+                    login.complete(&store, &arguments.profile, arguments.allow_file)?
                 }
-                login.complete(&store, &arguments.profile, arguments.allow_file)?
-            } else if arguments.provider == "xai" && arguments.oauth {
-                auth::validate_credential_name(&name)?;
-                let login = auth::XaiLogin::start(&store)?;
-                eprintln!(
-                    "Open this URL to sign in with xAI:\n{}\n\nEnter code: {}",
-                    login.verification_url(),
-                    login.user_code()
-                );
-                if webbrowser::open(login.verification_url()).is_err() {
-                    eprintln!("The browser could not be opened automatically.");
+                config::LoginMethod::OpenAiCodexBrowser => {
+                    auth::validate_credential_name(&name)?;
+                    let login = auth::CodexLogin::start()?;
+                    eprintln!(
+                        "Open this URL to sign in with OpenAI Codex:\n{}",
+                        login.authorization_url()
+                    );
+                    if webbrowser::open(login.authorization_url()).is_err() {
+                        eprintln!("The browser could not be opened automatically.");
+                    }
+                    login.complete(&store, &arguments.profile, arguments.allow_file)?
                 }
-                login.complete(&store, &arguments.profile, arguments.allow_file)?
-            } else {
-                let secret = read_secret(&format!("{} API key: ", arguments.provider))?;
-                store.set_with_metadata(
-                    &name,
-                    secret.expose_secret_bytes(),
-                    arguments.allow_file,
-                    Some(&arguments.provider),
-                    built_in_endpoint(&arguments.provider),
-                )?
+                config::LoginMethod::XAiOAuth => {
+                    auth::validate_credential_name(&name)?;
+                    let login = auth::XaiLogin::start(&store)?;
+                    eprintln!(
+                        "Open this URL to sign in with xAI:\n{}\n\nEnter code: {}",
+                        login.verification_url(),
+                        login.user_code()
+                    );
+                    if webbrowser::open(login.verification_url()).is_err() {
+                        eprintln!("The browser could not be opened automatically.");
+                    }
+                    login.complete(&store, &arguments.profile, arguments.allow_file)?
+                }
+                config::LoginMethod::ApiKey => {
+                    let secret = read_secret(&format!("{} API key: ", arguments.provider))?;
+                    store.set_with_metadata(
+                        &name,
+                        secret.expose_secret_bytes(),
+                        arguments.allow_file,
+                        Some(&arguments.provider),
+                        built_in_endpoint(&arguments.provider),
+                    )?
+                }
             };
             println!("stored {name} in {backend}");
         }
@@ -1973,25 +1969,45 @@ fn auth_command(command: cli::AuthCommand) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Checks a `qq auth login` invocation's mode flags against the provider
+/// table before the credential store is opened.
+#[cfg(test)]
 fn validate_login_mode(arguments: &cli::LoginArgs) -> Result<(), Box<dyn Error>> {
+    let provider = login_provider(&arguments.provider)
+        .ok_or_else(|| format!("{:?} is not a built-in provider", arguments.provider))?;
+    login_method(arguments, &provider).map(drop)
+}
+
+/// The login method a `qq auth login` invocation selects for `provider`:
+/// `--device-auth` and `--oauth` each name one device-code method, and with
+/// neither the provider's default (its first listed method) applies. A flag
+/// the provider's row does not offer is rejected.
+fn login_method(
+    arguments: &cli::LoginArgs,
+    provider: &config::BuiltinProvider,
+) -> Result<config::LoginMethod, Box<dyn Error>> {
     if arguments.oauth && arguments.device_auth {
         return Err("--oauth and --device-auth cannot be used together".into());
     }
-    if arguments.oauth && arguments.provider != "xai" {
-        return Err(format!(
-            "OAuth login is not supported for provider {:?}",
+    let requested = if arguments.oauth {
+        Some((config::LoginMethod::XAiOAuth, "OAuth login"))
+    } else if arguments.device_auth {
+        Some((
+            config::LoginMethod::OpenAiCodexDevice,
+            "device authorization",
+        ))
+    } else {
+        None
+    };
+    match requested {
+        Some((method, _)) if provider.login.contains(&method) => Ok(method),
+        Some((_, label)) => Err(format!(
+            "{label} is not supported for provider {:?}",
             arguments.provider
         )
-        .into());
+        .into()),
+        None => Ok(provider.login[0]),
     }
-    if arguments.device_auth && arguments.provider != "openai-codex" {
-        return Err(format!(
-            "device authorization is not supported for provider {:?}",
-            arguments.provider
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn codex_device_prompt(verification_url: &str, user_code: &str) -> String {
@@ -2101,18 +2117,23 @@ fn read_secret(prompt: &str) -> Result<auth::Secret, Box<dyn Error>> {
     Ok(auth::Secret::from_secret_bytes(value.into_bytes()))
 }
 
-/// Providers `qq auth login` accepts, in the order the error lists them.
-const LOGIN_PROVIDERS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openai-codex"];
+/// The built-in provider `qq auth login` names, from the provider table.
+fn login_provider(id: &str) -> Option<config::BuiltinProvider> {
+    config::builtin_provider(id)
+}
 
+/// Providers `qq auth login` accepts, in the order the error lists them.
+fn login_providers() -> Vec<&'static str> {
+    config::builtin_providers()
+        .map(|provider| provider.id)
+        .collect()
+}
+
+/// The audience a credential stored by `qq auth login <provider>` is bound
+/// to: the table's for an API-key preset, `qq-auth`'s for a provider whose
+/// credential it owns (ADR-0064 §1).
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
-    match provider {
-        "openai" => Some("https://api.openai.com"),
-        "openai-codex" => Some(auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
-        "anthropic" => Some("https://api.anthropic.com"),
-        "google" => Some("https://generativelanguage.googleapis.com"),
-        "xai" => Some(auth::XAI_CREDENTIAL_ENDPOINT),
-        _ => None,
-    }
+    Some(runtime::builtin_audience(&login_provider(provider)?))
 }
 
 async fn run_blocking_command(
@@ -2248,7 +2269,7 @@ mod tests {
             error.contains("\"opnai\" is not a built-in provider"),
             "{error}"
         );
-        for provider in LOGIN_PROVIDERS {
+        for provider in login_providers() {
             assert!(error.contains(provider), "{error}");
         }
         assert!(error.contains("qq auth set NAME"), "{error}");
@@ -2310,9 +2331,68 @@ mod tests {
         }
     }
 
+    /// Every table row's login methods are reachable through the CLI flags
+    /// and nothing else: the default with no flag, and each device-code
+    /// method through its flag. A method the row lacks is rejected.
+    #[test]
+    fn login_methods_come_from_the_provider_table() {
+        for provider in config::builtin_providers() {
+            let args = |oauth, device_auth| cli::LoginArgs {
+                provider: provider.id.to_owned(),
+                profile: "default".to_owned(),
+                oauth,
+                device_auth,
+                allow_file: false,
+            };
+            assert_eq!(
+                login_method(&args(false, false), &provider).unwrap(),
+                provider.login[0],
+                "{}",
+                provider.id
+            );
+            for (flags, method) in [
+                ((true, false), config::LoginMethod::XAiOAuth),
+                ((false, true), config::LoginMethod::OpenAiCodexDevice),
+            ] {
+                let result = login_method(&args(flags.0, flags.1), &provider);
+                assert_eq!(
+                    result.is_ok(),
+                    provider.login.contains(&method),
+                    "{} {method:?}",
+                    provider.id
+                );
+            }
+        }
+    }
+
+    /// The audiences `qq auth login` binds: the table's for API-key presets,
+    /// `qq-auth`'s for the providers it owns, and the same values as before
+    /// the table existed.
+    #[test]
+    fn login_audiences_match_the_table_and_qq_auth() {
+        assert_eq!(built_in_endpoint("openai"), Some("https://api.openai.com"));
+        assert_eq!(
+            built_in_endpoint("anthropic"),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(
+            built_in_endpoint("google"),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(
+            built_in_endpoint("xai"),
+            Some(auth::XAI_CREDENTIAL_ENDPOINT)
+        );
+        assert_eq!(
+            built_in_endpoint("openai-codex"),
+            Some(auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT)
+        );
+        assert_eq!(built_in_endpoint("custom"), None);
+    }
+
     #[test]
     fn every_login_provider_has_a_built_in_endpoint() {
-        for provider in LOGIN_PROVIDERS {
+        for provider in login_providers() {
             assert!(built_in_endpoint(provider).is_some(), "{provider}");
         }
     }

@@ -15,7 +15,7 @@ or your own rework.
 3. **Existing violations:** if fixing them all is out of scope, add a ceiling
    (like `SLEEP_CEILING`) set to today's count. New violations fail; the
    ceiling only moves down.
-4. **Add a row** to the `AGENTS.md` § Rules → enforcers table: the rule, its enforcer.
+4. **Add a lint rule or test** that enforces it.
    Delete any prose the enforcer now makes redundant.
 5. Test the enforcer: it fails on a known bad example and passes on the
    tree.
