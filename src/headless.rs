@@ -64,6 +64,8 @@ pub struct HeadlessOptions {
     /// Source of the pricing table used for durable accounting.
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
+    /// Whether the invocation explicitly overrides a resumed session's mode.
+    pub approval_explicit: bool,
     /// Whether a held call has an approval delegate that exists: a
     /// configured `reviewer_model`.
     /// Whether one is *consulted* also depends on `approval_delegate`, which
@@ -124,6 +126,15 @@ const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
         HeadlessApproval::Ask => ApprovalMode::Ask,
         HeadlessApproval::Auto => ApprovalMode::Auto,
         HeadlessApproval::Full => ApprovalMode::Full,
+    }
+}
+
+const fn headless_approval(mode: ApprovalMode) -> HeadlessApproval {
+    match mode {
+        ApprovalMode::ReadOnly => HeadlessApproval::ReadOnly,
+        ApprovalMode::Ask => HeadlessApproval::Ask,
+        ApprovalMode::Auto => HeadlessApproval::Auto,
+        ApprovalMode::Full => HeadlessApproval::Full,
     }
 }
 
@@ -254,6 +265,7 @@ enum SessionIntent<'a> {
 
 #[derive(Clone)]
 struct SessionHandle {
+    approval: HeadlessApproval,
     workspace_id: WorkspaceId,
     session_id: SessionId,
     subscribe_after: qq_protocol::EventCursor,
@@ -263,6 +275,7 @@ struct SessionHandle {
 
 #[derive(Clone)]
 struct RunHandle {
+    approval: HeadlessApproval,
     workspace_id: WorkspaceId,
     session_id: SessionId,
     run_id: RunId,
@@ -1009,7 +1022,7 @@ pub async fn run(
         profile: options.profile.clone(),
         context_window: options.context_window,
         pricing_provenance: options.pricing_provenance.clone(),
-        approval: options.approval,
+        approval: handle.approval,
         timeout_seconds: options.timeout.map(|timeout| timeout.as_secs()),
         max_turns: options.max_turns,
         max_cost_usd_nanos: options.max_cost_usd_nanos,
@@ -1111,7 +1124,7 @@ pub async fn run(
         }
         // Explain read-only denials and name the mode allowing workspace
         // edits. JSONL consumers already see each denied call's state.
-        if options.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
+        if handle.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
             let _ = writeln!(
                 stderr,
                 "held calls were denied under --approval read-only; rerun with --approval auto to allow workspace edits"
@@ -1138,6 +1151,7 @@ async fn submit(
     input: Vec<qq_protocol::InputPart>,
 ) -> Result<RunHandle, Failure> {
     let SessionHandle {
+        approval,
         workspace_id,
         session_id,
         subscribe_after,
@@ -1177,6 +1191,7 @@ async fn submit(
     };
 
     Ok(RunHandle {
+        approval,
         workspace_id,
         session_id,
         run_id,
@@ -1215,7 +1230,7 @@ async fn prepare_session(
         ));
     };
 
-    let (session_id, subscribe_after, session_delegate) = match options.session {
+    let (session_id, subscribe_after, session_delegate, approval) = match options.session {
         None => {
             let created = send(
                 sessions,
@@ -1235,7 +1250,12 @@ async fn prepare_session(
                     "session creation returned an unexpected outcome",
                 ));
             };
-            (session_id, created.committed_through, None)
+            (
+                session_id,
+                created.committed_through,
+                None,
+                options.approval,
+            )
         }
         Some(session_id) => {
             // Store ownership was taken when the runtime opened and its
@@ -1307,10 +1327,14 @@ async fn prepare_session(
                     }
                 )));
             }
-            // The invocation decides the run, exactly as it would for a new
-            // session. The model selection is always written (the summary
-            // shows only the route, not the output cap or organization);
-            // profile and approval are written only when they differ.
+            // Preserve the session's approval policy unless the operator
+            // explicitly selects another mode. The model selection is always
+            // written (the summary omits its output cap and organization).
+            let approval = if options.approval_explicit {
+                options.approval
+            } else {
+                headless_approval(summary.approval_mode)
+            };
             let receipt = send(
                 sessions,
                 SessionCommand::SetSessionModel {
@@ -1331,12 +1355,12 @@ async fn prepare_session(
                 .await?;
                 after = receipt.committed_through;
             }
-            if summary.approval_mode != approval_mode(options.approval) {
+            if summary.approval_mode != approval_mode(approval) {
                 let receipt = send(
                     sessions,
                     SessionCommand::SetApprovalMode {
                         session_id,
-                        mode: approval_mode(options.approval),
+                        mode: approval_mode(approval),
                     },
                 )
                 .await?;
@@ -1354,6 +1378,7 @@ async fn prepare_session(
                     after
                 },
                 summary.approval_delegate,
+                approval,
             )
         }
     };
@@ -1365,12 +1390,13 @@ async fn prepare_session(
     // the same setting under that mode.
     let effective_delegate = session_delegate.unwrap_or(options.configured_delegate);
     let wait_for_delegate = options.reviewer_configured
-        && effective_delegate.consults_reviewer(approval_mode(options.approval));
-    let child_waits_for_delegate = options.approval != HeadlessApproval::Ask
+        && effective_delegate.consults_reviewer(approval_mode(approval));
+    let child_waits_for_delegate = approval != HeadlessApproval::Ask
         && options.reviewer_configured
         && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Auto);
 
     Ok(SessionHandle {
+        approval,
         workspace_id,
         session_id,
         subscribe_after,
@@ -1578,7 +1604,7 @@ async fn stream_run(
                             };
                         }
                         let unattended = !ours
-                            || matches!(options.approval, HeadlessApproval::Auto | HeadlessApproval::Ask);
+                            || matches!(handle.approval, HeadlessApproval::Auto | HeadlessApproval::Ask);
                         if unattended && let Some(run_id) = envelope.run_id {
                             respond_approval(
                                 sessions,
@@ -1644,6 +1670,7 @@ async fn stream_run(
                             continue;
                         }
                         unattended_approval(sessions, options, &SessionHandle {
+                            approval: handle.approval,
                             workspace_id: handle.workspace_id, session_id: handle.session_id,
                             subscribe_after: handle.subscribe_after, wait_for_delegate: handle.wait_for_delegate,
                             child_waits_for_delegate: handle.child_waits_for_delegate,
@@ -1966,8 +1993,8 @@ async fn unattended_approval(
     // allowlist still applies: the human declared it.
     let granted = allowlisted_grant(options, &tool_call.name, shell.as_deref(), fetch.as_deref());
     let approval =
-        if options.approval == HeadlessApproval::Ask || envelope.session_id == handle.session_id {
-            options.approval
+        if handle.approval == HeadlessApproval::Ask || envelope.session_id == handle.session_id {
+            handle.approval
         } else {
             HeadlessApproval::Auto
         };
@@ -2846,6 +2873,7 @@ mod tests {
             context_window: Some(128_000),
             pricing_provenance: Some("test fixture".to_owned()),
             approval: HeadlessApproval::ReadOnly,
+            approval_explicit: false,
             reviewer_configured: false,
             configured_delegate: qq_protocol::ApprovalDelegate::ByMode,
             allow_tools: Vec::new(),
@@ -3231,6 +3259,7 @@ mod tests {
             let mut opts = base;
             opts.model.model = Some("test/changed-model".into());
             opts.approval = HeadlessApproval::Full;
+            opts.approval_explicit = true;
             opts.session = Some(handle.session_id);
             let code = run_goal(
                 &fixture.sessions,
@@ -3282,6 +3311,7 @@ mod tests {
             opts.model.model = Some("test/changed-model".into());
             opts.profile = qq_protocol::AgentProfileId::new("reviewer").unwrap();
             opts.approval = HeadlessApproval::Full;
+            opts.approval_explicit = true;
             let mut request = goal_request();
             request.replace = replace;
             if !replace {
@@ -5979,6 +6009,182 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_resume_preserves_ask_and_its_unattended_policy_without_an_override() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut initial = options(&fixture.workspace);
+        initial.approval = HeadlessApproval::Ask;
+        let stored = prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut resumed = options(&fixture.workspace);
+        resumed.session = Some(stored.session_id);
+        resumed.approval = HeadlessApproval::Auto;
+        resumed.reviewer_configured = true;
+        resumed.configured_delegate = qq_protocol::ApprovalDelegate::On;
+        resumed.allow_tools = vec!["write_file".into(), "shell".into()];
+        resumed.allow_shell_prefixes = vec!["cp".into()];
+        let (status, stdout, stderr) = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_to_end(&fixture, resumed, std::future::pending()),
+        )
+        .await
+        .expect("stored Ask must deny unattended immediately, without waiting for a reviewer");
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        assert!(
+            !fixture.workspace.join("note.txt").exists(),
+            "stored Ask was widened to Auto"
+        );
+        assert!(!fixture.workspace.join("shelled.txt").exists());
+        let records = parse_records(&stdout);
+        assert_eq!(
+            records[0]["approval"], "ask",
+            "trial must name the effective policy"
+        );
+        let resolutions: Vec<_> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .collect();
+        assert_eq!(resolutions.len(), 2, "{stdout}");
+        assert!(
+            resolutions
+                .iter()
+                .all(|record| record["envelope"]["event"]["resolution"] == "denied"),
+            "{stdout}"
+        );
+        assert_eq!(
+            workspace_snapshot(&fixture).await.sessions[0].approval_mode,
+            ApprovalMode::Ask
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_permission_selection_is_shared_by_prompt_and_goal() {
+        for stored_mode in [
+            HeadlessApproval::ReadOnly,
+            HeadlessApproval::Ask,
+            HeadlessApproval::Auto,
+            HeadlessApproval::Full,
+        ] {
+            for explicit in [false, true] {
+                for goal in [false, true] {
+                    let fixture = fixture(|| TextProvider).await;
+                    let mut initial = options(&fixture.workspace);
+                    initial.approval = stored_mode;
+                    let stored =
+                        prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
+                            .await
+                            .unwrap();
+                    let mut resumed = options(&fixture.workspace);
+                    resumed.session = Some(stored.session_id);
+                    resumed.approval = if stored_mode == HeadlessApproval::Auto {
+                        HeadlessApproval::Ask
+                    } else {
+                        HeadlessApproval::Auto
+                    };
+                    resumed.approval_explicit = explicit;
+                    resumed.reviewer_configured = true;
+                    resumed.configured_delegate = qq_protocol::ApprovalDelegate::On;
+                    let request = goal_request();
+                    let intent = if goal {
+                        SessionIntent::Goal(&request)
+                    } else {
+                        SessionIntent::Prompt
+                    };
+                    let effective = prepare_session(&fixture.sessions, &resumed, intent)
+                        .await
+                        .unwrap();
+                    let expected = if explicit {
+                        resumed.approval
+                    } else {
+                        stored_mode
+                    };
+                    assert_eq!(effective.approval, expected);
+                    assert_eq!(
+                        effective.wait_for_delegate,
+                        expected == HeadlessApproval::Auto
+                    );
+                    assert_eq!(
+                        effective.child_waits_for_delegate,
+                        expected != HeadlessApproval::Ask
+                    );
+                    assert_eq!(
+                        workspace_snapshot(&fixture).await.sessions[0].approval_mode,
+                        approval_mode(expected)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_resume_preserves_ask_for_unattended_mutations() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut initial = options(&fixture.workspace);
+        initial.approval = HeadlessApproval::Ask;
+        let stored = prepare_session(&fixture.sessions, &initial, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        let mut resumed = options(&fixture.workspace);
+        resumed.session = Some(stored.session_id);
+        resumed.approval = HeadlessApproval::Auto;
+        resumed.allow_tools = vec!["write_file".into(), "shell".into()];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_goal(
+            &fixture.sessions,
+            resumed,
+            goal_request(),
+            std::future::pending(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(
+            code,
+            qq_protocol::HeadlessGoalStatus::BudgetExhausted.code(),
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(!fixture.workspace.join("note.txt").exists());
+        assert!(!fixture.workspace.join("shelled.txt").exists());
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let resolutions: Vec<_> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .collect();
+        assert_eq!(resolutions.len(), 2);
+        assert!(
+            resolutions
+                .iter()
+                .all(|record| record["envelope"]["event"]["resolution"] == "denied")
+        );
+        assert_eq!(
+            workspace_snapshot(&fixture).await.sessions[0].approval_mode,
+            ApprovalMode::Ask
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_read_only_uses_its_effective_denial_hint() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let stored = prepare_session(
+            &fixture.sessions,
+            &options(&fixture.workspace),
+            SessionIntent::Prompt,
+        )
+        .await
+        .unwrap();
+        let mut resumed = options(&fixture.workspace);
+        resumed.session = Some(stored.session_id);
+        resumed.approval = HeadlessApproval::Auto;
+        resumed.format = HeadlessFormat::Text;
+        let (status, _, stderr) = run_to_end(&fixture, resumed, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        assert!(stderr.contains(DENIAL_HINT), "{stderr}");
+        assert!(!fixture.workspace.join("note.txt").exists());
+    }
+
+    #[tokio::test]
     async fn session_resume_submits_into_the_idle_session_and_applies_the_invocation() {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let fixture = {
@@ -6005,6 +6211,7 @@ mod tests {
             prompt: "second task".to_owned(),
             session: Some(session_id),
             approval: HeadlessApproval::Auto,
+            approval_explicit: true,
             model: ModelSelection {
                 model_is_fallback: false,
                 model: Some("test/model".to_owned()),
@@ -7147,11 +7354,32 @@ mod tests {
 
     #[tokio::test]
     async fn aborting_the_headless_owner_still_settles_its_accepted_run() {
+        struct AcceptanceSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Write for AcceptanceSignal {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if let Some(accepted) = self.0.take() {
+                    accepted.send(()).unwrap();
+                }
+                Ok(())
+            }
+        }
         let fixture = fixture(|| HangingProvider).await;
         let options = options(&fixture.workspace);
+        let before = workspace_snapshot(&fixture).await;
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: before.workspace.id,
+                after: before.cursor,
+            })
+            .unwrap();
+        let (entered, accepted) = tokio::sync::oneshot::channel();
         let sessions = fixture.sessions.clone();
         let owner = tokio::spawn(async move {
-            let mut stdout = Vec::new();
+            let mut stdout = AcceptanceSignal(Some(entered));
             let mut stderr = Vec::new();
             run(
                 &sessions,
@@ -7164,35 +7392,23 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let snapshot = workspace_snapshot(&fixture).await;
-                if snapshot
-                    .sessions
-                    .iter()
-                    .any(|session| session.active_run_id.is_some())
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the headless owner must accept a run before it is aborted");
+        // The first output flush follows installation of the accepted-run
+        // guard. A snapshot can observe acceptance before that guard exists.
+        tokio::time::timeout(Duration::from_secs(5), accepted)
+            .await
+            .expect("the headless owner must accept a run before it is aborted")
+            .unwrap();
         owner.abort();
         assert!(owner.await.unwrap_err().is_cancelled());
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let snapshot = workspace_snapshot(&fixture).await;
-                if snapshot
-                    .sessions
-                    .iter()
-                    .all(|session| session.active_run_id.is_none())
+                if let SessionEvent::RunFinished { outcome, .. } =
+                    events.next().await.unwrap().unwrap().event
                 {
+                    assert_eq!(outcome, RunOutcome::Cancelled);
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await

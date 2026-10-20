@@ -397,13 +397,85 @@ pub(super) fn insert_seed_grants(
 }
 
 /// Effective local policy plus the ancestor ceilings applied before review.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(super) struct ToolApprovalPolicy {
     pub mode: ApprovalMode,
     pub grants: approval::SessionGrants,
     pub delegate: Option<approval::ApprovalDelegate>,
     pub ancestors: Vec<(ApprovalMode, approval::SessionGrants)>,
     pub supervised: bool,
+}
+
+impl ToolApprovalPolicy {
+    fn same_authority(&self, other: &Self) -> bool {
+        // Delegate selection controls who reviews, not what they can authorize.
+        // An already requested review remains valid across preference changes.
+        self.mode == other.mode
+            && self.grants == other.grants
+            && self.ancestors == other.ancestors
+            && self.supervised == other.supervised
+    }
+}
+
+/// Recover the immutable policy inputs recorded when the gate requested this
+/// approval. Never infer a catalog effect from an arbitrary external tool name.
+/// Shell and fetch previews retain the exact command/host used by admission;
+/// mutations and external tools have the same ceiling policy. Refused hosts
+/// never reach an approval request: admission denies them under every mode.
+pub(super) fn load_pending_approval_class(
+    connection: &Connection,
+    workspace_id: WorkspaceId,
+    session_id: SessionId,
+    run_id: RunId,
+    tool_call_id: ToolCallId,
+) -> Result<(String, approval::ToolClass), SessionRuntimeError> {
+    let encoded: String = connection.query_row(
+        "SELECT envelope_json FROM events
+         WHERE workspace_id = ?1
+           AND json_extract(envelope_json, '$.event.type') = 'tool_approval_requested'
+           AND json_extract(envelope_json, '$.session_id') = ?2
+           AND json_extract(envelope_json, '$.run_id') = ?3
+           AND json_extract(envelope_json, '$.event.tool_call.id') = ?4
+         ORDER BY sequence DESC LIMIT 1",
+        params![
+            workspace_id.to_string(),
+            session_id.to_string(),
+            run_id.to_string(),
+            tool_call_id.to_string()
+        ],
+        |row| row.get(0),
+    )?;
+    let envelope: SessionEventEnvelope = serde_json::from_str(&encoded)?;
+    let SessionEvent::ToolApprovalRequested {
+        tool_call,
+        shell,
+        fetch,
+        question,
+        ..
+    } = envelope.event
+    else {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    };
+    let class = if let Some(shell) = shell {
+        approval::ToolClass::Shell {
+            command: shell.command,
+            cwd: shell.cwd,
+            // The ceiling evaluator classifies the exact command itself.
+            read_only: false,
+        }
+    } else if let Some(fetch) = fetch {
+        approval::ToolClass::Network {
+            host: Some(fetch.host),
+            refusal: None,
+        }
+    } else if let Some(question) = question {
+        approval::ToolClass::Interactive {
+            question: Some(*question),
+        }
+    } else {
+        approval::ToolClass::Mutating
+    };
+    Ok((tool_call.name, class))
 }
 
 pub(super) fn load_tool_approval_policy(
@@ -666,7 +738,9 @@ pub(super) fn resolve_approval_by_reviewer(
     expected_policy: &ToolApprovalPolicy,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    if load_tool_approval_policy(&transaction, identity.session_id)? != *expected_policy {
+    if !load_tool_approval_policy(&transaction, identity.session_id)?
+        .same_authority(expected_policy)
+    {
         let event = deny_pending_approval(
             &transaction,
             store_id,

@@ -4267,3 +4267,45 @@ async fn readonly_revocation_denies_a_late_human_approval_without_recording_gran
         }
     }
 }
+
+#[tokio::test]
+async fn selecting_equivalent_delegate_policy_preserves_an_inflight_reviewer_approval() {
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Auto,
+        vec![vec![(
+            "__test_shell",
+            r#"{"command":"git push origin main"}"#.to_owned(),
+        )]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let run_id = submit_prompt(&harness, "publish").await;
+    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: harness.session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::ByMode),
+            },
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event, SessionEvent::ToolApprovalResolved { tool_call, resolution: ApprovalResolution::ApprovedByReviewer, .. }
+            if tool_call.id == call.id
+    )), "a delegate preference is not an authority change: {observed:?}");
+    assert!(observed.iter().any(|event| matches!(
+        &event.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id
+    )));
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    harness.runtime.shutdown().await.unwrap();
+}

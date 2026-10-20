@@ -5872,3 +5872,123 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
     )));
     runtime.shutdown().await.unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_auto_revocation_denies_every_late_human_child_approval() {
+    for parent_granted in [false, true] {
+        for decision in [
+            ApprovalDecision::ApproveOnce,
+            ApprovalDecision::ApproveForSession {
+                grant: ApprovalGrant::ShellPrefix {
+                    prefix: "rm -r".into(),
+                },
+            },
+            ApprovalDecision::ApproveForWorkspace {
+                grant: ApprovalGrant::ShellPrefix {
+                    prefix: "rm -r".into(),
+                },
+            },
+        ] {
+            let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                script: vec![(
+                    "shell",
+                    r#"{"command":"rm -r approval-scratch"}"#.to_owned(),
+                )],
+                turn: StdMutex::new(0),
+            });
+            let (reviewer, _) =
+                StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Escalate {
+                    reason: "human decision required".into(),
+                }));
+            let spawn = serde_json::json!({"task": "remove approval-scratch", "model": "test/child", "authority": "write"});
+            let (mut harness, _) = write_child_harness(
+                child,
+                vec![("spawn_agent", spawn.to_string())],
+                Some(reviewer),
+                ApprovalMode::Full,
+            )
+            .await;
+            std::fs::create_dir(harness._directory.path().join("approval-scratch")).unwrap();
+            let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+            let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+            assert_eq!(call.name, "shell");
+            if parent_granted {
+                let session_id = harness.session_id;
+                harness
+                    .runtime
+                    .inner
+                    .store
+                    .call(Priority::Control, move |connection| {
+                        connection.execute(
+                        "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
+                         VALUES (?1, 'shell_prefix', 'rm -r', 0, 'human')",
+                        [session_id.to_string()],
+                    )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SetApprovalMode {
+                        session_id: harness.session_id,
+                        mode: ApprovalMode::Auto,
+                    },
+                )
+                .await
+                .unwrap();
+            let expected = if !parent_granted {
+                ApprovalResolution::Denied
+            } else {
+                match &decision {
+                    ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
+                    ApprovalDecision::ApproveForSession { .. } => {
+                        ApprovalResolution::ApprovedForSession
+                    }
+                    ApprovalDecision::ApproveForWorkspace { .. } => {
+                        ApprovalResolution::ApprovedForWorkspace
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let receipt = respond_approval(&harness.runtime, call.run_id, call.id, decision)
+                .await
+                .unwrap();
+            assert!(
+                matches!(receipt.outcome,
+            CommandOutcome::ToolApprovalResolved { resolution, .. } if resolution == expected),
+                "a child approval must respect the current parent's grants: {receipt:?}"
+            );
+            let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+            assert_eq!(
+                harness._directory.path().join("approval-scratch").exists(),
+                !parent_granted
+            );
+            if !parent_granted {
+                assert!(!observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
+                assert!(observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolApprovalResolved { tool_call, .. }
+                if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text.contains("parent_permission_required")))));
+            }
+            let (_, grants, _) = harness
+                .runtime
+                .inner
+                .store
+                .approval_policy(call.session_id)
+                .await
+                .unwrap();
+            if !parent_granted || expected == ApprovalResolution::ApprovedOnce {
+                assert!(grants.shell_prefixes.is_empty());
+            } else {
+                assert_eq!(grants.shell_prefixes, ["rm -r"]);
+            }
+            harness.runtime.shutdown().await.unwrap();
+        }
+    }
+}

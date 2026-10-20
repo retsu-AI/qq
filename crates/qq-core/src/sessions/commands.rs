@@ -1472,27 +1472,45 @@ pub(super) fn execute_command(
                 // produced "approval grant is empty or exceeds the session
                 // limit" and left the call waiting after the user had already
                 // approved it. The grant is dropped; the call runs once.
-                // A pending prompt is not a lasting grant: ReadOnly selected
-                // since admission revokes every approval path, including a
-                // parent's ceiling. Questions still accept their answers.
+                // A pending prompt is not a lasting grant. Re-evaluate every
+                // ancestor ceiling in this transaction before any approval or
+                // grant write; a child approval cannot widen its parent's
+                // current authority. Questions still accept their answers.
                 let own_mode = load_approval_policy(&transaction, session_id)?.0;
                 let ancestors = load_ancestor_approval_policies(&transaction, session_id)?;
-                let readonly = own_mode == ApprovalMode::ReadOnly
-                    || ancestors
-                        .iter()
-                        .any(|(mode, _)| *mode == ApprovalMode::ReadOnly);
-                let revoked = readonly
-                    && matches!(
-                        decision,
-                        ApprovalDecision::ApproveOnce
-                            | ApprovalDecision::ApproveForSession { .. }
-                            | ApprovalDecision::ApproveForWorkspace { .. }
-                    );
-                let denial_message = if revoked {
-                    "permission_denied: authority_changed: task or parent permissions are now read-only; a pending approval cannot restore revoked authority"
-                } else {
-                    approval::USER_DENIED_RESULT
-                };
+                let approving = matches!(
+                    decision,
+                    ApprovalDecision::ApproveOnce
+                        | ApprovalDecision::ApproveForSession { .. }
+                        | ApprovalDecision::ApproveForWorkspace { .. }
+                );
+                let mut refusal = None;
+                if approving && own_mode == ApprovalMode::ReadOnly {
+                    refusal = Some("permission_denied: authority_changed: task permissions are now read-only; a pending approval cannot restore revoked authority".to_owned());
+                } else if approving && !ancestors.is_empty() {
+                    let (name, class) = load_pending_approval_class(
+                        &transaction,
+                        workspace_id,
+                        session_id,
+                        run_id,
+                        tool_call_id,
+                    )?;
+                    for (mode, grants) in &ancestors {
+                        refusal = match approval::evaluate(*mode, &name, &class, grants) {
+                            approval::PolicyDecision::Execute
+                            | approval::PolicyDecision::AskUser { .. } => continue,
+                            // The pending response supplies the fresh human
+                            // approval required by an Ask ancestor.
+                            approval::PolicyDecision::RequireApproval if *mode == ApprovalMode::Ask => continue,
+                            approval::PolicyDecision::RequireApproval => Some("permission_denied: authority_changed: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned()),
+                            approval::PolicyDecision::Deny { reason } => Some(format!("permission_denied: authority_changed: {}", approval::deny_result(&reason))),
+                            approval::PolicyDecision::Forbidden { rules } => Some(format!("permission_denied: authority_changed: {}", approval::forbidden_result(&rules))),
+                        };
+                        break;
+                    }
+                }
+                let revoked = refusal.is_some();
+                let denial_message = refusal.as_deref().unwrap_or(approval::USER_DENIED_RESULT);
                 let human_only = own_mode == ApprovalMode::Ask
                     || ancestors.iter().any(|(mode, _)| *mode == ApprovalMode::Ask);
                 let decision = if revoked {

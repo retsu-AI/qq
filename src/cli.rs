@@ -223,18 +223,18 @@ pub struct RunArgs {
     pub workspace: Option<PathBuf>,
 
     /// Submit the prompt into this existing idle root session of the
-    /// workspace instead of creating one. The invocation, not the session's
-    /// history, decides the run: the configured model (after `--model`),
-    /// `--profile`, and `--approval` are applied to the session first. An
-    /// interrupted earlier run is recovered before anything else and never
+    /// workspace instead of creating one. The configured model (after
+    /// `--model`) and `--profile` are applied first. The stored approval mode
+    /// is preserved unless `--approval` is explicit. An interrupted earlier
+    /// run is recovered before anything else and never
     /// re-executes uncertain tool calls.
     #[arg(long, value_name = "ID")]
     pub session: Option<qq_protocol::SessionId>,
 
-    /// Unattended approval policy. Interactive `ask` approval is not
-    /// available in headless mode.
-    #[arg(long, value_enum, default_value_t = RunApproval::Auto)]
-    pub approval: RunApproval,
+    /// Approval policy: auto for new sessions; preserves the stored mode on
+    /// resume when omitted. Ask denies calls needing a human in headless mode.
+    #[arg(long, value_enum)]
+    pub approval: Option<RunApproval>,
 
     /// Agent profile to run as: a name under `profiles` in the configuration
     /// or one declared by a trusted agent pack. Defaults to `default`.
@@ -830,7 +830,7 @@ mod tests {
         };
         assert_eq!(args.prompt.as_deref(), Some("fix the failing test"));
         assert_eq!(args.workspace.as_deref(), Some(Path::new("/tmp/task")));
-        assert_eq!(args.approval, RunApproval::Auto);
+        assert_eq!(args.approval, Some(RunApproval::Auto));
         assert_eq!(args.timeout_seconds, Some(900));
         assert_eq!(args.max_turns, Some(40));
         assert_eq!(args.max_cost_usd.as_deref(), Some("2.5"));
@@ -869,14 +869,14 @@ mod tests {
     }
 
     #[test]
-    fn run_defaults_to_auto_text_in_the_current_workspace() {
+    fn run_defaults_to_text_without_an_explicit_approval_override() {
         let cli = Cli::try_parse_from(["qq", "run", "summarize this repository"]).unwrap();
 
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected a run command");
         };
         assert_eq!(args.workspace, None);
-        assert_eq!(args.approval, RunApproval::Auto);
+        assert_eq!(args.approval, None);
         assert_eq!(args.timeout_seconds, None);
         assert_eq!(args.max_turns, None);
         assert_eq!(args.max_cost_usd, None);
@@ -929,7 +929,7 @@ mod tests {
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected run")
         };
-        assert_eq!(args.approval, RunApproval::Ask);
+        assert_eq!(args.approval, Some(RunApproval::Ask));
     }
 
     #[test]

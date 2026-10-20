@@ -561,7 +561,8 @@ async fn prepare_headless(
         pricing_provenance: model_metadata
             .and_then(qq_config::ModelMetadata::pricing)
             .map(|pricing| pricing.provenance.clone()),
-        approval: match args.approval {
+        approval_explicit: args.approval.is_some(),
+        approval: match args.approval.unwrap_or(cli::RunApproval::Auto) {
             cli::RunApproval::ReadOnly => headless::HeadlessApproval::ReadOnly,
             cli::RunApproval::Ask => headless::HeadlessApproval::Ask,
             cli::RunApproval::Auto => headless::HeadlessApproval::Auto,

@@ -150,8 +150,9 @@ qq run --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 "Now add the same flag to the 
 ```
 
 Submits into an existing idle root session of this workspace, keeping its
-history. The model, profile, and approval come from *this* invocation, not
-the session's past. Every exit prints the id you need.
+history. The model and profile come from this invocation. The stored approval
+mode is preserved unless you explicitly pass `--approval`. New sessions
+default to Auto. Every exit prints the id you need.
 
 ### Steering from a pipe
 
