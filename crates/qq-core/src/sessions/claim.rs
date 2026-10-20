@@ -419,7 +419,7 @@ pub(super) fn test_prepared_audit_with_identity(
             credential_epoch: qq_protocol::CredentialEpoch::NONE,
         },
         plan_descriptor_json: Arc::from(
-            r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+            serde_json::json!({"version": crate::plan::DESCRIPTOR_VERSION, "tool_output_projection": "strict_reserved_v1"}).to_string(),
         ),
         weight: PreparedRequestWeight {
             max_output_tokens,

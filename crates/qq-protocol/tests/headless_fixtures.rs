@@ -327,10 +327,10 @@ fn current_version_streams_match_their_goldens() {
     );
 
     check(
-        "strict_completed",
+        "ask_completed",
         &stream(
             HeadlessTrial {
-                approval: HeadlessApproval::Strict,
+                approval: HeadlessApproval::Ask,
                 ..trial()
             },
             run_events(RunOutcome::Completed, None),

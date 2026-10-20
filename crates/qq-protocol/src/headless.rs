@@ -201,14 +201,14 @@ impl HeadlessStatus {
     }
 }
 
-/// Unattended approval policies. Interactive `ask` approval is
-/// unrepresentable: a headless run must never wait for a human.
+/// Unattended approval policies. Held actions receive an explicit decision:
+/// a headless run must never wait for a human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HeadlessApproval {
     ReadOnly,
     /// Read tools run; calls needing explicit human approval are denied.
-    Strict,
+    Ask,
     Auto,
     Full,
 }
@@ -219,7 +219,7 @@ impl HeadlessApproval {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
-            Self::Strict => "strict",
+            Self::Ask => "ask",
             Self::Auto => "auto",
             Self::Full => "full",
         }

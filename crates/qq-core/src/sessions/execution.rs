@@ -94,11 +94,9 @@ fn session_prompt_prefix_key(
         subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
             match claimed.approval_mode {
                 ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
-                ApprovalMode::Strict
-                | ApprovalMode::Supervised
-                | ApprovalMode::Ask
-                | ApprovalMode::Auto
-                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+                ApprovalMode::Ask | ApprovalMode::Auto | ApprovalMode::Full => {
+                    crate::runtime::SubagentAuthority::Write
+                }
             },
         ),
     }
@@ -414,15 +412,13 @@ async fn prepare_execution(
             && !claimed.user_initiated
             && claimed.purpose == SessionPurpose::Task
         {
-            // Read children are ReadOnly and write children Supervised; a
-            // client may only lower a child's mode, never raise it.
+            // Read children are ReadOnly; write children use Auto with internal
+            // review. A client may only lower a child's mode, never raise it.
             base.for_subagent(match claimed.approval_mode {
                 ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
-                ApprovalMode::Strict
-                | ApprovalMode::Supervised
-                | ApprovalMode::Ask
-                | ApprovalMode::Auto
-                | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
+                ApprovalMode::Ask | ApprovalMode::Auto | ApprovalMode::Full => {
+                    crate::runtime::SubagentAuthority::Write
+                }
             })
         } else if claimed.depth > 0
             && !claimed.user_initiated
@@ -435,7 +431,7 @@ async fn prepare_execution(
         };
         // A read-only session (every read child) never sees the schemas its
         // policy denies; the catalog filter is part of the request, not a
-        // gate-time refusal. A Supervised child keeps the full catalog: its
+        // gate-time refusal. A write child keeps the full catalog: its
         // mutating calls are held, not denied.
         let base = if claimed.approval_mode == ApprovalMode::ReadOnly {
             base.read_only()

@@ -1011,6 +1011,25 @@ impl ToolGate for StaticPolicyGate {
     }
 }
 
+/// Direct embedded runs have no human approval channel. Their configured
+/// tool allowlist is an authority ceiling, independent of approval mode.
+struct ConfiguredToolGate(StaticPolicyGate);
+
+impl ToolGate for ConfiguredToolGate {
+    fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
+        if !matches!(
+            call.effect,
+            catalog::EffectClass::ReadOnly | catalog::EffectClass::Interactive
+        ) && !self.0.grants.tools.contains(&call.name)
+        {
+            return Box::pin(std::future::ready(GateDecision::Deny {
+                message: approval::UNATTENDED_DENIED_RESULT.to_owned(),
+            }));
+        }
+        self.0.resolve(call)
+    }
+}
+
 /// Runs protocol commands against a configured model provider.
 #[derive(Clone)]
 pub struct Runtime {
@@ -1593,11 +1612,11 @@ impl Runtime {
             messages,
             workspace,
             cancelled,
-            Arc::new(StaticPolicyGate {
-                mode: ApprovalMode::Ask,
+            Arc::new(ConfiguredToolGate(StaticPolicyGate {
+                mode: ApprovalMode::Auto,
                 grants: approval::SessionGrants::default(),
                 network: Arc::clone(&self.network),
-            }),
+            })),
             Arc::new(workspace::FileState::default()),
             capabilities,
         )
@@ -1718,14 +1737,14 @@ impl Runtime {
             };
             drop(opened);
             let gate = if capabilities.unattended {
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
+                Arc::new(ConfiguredToolGate(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
                     grants: approval::SessionGrants {
                         tools: compiled.descriptor().tools.config_grants.iter().cloned().collect(),
                         ..approval::SessionGrants::default()
                     },
                     network: Arc::clone(&compiled.runtime.network),
-                }) as Arc<dyn ToolGate>
+                })) as Arc<dyn ToolGate>
             } else { gate };
             let mut events = compiled.execute(messages, cancelled, gate, file_state, capabilities);
             while let Some(event) = events.next().await {
@@ -1762,11 +1781,11 @@ impl plan::CompiledAgentPlan {
             self.execute(
                 vec![Message::user(input::render_text(command.input()))],
                 RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
+                Arc::new(ConfiguredToolGate(StaticPolicyGate {
+                    mode: ApprovalMode::Auto,
                     grants,
                     network: Arc::clone(&self.runtime.network),
-                }),
+                })),
                 Arc::new(workspace::FileState::default()),
                 capabilities,
             ),
@@ -9862,10 +9881,6 @@ mod tests {
             for (mode, expected) in [
                 (ApprovalMode::ReadOnly, Some(approval::POLICY_DENIED_RESULT)),
                 (ApprovalMode::Ask, Some(approval::UNATTENDED_DENIED_RESULT)),
-                (
-                    ApprovalMode::Supervised,
-                    Some(approval::UNATTENDED_DENIED_RESULT),
-                ),
                 (ApprovalMode::Auto, None),
                 (ApprovalMode::Full, None),
             ] {
@@ -10279,8 +10294,8 @@ mod tests {
                         .execute(
                             vec![Message::user("perform the requested operation")],
                             RunCancellation::new(),
-                            Arc::new(StaticPolicyGate {
-                                mode: ApprovalMode::Ask,
+                            Arc::new(ConfiguredToolGate(StaticPolicyGate {
+                                mode: ApprovalMode::Auto,
                                 grants: approval::SessionGrants {
                                     tools: plan
                                         .descriptor()
@@ -10292,7 +10307,7 @@ mod tests {
                                     ..approval::SessionGrants::default()
                                 },
                                 network: Arc::default(),
-                            }),
+                            })),
                             Arc::new(workspace::FileState::default()),
                             RunCapabilities::user(None),
                         )

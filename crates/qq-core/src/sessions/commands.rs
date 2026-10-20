@@ -99,12 +99,9 @@ pub(super) fn create_child_run(
         purpose,
         detached,
     } = admission;
-    // Children never hold more than Supervised authority; the spawner decides
-    // between ReadOnly and Supervised and nothing else may reach here.
-    if !matches!(
-        approval_mode,
-        ApprovalMode::ReadOnly | ApprovalMode::Supervised
-    ) {
+    // Children start ReadOnly or Auto with internal supervision. The
+    // spawner cannot give a child Full authority.
+    if !matches!(approval_mode, ApprovalMode::ReadOnly | ApprovalMode::Auto) {
         return Err(SessionRuntimeError::ChildAuthorityEscalation);
     }
     let ChildRunParent {
@@ -1496,13 +1493,11 @@ pub(super) fn execute_command(
                 } else {
                     approval::USER_DENIED_RESULT
                 };
-                let strict = own_mode == ApprovalMode::Strict
-                    || ancestors
-                        .iter()
-                        .any(|(mode, _)| *mode == ApprovalMode::Strict);
+                let human_only = own_mode == ApprovalMode::Ask
+                    || ancestors.iter().any(|(mode, _)| *mode == ApprovalMode::Ask);
                 let decision = if revoked {
                     ApprovalDecision::Deny
-                } else if strict
+                } else if human_only
                     && matches!(
                         decision,
                         ApprovalDecision::ApproveForSession { .. }

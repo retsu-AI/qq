@@ -570,7 +570,7 @@ proceed on its own judgement. An unanswered question follows the approval
 clocks (§ Approval Policy, "Two clocks"): no server deadline unless
 `approval_timeout_seconds` is set, in which case it settles `denied_timeout`
 and the run continues. Under
-`supervised` the reviewer is not consulted — there is nothing to adjudicate —
+write-child supervision the reviewer is not consulted — there is nothing to adjudicate —
 but it sees the question and the answer in the transcript like any other
 call. Malformed arguments never hold: they fall through to dispatch and the
 contract error names the failing question and bound.
@@ -1247,7 +1247,7 @@ control, not that the model needs new verbs.
   config grants: visible in the same reviewable file, removable by a
   managed layer, matched at word granularity like every shell prefix.
 - **Mutating commands follow ordinary shell policy.** `commit`,
-  `checkout`, `rebase`, `restore` prompt under `ask` and are grantable
+  `checkout`, `rebase`, `restore` prompt under Ask; Auto may use grants
   like any other prefix; nothing special-cases them.
 - **Outward-facing commands are never preset.** `git push`, `jj git
   push`, and anything else that publishes stays prompt-always unless a
@@ -1282,7 +1282,7 @@ private-name set (`localhost`, single-label names, `.local`, `.internal`,
 here is `PolicyDecision::Deny { HostBlocked }` under **every** mode, `full`
 included: unrestricted authority over the workspace is not authority over
 the local network. A public name then follows the `Network` row of the
-decision table; under `ask` and `auto` a `Host` grant (exact `docs.rs` or
+decision table; under `auto` a `Host` grant (exact `docs.rs` or
 one leading wildcard `*.github.com`, never the apex) covers it. The
 approval request carries a `fetch` preview (`url`, `host`, `method`) so a
 client offers the judged host as the grant without parsing arguments.
@@ -1334,8 +1334,7 @@ a concurrency permit, a per-call deadline, and argument (64 KiB) and result
 (1 MiB) bounds. Both pass the same conformance suite. Hosts never retry
 implicitly, and a host's effect hints are advisory: approval policy classifies
 every call from the catalog's effect class, and every external tool (MCP or
-embedded) is gated like a mutation — denied under read-only, held under ask and
-supervised, and trusted under auto and full. A `read_only` hint only filters
+embedded) is gated like a mutation — denied under read-only, held under Ask, and trusted under Auto and Full. A `read_only` hint only filters
 the schema out of read-only requests; it never changes a decision.
 
 Host tools are compiled into the plan's `ToolCatalog` at plan compile time,
@@ -1504,13 +1503,10 @@ flow.
 
 Each session has an approval mode:
 
-- `read-only` — only read-only built-ins and allowlisted read-only MCP tools
-  execute; everything else is denied without prompting.
-- `ask` — workspace-contained edits, writes, shell, and non-allowlisted MCP
-  calls each request approval. The human decides by default; with
-  `approval_delegate: on` the reviewer is consulted first and its `approve`
-  settles the hold, while its `deny` is advice: the human is still asked,
-  their wait starting at the denial.
+- `read-only` — read-only built-ins execute; mutating, shell, network and
+  external tools are denied without prompting.
+- `ask` — every non-read action requires fresh human approval; stored grants
+  and model reviewers cannot authorize it.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
   without prompting; shell commands the classifier allows or a grant covers
   execute; everything it would prompt for is held. With a `reviewer_model`
@@ -1520,10 +1516,6 @@ Each session has an approval mode:
   escalation rather than when the reviewer was consulted. Without a reviewer,
   or with `approval_delegate: off`, the human is asked. `Forbidden` shapes are
   refused before any of this.
-- `supervised` — every mutating, shell, and MCP call is held and adjudicated
-  by the reviewer model regardless of grants, under the same three verdicts.
-  Only spawned write children run here; a client cannot select it directly.
-  `approval_delegate: off` withdraws the reviewer here too.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
@@ -1538,8 +1530,8 @@ like `reviewer_model`. Who is consulted, by mode and setting:
 | mode | absent | `on` | `off` |
 | --- | --- | --- | --- |
 | `read-only`, `full` | nobody; nothing is held | nobody | nobody |
-| `ask` | human | reviewer, then human on `escalate` or `deny` | human |
-| `auto`, `supervised` | reviewer, then human on `escalate` | reviewer, then human on `escalate` | human |
+| `ask` | human | human | human |
+| `auto` | reviewer, then human on `escalate` | reviewer, then human on `escalate` | human |
 
 Without a `reviewer_model` every cell is the human. The setting is not part
 of the plan digest: it changes who is asked, never what the model may do.
@@ -1568,20 +1560,21 @@ can tell a delegate resolution from the stream alone. Recorded `source =
 are never written. Human, timeout, and answer resolutions carry no
 `delegate`.
 
-`strict` holds every non-read action for fresh explicit human approval,
-regardless of grants or reviewer settings. An unattended strict run denies
-held calls immediately.
+`ask` holds every non-read action for fresh explicit human approval,
+regardless of grants or reviewer settings. An unattended Ask run denies
+held calls immediately. Write children retain internal supervision within
+the parent's permission ceiling; supervision is not a selectable mode.
 
 Decision by effect class before grants (ADR-0021):
 
-| class | read-only | strict | ask | auto | supervised | full |
-| --- | --- | --- | --- | --- | --- | --- |
-| `ReadOnly` | Execute | Execute | Execute | Execute | Execute | Execute |
-| `Mutating` | Deny | Human each call | Ask | Execute | Ask | Execute |
-| `Shell` | Deny | Human each call | Ask | Execute unless `Prompt`/`Forbidden` | Ask | Execute (`Forbidden` still denied) |
-| `External` | Deny | Human each call | Ask | Execute | Ask | Execute |
-| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold | Hold | Hold |
-| `Network` (`fetch`) | Deny | Human each call | Ask | Execute if a grant covers the host | Ask | Execute |
+| class | read-only | ask | auto | full |
+| --- | --- | --- | --- | --- |
+| `ReadOnly` | Execute | Execute | Execute | Execute |
+| `Mutating` | Deny | Human each call | Execute | Execute |
+| `Shell` | Deny | Human each call | Execute unless `Prompt`/`Forbidden` | Execute (`Forbidden` still denied) |
+| `External` | Deny | Human each call | Execute | Execute |
+| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold |
+| `Network` (`fetch`) | Deny | Human each call | Execute if a grant covers the host | Execute |
 
 Blocked hosts (private, link-local, metadata, managed `deny_hosts`) are
 refused before the mode, like a shell `Forbidden` (§ Network Tools).

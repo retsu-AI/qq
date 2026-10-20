@@ -1985,7 +1985,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
 }
 
 #[tokio::test]
-async fn a_strict_parent_requires_human_approval_for_each_child_write() {
+async fn an_ask_parent_requires_human_approval_for_each_child_write() {
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -2003,7 +2003,7 @@ async fn a_strict_parent_requires_human_approval_for_each_child_write() {
             r#"{"task":"write child.txt","model":"test/child","authority":"write"}"#.to_owned(),
         )],
         Some(reviewer),
-        ApprovalMode::Strict,
+        ApprovalMode::Ask,
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
@@ -2121,7 +2121,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             _ => None,
         })
         .expect("the write spawn creates a child");
-    assert_eq!(child_session.approval_mode, ApprovalMode::Supervised);
+    assert_eq!(child_session.approval_mode, ApprovalMode::Auto);
     // The child's write was held, adjudicated, and executed.
     let resolutions = observed
         .iter()
@@ -2151,7 +2151,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
     let requests = consulted.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].tool_name, "write_file");
-    assert_eq!(requests[0].mode, ApprovalMode::Supervised);
+    assert_eq!(requests[0].mode, ApprovalMode::Auto);
     assert!(matches!(
         requests[0].origin,
         ReviewOrigin::Child { depth: 1, .. }
@@ -2455,7 +2455,7 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::SessionCreated { session }
-            if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Supervised
+            if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Auto
     )));
     assert!(matches!(
         finished_outcome(&observed, run_id),
@@ -3263,7 +3263,7 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         .iter()
         .filter(|event| {
             matches!(&event.event, SessionEvent::SessionCreated { session }
-                if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Supervised)
+                if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Auto)
         })
         .count();
     assert_eq!(children, 3, "every writer eventually runs");
@@ -5625,7 +5625,7 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
 }
 
 #[tokio::test]
-async fn a_strict_parent_cannot_widen_its_read_child_to_human_approved_writes() {
+async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
@@ -5643,7 +5643,7 @@ async fn a_strict_parent_cannot_widen_its_read_child_to_human_approved_writes() 
             r#"{"task":"inspect only","model":"test/child","authority":"read"}"#.to_owned(),
         )],
         Some(reviewer),
-        ApprovalMode::Strict,
+        ApprovalMode::Ask,
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate a read").await;
@@ -5668,7 +5668,7 @@ async fn a_strict_parent_cannot_widen_its_read_child_to_human_approved_writes() 
 
 #[tokio::test]
 async fn changing_parent_authority_revokes_an_inflight_child_reviewer_approval() {
-    for mode in [ApprovalMode::ReadOnly, ApprovalMode::Strict] {
+    for mode in [ApprovalMode::ReadOnly, ApprovalMode::Ask] {
         let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
         let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
             requests: Arc::new(StdMutex::new(Vec::new())),
@@ -5740,7 +5740,7 @@ async fn parent_readonly_revocation_denies_a_late_human_child_approval() {
                 .to_owned(),
         )],
         Some(reviewer),
-        ApprovalMode::Strict,
+        ApprovalMode::Ask,
     )
     .await;
     let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;

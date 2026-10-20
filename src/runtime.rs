@@ -1052,7 +1052,6 @@ impl RuntimeFactory {
                     .approval_mode()
                     .map_or(ApprovalMode::default(), |mode| match mode {
                         qq_config::ProfileApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
-                        qq_config::ProfileApprovalMode::Strict => ApprovalMode::Strict,
                         qq_config::ProfileApprovalMode::Ask => ApprovalMode::Ask,
                         qq_config::ProfileApprovalMode::Auto => ApprovalMode::Auto,
                         qq_config::ProfileApprovalMode::Full => ApprovalMode::Full,
@@ -2745,8 +2744,7 @@ the workspace owns, reinstalling dependencies, editing source files); escalate a
 externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
 branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
 brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Under auto and supervised your deny is final: the agent receives it as a tool \
-error and no human is asked. Under ask your deny escalates to the human with your reason. \
+outside it. Your deny is final: the agent receives it as a tool error. \
 Escalate when you are unsure; a human decides escalations. \
 Reply with exactly one JSON object on one line and nothing else: \
 {\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
@@ -2766,19 +2764,10 @@ async fn collect_reviewer_verdict(
         request.tool_name,
         request.workspace,
         match request.mode {
-            qq_protocol::ApprovalMode::Supervised => {
-                "supervised sub-agent: every non-read action is held for you"
-            }
-            qq_protocol::ApprovalMode::Auto => {
-                "auto root session: only dangerous-shaped shell and ungranted hosts are held for you"
-            }
-            qq_protocol::ApprovalMode::Ask => {
-                "ask root session: every ungranted mutation is held; the operator opted you in, \
-                 and your deny is advice here (the human is still asked)"
-            }
-            qq_protocol::ApprovalMode::Strict =>
-                "strict session: only the human can approve this action",
-            qq_protocol::ApprovalMode::ReadOnly | qq_protocol::ApprovalMode::Full => "root session",
+            qq_protocol::ApprovalMode::Auto => "auto: policy-held actions require review",
+            qq_protocol::ApprovalMode::Ask => "ask: only the human can approve this action",
+            qq_protocol::ApprovalMode::ReadOnly => "read-only session",
+            qq_protocol::ApprovalMode::Full => "full autonomy session",
         }
     );
     match request.origin {

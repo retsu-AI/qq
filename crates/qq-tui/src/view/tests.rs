@@ -736,14 +736,14 @@ fn question_holds_render_numbered_options_and_the_answered_questions() {
 }
 
 #[test]
-fn strict_approval_prompt_offers_only_once_and_deny() {
+fn ask_approval_prompt_offers_only_once_and_deny() {
     let mut app = app_with_messages(1);
     let session_id = app.focused().unwrap();
     app.sessions
         .get_mut(&session_id)
         .unwrap()
         .summary
-        .approval_mode = ApprovalMode::Strict;
+        .approval_mode = ApprovalMode::Ask;
     app.sessions.upsert_tool_call(tool_call_snapshot(
         9,
         "write_file",
@@ -753,7 +753,7 @@ fn strict_approval_prompt_offers_only_once_and_deny() {
         false,
     ));
     let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24));
-    assert!(text.contains("strict: approval applies once"), "{text}");
+    assert!(text.contains("ask: approval applies once"), "{text}");
     assert!(text.contains("once") && text.contains("deny"), "{text}");
     assert!(
         !text.contains("a session") && !text.contains("w workspace"),

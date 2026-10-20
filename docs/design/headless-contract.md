@@ -72,7 +72,7 @@ Line references are approximate anchors, not stable identifiers.
 
 ```sh
 qq run [--workspace PATH] [--session ID]
-       [--approval read-only|strict|auto|full] [--profile NAME]
+       [--approval read-only|ask|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--allow-host HOST]...
        [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
@@ -237,7 +237,7 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
 
 - `read-only`: read-only tools execute; every mutating, shell, or external
   call is **denied** before a request exists. `--allow-*` never fires.
-- `strict`: reads execute; every call requiring explicit human approval is
+- `ask`: reads execute; every call requiring explicit human approval is
   denied immediately. Allowlists and reviewer models cannot authorize it.
 - `auto` (default): everything executes except shell commands the policy classifies as
   dangerous (`sudo`, recursive `rm`, `git push`, `curl | sh`, and similar);

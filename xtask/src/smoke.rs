@@ -420,7 +420,7 @@ struct Scenario {
 const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "permission-dispatch",
-        proves: "auto is default, strict denies unattended writes, and built-ins protect policy/Git files",
+        proves: "all four approval modes dispatch correctly, Ask denies unattended writes, and built-ins protect policy/Git files",
         run: |home| Box::pin(permission_dispatch(home)),
     },
     Scenario {
@@ -471,11 +471,13 @@ const SCENARIOS: &[Scenario] = &[
 ];
 
 async fn permission_dispatch(home: &Home) -> Result<(), String> {
-    for (path, strict, allowed) in [
-        ("auto-created.txt", false, true),
-        ("strict-denied.txt", true, false),
-        (".qq/config.ron", false, false),
-        (".git/hooks/pre-commit", false, false),
+    for (path, mode, allowed) in [
+        ("auto-created.txt", None, true),
+        ("ask-denied.txt", Some("ask"), false),
+        ("readonly-denied.txt", Some("read-only"), false),
+        ("full-created.txt", Some("full"), true),
+        (".qq/config.ron", None, false),
+        (".git/hooks/pre-commit", None, false),
     ] {
         let provider = home
             .provider(vec![
@@ -485,8 +487,8 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let mut args = vec!["run", "--format", "jsonl"];
-        if strict {
-            args.extend(["--approval", "strict", "--allow-tool", "write_file"]);
+        if let Some(mode) = mode {
+            args.extend(["--approval", mode, "--allow-tool", "write_file"]);
         }
         args.push("write the requested file");
         let output = home.run(&provider.base_url, &args).await?;

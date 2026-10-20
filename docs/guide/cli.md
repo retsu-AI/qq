@@ -51,7 +51,7 @@ One unattended agent task. [Headless](headless.md#qq-run--the-agent-unattended).
 | --- | --- |
 | `--workspace PATH` | current directory |
 | `--session ID` | new session |
-| `--approval read-only\|strict\|auto\|full` | `auto` |
+| `--approval read-only\|ask\|auto\|full` | `auto` |
 | `--profile NAME` | `default` |
 | `--allow-tool NAME`, `--allow-shell PREFIX`, `--allow-host HOST` | none; repeatable |
 | `--steer-stdin` | stdin unread |

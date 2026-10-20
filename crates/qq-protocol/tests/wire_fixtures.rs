@@ -329,12 +329,12 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
         ),
     );
     check(
-        "command_set_approval_strict",
+        "command_set_approval_ask",
         &command(
             0x7c,
             SessionCommand::SetApprovalMode {
                 session_id,
-                mode: ApprovalMode::Strict,
+                mode: ApprovalMode::Ask,
             },
         ),
     );
@@ -1170,7 +1170,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             ],
             approval_modes: vec![
                 ApprovalMode::ReadOnly,
-                ApprovalMode::Strict,
                 ApprovalMode::Ask,
                 ApprovalMode::Auto,
                 ApprovalMode::Full,

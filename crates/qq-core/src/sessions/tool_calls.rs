@@ -403,6 +403,7 @@ pub(super) struct ToolApprovalPolicy {
     pub grants: approval::SessionGrants,
     pub delegate: Option<approval::ApprovalDelegate>,
     pub ancestors: Vec<(ApprovalMode, approval::SessionGrants)>,
+    pub supervised: bool,
 }
 
 pub(super) fn load_tool_approval_policy(
@@ -411,10 +412,16 @@ pub(super) fn load_tool_approval_policy(
 ) -> Result<ToolApprovalPolicy, SessionRuntimeError> {
     let (mode, grants, delegate) = load_approval_policy(connection, session_id)?;
     let ancestors = load_ancestor_approval_policies(connection, session_id)?;
+    let spawned: bool = connection.query_row(
+        "SELECT owner_run_id IS NOT NULL FROM sessions WHERE id = ?1",
+        [session_id.to_string()],
+        |row| row.get(0),
+    )?;
     Ok(ToolApprovalPolicy {
         mode,
         grants,
         delegate,
+        supervised: spawned && mode != ApprovalMode::ReadOnly,
         ancestors,
     })
 }

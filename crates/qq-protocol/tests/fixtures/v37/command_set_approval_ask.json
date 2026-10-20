@@ -3,6 +3,6 @@
   "command": {
     "type": "set_approval_mode",
     "session_id": "03030303030303030303030303030303",
-    "mode": "strict"
+    "mode": "ask"
   }
 }

@@ -563,7 +563,7 @@ async fn prepare_headless(
             .map(|pricing| pricing.provenance.clone()),
         approval: match args.approval {
             cli::RunApproval::ReadOnly => headless::HeadlessApproval::ReadOnly,
-            cli::RunApproval::Strict => headless::HeadlessApproval::Strict,
+            cli::RunApproval::Ask => headless::HeadlessApproval::Ask,
             cli::RunApproval::Auto => headless::HeadlessApproval::Auto,
             cli::RunApproval::Full => headless::HeadlessApproval::Full,
         },
@@ -1476,7 +1476,6 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
             if let Some(mode) = profile.approval_mode() {
                 let mode = match mode {
                     config::ProfileApprovalMode::ReadOnly => "read_only",
-                    config::ProfileApprovalMode::Strict => "strict",
                     config::ProfileApprovalMode::Ask => "ask",
                     config::ProfileApprovalMode::Auto => "auto",
                     config::ProfileApprovalMode::Full => "full",

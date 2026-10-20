@@ -65,12 +65,12 @@ repository should not commit; this repository's `.gitignore` excludes
 | --- | --- | --- | --- |
 | `version` | `1` | required | document schema |
 | `model` | `"PROVIDER/MODEL"` | none; required to run | the route sessions start with |
-| `reviewer_model` | `"PROVIDER/MODEL"` | none | model used for `supervised` approval and the final-answer audit |
+| `reviewer_model` | `"PROVIDER/MODEL"` | none | model used for tool review and the final-answer audit |
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
-| `approval_delegate` | `on` `off` | absent | who settles held approvals: `on` lets the delegate decide `ask` holds too, `off` sends every hold to you; absent keeps each mode's default (delegate under `auto`, you under `ask`). See [permissions](permissions.md#who-decides-a-held-call) |
+| `approval_delegate` | `on` `off` | absent | who settles Auto holds: `on` enables the reviewer, `off` sends holds to you; absent enables the reviewer. Ask always requires the human. See [permissions](permissions.md#who-decides-a-held-call) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |
@@ -242,7 +242,7 @@ profiles: {
 ```
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
-(`read_only` `strict` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
+(`read_only` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
 `reasoning_effort`. Pack
 profiles (below) add prompts, skills, and tool filters.
 

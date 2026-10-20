@@ -201,11 +201,11 @@ fn approve_for_session_grants_shell_commands_as_prefixes() {
 }
 
 #[test]
-fn strict_approval_never_records_a_session_grant() {
+fn ask_approval_never_records_a_session_grant() {
     let mut app = App::new(TuiOptions::default());
     let mut initial = snapshot();
     let focused = initial.focused.as_mut().unwrap();
-    focused.summary.approval_mode = ApprovalMode::Strict;
+    focused.summary.approval_mode = ApprovalMode::Ask;
     let session_id = focused.summary.id;
     app.apply_snapshot(initial);
     app.sessions.upsert_tool_call(ToolCallSnapshot {
@@ -4422,7 +4422,7 @@ fn approval_picker_sets_the_focused_session_mode_and_the_summary_update_lands() 
         panic!("expected the approval-mode picker")
     };
     let labels: Vec<&str> = picker.items().iter().map(|row| row.label).collect();
-    assert_eq!(labels, ["read_only", "strict", "ask", "auto", "full"]);
+    assert_eq!(labels, ["read_only", "ask", "auto", "full"]);
     // The cursor starts on the session's current mode.
     assert_eq!(picker.current().unwrap().mode, ApprovalMode::Auto);
 

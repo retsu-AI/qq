@@ -460,13 +460,12 @@ pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
     }
 }
 
-/// Headless approval policies. Deliberately excludes interactive `ask`:
-/// a headless run must never wait for a human approval.
+/// Approval policies. Headless Ask denies held actions instead of waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunApproval {
     /// Require explicit approval for every non-read call; unattended calls
     /// are denied even when an allowlist matches.
-    Strict,
+    Ask,
     /// Deny every mutating, shell, and MCP tool call without prompting.
     ReadOnly,
     /// Approve tool calls unattended except dangerous shell commands
@@ -926,20 +925,19 @@ mod tests {
     }
 
     #[test]
-    fn run_accepts_strict_approval() {
-        let cli = Cli::try_parse_from(["qq", "run", "task", "--approval", "strict"]).unwrap();
+    fn run_accepts_ask_approval() {
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--approval", "ask"]).unwrap();
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected run")
         };
-        assert_eq!(args.approval, RunApproval::Strict);
+        assert_eq!(args.approval, RunApproval::Ask);
     }
 
     #[test]
-    fn run_rejects_interactive_ask_approval() {
-        // Headless mode must never select interactive approval; `ask` is not
-        // a value of the headless approval enum, so it fails at parse time —
-        // before any prompt could be submitted.
-        assert!(Cli::try_parse_from(["qq", "run", "task", "--approval", "ask"]).is_err());
+    fn run_rejects_removed_approval_modes() {
+        for mode in ["strict", "supervised"] {
+            assert!(Cli::try_parse_from(["qq", "run", "task", "--approval", mode]).is_err());
+        }
     }
 
     #[test]

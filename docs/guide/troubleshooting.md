@@ -215,7 +215,7 @@ start it again after adding one.
 ### `qq run` denied everything
 
 `--approval read-only` denies every edit, shell, MCP, and network call.
-`--approval strict` denies calls needing explicit human approval, including
+`--approval ask` denies calls needing explicit human approval, including
 allowlisted calls. The default `--approval auto` permits workspace edits and
 safe commands; grant specific extras with `--allow-shell` / `--allow-tool` /
 `--allow-host`.

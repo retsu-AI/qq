@@ -108,20 +108,18 @@ Every session runs under one mode. Set the default in a profile
 | Mode | Reads | Edits and writes in the workspace | Shell | MCP tools | `fetch` |
 | --- | --- | --- | --- | --- | --- |
 | `read_only` | run | denied | denied | denied | denied |
-| `strict` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
-| `ask` | run | ask | ask | ask | ask |
+| `ask` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
 | `auto` **(default)** | run | run | classifier `allow` or a grant → run; `prompt` → ask; `forbidden` → refused | run | granted hosts run; others ask |
 | `full` | run | run | run except `forbidden` | run | run |
-| `supervised` | run | reviewer model decides | reviewer decides | reviewer decides | reviewer decides |
 
-`supervised` is used for sub-agents that may write; you cannot pick it for
-your own session. `full` is authority over the workspace, not the machine:
+Write sub-agents require internal review for each non-read action. `full`
+is authority over the workspace, not the machine:
 `forbidden` shell shapes are refused under every mode.
 
-`auto` is the default for the TUI and `qq run`. In `strict`, each non-read
+`auto` is the default for the TUI and `qq run`. In `ask`, each non-read
 action needs explicit human approval even when a stored grant matches; no
-reviewer model can approve it. Headless `qq run --approval strict` denies
-those calls immediately because no human is present. Approvals in strict
+reviewer model can approve it. Headless `qq run --approval ask` denies
+those calls immediately because no human is present. Approvals in Ask
 mode apply once and never create session or workspace grants.
 
 ## Who decides a held call
@@ -132,19 +130,16 @@ is `reviewer_model`; when it abstains or is unavailable, you are asked.
 
 | Profile | Set | What happens |
 | --- | --- | --- |
-| default | nothing | `auto` and `supervised` holds go to the reviewer first; `ask` holds come to you |
-| hands-off | `approval_delegate: on` | `ask` holds go to the reviewer too. Its approve runs the call; its deny still comes to you, with the reason, and your wait starts then |
-| human-only holds | `approval_delegate: off` | every held call comes to you, even under `auto`, even with a reviewer configured |
+| default | nothing | `auto` holds go to the reviewer first; `ask` always comes to you |
+| reviewer enabled | `approval_delegate: on` | reviewer decides `auto` holds; it cannot approve an `ask` call |
+| human-only holds | `approval_delegate: off` | every held call comes to you |
 
-Under `auto` and `supervised` a reviewer deny is final: the model gets the
-reason as a tool error and you are not asked. Under `ask` you asked to decide
-everything, so a reviewer deny is advice and the prompt still appears. A
-reviewer `escalate`, timeout, or outage always comes to you. `forbidden`
-shell shapes, private or denied hosts, and `ask_user` questions never go to
-the reviewer.
+A reviewer denial is final: the model gets the reason as a tool error.
+An escalation, timeout, or outage asks the human. `ask` never consults a
+reviewer. Questions and policy-forbidden actions never go to the reviewer.
 
 Set it at the top level, in a profile
-(`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
+(`Profile(approval_mode: auto, approval_delegate: on)`), or for one process
 with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
 any other sensitive key.
 
@@ -287,7 +282,7 @@ approval), ADR-0020 (`forbidden` above every mode), ADR-0021 (`fetch` and
 
 A write child's reviewer cannot grant an action that its parent policy denies
 or holds without a grant. Such a call returns `parent_permission_required`;
-the operator must grant the necessary parent scope explicitly. A strict
+the operator must grant the necessary parent scope explicitly. An Ask
 parent instead requires human approval for each child action, without a
 reviewer or reusable grants. Existing supervised write delegation still
 requires its configured reviewer; this change does not enable unsandboxed
