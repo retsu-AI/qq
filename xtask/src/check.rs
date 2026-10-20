@@ -423,7 +423,9 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
             continue;
         }
         let before = blob(&format!("{last}^"), path);
-        if blob("HEAD", path) == before && blob(merge_base, path) != before {
+        // Only restoring an existing old blob is evidence of a stale tree.
+        // Absence on both sides also describes a legitimate file deletion.
+        if !before.is_empty() && blob("HEAD", path) == before && blob(merge_base, path) != before {
             reverted.push(format!("{path} (undoes {})", short(last)));
         }
     }
@@ -1319,6 +1321,15 @@ mod tests {
         let reverted = super::reverted_base_changes(root, "main").unwrap();
         assert_eq!(reverted.len(), 1, "{reverted:?}");
         assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
+
+        // Deleting a file created on main is subtraction, not a stale blob.
+        git(&["checkout", "-qb", "delete", "main"]);
+        git(&["rm", "mine.rs"]);
+        git(&["commit", "-qm", "remove obsolete auth"]);
+        assert_eq!(
+            super::reverted_base_changes(root, "main").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};

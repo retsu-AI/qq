@@ -2140,6 +2140,19 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     assert!(!view.is_warm(), "focusing it must fetch its own body");
     assert_eq!(view.summary.title, starved.summary.title);
 
+    // Transcripts are loaded before tools, so a later prewarmed body can
+    // have messages but no tool rows. It must still refetch on focus.
+    let tool_starved = SessionSnapshot {
+        messages: vec![message(8, session_id, RunId::from_bytes([9; 16]), "work")],
+        has_older_messages: false,
+        ..starved.clone()
+    };
+    store.install_session_snapshot(tool_starved, &[], 6);
+    assert!(
+        !store.get(&session_id).unwrap().is_warm(),
+        "missing tool rows must not become a permanently warm transcript"
+    );
+
     // A genuinely empty session is still installed warm.
     let empty = SessionSnapshot {
         has_older_messages: false,
