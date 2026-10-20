@@ -284,24 +284,21 @@ pub struct ModelDescriptor {
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     ReadOnly,
-    /// Every mutating, shell, and external call is held and adjudicated by
-    /// the configured reviewer model regardless of grants; a reviewer denial
-    /// is final and an escalation reaches the human. Only spawned write
-    /// children run here; a client cannot select it for a root session.
-    Supervised,
+    /// Every non-read action needs a fresh explicit human approval. Stored
+    /// grants and reviewer models never authorize calls in this mode.
     Ask,
     /// Default: edits and safe shell run without prompting; only dangerous
     /// shell commands (deletion, privilege escalation, force-push, piped
     /// installers) require approval.
     #[default]
     Auto,
-    /// Zero restrictions: every tool call executes without prompting.
+    /// Every tool call proceeds without approval prompts within execution boundaries.
     Full,
 }
 
 /// The authority a parent grants a spawned child: `read` yields a `ReadOnly`
-/// child; `write` yields a `Supervised` one whose every held action is
-/// adjudicated before it runs.
+/// child; `write` yields an `Auto` child whose non-read actions are reviewed
+/// before execution within its parent's authority.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChildAuthority {
@@ -322,16 +319,15 @@ impl ChildAuthority {
 
 /// Who settles the calls an approval mode holds, before a human is asked
 /// (protocol 28). The mode stays the ceiling: this only chooses who decides
-/// inside it. `read_only` and `full` hold nothing a delegate may decide, so
-/// the choice is inert there.
+/// inside it. Ask calls always require human approval, while `read_only`
+/// and `full` hold nothing a delegate may decide.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDelegate {
-    /// `auto` and `supervised` consult the reviewer, `ask` asks the human:
-    /// the behavior every session had before the choice existed.
+    /// Consult the reviewer for held `auto` calls.
     #[default]
     ByMode,
-    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
+    /// Consult the reviewer for held `auto` calls.
     On,
     /// Never consult the reviewer; every held call waits for a human.
     Off,
@@ -342,23 +338,9 @@ impl ApprovalDelegate {
     #[must_use]
     pub const fn consults_reviewer(self, mode: ApprovalMode) -> bool {
         match (mode, self) {
-            (ApprovalMode::ReadOnly | ApprovalMode::Full, _) => false,
-            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::ByMode | Self::On) => true,
-            (ApprovalMode::Auto | ApprovalMode::Supervised, Self::Off) => false,
-            (ApprovalMode::Ask, Self::On) => true,
-            (ApprovalMode::Ask, Self::ByMode | Self::Off) => false,
-        }
-    }
-
-    /// Whether a reviewer `Deny` settles the call. Under `auto` and
-    /// `supervised` the reviewer is the delegate for what those modes hold;
-    /// under `ask` the operator asked to decide everything, so a denial is
-    /// advice and the human still decides.
-    #[must_use]
-    pub const fn deny_is_final(mode: ApprovalMode) -> bool {
-        match mode {
-            ApprovalMode::Auto | ApprovalMode::Supervised => true,
-            ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => false,
+            (ApprovalMode::Auto, Self::ByMode | Self::On) => true,
+            (ApprovalMode::Auto, Self::Off) => false,
+            (ApprovalMode::ReadOnly | ApprovalMode::Ask | ApprovalMode::Full, _) => false,
         }
     }
 
@@ -453,8 +435,7 @@ pub enum ApprovalResolution {
     Denied,
     DeniedTimeout,
     /// Denied by the configured approval reviewer model, without a human in
-    /// the loop. Final under `supervised` (write children) and `auto` (the
-    /// dangerous-shaped calls that mode holds): the model receives the
+    /// the loop. Final under Auto: the model receives the
     /// reviewer's reason as a tool error.
     DeniedByReviewer,
     /// The user answered an `ask_user` question (protocol 21); the call
@@ -3617,6 +3598,26 @@ mod tests {
     }
 
     #[test]
+    fn removed_approval_modes_are_rejected() {
+        for mode in ["strict", "supervised"] {
+            assert!(serde_json::from_str::<ApprovalMode>(&format!("\"{mode}\"")).is_err());
+        }
+    }
+
+    #[test]
+    fn ask_mode_never_consults_a_reviewer() {
+        let ask: ApprovalMode = serde_json::from_str("\"ask\"").unwrap();
+        assert_eq!(serde_json::to_string(&ask).unwrap(), "\"ask\"");
+        for delegate in [
+            ApprovalDelegate::ByMode,
+            ApprovalDelegate::On,
+            ApprovalDelegate::Off,
+        ] {
+            assert!(!delegate.consults_reviewer(ask));
+        }
+    }
+
+    #[test]
     fn create_session_without_an_approval_mode_defaults_to_auto() {
         let encoded = serde_json::json!({
             "type": "create_session",
@@ -4407,7 +4408,9 @@ mod tests {
         // the new command, outcome, event tag, and summary field.
         // Version 36 removes Jev routing and checkpoint events; recorded ones
         // decode as `retired`.
-        assert_eq!(crate::PROTOCOL_VERSION, 36);
+        // Version 37 makes Ask human-only per call and moves write-child
+        // supervision out of the public approval modes.
+        assert_eq!(crate::PROTOCOL_VERSION, 37);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

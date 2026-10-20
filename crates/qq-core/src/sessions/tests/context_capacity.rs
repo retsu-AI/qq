@@ -465,6 +465,15 @@ async fn admitted_tool_calls_store_their_effect_class() {
 
 #[test]
 fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
+    assert_capacity_accounting_for_descriptor(15);
+}
+
+#[test]
+fn descriptor_16_capacity_accounting_preserves_projected_history() {
+    assert_capacity_accounting_for_descriptor(16);
+}
+
+fn assert_capacity_accounting_for_descriptor(descriptor_version: u16) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (mut connection, store_id) = open_database(&path).unwrap();
@@ -515,8 +524,8 @@ fn capacity_accounting_measures_the_pruned_assembly_not_raw_rows() {
         .execute(
             "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2 WHERE id=?3",
             params![
-                r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
-                r#"{"descriptor_version":15}"#,
+                serde_json::json!({"version": descriptor_version, "tool_output_projection": "strict_reserved_v1"}).to_string(),
+                serde_json::json!({"descriptor_version": descriptor_version}).to_string(),
                 run_id.to_string()
             ],
         )

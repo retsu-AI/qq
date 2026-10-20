@@ -221,7 +221,6 @@ pub(super) fn parse_message_state(value: &str) -> Result<MessageState, SessionRu
 pub(super) const fn approval_mode_str(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::ReadOnly => "read_only",
-        ApprovalMode::Supervised => "supervised",
         ApprovalMode::Ask => "ask",
         ApprovalMode::Auto => "auto",
         ApprovalMode::Full => "full",
@@ -231,7 +230,6 @@ pub(super) const fn approval_mode_str(mode: ApprovalMode) -> &'static str {
 pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRuntimeError> {
     match value {
         "read_only" => Ok(ApprovalMode::ReadOnly),
-        "supervised" => Ok(ApprovalMode::Supervised),
         "ask" => Ok(ApprovalMode::Ask),
         "auto" => Ok(ApprovalMode::Auto),
         "full" => Ok(ApprovalMode::Full),
@@ -289,12 +287,9 @@ pub(super) fn reasoning_effort_column(
 pub(super) const fn approval_rank(mode: ApprovalMode) -> u8 {
     match mode {
         ApprovalMode::ReadOnly => 0,
-        // Supervised executes nothing non-read without adjudication; Ask lets
-        // grants through, so it ranks above.
-        ApprovalMode::Supervised => 1,
-        ApprovalMode::Ask => 2,
-        ApprovalMode::Auto => 3,
-        ApprovalMode::Full => 4,
+        ApprovalMode::Ask => 1,
+        ApprovalMode::Auto => 2,
+        ApprovalMode::Full => 3,
     }
 }
 

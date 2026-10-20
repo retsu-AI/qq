@@ -1,7 +1,9 @@
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+
 use std::{
     collections::BTreeMap,
     io::Write as _,
-    path::{Path, PathBuf},
     sync::{
         PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -11,7 +13,7 @@ use std::{
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
+use crate::workspace::{FileState, FileStateUpdate, Workspace, WriteTarget, content_hash};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
@@ -166,7 +168,7 @@ impl Edit {
 /// One file's planned change: its original bytes and permissions, the text
 /// after every edit in the batch, and the per-edit summaries for the result.
 struct Planned {
-    path: PathBuf,
+    target: WriteTarget,
     key: String,
     original: EditableFile,
     before_hash: String,
@@ -247,12 +249,19 @@ pub(super) fn edit_file(
                 ));
             }
         };
+        if let Err(error) = workspace.check_write_path(&edit.path, &path) {
+            return ToolOutput::refused(format!("edit {index}: {error}"));
+        }
         let key = path.to_string_lossy().into_owned();
         if !planned.contains_key(&key) {
-            if !workspace.root().is_file(&path) {
+            if path.file_name().is_none() {
                 return ToolOutput::error(format!("edit {index}: not_a_file: {}", edit.path));
             }
-            let original = match read_editable(workspace, &path) {
+            let target = match workspace.write_target(&path, false) {
+                Ok(target) => target,
+                Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
+            };
+            let original = match read_editable(&target) {
                 Ok(original) => original,
                 Err(error) => return ToolOutput::error(format!("edit {index}: {error}")),
             };
@@ -278,7 +287,7 @@ pub(super) fn edit_file(
             planned.insert(
                 key.clone(),
                 Planned {
-                    path,
+                    target,
                     key: key.clone(),
                     original,
                     before_hash,
@@ -453,7 +462,10 @@ pub(super) fn edit_file(
         return ToolOutput::interrupted("tool execution was cancelled");
     }
     for file in planned.values() {
-        let current = match read_editable(workspace, &file.path) {
+        if let Err(error) = workspace.revalidate_write_target(&file.target) {
+            return ToolOutput::error(format!("could not validate write directory: {error}"));
+        }
+        let current = match read_editable(&file.target) {
             Ok(current) => current,
             Err(error) => return ToolOutput::error(error),
         };
@@ -473,7 +485,7 @@ pub(super) fn edit_file(
     for file in planned.values() {
         if let Err(error) = apply_atomically(
             workspace,
-            &file.path,
+            &file.target,
             file.text.as_bytes(),
             Some(file.original.permissions.clone()),
         ) {
@@ -842,14 +854,17 @@ pub(super) struct EditableFile {
     pub(super) permissions: cap_std::fs::Permissions,
 }
 
-pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<EditableFile, String> {
-    let file = workspace
-        .root()
-        .open(path)
+pub(super) fn read_editable(target: &WriteTarget) -> Result<EditableFile, String> {
+    let file = target
+        .directory
+        .open(&target.name)
         .map_err(|error| format!("could not open file: {error}"))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("could not inspect file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("not_a_file: path is not a regular file".to_owned());
+    }
     if metadata.len() > MAX_EDIT_FILE_BYTES {
         return Err(format!(
             "too_large: file exceeds the {} MiB editable size limit",
@@ -880,7 +895,7 @@ pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<Editab
 /// file, and renames into place so readers never observe a partial write.
 pub(super) fn apply_atomically(
     workspace: &Workspace,
-    path: &Path,
+    target: &WriteTarget,
     bytes: &[u8],
     permissions: Option<cap_std::fs::Permissions>,
 ) -> Result<(), String> {
@@ -889,20 +904,26 @@ pub(super) fn apply_atomically(
         std::process::id(),
         TEMP_FILE_ORDINAL.fetch_add(1, Ordering::Relaxed),
     );
-    let temp_path = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&temp_name),
-        _ => PathBuf::from(&temp_name),
-    };
+    let directory = &target.directory;
+    let target_name = &target.name;
+    workspace
+        .revalidate_write_target(target)
+        .map_err(|error| format!("could not validate write directory: {error}"))?;
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    let mut temp = workspace
-        .root()
-        .open_with(&temp_path, &options)
+    let mut temp = directory
+        .open_with(&temp_name, &options)
         .map_err(|error| format!("could not create a temporary file: {error}"))?;
     let written = temp
         .write_all(bytes)
         .and_then(|()| temp.sync_all())
-        .map_err(|error| format!("could not write the temporary file: {error}"));
+        .and_then(|()| match permissions {
+            Some(permissions) => temp.set_permissions(permissions),
+            None => Ok(()),
+        })
+        .map_err(|error| {
+            format!("could not write the temporary file or preserve its permissions: {error}")
+        });
     drop(temp);
     #[cfg(test)]
     {
@@ -918,22 +939,16 @@ pub(super) fn apply_atomically(
             let _ = hook.release.recv();
         }
     }
-    let applied = written
-        .and_then(|()| match permissions {
-            Some(permissions) => workspace
-                .root()
-                .set_permissions(&temp_path, permissions)
-                .map_err(|error| format!("could not preserve file permissions: {error}")),
-            None => Ok(()),
-        })
-        .and_then(|()| {
-            workspace
-                .root()
-                .rename(&temp_path, workspace.root(), path)
-                .map_err(|error| format!("could not apply the change: {error}"))
-        });
+    let applied = written.and_then(|()| {
+        workspace
+            .revalidate_write_target(target)
+            .map_err(|error| format!("could not validate write directory: {error}"))?;
+        directory
+            .rename(&temp_name, directory, target_name)
+            .map_err(|error| format!("could not apply the change: {error}"))
+    });
     if applied.is_err() {
-        let _ = workspace.root().remove_file(&temp_path);
+        let _ = directory.remove_file(&temp_name);
     }
     applied
 }
@@ -1621,5 +1636,229 @@ mod tests {
             .expect("valid edit arguments");
             assert_eq!(edit.form().err().as_deref(), Some(message), "{field}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod directory_identity_race_tests {
+    use super::*;
+
+    #[test]
+    fn real_git_directory_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps(".git", "config", false);
+    }
+
+    #[test]
+    fn real_qq_directory_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps(".qq", "config.ron", false);
+    }
+
+    #[test]
+    fn real_configured_pack_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps("vendor/reviewer", "config", true);
+    }
+
+    #[test]
+    fn real_configured_pack_parent_swaps_cannot_hide_protected_children() {
+        assert_trust_swaps("vendor", "reviewer/config", true);
+    }
+
+    fn assert_trust_swaps(protected: &str, filename: &str, pack: bool) {
+        for (name, arguments) in [
+            (
+                "write_file",
+                serde_json::json!({"path":format!("ordinary/{filename}"), "content":"untrusted", "if_hash": format!("h:{}", &content_hash(b"trusted")[..12])}),
+            ),
+            (
+                "edit_file",
+                serde_json::json!({"edits":[{"path":format!("ordinary/{filename}"), "old":"trusted", "new":"untrusted"}]}),
+            ),
+            (
+                "write_file",
+                serde_json::json!({"path":"ordinary/new/deep/config", "content":"untrusted"}),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            for path in ["ordinary", protected] {
+                let file = directory.path().join(path).join(filename);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "trusted").unwrap();
+            }
+            let mut workspace = Workspace::open(directory.path()).unwrap();
+            if pack {
+                workspace = workspace
+                    .with_protected_pack_roots(&[directory.path().join("vendor/reviewer")])
+                    .unwrap();
+            }
+            let root = directory.path().to_owned();
+            let protected_path = protected.to_owned();
+            workspace.on_write_path_checked(move || {
+                std::fs::rename(root.join("ordinary"), root.join("original-ordinary")).unwrap();
+                std::fs::rename(root.join(protected_path), root.join("ordinary")).unwrap();
+            });
+            let result = super::super::dispatch::execute_blocking(
+                &workspace,
+                &FileState::default(),
+                name,
+                &arguments.to_string(),
+                &ToolCancellation::new(crate::RunCancellation::new()),
+            );
+            std::fs::rename(
+                directory.path().join("ordinary"),
+                directory.path().join(protected),
+            )
+            .unwrap();
+            assert!(
+                result.is_error && result.model_text.contains("protected_path"),
+                "{}",
+                result.model_text
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join(protected).join(filename)).unwrap(),
+                "trusted",
+                "{name} redirected into {protected} trust data: {}",
+                result.model_text
+            );
+            assert!(
+                !directory.path().join(protected).join("new").exists(),
+                "new parent creation entered the protected directory"
+            );
+        }
+    }
+    #[test]
+    fn a_batch_refuses_a_replaced_directory_without_writing_either_object() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("ordinary")).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(directory.path().join("ordinary").join(name), "trusted").unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let root = directory.path().to_owned();
+        on_edit_planned(workspace.path(), move || {
+            std::fs::rename(root.join("ordinary"), root.join("original")).unwrap();
+            std::fs::create_dir(root.join("ordinary")).unwrap();
+            for name in ["a", "b"] {
+                std::fs::write(root.join("ordinary").join(name), "trusted").unwrap();
+            }
+        });
+        let result = super::super::dispatch::execute_blocking(
+            &workspace,
+            &FileState::default(),
+            "edit_file",
+            &serde_json::json!({"edits":[
+                {"path":"ordinary/a","old":"trusted","new":"updated"},
+                {"path":"ordinary/b","old":"trusted","new":"updated"}
+            ]})
+            .to_string(),
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        );
+        assert!(
+            result.is_error && result.model_text.contains("write_namespace_changed"),
+            "{}",
+            result.model_text
+        );
+        for name in ["a", "b"] {
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("ordinary").join(name)).unwrap(),
+                "trusted"
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("original").join(name)).unwrap(),
+                "trusted"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod promoted_directory_race_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_prepared_write_cannot_install_into_a_directory_promoted_to_git() {
+        assert_promoted_directory_is_not_mutated(
+            "write_file",
+            serde_json::json!({
+                "path": "ordinary/config",
+                "content": "untrusted replacement",
+                "if_hash": format!("h:{}", &content_hash(b"ordinary baseline")[..12]),
+            }),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_prepared_edit_cannot_install_into_a_directory_promoted_to_git() {
+        assert_promoted_directory_is_not_mutated(
+            "edit_file",
+            serde_json::json!({"edits": [{
+                "path": "ordinary/config",
+                "old": "ordinary baseline",
+                "new": "untrusted replacement",
+            }]}),
+        )
+        .await;
+    }
+
+    async fn assert_promoted_directory_is_not_mutated(
+        name: &'static str,
+        arguments: serde_json::Value,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("ordinary", "ordinary baseline"),
+            (".git", "trusted configuration"),
+        ] {
+            std::fs::create_dir(directory.path().join(path)).unwrap();
+            std::fs::write(directory.path().join(path).join("config"), content).unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let (entered, release) = hold_tool_apply(workspace.path());
+        let operation = tokio::task::spawn_blocking(move || {
+            super::super::dispatch::execute_blocking(
+                &workspace,
+                &FileState::default(),
+                name,
+                &arguments.to_string(),
+                &ToolCancellation::new(crate::RunCancellation::new()),
+            )
+        });
+        entered.await.unwrap();
+        std::fs::rename(
+            directory.path().join(".git"),
+            directory.path().join("held-git"),
+        )
+        .unwrap();
+        std::fs::rename(
+            directory.path().join("ordinary"),
+            directory.path().join(".git"),
+        )
+        .unwrap();
+        release.send(()).unwrap();
+        let result = operation.await.unwrap();
+        assert!(result.is_error, "{name} must refuse the changed namespace");
+        assert!(result.file_states.is_empty());
+        assert!(
+            std::fs::read_dir(directory.path().join(".git"))
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qq-apply-")),
+            "temporary file must be cleaned through the retained capability"
+        );
+        // The original protected identity is intact, but the live protected
+        // namespace now refers to the admitted ordinary directory instead.
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("held-git/config")).unwrap(),
+            "trusted configuration"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join(".git/config")).unwrap(),
+            "ordinary baseline",
+            "{name} installed into the current .git namespace: {}",
+            result.model_text,
+        );
     }
 }

@@ -1114,6 +1114,7 @@ pub(super) fn search(
 pub(super) fn path_error(requested: &str, error: &crate::workspace::WorkspacePathError) -> String {
     use crate::workspace::WorkspacePathError as E;
     let escapes = match error {
+        E::ProtectedMutation => return error.to_string(),
         E::Escape | E::Absolute => true,
         E::Empty => false,
         E::Resolve { .. } => std::path::Path::new(requested)

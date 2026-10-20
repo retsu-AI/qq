@@ -388,10 +388,8 @@ pub struct ReviewRequest {
     /// The child's task brief (the prompt that created its run), truncated to
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
-    /// The session's approval mode. The reviewer's `Deny` is final under
-    /// `Auto` and `Supervised`; under `Ask` (reached only when the operator
-    /// opted the delegate in) a `Deny` escalates to the human. The mode tells
-    /// the reviewer what that mode holds.
+    /// The session's approval mode. Only Auto consults the reviewer;
+    /// its denial is final. Ask requires the human directly.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,
@@ -451,8 +449,7 @@ impl ReviewVerdict {
 }
 
 /// The reviewer's judgement for a call the mode held. `Approve` executes it
-/// and `Deny` settles it as a tool error, under `Auto` and `Supervised`
-/// alike; `Escalate` hands the call to the human, whose wait starts at the
+/// and `Deny` settles it as a tool error, under Auto; `Escalate` hands the call to the human, whose wait starts at the
 /// escalation. A reviewer that cannot answer must return `Escalate`, never
 /// hang and never `Approve`.
 #[derive(Debug, Clone, PartialEq, Eq)]

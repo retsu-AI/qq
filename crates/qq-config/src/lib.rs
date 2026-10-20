@@ -2181,13 +2181,12 @@ impl Default for AuditConfig {
 
 /// Who settles the approvals a session's mode holds. The mode stays the
 /// ceiling; this only chooses whether the configured `reviewer_model` is
-/// consulted before a human. Absent from configuration, `auto` and
-/// `supervised` consult the reviewer and `ask` does not; that is what every
-/// session did before the setting existed.
+/// consulted before a human for held Auto calls. Ask always requires
+/// explicit human approval, regardless of this setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDelegateSetting {
-    /// Consult the reviewer under `ask` as well as `auto` and `supervised`.
+    /// Consult the reviewer for held Auto calls.
     On,
     /// Never consult the reviewer; every held call waits for a human.
     Off,
@@ -2342,7 +2341,7 @@ impl ConfigSnapshot {
     }
 
     /// The explicit delegate choice, or `None` when the mode's own default
-    /// applies (reviewer under `auto` and `supervised`, human under `ask`).
+    /// applies (reviewer under Auto; Ask always asks the human).
     #[must_use]
     pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
         self.approval_delegate

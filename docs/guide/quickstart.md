@@ -128,13 +128,13 @@ QQ prints what it accepted. Edit the file later and QQ asks again.
 ## 6. Automate it
 
 ```sh
-qq run --approval auto "Add a unit test for parse_duration and make it pass"
+qq run "Add a unit test for parse_duration and make it pass"
 ```
 
 `qq run` is the agent without a UI: readable progress on stderr, the final
-answer on stdout, exit code `0` on success. `--approval read-only` (the
-default) lets it look but not touch; `auto` allows workspace edits and safe
-commands; `--format jsonl` gives you every event as a JSON line. Details in
+answer on stdout, exit code `0` on success. `auto` is the default and allows
+workspace edits and safe commands; `--approval read-only` lets it look but
+not touch; `--format jsonl` gives you every event as a JSON line. Details in
 [Headless](headless.md).
 
 ## Where next

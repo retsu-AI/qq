@@ -72,7 +72,7 @@ Line references are approximate anchors, not stable identifiers.
 
 ```sh
 qq run [--workspace PATH] [--session ID]
-       [--approval read-only|auto|full] [--profile NAME]
+       [--approval read-only|ask|auto|full] [--profile NAME]
        [--allow-tool NAME]... [--allow-shell PREFIX]... [--allow-host HOST]...
        [--steer-stdin]
        [--timeout-seconds N] [--max-turns N] [--max-cost-usd VALUE]
@@ -126,10 +126,11 @@ answer; the schema-less default path is unchanged.
 session must be a root session of the workspace (a spawned sub-agent session
 is refused) and idle with no queued prompt; an unknown id and a session of
 another workspace are the same `invalid_configuration` refusal, so the id's
-existence elsewhere is not disclosed. The invocation decides the run exactly
-as it would for a new session: the configured model (after `--model`),
-`--profile`, and `--approval` are written to the session before the prompt is
-submitted. Store ownership (below) and the recovery sweep both precede this,
+existence elsewhere is not disclosed. The configured model (after `--model`),
+`--profile`, and any explicit `--approval` override are written to the session
+before the prompt is submitted. Omitting `--approval` preserves the stored
+approval mode; new sessions default to Auto. Store ownership (below) and the
+recovery sweep both precede this,
 so an earlier run the previous process left executing is already settled as
 `interrupted` when the resume is examined, and its history — including the
 runtime notice not to retry interrupted tool calls — is what the resumed run
@@ -237,7 +238,9 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
 
 - `read-only`: read-only tools execute; every mutating, shell, or external
   call is **denied** before a request exists. `--allow-*` never fires.
-- `auto`: everything executes except shell commands the policy classifies as
+- `ask`: reads execute; every call requiring explicit human approval is
+  denied immediately. Allowlists and reviewer models cannot authorize it.
+- `auto` (default): everything executes except shell commands the policy classifies as
   dangerous (`sudo`, recursive `rm`, `git push`, `curl | sh`, and similar);
   those are held and answered by `--allow-tool`/`--allow-shell` grants.
 - `full`: everything executes; grants are redundant.

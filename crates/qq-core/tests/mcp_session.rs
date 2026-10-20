@@ -1,6 +1,6 @@
 //! End-to-end MCP dispatch through the durable session runtime: a scripted
 //! model requests an `mcp__` tool, the session's approval flow gates it in
-//! `ask` mode, and an exact-name session grant auto-approves the next call.
+//! Ask mode; each call needs fresh human approval.
 
 use std::{
     path::PathBuf,
@@ -18,7 +18,7 @@ use qq_core::{
 use qq_protocol::{
     ApprovalDecision, ApprovalGrant, ApprovalMode, CommandId, CommandOutcome, ModelSelection,
     RunFailureKind, RunId, RunOutcome, SessionCommand, SessionEvent, SubscribeRequest,
-    ToolCallSnapshot, ToolCallState,
+    ToolCallState,
 };
 use qq_provider::{ModelRequest, Provider, ProviderEvent, ProviderStream, ToolSpec};
 
@@ -194,15 +194,8 @@ async fn collect_run(events: &mut SessionEventStream, run_id: RunId) -> Vec<Sess
     .expect("the run must finish within five seconds")
 }
 
-fn approval_request(events: &[SessionEvent]) -> Option<&ToolCallSnapshot> {
-    events.iter().find_map(|event| match event {
-        SessionEvent::ToolApprovalRequested { tool_call, .. } => Some(tool_call),
-        _ => None,
-    })
-}
-
 #[tokio::test]
-async fn ask_mode_gates_mcp_calls_and_an_exact_name_grant_auto_approves() {
+async fn ask_mode_requires_fresh_human_approval_for_each_mcp_call() {
     let directory = tempfile::tempdir().unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
@@ -255,7 +248,7 @@ async fn ask_mode_gates_mcp_calls_and_an_exact_name_grant_auto_approves() {
         .unwrap();
 
     // First run: ask mode must hold the MCP call for approval, and
-    // approve-for-session must record the exact-name grant before executing.
+    // even a session approval choice applies only once in Ask mode.
     let first_run = submit_prompt(&runtime, session_id).await;
     let requested = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -313,26 +306,37 @@ async fn ask_mode_gates_mcp_calls_and_an_exact_name_grant_auto_approves() {
     ));
     assert_eq!(calls.lock().unwrap().len(), 1);
 
-    // Second run: the recorded exact-name grant auto-approves without a
-    // prompt, and the MCP result is indistinguishable from a built-in's.
+    // Ask cannot turn the previous approval into standing authority.
     let second_run = submit_prompt(&runtime, session_id).await;
+    let requested = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let envelope = events.next().await.unwrap().unwrap();
+            if let SessionEvent::ToolApprovalRequested { tool_call, .. } = envelope.event {
+                break tool_call;
+            }
+            assert!(!matches!(envelope.event, SessionEvent::RunFinished { .. }));
+        }
+    })
+    .await
+    .expect("the next MCP call still needs the human");
+    assert_eq!(requested.name, MCP_TOOL);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    command(
+        &runtime,
+        SessionCommand::RespondToolApproval {
+            run_id: second_run,
+            tool_call_id: requested.id,
+            decision: ApprovalDecision::Deny,
+        },
+    )
+    .await;
     let observed = collect_run(&mut events, second_run).await;
-    assert!(
-        approval_request(&observed).is_none(),
-        "the session grant must cover the second call"
-    );
     assert!(observed.iter().any(|event| matches!(
         event,
-        SessionEvent::ToolCallFinished { tool_call }
-            if tool_call.state == ToolCallState::Completed
-                && tool_call.result.as_deref() == Some("pong")
-    )));
-    assert!(matches!(
-        observed.last(),
-        Some(SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
+        SessionEvent::ToolApprovalResolved {
+            resolution: qq_protocol::ApprovalResolution::Denied,
             ..
-        })
-    ));
-    assert_eq!(calls.lock().unwrap().len(), 2);
+        }
+    )));
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }

@@ -201,6 +201,29 @@ fn approve_for_session_grants_shell_commands_as_prefixes() {
 }
 
 #[test]
+fn ask_approval_never_records_a_session_grant() {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let focused = initial.focused.as_mut().unwrap();
+    focused.summary.approval_mode = ApprovalMode::Ask;
+    let session_id = focused.summary.id;
+    app.apply_snapshot(initial);
+    app.sessions.upsert_tool_call(ToolCallSnapshot {
+        run_id: id(4, RunId::from_bytes),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(8, ToolCallId::from_bytes), session_id, "write_file")
+    });
+    let request = only_command(press(&mut app, KeyCode::Char('a')));
+    assert!(matches!(
+        request.command,
+        SessionCommand::RespondToolApproval {
+            decision: ApprovalDecision::ApproveOnce,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn a_command_past_the_grant_cap_approves_once_and_says_why() {
     // Approving a command longer than the session grant cap for the session
     // used to send a grant the server rejected with "approval grant is empty

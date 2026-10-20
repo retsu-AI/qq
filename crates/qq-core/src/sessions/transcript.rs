@@ -448,8 +448,8 @@ fn assemble_model_context(
                           AND json_extract(r.plan_identity_json,'$.descriptor_version') = json_extract(r.plan_descriptor_json,'$.version')
                          THEN 1 ELSE 0 END,
                     CASE WHEN json_valid(r.plan_descriptor_json) AND json_valid(r.plan_identity_json)
-                          AND json_extract(r.plan_descriptor_json,'$.version')=15
-                          AND json_extract(r.plan_identity_json,'$.descriptor_version')=15
+                          AND json_extract(r.plan_descriptor_json,'$.version') IN (15,16)
+                          AND json_extract(r.plan_identity_json,'$.descriptor_version')=json_extract(r.plan_descriptor_json,'$.version')
                           AND json_extract(r.plan_descriptor_json,'$.tool_output_projection')='strict_reserved_v1'
                          THEN 1 ELSE 0 END,
                     CASE WHEN t.tool_results_projection_json IS NULL THEN NULL

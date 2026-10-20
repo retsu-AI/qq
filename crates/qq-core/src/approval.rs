@@ -69,9 +69,6 @@ pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
     "The user declined to answer; proceed with your best judgement.";
-/// Prefix of the `tool_approval_escalated` reason when a delegate's `deny`
-/// was advice rather than a verdict (under `ask`).
-pub(crate) const ADVISORY_DENIAL_PREFIX: &str = "the delegate would deny:";
 /// The `tool_approval_escalated` reason when the delegate's own clock ran
 /// out before it answered.
 pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer within its window";
@@ -81,19 +78,9 @@ pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer 
 /// the ceiling and this only chooses who decides inside it.
 pub use qq_protocol::ApprovalDelegate;
 
-/// The model-facing prefix of a reviewer denial. Final under `supervised`
-/// (every held call of a write child) and under `auto` (the dangerous-shaped
-/// shell and ungranted hosts that mode holds); the reviewer's bounded reason
-/// follows. Under `ask` a denial escalates instead, so no result is built.
-pub(crate) fn reviewer_denied_result(mode: ApprovalMode) -> &'static str {
-    match mode {
-        ApprovalMode::Supervised => {
-            "The approval reviewer denied this tool call for the supervised sub-agent:"
-        }
-        ApprovalMode::Auto | ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => {
-            "The approval reviewer denied this tool call:"
-        }
-    }
+/// The model-facing prefix of a reviewer denial in Auto mode.
+pub(crate) fn reviewer_denied_result() -> &'static str {
+    "The approval reviewer denied this tool call:"
 }
 
 /// The model-facing refusal for a `Forbidden` shell command: the rule(s) that
@@ -999,8 +986,8 @@ pub(crate) fn evaluate(
         ToolClass::ReadOnly => PolicyDecision::Execute,
         // A malformed fetch URL has nothing to gate; dispatch reports it.
         ToolClass::Network { host: None, .. } => PolicyDecision::Execute,
-        // Asking is never dangerous: the reviewer under `supervised` sees the
-        // question too, and a read-only session may still consult its user.
+        // Asking the user grants no execution authority; read-only sessions
+        // may still ask questions.
         ToolClass::Interactive {
             question: Some(question),
         } => PolicyDecision::AskUser {
@@ -1014,16 +1001,8 @@ pub(crate) fn evaluate(
             ApprovalMode::ReadOnly => PolicyDecision::Deny {
                 reason: DenyReason::Mode,
             },
-            // Supervised holds everything, grants included: the whole point is
-            // that a reviewer sees every action a write child takes.
-            ApprovalMode::Supervised => PolicyDecision::RequireApproval,
-            ApprovalMode::Ask => {
-                if grants.covers(name, class) {
-                    PolicyDecision::Execute
-                } else {
-                    PolicyDecision::RequireApproval
-                }
-            }
+            // Human approval is fresh for every non-read action.
+            ApprovalMode::Ask => PolicyDecision::RequireApproval,
             ApprovalMode::Auto => match class {
                 // Auto trusts workspace-bounded edits and external tools, and
                 // shell commands that are allowed or only change files inside
@@ -1607,6 +1586,7 @@ mod tests {
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
+            ApprovalMode::Full,
         ] {
             assert_eq!(
                 evaluate(mode, "read_file", &ToolClass::ReadOnly, &grants(&[], &[])),
@@ -1616,7 +1596,7 @@ mod tests {
     }
 
     #[test]
-    fn supervised_mode_holds_every_non_read_call_regardless_of_grants() {
+    fn ask_mode_holds_every_non_read_call_regardless_of_grants() {
         for (name, class) in [
             ("write_file", ToolClass::Mutating),
             ("shell", shell("cargo test")),
@@ -1625,18 +1605,18 @@ mod tests {
         ] {
             assert_eq!(
                 evaluate(
-                    ApprovalMode::Supervised,
+                    ApprovalMode::Ask,
                     name,
                     &class,
                     &grants(&[name], &["cargo", "rm"]),
                 ),
                 PolicyDecision::RequireApproval,
-                "supervised must hold {name} even when granted"
+                "ask must hold {name} even when granted"
             );
         }
         assert_eq!(
             evaluate(
-                ApprovalMode::Supervised,
+                ApprovalMode::Ask,
                 "read_file",
                 &ToolClass::ReadOnly,
                 &grants(&[], &[])
@@ -1666,7 +1646,6 @@ mod tests {
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
-            ApprovalMode::Supervised,
             ApprovalMode::Full,
         ] {
             assert_eq!(
@@ -1729,7 +1708,7 @@ mod tests {
         );
         assert_eq!(
             evaluate(ApprovalMode::Ask, "fetch", &public, &covering),
-            PolicyDecision::Execute
+            PolicyDecision::RequireApproval
         );
         assert_eq!(
             evaluate(ApprovalMode::Auto, "fetch", &public, &none),
@@ -1740,10 +1719,7 @@ mod tests {
             evaluate(ApprovalMode::Auto, "fetch", &public, &covering),
             PolicyDecision::Execute
         );
-        assert_eq!(
-            evaluate(ApprovalMode::Supervised, "fetch", &public, &covering),
-            PolicyDecision::RequireApproval
-        );
+
         assert_eq!(
             evaluate(ApprovalMode::Full, "fetch", &public, &none),
             PolicyDecision::Execute
@@ -1793,7 +1769,6 @@ mod tests {
                 ApprovalMode::ReadOnly,
                 ApprovalMode::Ask,
                 ApprovalMode::Auto,
-                ApprovalMode::Supervised,
                 ApprovalMode::Full,
             ] {
                 assert!(
@@ -1843,38 +1818,6 @@ mod tests {
                 "read-only must deny {name} even when granted"
             );
         }
-    }
-
-    #[test]
-    fn ask_mode_requires_approval_unless_granted() {
-        for (name, class) in [
-            ("edit_file", ToolClass::Mutating),
-            ("shell", shell("cargo test")),
-            ("mcp__server__tool", ToolClass::External),
-        ] {
-            assert_eq!(
-                evaluate(ApprovalMode::Ask, name, &class, &grants(&[], &[])),
-                PolicyDecision::RequireApproval
-            );
-        }
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Ask,
-                "edit_file",
-                &ToolClass::Mutating,
-                &grants(&["edit_file"], &[]),
-            ),
-            PolicyDecision::Execute
-        );
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Ask,
-                "shell",
-                &shell("cargo test -p qq-core"),
-                &grants(&[], &["cargo test"]),
-            ),
-            PolicyDecision::Execute
-        );
     }
 
     #[test]
@@ -1992,7 +1935,7 @@ mod tests {
                 read_only: false,
             }
         );
-        // A grant on the prefix covers it; auto allows it.
+        // Ask still requires fresh approval for a granted prefix; Auto allows it.
         assert_eq!(
             evaluate(
                 ApprovalMode::Ask,
@@ -2000,7 +1943,7 @@ mod tests {
                 &class,
                 &grants(&[], &["cargo test"])
             ),
-            PolicyDecision::Execute
+            PolicyDecision::RequireApproval
         );
         assert_eq!(
             evaluate(ApprovalMode::Auto, "exec", &class, &grants(&[], &[])),
@@ -2045,7 +1988,6 @@ mod tests {
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
-            ApprovalMode::Supervised,
             ApprovalMode::Full,
         ] {
             for command in [
@@ -2100,15 +2042,20 @@ mod tests {
             .insert("git push origin x".to_owned());
         grants.delegate.hosts.insert("docs.rs".to_owned());
         for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+            let covered = if mode == ApprovalMode::Auto {
+                PolicyDecision::Execute
+            } else {
+                PolicyDecision::RequireApproval
+            };
             assert_eq!(
                 evaluate(mode, "shell", &shell("git push origin x"), &grants),
-                PolicyDecision::Execute,
-                "{mode:?}: the exact command is covered"
+                covered.clone(),
+                "{mode:?}: only Auto executes the exact granted command"
             );
             assert_eq!(
                 evaluate(mode, "shell", &shell("  git push origin x "), &grants),
-                PolicyDecision::Execute,
-                "{mode:?}: surrounding whitespace is not a different command"
+                covered.clone(),
+                "{mode:?}: whitespace preserves the exact grant; Ask still needs fresh approval"
             );
             assert_eq!(
                 evaluate(mode, "shell", &shell("git push origin y"), &grants),
@@ -2128,10 +2075,7 @@ mod tests {
                 host: Some("api.docs.rs".to_owned()),
                 refusal: None,
             };
-            assert_eq!(
-                evaluate(mode, "fetch", &docs, &grants),
-                PolicyDecision::Execute
-            );
+            assert_eq!(evaluate(mode, "fetch", &docs, &grants), covered);
             assert_eq!(
                 evaluate(mode, "fetch", &sub, &grants),
                 PolicyDecision::RequireApproval,
@@ -2151,7 +2095,6 @@ mod tests {
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
-            ApprovalMode::Supervised,
             ApprovalMode::Full,
         ] {
             assert!(
@@ -2411,16 +2354,11 @@ mod tests {
         );
         assert_eq!(
             evaluate(ApprovalMode::Ask, name, &class, &grants(&[name], &[])),
-            PolicyDecision::Execute
+            PolicyDecision::RequireApproval
         );
         assert_eq!(
-            evaluate(
-                ApprovalMode::Supervised,
-                name,
-                &class,
-                &grants(&[name], &[])
-            ),
-            PolicyDecision::RequireApproval
+            evaluate(ApprovalMode::Auto, name, &class, &grants(&[name], &[])),
+            PolicyDecision::Execute
         );
         assert_eq!(
             evaluate(ApprovalMode::Auto, name, &class, &grants(&[], &[])),

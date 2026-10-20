@@ -2690,6 +2690,21 @@ impl App {
             .get(&tool_call.id)
     }
 
+    /// Ask authority also applies to a child's held calls.
+    pub(crate) fn pending_approval_is_ask(&self) -> bool {
+        let mut session = self.pending_approval().map(|call| call.session_id);
+        for _ in 0..self.sessions.len() {
+            let Some(view) = session.and_then(|id| self.sessions.get(&id)) else {
+                break;
+            };
+            if view.summary.approval_mode == ApprovalMode::Ask {
+                return true;
+            }
+            session = view.summary.parent_id;
+        }
+        false
+    }
+
     /// The pending hold's question, when it is an `ask_user` call.
     pub(crate) fn pending_question(&self) -> Option<&QuestionPreview> {
         self.pending_approval_preview()?.question.as_ref()
@@ -2883,11 +2898,16 @@ impl App {
         let tool_call_id = tool_call.id;
         let run_id = tool_call.run_id;
         let preview = self.pending_approval_preview();
+        let ask = self.pending_approval_is_ask();
         // A session or workspace choice whose grant cannot be stored must not
         // be sent as one: the server would reject the whole approval. Approve
         // this call once and say why, so the key never produces a 400.
         let (decision, notice) = match choice {
             ApprovalChoice::Once => (ApprovalDecision::ApproveOnce, None),
+            ApprovalChoice::Session | ApprovalChoice::Workspace if ask => (
+                ApprovalDecision::ApproveOnce,
+                Some("approved once; ask mode requires approval for each call".to_owned()),
+            ),
             ApprovalChoice::Session | ApprovalChoice::Workspace => {
                 let grant = approval_grant(tool_call, preview);
                 let workspace = matches!(choice, ApprovalChoice::Workspace);

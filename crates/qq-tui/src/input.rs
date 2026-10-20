@@ -456,7 +456,6 @@ pub(crate) fn command_rows() -> Vec<CommandRow> {
 pub(crate) const fn approval_mode_label(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::ReadOnly => "read_only",
-        ApprovalMode::Supervised => "supervised",
         ApprovalMode::Ask => "ask",
         ApprovalMode::Auto => "auto",
         ApprovalMode::Full => "full",
@@ -471,13 +470,10 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
             "read_only",
             "deny edits, shell, and external tools without asking",
         ),
-        // Never offered by the server for root sessions; rendered for the
-        // write children that run under it.
-        ApprovalMode::Supervised => (
-            "supervised",
-            "every edit, shell, and external call is adjudicated by the reviewer model",
+        ApprovalMode::Ask => (
+            "ask",
+            "require your approval for every non-read action; ignore grants and reviewers",
         ),
-        ApprovalMode::Ask => ("ask", "ask before edits, shell, and external tools"),
         ApprovalMode::Auto => (
             "auto",
             "edits and safe shell run; dangerous shell is held for approval",
@@ -535,11 +531,8 @@ pub(crate) const fn delegate_label(delegate: Option<ApprovalDelegate>) -> &'stat
 pub(crate) const fn delegate_row(delegate: Option<ApprovalDelegate>) -> DelegateRow {
     let summary = match delegate {
         None => "use the workspace's approval_delegate setting",
-        Some(ApprovalDelegate::ByMode) => {
-            "the reviewer settles auto and supervised holds; ask holds come to you"
-        }
-        Some(ApprovalDelegate::On) => {
-            "the reviewer settles ask holds too; its deny still comes to you"
+        Some(ApprovalDelegate::ByMode | ApprovalDelegate::On) => {
+            "the reviewer settles auto holds; ask calls require your approval"
         }
         Some(ApprovalDelegate::Off) => "stop delegating: every held call waits for you",
     };

@@ -674,7 +674,7 @@ fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
     tree.write(
         "work/qq.ron",
         r#"(version: 1, approval_delegate: on,
-        profiles: { "strict": Profile(approval_mode: ask, approval_delegate: off) })"#,
+        profiles: { "ask": Profile(approval_mode: ask, approval_delegate: off) })"#,
     );
     let request = tree.request();
     assert!(matches!(
@@ -688,7 +688,7 @@ fn approval_delegate_in_a_workspace_file_or_profile_requires_trust() {
         Some(ApprovalDelegateSetting::On)
     );
     assert_eq!(
-        trusted.profile("strict").unwrap().approval_delegate(),
+        trusted.profile("ask").unwrap().approval_delegate(),
         Some(ApprovalDelegateSetting::Off)
     );
     assert_eq!(
@@ -5041,4 +5041,14 @@ fn builtin_provider_patches_layer_over_their_presets() {
             Some("work".to_owned())
         )
     );
+}
+
+#[test]
+fn ask_profile_approval_decodes_and_removed_modes_are_rejected() {
+    assert_eq!(
+        ron::from_str::<ProfileApprovalMode>("ask").unwrap(),
+        ProfileApprovalMode::Ask
+    );
+    assert!(ron::from_str::<ProfileApprovalMode>("strict").is_err());
+    assert!(ron::from_str::<ProfileApprovalMode>("supervised").is_err());
 }

@@ -793,7 +793,7 @@ async fn run_owned_child(
         detached,
     } = request;
     // Authority attenuates strictly: a read child is ReadOnly; a write child
-    // is Supervised and needs both the roster's permission and a reviewer to
+    // uses Auto with mandatory review and needs the roster's permission to
     // adjudicate its actions. Only depth one may write (children have no
     // spawner at all, so this is structural). A ReadOnly parent cannot grant
     // write: its own policy already denied the mutating spawn call.
@@ -812,7 +812,7 @@ async fn run_owned_child(
                      actions; spawn with authority read instead",
                 );
             }
-            ApprovalMode::Supervised
+            ApprovalMode::Auto
         }
     };
     // The budget counts attempts, so a failing spawn also consumes it. A
@@ -835,7 +835,7 @@ async fn run_owned_child(
         };
         // Writers serialize behind the read slot too: a second write spawn in the
         // same turn waits here until the first child settles.
-        let _write_slot = if child_mode == ApprovalMode::Supervised {
+        let _write_slot = if child_mode == ApprovalMode::Auto {
             match Arc::clone(&write_slot).acquire_owned().await {
                 Ok(permit) => Some(permit),
                 Err(_) => return Err(spawn_error("the sub-agent scheduler is unavailable")),

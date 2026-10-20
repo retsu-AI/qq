@@ -66,8 +66,9 @@ answer schema; those flags apply to ordinary prompt runs.
 
 | `--approval` | Meaning |
 | --- | --- |
-| `read-only` (default) | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
-| `auto` | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
+| `read-only` | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
+| `ask` | reads run; calls requiring human approval are denied immediately, even with matching allowlists |
+| `auto` (default) | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
 | `full` | everything except `forbidden` shell shapes |
 
 Under `read-only`, when at least one held call was denied, a text-mode run
@@ -149,8 +150,9 @@ qq run --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 "Now add the same flag to the 
 ```
 
 Submits into an existing idle root session of this workspace, keeping its
-history. The model, profile, and approval come from *this* invocation, not
-the session's past. Every exit prints the id you need.
+history. The model and profile come from this invocation. The stored approval
+mode is preserved unless you explicitly pass `--approval`. New sessions
+default to Auto. Every exit prints the id you need.
 
 ### Steering from a pipe
 

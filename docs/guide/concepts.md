@@ -138,10 +138,13 @@ grants for every new session. See
 
 ### Approval mode
 
-How much a session may do without asking: `read_only`, `supervised`, `ask`,
-`auto` (the TUI default), or `full`. `qq run` defaults to `read_only`
-(`--approval read-only`); `supervised` is what sub-agents that may edit run
-under. Change it with `/approval` or `qq run --approval`. See [Approval modes](permissions.md#approval-modes).
+How much a session may do without asking: `read_only`, `ask`,
+`auto` (the TUI default), or `full`. `ask` requires fresh human approval for
+each non-read action; grants and reviewers cannot replace it. `auto` reuses
+grants, while `full` bypasses approval prompts. `qq run` also defaults to
+`auto`. Write sub-agents retain internal supervision within their parent's
+authority. Change modes with `/approval` or `qq run --approval`.
+See [Approval modes](permissions.md#approval-modes).
 
 ### Held call
 

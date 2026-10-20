@@ -32,7 +32,7 @@ and open PRs before editing; retain compatible work already underway.
 
 | Outcome | Implementation boundary | Proof before calling it fixed |
 | --- | --- | --- |
-| One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Legacy stored sessions/configs still load without gaining authority. |
+| One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
 | Shell and built-ins enforce that contract | Core tool dispatch/process ownership and native execution adapters. Deliver an enforced Linux path first, then macOS/Windows against the same contract below. Delete obsolete paths as each replacement is proven. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Managed polling lets commands outlive the current 600-second tool ceiling within the task deadline, retaining output, exit/cancel state and ownership across recovery. Termination leaves no descendants; test the deadline with a shortened limit or controlled clock. |
 | The task survives interruption | `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
 | Tools tell the truth and edits preserve work | `src/runtime.rs` model discovery/admission; core edit tools. Advertise and validate against the same discovery snapshot; fresh availability failures remain recoverable. Preserve atomic edit semantics. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
@@ -57,8 +57,9 @@ plan with this one instead of maintaining a second work queue.
 - An unattended run never waits indefinitely for approval: allowed actions
   execute; requests outside its grants return a typed denial and the missing
   scope. An attended user can explicitly extend scope. Model/tool output is
-  never authorization. Preserve supported legacy approval modes with tested
-  decoding/migration, including `Supervised`, without silent grant expansion.
+  never authorization. Expose Read-only, Ask, Auto and Full without compatibility aliases. Ask
+  requires fresh human approval; reusable grants authorize Auto work. Write
+  supervision remains internal to delegation, bounded by parent authority.
 - Shell egress has its own explicit grant; existing HTTP-fetch allowlists do
   not authorize arbitrary shell traffic. Isolate each execution's proxy and
   credential authority. Git/hosting operations must not expose reusable

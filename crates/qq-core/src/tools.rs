@@ -3115,6 +3115,163 @@ mod tests {
         assert_eq!(body, expected_body);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_swap_cannot_redirect_an_admitted_write_into_git_trust_files() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("ordinary")).unwrap();
+        fs::create_dir(directory.path().join(".git")).unwrap();
+        fs::write(directory.path().join(".git/config"), "trusted").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let (entered, release) = hold_tool_apply(workspace.path());
+        let write = tokio::task::spawn_blocking(move || {
+            run_tool(
+                &workspace,
+                &FileState::default(),
+                "write_file",
+                r#"{"path":"ordinary/config","content":"task data"}"#,
+            )
+        });
+        entered.await.unwrap();
+        let temp = fs::read_dir(directory.path().join("ordinary"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name();
+        fs::rename(
+            directory.path().join("ordinary"),
+            directory.path().join("original-directory"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(".git", directory.path().join("ordinary")).unwrap();
+        fs::write(directory.path().join(".git").join(&temp), "redirected").unwrap();
+        release.send(()).unwrap();
+        let _result = write.await.unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.path().join(".git/config")).unwrap(),
+            "trusted"
+        );
+    }
+
+    #[test]
+    fn dispatch_protects_policy_and_git_trust_files_without_blocking_ordinary_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for path in [
+            "src/main.rs",
+            ".github/workflows/check.yml",
+            ".qq/skills/example/SKILL.md",
+        ] {
+            let result = run_tool(
+                &workspace,
+                &state,
+                "write_file",
+                &json!({"path":path,"content":"allowed"}).to_string(),
+            );
+            assert!(!result.is_error, "{path}: {}", result.model_text);
+            assert_eq!(
+                fs::read_to_string(directory.path().join(path)).unwrap(),
+                "allowed"
+            );
+        }
+        for path in [
+            ".qq/config.ron",
+            ".qq/config.d/policy.ron",
+            ".qq/packs/untrusted/pack.ron",
+            "qq.ron",
+            ".git",
+            "nested/.git/config",
+            ".git/hooks/pre-commit",
+        ] {
+            let result = run_tool(
+                &workspace,
+                &state,
+                "write_file",
+                &json!({"path":path,"content":"unsafe"}).to_string(),
+            );
+            assert!(
+                result.is_error,
+                "{path} was writable: {}",
+                result.model_text
+            );
+            assert!(
+                result.model_text.contains("protected_path"),
+                "{}",
+                result.model_text
+            );
+            assert!(!directory.path().join(path).exists());
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_a_protected_edit_batch_before_changing_any_file() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join(".qq")).unwrap();
+        fs::write(directory.path().join(".qq/config.ron"), "original").unwrap();
+        fs::write(directory.path().join("ordinary.txt"), "original").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        for path in [".qq/config.ron", "ordinary.txt"] {
+            run_tool(
+                &workspace,
+                &state,
+                "read_file",
+                &json!({"path":path}).to_string(),
+            );
+        }
+        let result = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &json!({"edits":[
+                {"path":"ordinary.txt","old":"original","new":"changed"},
+                {"path":".qq/config.ron","old":"original","new":"changed"}
+            ]})
+            .to_string(),
+        );
+        assert!(result.is_error, "{}", result.model_text);
+        assert!(
+            result.model_text.contains("protected_path"),
+            "{}",
+            result.model_text
+        );
+        for path in [".qq/config.ron", "ordinary.txt"] {
+            assert_eq!(
+                fs::read_to_string(directory.path().join(path)).unwrap(),
+                "original"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatch_protects_canonical_policy_and_git_aliases() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in [".git", ".qq"] {
+            fs::create_dir(directory.path().join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(".git", directory.path().join("git-alias")).unwrap();
+        std::os::unix::fs::symlink(".qq", directory.path().join("policy-alias")).unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        for path in ["git-alias/hooks/pre-commit", "policy-alias/config.ron"] {
+            let result = run_tool(
+                &workspace,
+                &FileState::default(),
+                "write_file",
+                &json!({"path":path,"content":"unsafe"}).to_string(),
+            );
+            assert!(result.is_error, "{path}: {}", result.model_text);
+            assert!(
+                result.model_text.contains("protected_path"),
+                "{}",
+                result.model_text
+            );
+            assert!(!directory.path().join(path).exists());
+        }
+    }
+
     #[test]
     fn edit_replaces_exact_strings_and_refreshes_the_recorded_hash() {
         let directory = tempfile::tempdir().unwrap();

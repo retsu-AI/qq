@@ -1823,7 +1823,6 @@ mod tests {
         // added to the list the glossary is checked against.
         let modes = [
             ApprovalMode::ReadOnly,
-            ApprovalMode::Supervised,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
             ApprovalMode::Full,
@@ -1831,10 +1830,9 @@ mod tests {
         for mode in modes {
             let listed = match mode {
                 ApprovalMode::ReadOnly => 0,
-                ApprovalMode::Supervised => 1,
-                ApprovalMode::Ask => 2,
-                ApprovalMode::Auto => 3,
-                ApprovalMode::Full => 4,
+                ApprovalMode::Ask => 1,
+                ApprovalMode::Auto => 2,
+                ApprovalMode::Full => 3,
             };
             assert_eq!(modes[listed], mode);
         }

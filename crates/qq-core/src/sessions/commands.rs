@@ -99,12 +99,9 @@ pub(super) fn create_child_run(
         purpose,
         detached,
     } = admission;
-    // Children never hold more than Supervised authority; the spawner decides
-    // between ReadOnly and Supervised and nothing else may reach here.
-    if !matches!(
-        approval_mode,
-        ApprovalMode::ReadOnly | ApprovalMode::Supervised
-    ) {
+    // Children start ReadOnly or Auto with internal supervision. The
+    // spawner cannot give a child Full authority.
+    if !matches!(approval_mode, ApprovalMode::ReadOnly | ApprovalMode::Auto) {
         return Err(SessionRuntimeError::ChildAuthorityEscalation);
     }
     let ChildRunParent {
@@ -1475,6 +1472,60 @@ pub(super) fn execute_command(
                 // produced "approval grant is empty or exceeds the session
                 // limit" and left the call waiting after the user had already
                 // approved it. The grant is dropped; the call runs once.
+                // A pending prompt is not a lasting grant. Re-evaluate every
+                // ancestor ceiling in this transaction before any approval or
+                // grant write; a child approval cannot widen its parent's
+                // current authority. Questions still accept their answers.
+                let own_mode = load_approval_policy(&transaction, session_id)?.0;
+                let ancestors = load_ancestor_approval_policies(&transaction, session_id)?;
+                let approving = matches!(
+                    decision,
+                    ApprovalDecision::ApproveOnce
+                        | ApprovalDecision::ApproveForSession { .. }
+                        | ApprovalDecision::ApproveForWorkspace { .. }
+                );
+                let mut refusal = None;
+                if approving && own_mode == ApprovalMode::ReadOnly {
+                    refusal = Some("permission_denied: authority_changed: task permissions are now read-only; a pending approval cannot restore revoked authority".to_owned());
+                } else if approving && !ancestors.is_empty() {
+                    let (name, class) = load_pending_approval_class(
+                        &transaction,
+                        workspace_id,
+                        session_id,
+                        run_id,
+                        tool_call_id,
+                    )?;
+                    for (mode, grants) in &ancestors {
+                        refusal = match approval::evaluate(*mode, &name, &class, grants) {
+                            approval::PolicyDecision::Execute
+                            | approval::PolicyDecision::AskUser { .. } => continue,
+                            // The pending response supplies the fresh human
+                            // approval required by an Ask ancestor.
+                            approval::PolicyDecision::RequireApproval if *mode == ApprovalMode::Ask => continue,
+                            approval::PolicyDecision::RequireApproval => Some("permission_denied: authority_changed: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned()),
+                            approval::PolicyDecision::Deny { reason } => Some(format!("permission_denied: authority_changed: {}", approval::deny_result(&reason))),
+                            approval::PolicyDecision::Forbidden { rules } => Some(format!("permission_denied: authority_changed: {}", approval::forbidden_result(&rules))),
+                        };
+                        break;
+                    }
+                }
+                let revoked = refusal.is_some();
+                let denial_message = refusal.as_deref().unwrap_or(approval::USER_DENIED_RESULT);
+                let human_only = own_mode == ApprovalMode::Ask
+                    || ancestors.iter().any(|(mode, _)| *mode == ApprovalMode::Ask);
+                let decision = if revoked {
+                    ApprovalDecision::Deny
+                } else if human_only
+                    && matches!(
+                        decision,
+                        ApprovalDecision::ApproveForSession { .. }
+                            | ApprovalDecision::ApproveForWorkspace { .. }
+                    )
+                {
+                    ApprovalDecision::ApproveOnce
+                } else {
+                    decision
+                };
                 let mut grant_not_recorded = false;
                 let resolution = match &decision {
                     ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
@@ -1515,7 +1566,7 @@ pub(super) fn execute_command(
                             &transaction,
                             run_id,
                             &provider_call_id,
-                            approval::USER_DENIED_RESULT,
+                            denial_message,
                             first_result_in_turn,
                         )?;
                         transaction.execute(
@@ -1526,7 +1577,7 @@ pub(super) fn execute_command(
                                  WHERE id = ?1 AND state = 'awaiting_approval'",
                             params![
                                 tool_call_id.to_string(),
-                                approval::USER_DENIED_RESULT,
+                                denial_message,
                                 approval_resolution_str(resolution),
                                 now,
                             ],

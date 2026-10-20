@@ -790,9 +790,9 @@ pub(super) struct Document {
     audit: Field<AuditPatch>,
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     goals: Field<GoalsPatch>,
-    /// Who settles held approvals: `on` sends `ask`-mode holds to the
-    /// configured reviewer too, `off` sends every hold to a human. Missing
-    /// keeps the mode's own default (reviewer under `auto` and `supervised`).
+    /// Who settles held Auto approvals: `on` consults the configured
+    /// reviewer, `off` sends holds to a human. Missing uses the reviewer.
+    /// Ask always asks the human regardless of this setting.
     #[serde(default, skip_serializing_if = "Field::is_missing")]
     approval_delegate: Field<ApprovalDelegateSetting>,
     /// Seconds a held call may wait for a client before the server denies it.

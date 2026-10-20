@@ -39,20 +39,67 @@ impl ToolGate for SessionToolGate {
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
         Box::pin(async move {
-            let (mode, grants, session_delegate) = match inner
+            let policy = match inner
                 .store
-                .approval_policy(claimed.identity.session_id)
+                .tool_approval_policy(claimed.identity.session_id)
                 .await
             {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
+            let ToolApprovalPolicy {
+                mode,
+                grants,
+                delegate: session_delegate,
+                ancestors,
+                supervised,
+            } = policy.clone();
             // The session's own choice (`set_approval_delegate`) wins over the
             // configured one for the rest of the session; read here, at the
             // hold, so it applies to the next held call without a restart.
             let delegate = session_delegate.unwrap_or(delegate);
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
-            match approval::evaluate(mode, &call.name, &class, &grants) {
+            let mut mode = mode;
+            for (parent_mode, parent_grants) in ancestors {
+                let message = match approval::evaluate(parent_mode, &call.name, &class, &parent_grants) {
+                    approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
+                    approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask => {
+                        // Ask applies to each child action too: only the human
+                        // may approve it, even if the child normally has a reviewer.
+                        if mode != ApprovalMode::ReadOnly {
+                            mode = ApprovalMode::Ask;
+                        }
+                        continue;
+                    }
+                    approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned(),
+                    approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
+                    approval::PolicyDecision::Forbidden { rules } => approval::forbidden_result(&rules),
+                };
+                return match inner
+                    .store
+                    .deny_tool_call(&claimed, call.id, message.clone())
+                    .await
+                {
+                    Ok(_) => GateDecision::Deny { message },
+                    Err(error) => approval_persistence_failure(error),
+                };
+            }
+            let decision = approval::evaluate(mode, &call.name, &class, &grants);
+            // Write children retain mandatory supervision independently of the
+            // user's approval mode. The parent's policy was checked above.
+            let decision = if supervised
+                && matches!(decision, approval::PolicyDecision::Execute)
+                && !matches!(
+                    class,
+                    approval::ToolClass::ReadOnly
+                        | approval::ToolClass::Interactive { .. }
+                        | approval::ToolClass::Network { host: None, .. }
+                ) {
+                approval::PolicyDecision::RequireApproval
+            } else {
+                decision
+            };
+            match decision {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
                 approval::PolicyDecision::Deny { reason } => {
                     let message = approval::deny_result(&reason);
@@ -210,12 +257,12 @@ impl ToolGate for SessionToolGate {
                     // Who the held call goes to first. The mode is the
                     // ceiling; the delegate setting chooses who decides inside
                     // it: by default the reviewer under Auto (the held bucket
-                    // is "dangerous-shaped but possibly fine") and Supervised
-                    // (every action of a write child), the human under Ask.
-                    // `On` extends the reviewer to Ask; `Off` withdraws it.
+                    // is "dangerous-shaped but possibly fine") and for write
+                    // children. Ask always requires the human;
+                    // `Off` withdraws the reviewer from Auto holds.
                     // ReadOnly and Full never reach here. Where the reviewer
                     // is the delegate its verdict settles the call: Approve
-                    // executes, Deny is final under Auto and Supervised, and
+                    // executes, Deny is final under Auto, and
                     // Escalate (or a reviewer failure, which the reviewer must
                     // report as Escalate) reaches the human.
                     let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
@@ -300,13 +347,13 @@ impl ToolGate for SessionToolGate {
                                                     &claimed,
                                                     call.id,
                                                     delegate_grant.take(),
-                                                    DelegateIdentity::Reviewer,
+                                                    policy.clone(),
                                                 )
                                                 .await
                                             {
                                                 Ok(Some(_)) => {
                                                     inner.remove_approval(call.id);
-                                                    return reviewed(GateDecision::Execute, review_spend);
+                                                    return conclude(&inner, &claimed, call.id, false, review_spend).await;
                                                 }
                                                 // A client resolution won the
                                                 // race or the write failed:
@@ -315,20 +362,13 @@ impl ToolGate for SessionToolGate {
                                                 Ok(None) | Err(_) => break false,
                                             }
                                         }
-                                        // Final under Auto and Supervised: the
-                                        // reviewer is the configured delegate
-                                        // for the calls those modes hold. Under
-                                        // Ask the operator asked to decide
-                                        // everything, so a denial is advice: the
-                                        // human is still asked and their wait
-                                        // starts here. The client-wins race is
-                                        // unchanged.
-                                        ReviewDecision::Deny { reason }
-                                            if approval::ApprovalDelegate::deny_is_final(mode) =>
+                                        // A reviewer denial is final. Ask never
+                                        // reaches the reviewer.
+                                        ReviewDecision::Deny { reason } =>
                                         {
                                             let message = format!(
                                                 "{} {}",
-                                                approval::reviewer_denied_result(mode),
+                                                approval::reviewer_denied_result(),
                                                 truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
                                             );
                                             match inner
@@ -366,29 +406,6 @@ impl ToolGate for SessionToolGate {
                                                     call.id,
                                                     Some(DelegateIdentity::Reviewer),
                                                     truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
-                                                )
-                                                .await
-                                            {
-                                                inner.remove_approval(call.id);
-                                                return reviewed(
-                                                    approval_persistence_failure(error),
-                                                    review_spend,
-                                                );
-                                            }
-                                            deadline = human_deadline(inner.approval_timeout).into_iter().chain(goal_deadline).min();
-                                        }
-                                        ReviewDecision::Deny { reason } => {
-                                            if let Err(error) = inner
-                                                .store
-                                                .escalate_tool_approval(
-                                                    &claimed,
-                                                    call.id,
-                                                    Some(DelegateIdentity::Reviewer),
-                                                    format!(
-                                                        "{} {}",
-                                                        approval::ADVISORY_DENIAL_PREFIX,
-                                                        truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
-                                                    ),
                                                 )
                                                 .await
                                             {

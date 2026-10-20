@@ -60,8 +60,18 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 36
+PROTOCOL_VERSION = 37
 ```
+
+Descriptor 16 adds sorted workspace-relative configured pack roots to the
+compiled authority identity; descriptor 15 and earlier retain their original
+encoding and digest domains.
+
+Version 37 exposes four approval modes: `read_only`, `ask`, `auto`, and
+`full`. Ask requires fresh human approval for every non-read action;
+reviewers and reusable grants cannot bypass it. The former `strict` and
+`supervised` mode values are unsupported. Write-child review is internal
+runtime policy, independent of the user mode.
 
 Version 36 removes Jev routing and checkpoints. The `routing_started`,
 `routing_completed`, `checkpoint_started` and `checkpoint_reviewed` events are
@@ -128,7 +138,7 @@ waiting or answering without loading its body or having seen the request
 event.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v36/`; the `v17`–`v35` directories are
+`crates/qq-protocol/tests/fixtures/v37/`; the `v17`–`v36` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -1106,10 +1116,9 @@ Resolution values: `approved_once`, `approved_for_session`,
 call is `completed` and its `result` is the rendered questions and answers
 (or the decline text). The reviewer resolutions are written by the configured
 delegate without a human — `reviewer_model` (ADR-0041) — for the calls `auto` holds (dangerous-shaped
-shell, ungranted hosts), for every held call of a `supervised` child, and
-under `ask` when `approval_delegate` is `on`: `approved_by_reviewer` executes
-the call; `denied_by_reviewer` is final under `auto` and `supervised` and the
-model receives the reviewer's reason as a tool error. The
+shell, ungranted hosts) and for every non-read action of a write child.
+`approved_by_reviewer` executes the call; `denied_by_reviewer` is final and
+the model receives the reason as a tool error. Ask never delegates. The
 `tool_approval_resolved` *event* (not the command outcome) carries
 `delegate: "reviewer"` beside these two resolutions (protocol 28; a recorded
 `"jev"` still decodes but is never written) and
@@ -1121,11 +1130,12 @@ wins. It carries `delegated: true` when the reviewer is consulted (protocol
 32): a client then knows the human is asked only after
 `tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
 
-Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
-`full`. `supervised` is never advertised for root sessions and cannot be set by
-`set_approval_mode`: it is the mode a `spawn_agent` call with
-`authority: "write"` gives its child, and a spawned child's mode may only be
-lowered by a client, never raised (`child_authority_escalation`).
+Approval modes are `read_only`, `ask`, `auto` (default), and `full`.
+Ask requires fresh explicit human approval for each non-read action,
+ignoring stored grants and reviewer delegation. Session/workspace approval
+choices in Ask resolve once without persisting grants. Write children use
+Auto with mandatory internal supervision; a client may only lower a child's
+mode, never raise it (`child_authority_escalation`).
 
 `approve_for_workspace` resolves the approval exactly like
 `approve_for_session` — the session grant is recorded in the same
@@ -1168,7 +1178,7 @@ Modes:
 | Mode | Behavior |
 | --- | --- |
 | `read_only` | Deny mutating, shell, and MCP tools without prompting |
-| `ask` | Prompt for mutating/shell/MCP unless granted |
+| `ask` | Fresh human approval for every non-read action, ignoring grants and reviewers |
 | `auto` | Default. Edits and safe shell run without prompting; only dangerous shell (deletion, privilege escalation, force-push, piped installers) is held |
 | `full` | Every tool call executes without prompting |
 
@@ -1200,9 +1210,9 @@ Outcome:
 ```
 
 Protocol 28. Overrides, for the rest of this session, who settles the calls
-the mode holds: `by_mode` (the reviewer under `auto` and `supervised`, the
-human under `ask`), `on` (the reviewer under `ask` too), or `off` (every held
-call waits for a human — the "stop delegating" switch). Omitting `delegate`
+the mode holds: `by_mode` or `on` (the reviewer under `auto`), or `off` (every held
+call waits for a human — the "stop delegating" switch). Ask always requires
+a human and never consults the reviewer. Omitting `delegate`
 clears the override so the workspace's configured `approval_delegate` applies
 again. The mode stays the ceiling, so there is no authority check: no value
 lets the model do more than the mode allows. Like the mode, the override is

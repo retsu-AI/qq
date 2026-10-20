@@ -1631,7 +1631,14 @@ impl RuntimeFactory {
                 .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
-                .with_profile_id(profile_id.clone());
+                .with_profile_id(profile_id.clone())
+                .with_protected_pack_roots(
+                    snapshot
+                        .packs()
+                        .values()
+                        .map(|pack| pack.directory().to_owned())
+                        .collect(),
+                );
         if let Some(effort) = snapshot.reasoning_effort() {
             profile = profile.with_reasoning_effort(effort);
         }
@@ -2737,8 +2744,7 @@ the workspace owns, reinstalling dependencies, editing source files); escalate a
 externally visible, credential-touching, system-level, or ambiguous (force-pushing shared \
 branches, sudo, piped installers, writes outside the workspace). (2) necessity — when a task \
 brief is given, the action must be plausibly necessary for that task; deny actions clearly \
-outside it. Under auto and supervised your deny is final: the agent receives it as a tool \
-error and no human is asked. Under ask your deny escalates to the human with your reason. \
+outside it. Your deny is final: the agent receives it as a tool error. \
 Escalate when you are unsure; a human decides escalations. \
 Reply with exactly one JSON object on one line and nothing else: \
 {\"verdict\":\"approve\"} or {\"verdict\":\"escalate\",\"reason\":\"...\"} \
@@ -2758,17 +2764,10 @@ async fn collect_reviewer_verdict(
         request.tool_name,
         request.workspace,
         match request.mode {
-            qq_protocol::ApprovalMode::Supervised => {
-                "supervised sub-agent: every non-read action is held for you"
-            }
-            qq_protocol::ApprovalMode::Auto => {
-                "auto root session: only dangerous-shaped shell and ungranted hosts are held for you"
-            }
-            qq_protocol::ApprovalMode::Ask => {
-                "ask root session: every ungranted mutation is held; the operator opted you in, \
-                 and your deny is advice here (the human is still asked)"
-            }
-            qq_protocol::ApprovalMode::ReadOnly | qq_protocol::ApprovalMode::Full => "root session",
+            qq_protocol::ApprovalMode::Auto => "auto: policy-held actions require review",
+            qq_protocol::ApprovalMode::Ask => "ask: only the human can approve this action",
+            qq_protocol::ApprovalMode::ReadOnly => "read-only session",
+            qq_protocol::ApprovalMode::Full => "full autonomy session",
         }
     );
     match request.origin {
@@ -8101,6 +8100,7 @@ mod tests {
                 version: 1,
                 model: "custom/test-model",
                 max_output_tokens: 64,
+                packs: { "review-kit": Pack(path: "../vendor/review-kit") },
                 providers: {
                     "custom": Custom(
                         connection: (
@@ -8120,7 +8120,7 @@ mod tests {
         .unwrap();
         for (path, content) in [
             (
-                "work/.qq/packs/review-kit/pack.ron",
+                "work/vendor/review-kit/pack.ron",
                 r#"(
                     schema: 1,
                     id: "review-kit",
@@ -8136,9 +8136,9 @@ mod tests {
                     },
                 )"#,
             ),
-            ("work/.qq/packs/review-kit/persona.md", "Persona v1.\n"),
+            ("work/vendor/review-kit/persona.md", "Persona v1.\n"),
             (
-                "work/.qq/packs/review-kit/skills/audit/SKILL.md",
+                "work/vendor/review-kit/skills/audit/SKILL.md",
                 "---\ndescription: Audit it\n---\nbody\n",
             ),
         ] {
@@ -8180,6 +8180,11 @@ mod tests {
         let default_plan = factory.plan_for(&request).unwrap();
         assert_eq!(default_plan.descriptor().mcp_servers.len(), 2);
         assert!(default_plan.descriptor().pack.is_none());
+        assert_eq!(
+            default_plan.descriptor().protected_pack_roots,
+            ["vendor/review-kit"]
+        );
+        assert_eq!(descriptor.protected_pack_roots, ["vendor/review-kit"]);
         assert!(default_plan.catalog().names().any(|n| n == "shell"));
 
         // Warm lookups do no discovery and hit the cache.
@@ -8189,7 +8194,7 @@ mod tests {
         );
         // Editing the persona recompiles; the old plan stays valid for holders.
         fs::write(
-            fixture.path("work/.qq/packs/review-kit/persona.md"),
+            fixture.path("work/vendor/review-kit/persona.md"),
             "Persona v2.\n",
         )
         .unwrap();
@@ -8208,7 +8213,7 @@ mod tests {
 
         // A pack that needs a newer protocol fails as configuration.
         fs::write(
-            fixture.path("work/.qq/packs/review-kit/pack.ron"),
+            fixture.path("work/vendor/review-kit/pack.ron"),
             r#"(schema: 1, id: "review-kit", version: "9", requires: (protocol: 999),
                 profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
         )
@@ -8363,7 +8368,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v15\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v16\0{"));
     }
 
     #[test]

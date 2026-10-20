@@ -273,7 +273,7 @@ pub mod bench_support {
             .execute(
                 "UPDATE runs SET plan_descriptor_json=?1,plan_identity_json=?2",
                 params![
-                    r#"{"version":15,"tool_output_projection":"strict_reserved_v1"}"#,
+                    serde_json::json!({"version": crate::plan::DESCRIPTOR_VERSION, "tool_output_projection": "strict_reserved_v1"}).to_string(),
                     serde_json::to_string(&identity).expect("bench plan identity")
                 ],
             )

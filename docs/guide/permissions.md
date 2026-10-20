@@ -83,6 +83,25 @@ sources` shows `pending trust:` lines for files awaiting your decision.
 
 Nothing in your global configuration needs trust: you wrote it.
 
+## Protected task files
+
+Built-in `write_file` and `edit_file` refuse project configuration
+(`.qq/config.ron`, `.qq/config.d/`, `.qq/packs/`, and `qq.ron`) and Git
+trust files under `.git`, including nested repositories and symlink aliases.
+Resolved configured pack directories inside the workspace (for example,
+`vendor/reviewer`) and their aliases are protected too, even when that pack
+is not selected for the current run. Unconfigured vendor directories remain
+ordinary task files.
+This applies in every approval mode; approving a file tool cannot grant it
+permission to rewrite its own policy. Ordinary task files, `.github/`, and
+`.qq/skills/` remain writable when the mode permits writes. A batch rejected
+during planning changes no files; apply failures report any completed files.
+Atomic writes pin the resolved parent directory and refuse a changed directory
+namespace at apply-time validation. They do not follow replacement symlinks.
+These checks do not lock out outside processes: another process can still
+rename a directory after the final validation. They provide no OS isolation
+for concurrent namespace changes, shell commands, or trusted MCP servers.
+
 ## Approval modes
 
 Every session runs under one mode. Set the default in a profile
@@ -91,18 +110,20 @@ Every session runs under one mode. Set the default in a profile
 
 | Mode | Reads | Edits and writes in the workspace | Shell | MCP tools | `fetch` |
 | --- | --- | --- | --- | --- | --- |
-| `read_only` | run | denied | denied | read-only allowlisted only | denied |
-| `ask` | run | ask | ask | ask | ask |
-| `auto` **(TUI default)** | run | run | classifier `allow` or a grant → run; `prompt` → ask; `forbidden` → refused | run | granted hosts run; others ask |
+| `read_only` | run | denied | denied | denied | denied |
+| `ask` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
+| `auto` **(default)** | run | run | classifier `allow` or a grant → run; `prompt` → ask; `forbidden` → refused | run | granted hosts run; others ask |
 | `full` | run | run | run except `forbidden` | run | run |
-| `supervised` | run | reviewer model decides | reviewer decides | reviewer decides | reviewer decides |
 
-`supervised` is used for sub-agents that may write; you cannot pick it for
-your own session. `full` is authority over the workspace, not the machine:
+Write sub-agents require internal review for each non-read action. `full`
+is authority over the workspace, not the machine:
 `forbidden` shell shapes are refused under every mode.
 
-`qq run` defaults to `read_only` because nobody is there to answer. Pass
-`--approval auto` for a run that may edit.
+`auto` is the default for the TUI and `qq run`. In `ask`, each non-read
+action needs explicit human approval even when a stored grant matches; no
+reviewer model can approve it. Headless `qq run --approval ask` denies
+those calls immediately because no human is present. Approvals in Ask
+mode apply once and never create session or workspace grants.
 
 ## Who decides a held call
 
@@ -112,19 +133,16 @@ is `reviewer_model`; when it abstains or is unavailable, you are asked.
 
 | Profile | Set | What happens |
 | --- | --- | --- |
-| default | nothing | `auto` and `supervised` holds go to the reviewer first; `ask` holds come to you |
-| hands-off | `approval_delegate: on` | `ask` holds go to the reviewer too. Its approve runs the call; its deny still comes to you, with the reason, and your wait starts then |
-| strict | `approval_delegate: off` | every held call comes to you, even under `auto`, even with a reviewer configured |
+| default | nothing | `auto` holds go to the reviewer first; `ask` always comes to you |
+| reviewer enabled | `approval_delegate: on` | reviewer decides `auto` holds; it cannot approve an `ask` call |
+| human-only holds | `approval_delegate: off` | every held call comes to you |
 
-Under `auto` and `supervised` a reviewer deny is final: the model gets the
-reason as a tool error and you are not asked. Under `ask` you asked to decide
-everything, so a reviewer deny is advice and the prompt still appears. A
-reviewer `escalate`, timeout, or outage always comes to you. `forbidden`
-shell shapes, private or denied hosts, and `ask_user` questions never go to
-the reviewer.
+A reviewer denial is final: the model gets the reason as a tool error.
+An escalation, timeout, or outage asks the human. `ask` never consults a
+reviewer. Questions and policy-forbidden actions never go to the reviewer.
 
 Set it at the top level, in a profile
-(`Profile(approval_mode: ask, approval_delegate: on)`), or for one process
+(`Profile(approval_mode: auto, approval_delegate: on)`), or for one process
 with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
 any other sensitive key.
 
@@ -264,3 +282,17 @@ The full model, the effect classes, and every shell rule are in
 Classification. The decisions behind them: ADR-0007 (effect-classified
 approval), ADR-0020 (`forbidden` above every mode), ADR-0021 (`fetch` and
 `ask_user` classes).
+
+A write child's reviewer cannot grant an action that its parent policy denies
+or holds without a grant. Such a call returns `parent_permission_required`;
+the operator must grant the necessary parent scope explicitly. An Ask
+parent instead requires human approval for each child action, without a
+reviewer or reusable grants. Existing supervised write delegation still
+requires its configured reviewer; this change does not enable unsandboxed
+children to acquire broader authority.
+
+Pending approvals do not preserve revoked authority. Tightening task or parent
+permissions while a reviewer is deciding denies that stale verdict without
+recording a grant. Switching a task or its parent to read-only also prevents
+a late human approval from executing the held mutation. Request the action
+again under the current policy.

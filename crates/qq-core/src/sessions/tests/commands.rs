@@ -298,9 +298,9 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     // the hold point: steering queued there must enter the request for
     // turn two, after turn one's tool result.
     let mut harness = approval_harness(
-        ApprovalMode::Ask,
-        "shell",
-        r#"{"command":"true"}"#,
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
         2,
         DEFAULT_APPROVAL_TIMEOUT,
     )
@@ -325,7 +325,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
         tool_call.id,
         ApprovalDecision::ApproveForSession {
             grant: ApprovalGrant::ShellPrefix {
-                prefix: "true".to_owned(),
+                prefix: "git push".to_owned(),
             },
         },
     )
@@ -457,9 +457,9 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     // attachments, and re-rendered from the store afterwards — so the model
     // sees the bytes as they were, even after the file changes or vanishes.
     let mut harness = approval_harness(
-        ApprovalMode::Ask,
-        "shell",
-        r#"{"command":"true"}"#,
+        ApprovalMode::Auto,
+        "__test_shell",
+        r#"{"command":"git push origin main"}"#,
         2,
         DEFAULT_APPROVAL_TIMEOUT,
     )
@@ -495,7 +495,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
         tool_call.id,
         ApprovalDecision::ApproveForSession {
             grant: ApprovalGrant::ShellPrefix {
-                prefix: "true".to_owned(),
+                prefix: "git push".to_owned(),
             },
         },
     )
@@ -2581,6 +2581,24 @@ async fn set_session_effort_pins_and_clears_on_the_published_summary() {
 #[tokio::test]
 async fn delete_session_is_refused_while_running_then_cascades_completely() {
     let mut harness = session_management_harness().await;
+    // Ask deliberately ignores existing grants. Seed one so deletion must
+    // actually cascade a grant row while the mutation still waits for us.
+    let session_id = harness.session_id;
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let inserted = connection.execute(
+                "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
+             VALUES (?1, 'tool', '__test_mutate', 0, 'human')",
+                [session_id.to_string()],
+            )?;
+            assert_eq!(inserted, 1);
+            Ok(())
+        })
+        .await
+        .unwrap();
     let queued = harness
         .runtime
         .command(
@@ -2615,20 +2633,28 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
         SessionRuntimeError::SessionActive
     );
 
-    // Approving for the session also writes a grant row to cascade over.
+    // Approve this call once; the preexisting grant remains to cascade.
     respond_approval(
         &harness.runtime,
         run_id,
         tool_call.id,
-        ApprovalDecision::ApproveForSession {
-            grant: ApprovalGrant::Tool {
-                name: "__test_mutate".to_owned(),
-            },
-        },
+        ApprovalDecision::ApproveOnce,
     )
     .await
     .unwrap();
     collect_through_finished(&mut harness.events).await;
+    let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
+    let grant_count: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_grants WHERE session_id = ?1",
+            [harness.session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        grant_count, 1,
+        "the deletion must cascade an existing grant"
+    );
 
     let command_id = CommandId::generate().unwrap();
     let command = SessionCommand::DeleteSession {
@@ -2651,7 +2677,6 @@ async fn delete_session_is_refused_while_running_then_cascades_completely() {
 
     // Every session-owned row is gone in one transaction; the event log
     // keeps its rows so replays stay gapless.
-    let connection = Connection::open(harness.directory.path().join("sessions.sqlite3")).unwrap();
     for table in [
         "sessions",
         "runs",

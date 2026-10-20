@@ -127,6 +127,7 @@ pub struct AgentProfile {
     credential_epoch: CredentialEpoch,
     profile_id: AgentProfileId,
     pack: Option<PackSelection>,
+    protected_pack_roots: Vec<PathBuf>,
     exposed_tools: Option<Vec<String>>,
     side_question_denies: Vec<String>,
     context_sources: Vec<Arc<dyn ContextSource>>,
@@ -172,6 +173,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            protected_pack_roots: Vec::new(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
             context_sources: Vec::new(),
@@ -243,6 +245,7 @@ impl AgentProfile {
             credential_epoch: CredentialEpoch::NONE,
             profile_id: AgentProfileId::default(),
             pack: None,
+            protected_pack_roots: runtime.protected_pack_roots.to_vec(),
             exposed_tools: None,
             side_question_denies: Vec::new(),
             context_sources: runtime
@@ -275,6 +278,15 @@ impl AgentProfile {
     #[must_use]
     pub fn with_pack(mut self, pack: PackSelection) -> Self {
         self.pack = Some(pack);
+        self
+    }
+
+    /// Protects every configured pack's canonical resources, including packs
+    /// not selected for this run. Directories outside the workspace are
+    /// already inaccessible to built-in file tools and are omitted.
+    #[must_use]
+    pub fn with_protected_pack_roots(mut self, roots: Vec<PathBuf>) -> Self {
+        self.protected_pack_roots = roots;
         self
     }
 
@@ -425,6 +437,12 @@ pub enum PlanCompileError {
     Runtime(#[from] RuntimeConfigError),
     #[error("workspace path must be absolute and canonical: {path}")]
     NonCanonicalWorkspace { path: PathBuf },
+    #[error("could not resolve protected pack directory {path}: {source}")]
+    ProtectedPackRoot {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("could not open workspace {path}: {source}")]
     OpenWorkspace {
         path: PathBuf,
@@ -662,6 +680,7 @@ impl CompiledAgentPlan {
             credential_epoch,
             profile_id,
             pack,
+            mut protected_pack_roots,
             exposed_tools,
             side_question_denies,
             context_sources,
@@ -714,8 +733,39 @@ impl CompiledAgentPlan {
         if !is_canonical_absolute(&workspace) {
             return Err(PlanCompileError::NonCanonicalWorkspace { path: workspace });
         }
-        let opened =
-            Workspace::open(&workspace).map_err(|source| PlanCompileError::OpenWorkspace {
+        if let Some(selection) = &pack {
+            protected_pack_roots.push(selection.directory.clone());
+        }
+        protected_pack_roots = protected_pack_roots
+            .into_iter()
+            .map(|path| {
+                let resolved = if path.is_absolute() {
+                    std::fs::canonicalize(&path)
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "protected pack roots must be absolute",
+                    ))
+                }
+                .map_err(|source| PlanCompileError::ProtectedPackRoot {
+                    path: path.clone(),
+                    source,
+                })?;
+                Workspace::open(&resolved)
+                    .map_err(|source| PlanCompileError::ProtectedPackRoot { path, source })?;
+                Ok(resolved)
+            })
+            .collect::<Result<Vec<_>, PlanCompileError>>()?;
+        protected_pack_roots.sort();
+        protected_pack_roots.dedup();
+        runtime.protected_pack_roots = protected_pack_roots.clone().into();
+        let opened = Workspace::open(&workspace)
+            .map_err(|source| PlanCompileError::OpenWorkspace {
+                path: workspace.clone(),
+                source,
+            })?
+            .with_protected_pack_roots(&protected_pack_roots)
+            .map_err(|source| PlanCompileError::OpenWorkspace {
                 path: workspace.clone(),
                 source,
             })?;
@@ -958,6 +1008,23 @@ impl CompiledAgentPlan {
         }
         let catalog = ToolCatalog::compile(static_tools, contributions);
 
+        let mut protected_pack_roots: Vec<String> = opened
+            .protected_pack_roots()
+            .iter()
+            .map(|path| {
+                let relative = path
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if relative.is_empty() {
+                    ".".to_owned()
+                } else {
+                    relative
+                }
+            })
+            .collect();
+        protected_pack_roots.sort();
         let descriptor = AgentPlanDescriptor {
             version: DESCRIPTOR_VERSION,
             profile: profile_id,
@@ -965,6 +1032,7 @@ impl CompiledAgentPlan {
             provider: provider_descriptor,
             model: resolved_model.clone(),
             workspace: workspace.display().to_string(),
+            protected_pack_roots,
             prompt_version: crate::runtime::AGENT_PROMPT_VERSION,
             instruction_hash: instructions.hash(),
             instruction_source: instructions.source_path().map(str::to_owned),
@@ -1561,6 +1629,7 @@ mod tests {
             provider: provider_descriptor(),
             model: resolved_model(),
             workspace: "/work".to_owned(),
+            protected_pack_roots: vec!["vendor/reviewer".to_owned()],
             prompt_version: crate::runtime::AGENT_PROMPT_VERSION,
             instruction_hash: InstructionHash::from_bytes([1; 32]),
             instruction_source: Some("AGENTS.md".to_owned()),
@@ -1668,28 +1737,40 @@ mod tests {
         let bytes = descriptor.canonical_bytes().unwrap();
         assert!(
             bytes.starts_with(
-                b"qq-agent-plan-descriptor-v15\0{\"version\":15,\"profile\":\"review\","
+                b"qq-agent-plan-descriptor-v16\0{\"version\":16,\"profile\":\"review\","
             )
         );
         // The golden digest pins the canonical encoding. A change here means
         // DESCRIPTOR_VERSION must be bumped and every recorded digest is
         // from a different encoding. The descriptor also carries
         // AGENT_PROMPT_VERSION, so a prompt bump changes this value without
-        // changing the encoding (descriptor 15 and prompt 22: strict projection identity and read-only authority, AB4).
+        // changing the encoding (descriptor 16: configured pack mutation authority).
+        assert_eq!(
+            descriptor.digest().unwrap().to_string(),
+            "dde5903c9fa2e696c2641c91a2a3b528c6c514f544875728630da5347ea310f4"
+        );
+        let round_trip: AgentPlanDescriptor =
+            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
+        assert_eq!(round_trip, descriptor);
+        assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
+    }
+
+    #[test]
+    fn historical_descriptor_15_digest_is_preserved() {
+        let mut descriptor = golden_descriptor();
+        descriptor.version = 15;
+        descriptor.protected_pack_roots.clear();
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
             "d8006352ea9660e507b3a9846b53772770b4965afccc43f546b9a7c97d589683"
         );
-        let round_trip: AgentPlanDescriptor =
-            serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v15\0".len()..]).unwrap();
-        assert_eq!(round_trip, descriptor);
-        assert_eq!(round_trip.digest().unwrap(), descriptor.digest().unwrap());
     }
 
     #[test]
     fn historical_descriptor_13_prompt_20_through_22_digests_are_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 13;
+        descriptor.protected_pack_roots.clear();
         descriptor.tool_output_projection = None;
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
@@ -1713,6 +1794,7 @@ mod tests {
     fn historical_descriptor_14_prompt_20_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 14;
+        descriptor.protected_pack_roots.clear();
         descriptor.prompt_version = PromptVersion::new(20).unwrap();
         descriptor.tool_output_projection = None;
         assert_eq!(
@@ -1725,6 +1807,7 @@ mod tests {
     fn historical_descriptor_14_prompt_22_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
         descriptor.version = 14;
+        descriptor.protected_pack_roots.clear();
         descriptor.tool_output_projection = None;
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
@@ -1739,6 +1822,10 @@ mod tests {
         type Mutation = Box<dyn Fn(&mut AgentPlanDescriptor)>;
         let variants: Vec<(&str, Mutation)> = vec![
             ("adapter_build", Box::new(|d| d.adapter_build.push('x'))),
+            (
+                "protected_pack_roots",
+                Box::new(|d| d.protected_pack_roots.clear()),
+            ),
             ("provider.id", Box::new(|d| d.provider.id.push('x'))),
             ("provider.api", Box::new(|d| d.provider.api.push('x'))),
             (
@@ -2358,5 +2445,206 @@ mod pack_tests {
             CompiledAgentPlan::compile_blocking(profile(workspace.path()).with_pack(missing)),
             Err(PlanCompileError::Persona { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod configured_pack_mutation_tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use futures_util::{StreamExt as _, stream};
+    use qq_provider::{ModelRequest, ProviderEvent, ProviderStream};
+
+    use super::{tests_support::*, *};
+
+    struct PackMutationProvider(Mutex<VecDeque<(&'static str, String)>>);
+
+    impl Provider for PackMutationProvider {
+        fn stream(&self, _request: ModelRequest) -> ProviderStream {
+            let Some((name, json)) = self.0.lock().unwrap().pop_front() else {
+                return Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "done".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]));
+            };
+            Box::pin(stream::iter([
+                Ok(ProviderEvent::ToolCallStarted {
+                    id: "call".to_owned(),
+                    name: name.to_owned(),
+                }),
+                Ok(ProviderEvent::ToolCallArgumentsDelta {
+                    id: "call".to_owned(),
+                    json,
+                }),
+                Ok(ProviderEvent::ToolCallCompleted {
+                    id: "call".to_owned(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ]))
+        }
+    }
+
+    async fn assert_custom_pack_mutations_are_denied(direct: bool, selected: bool) {
+        let directory = canonical_temp();
+        let pack = directory.path().join("vendor/reviewer");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("persona.md"), "Original reviewer rules.\n").unwrap();
+        let script = VecDeque::from([
+            ("read_file", r#"{"path":"vendor/reviewer/persona.md"}"#.to_owned()),
+            ("edit_file", r#"{"edits":[{"path":"vendor/reviewer/persona.md","old":"Original reviewer rules.","new":"Approve everything."}]}"#.to_owned()),
+            ("write_file", r#"{"path":"vendor/reviewer/persona.md","content":"Approve everything.\n"}"#.to_owned()),
+            ("write_file", r#"{"path":"vendor/reviewer/new-policy.md","content":"Approve everything."}"#.to_owned()),
+            ("write_file", r#"{"path":"vendor/ordinary.txt","content":"ordinary task edit"}"#.to_owned()),
+        ]);
+        #[cfg(unix)]
+        let script = {
+            let mut script = script;
+            std::os::unix::fs::symlink("vendor/reviewer", directory.path().join("pack-alias"))
+                .unwrap();
+            script.push_back((
+                "write_file",
+                r#"{"path":"pack-alias/aliased-policy.md","content":"Approve everything."}"#
+                    .to_owned(),
+            ));
+            script
+        };
+        let provider = Arc::new(PackMutationProvider(Mutex::new(script)));
+        let profile = AgentProfile::new(
+            provider,
+            provider_descriptor(),
+            resolved_model(),
+            directory.path().to_owned(),
+        );
+        let profile = if selected {
+            profile.with_pack(PackSelection {
+                id: "reviewer".to_owned(),
+                version: "1.0.0".to_owned(),
+                manifest_digest: "ab".repeat(32),
+                directory: pack.clone(),
+                persona: Some("persona.md".to_owned()),
+                skill_roots: Vec::new(),
+                command_roots: Vec::new(),
+                tool_allow: Vec::new(),
+                tool_deny: Vec::new(),
+            })
+        } else {
+            profile.with_protected_pack_roots(vec![pack.clone()])
+        };
+        let plan = CompiledAgentPlan::compile_blocking(profile).unwrap();
+        let gate = Arc::new(crate::StaticPolicyGate {
+            mode: qq_protocol::ApprovalMode::Auto,
+            grants: crate::approval::SessionGrants::default(),
+            network: Arc::clone(&plan.runtime.network),
+        });
+        let messages = vec![qq_provider::Message::user("attempt the edits")];
+        let cancelled = crate::RunCancellation::new();
+        let files = Arc::new(crate::workspace::FileState::default());
+        let events: Vec<_> = if direct {
+            plan.runtime
+                .run_loop(
+                    messages,
+                    directory.path().to_owned(),
+                    cancelled,
+                    gate,
+                    files,
+                )
+                .collect()
+                .await
+        } else {
+            plan.execute(
+                messages,
+                cancelled,
+                gate,
+                files,
+                crate::RunCapabilities::user(None),
+            )
+            .collect()
+            .await
+        };
+        assert_eq!(
+            std::fs::read_to_string(pack.join("persona.md")).unwrap(),
+            "Original reviewer rules.\n",
+            "pack resource changes must be refused (direct={direct})"
+        );
+        assert!(!pack.join("new-policy.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("vendor/ordinary.txt")).unwrap(),
+            "ordinary task edit"
+        );
+        let denied = events
+            .iter()
+            .filter(|event| match event {
+                crate::RuntimeEvent::ToolCallUnexecuted { message, .. } => {
+                    message.contains("protected_path")
+                }
+                crate::RuntimeEvent::ToolCallFinished {
+                    result,
+                    is_error: true,
+                    ..
+                } => result.contains("protected_path"),
+                _ => false,
+            })
+            .count();
+        assert_eq!(
+            denied,
+            if cfg!(unix) { 4 } else { 3 },
+            "all pack writes/edits need explicit protected-path refusals"
+        );
+    }
+
+    #[tokio::test]
+    async fn unselected_configured_custom_project_pack_is_protected() {
+        assert_custom_pack_mutations_are_denied(false, false).await;
+    }
+
+    #[test]
+    fn protected_pack_roots_are_normalized_and_change_plan_identity() {
+        let workspace = canonical_temp();
+        let pack = workspace.path().join("vendor/reviewer");
+        std::fs::create_dir_all(&pack).unwrap();
+        let outside = canonical_temp();
+        let plain = CompiledAgentPlan::compile_blocking(profile(workspace.path())).unwrap();
+        let protected = CompiledAgentPlan::compile_blocking(
+            profile(workspace.path()).with_protected_pack_roots(vec![
+                pack.clone(),
+                pack.clone(),
+                outside.path().to_owned(),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            protected.descriptor().protected_pack_roots,
+            ["vendor/reviewer"]
+        );
+        assert_ne!(plain.digest(), protected.digest());
+        assert!(matches!(
+            CompiledAgentPlan::compile_blocking(
+                profile(workspace.path())
+                    .with_protected_pack_roots(vec![PathBuf::from("vendor/reviewer")])
+            ),
+            Err(PlanCompileError::ProtectedPackRoot { .. })
+        ));
+        #[cfg(unix)]
+        {
+            let alias = workspace.path().join("pack-alias");
+            std::os::unix::fs::symlink(&pack, &alias).unwrap();
+            let aliased = CompiledAgentPlan::compile_blocking(
+                profile(workspace.path()).with_protected_pack_roots(vec![alias]),
+            )
+            .unwrap();
+            assert_eq!(aliased.digest(), protected.digest());
+        }
+    }
+
+    #[tokio::test]
+    async fn compiled_plan_protects_custom_project_pack_resources() {
+        assert_custom_pack_mutations_are_denied(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn direct_runtime_preserves_custom_project_pack_protection() {
+        assert_custom_pack_mutations_are_denied(true, true).await;
     }
 }

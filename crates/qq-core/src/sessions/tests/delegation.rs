@@ -1985,6 +1985,106 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
 }
 
 #[tokio::test]
+async fn an_ask_parent_requires_human_approval_for_each_child_write() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "write_file",
+            r#"{"path":"child.txt","content":"approved"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let (mut harness, _) = write_child_harness(
+        child,
+        vec![(
+            "spawn_agent",
+            r#"{"task":"write child.txt","model":"test/child","authority":"write"}"#.to_owned(),
+        )],
+        Some(reviewer),
+        ApprovalMode::Ask,
+    )
+    .await;
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+    let (_, spawn) = collect_until_approval_requested(&mut harness.events).await;
+    assert_eq!(spawn.name, "spawn_agent");
+    respond_approval(
+        &harness.runtime,
+        run_id,
+        spawn.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    let (observed, write) = collect_until_approval_requested(&mut harness.events).await;
+    assert_eq!(write.name, "write_file");
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalRequested {
+            delegated: false,
+            ..
+        }
+    )));
+    assert!(!harness._directory.path().join("child.txt").exists());
+    respond_approval(
+        &harness.runtime,
+        write.run_id,
+        write.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    collect_until_run_finished(&mut harness.events, run_id).await;
+    assert_eq!(
+        std::fs::read_to_string(harness._directory.path().join("child.txt")).unwrap(),
+        "approved"
+    );
+    assert!(consulted.lock().unwrap().is_empty());
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_child_reviewer_cannot_grant_work_outside_the_parent_policy() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "__test_shell",
+            r#"{"command":"git push origin main"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let (mut harness, _) = write_child_harness(
+        child,
+        vec![(
+            "spawn_agent",
+            r#"{"task":"publish work","model":"test/child","authority":"write"}"#.to_owned(),
+        )],
+        Some(reviewer),
+        ApprovalMode::Auto,
+    )
+    .await;
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(
+        consulted.lock().unwrap().is_empty(),
+        "a child reviewer cannot supply missing parent authority"
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event, SessionEvent::ToolCallFinished { tool_call }
+            if tool_call.name == "__test_shell" && tool_call.state == ToolCallState::Denied
+                && tool_call.result.as_deref().is_some_and(|text| text.contains("parent_permission_required"))
+    )), "child call must be durably denied: {observed:?}");
+    assert!(!observed.iter().any(|event| matches!(
+        &event.event, SessionEvent::ToolCallStarted { tool_call }
+            if tool_call.name == "__test_shell"
+    )));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action() {
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
@@ -2021,7 +2121,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
             _ => None,
         })
         .expect("the write spawn creates a child");
-    assert_eq!(child_session.approval_mode, ApprovalMode::Supervised);
+    assert_eq!(child_session.approval_mode, ApprovalMode::Auto);
     // The child's write was held, adjudicated, and executed.
     let resolutions = observed
         .iter()
@@ -2051,7 +2151,7 @@ async fn a_write_child_runs_supervised_and_the_reviewer_adjudicates_each_action(
     let requests = consulted.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].tool_name, "write_file");
-    assert_eq!(requests[0].mode, ApprovalMode::Supervised);
+    assert_eq!(requests[0].mode, ApprovalMode::Auto);
     assert!(matches!(
         requests[0].origin,
         ReviewOrigin::Child { depth: 1, .. }
@@ -2355,7 +2455,7 @@ async fn a_write_spawn_is_a_mutating_call_under_the_parents_policy() {
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::SessionCreated { session }
-            if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Supervised
+            if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Auto
     )));
     assert!(matches!(
         finished_outcome(&observed, run_id),
@@ -3163,7 +3263,7 @@ async fn write_children_serialize_on_the_per_run_write_permit() {
         .iter()
         .filter(|event| {
             matches!(&event.event, SessionEvent::SessionCreated { session }
-                if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Supervised)
+                if session.parent_id.is_some() && session.approval_mode == ApprovalMode::Auto)
         })
         .count();
     assert_eq!(children, 3, "every writer eventually runs");
@@ -5522,4 +5622,373 @@ async fn a_text_only_slice_report_is_never_audited_or_treated_as_the_answer() {
         parent_requests[report_at + 1].messages().last(),
         Some(&Message::user(crate::SLICE_CONTINUATION_NOTICE))
     );
+}
+
+#[tokio::test]
+async fn an_ask_parent_cannot_widen_its_read_child_to_human_approved_writes() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "write_file",
+            r#"{"path":"read-child.txt","content":"must not write"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let (mut harness, _) = write_child_harness(
+        child,
+        vec![(
+            "spawn_agent",
+            r#"{"task":"inspect only","model":"test/child","authority":"read"}"#.to_owned(),
+        )],
+        Some(reviewer),
+        ApprovalMode::Ask,
+    )
+    .await;
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate a read").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event, SessionEvent::ToolCallFinished { tool_call }
+                if tool_call.name == "write_file" && tool_call.state == ToolCallState::Denied
+        )),
+        "the child's ReadOnly ceiling must deny the write: {observed:?}"
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(&event.event, SessionEvent::ToolApprovalRequested { .. })),
+        "the child's denied write must never become approvable"
+    );
+    assert!(consulted.lock().unwrap().is_empty());
+    assert!(!harness._directory.path().join("read-child.txt").exists());
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn changing_parent_authority_revokes_an_inflight_child_reviewer_approval() {
+    for mode in [ApprovalMode::ReadOnly, ApprovalMode::Ask] {
+        let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
+        let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            script: vec![(
+                "write_file",
+                r#"{"path":"revoked.txt","content":"must not write"}"#.to_owned(),
+            )],
+            turn: StdMutex::new(0),
+        });
+        let (mut harness, _) = write_child_harness(
+            child,
+            vec![(
+                "spawn_agent",
+                r#"{"task":"write revoked.txt","model":"test/child","authority":"write"}"#
+                    .to_owned(),
+            )],
+            Some(reviewer),
+            ApprovalMode::Auto,
+        )
+        .await;
+        let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+        let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+        assert_eq!(call.name, "write_file");
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SetApprovalMode {
+                    session_id: harness.session_id,
+                    mode,
+                },
+            )
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert!(
+            !harness._directory.path().join("revoked.txt").exists(),
+            "{mode:?}"
+        );
+        assert!(observed.iter().any(|event| matches!(
+            &event.event, SessionEvent::ToolApprovalResolved { tool_call, resolution: ApprovalResolution::Denied, .. }
+                if tool_call.id == call.id && tool_call.state == ToolCallState::Denied
+        )), "parent revocation must persist a denied receipt: {observed:?}");
+        assert!(!observed.iter().any(|event| matches!(
+            &event.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id
+        )));
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn parent_readonly_revocation_denies_a_late_human_child_approval() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "write_file",
+            r#"{"path":"human-revoked.txt","content":"must not write"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let (mut harness, _) = write_child_harness(
+        child,
+        vec![(
+            "spawn_agent",
+            r#"{"task":"write human-revoked.txt","model":"test/child","authority":"write"}"#
+                .to_owned(),
+        )],
+        Some(reviewer),
+        ApprovalMode::Ask,
+    )
+    .await;
+    let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+    let (_, spawn) = collect_until_approval_requested(&mut harness.events).await;
+    respond_approval(
+        &harness.runtime,
+        run_id,
+        spawn.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+    assert_eq!(call.name, "write_file");
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::ReadOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let receipt = respond_approval(
+        &harness.runtime,
+        call.run_id,
+        call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::Denied,
+            ..
+        }
+    ));
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert!(!harness._directory.path().join("human-revoked.txt").exists());
+    assert!(!observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
+    assert!(consulted.lock().unwrap().is_empty());
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn nested_write_requests_preserve_the_root_only_write_boundary() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let grandchild: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "write_file",
+            r#"{"path":"nested.txt","content":"reviewed"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"write nested.txt","model":"test/grandchild","authority":"write"}"#
+                .to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"delegate the write","model":"test/child","authority":"write"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = 8;
+    options = options.with_approval_reviewer(reviewer);
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(DepthLoader {
+            inner: QueueLoader {
+                routed: vec![("test/child", child), ("test/grandchild", grandchild)],
+                queue: StdMutex::new(vec![parent]),
+            },
+            max_depth: 2,
+            write_children: true,
+            pricing: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("expected session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run = submit_prompt_to(&runtime, session_id, "delegate twice").await;
+    let observed = collect_until_run_finished(&mut events, run).await;
+    assert!(!directory.path().join("nested.txt").exists());
+    assert_eq!(
+        consulted.lock().unwrap().len(),
+        1,
+        "the supervised child reviews its spawn request, but cannot grant write authority onward"
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(&event.event,
+                SessionEvent::SessionCreated { session } if session.parent_id.is_some()
+            ))
+            .count(),
+        1,
+        "no write grandchild is admitted"
+    );
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "spawn_agent"
+            && tool_call.is_error
+            && tool_call.result.as_deref().is_some_and(|text| text.contains("write sub-agents are not enabled"))
+    )));
+    runtime.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn parent_auto_revocation_denies_every_late_human_child_approval() {
+    for parent_granted in [false, true] {
+        for decision in [
+            ApprovalDecision::ApproveOnce,
+            ApprovalDecision::ApproveForSession {
+                grant: ApprovalGrant::ShellPrefix {
+                    prefix: "rm -r".into(),
+                },
+            },
+            ApprovalDecision::ApproveForWorkspace {
+                grant: ApprovalGrant::ShellPrefix {
+                    prefix: "rm -r".into(),
+                },
+            },
+        ] {
+            let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                script: vec![(
+                    "shell",
+                    r#"{"command":"rm -r approval-scratch"}"#.to_owned(),
+                )],
+                turn: StdMutex::new(0),
+            });
+            let (reviewer, _) =
+                StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Escalate {
+                    reason: "human decision required".into(),
+                }));
+            let spawn = serde_json::json!({"task": "remove approval-scratch", "model": "test/child", "authority": "write"});
+            let (mut harness, _) = write_child_harness(
+                child,
+                vec![("spawn_agent", spawn.to_string())],
+                Some(reviewer),
+                ApprovalMode::Full,
+            )
+            .await;
+            std::fs::create_dir(harness._directory.path().join("approval-scratch")).unwrap();
+            let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+            let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+            assert_eq!(call.name, "shell");
+            if parent_granted {
+                let session_id = harness.session_id;
+                harness
+                    .runtime
+                    .inner
+                    .store
+                    .call(Priority::Control, move |connection| {
+                        connection.execute(
+                        "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
+                         VALUES (?1, 'shell_prefix', 'rm -r', 0, 'human')",
+                        [session_id.to_string()],
+                    )?;
+                        Ok(())
+                    })
+                    .await
+                    .unwrap();
+            }
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SetApprovalMode {
+                        session_id: harness.session_id,
+                        mode: ApprovalMode::Auto,
+                    },
+                )
+                .await
+                .unwrap();
+            let expected = if !parent_granted {
+                ApprovalResolution::Denied
+            } else {
+                match &decision {
+                    ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
+                    ApprovalDecision::ApproveForSession { .. } => {
+                        ApprovalResolution::ApprovedForSession
+                    }
+                    ApprovalDecision::ApproveForWorkspace { .. } => {
+                        ApprovalResolution::ApprovedForWorkspace
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let receipt = respond_approval(&harness.runtime, call.run_id, call.id, decision)
+                .await
+                .unwrap();
+            assert!(
+                matches!(receipt.outcome,
+            CommandOutcome::ToolApprovalResolved { resolution, .. } if resolution == expected),
+                "a child approval must respect the current parent's grants: {receipt:?}"
+            );
+            let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+            assert_eq!(
+                harness._directory.path().join("approval-scratch").exists(),
+                !parent_granted
+            );
+            if !parent_granted {
+                assert!(!observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
+                assert!(observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolApprovalResolved { tool_call, .. }
+                if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text.contains("parent_permission_required")))));
+            }
+            let (_, grants, _) = harness
+                .runtime
+                .inner
+                .store
+                .approval_policy(call.session_id)
+                .await
+                .unwrap();
+            if !parent_granted || expected == ApprovalResolution::ApprovedOnce {
+                assert!(grants.shell_prefixes.is_empty());
+            } else {
+                assert_eq!(grants.shell_prefixes, ["rm -r"]);
+            }
+            harness.runtime.shutdown().await.unwrap();
+        }
+    }
 }
