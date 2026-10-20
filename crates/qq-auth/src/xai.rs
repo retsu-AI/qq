@@ -512,7 +512,7 @@ impl CredentialStore {
             return Ok(credential.into_resolution(epoch));
         }
 
-        let _refresh = self.lock_oauth_operation(OAuthProvider::XAi)?;
+        let _refresh = self.lock_oauth_operation(OAuthProvider::XAI)?;
         let (credential, epoch) = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -666,7 +666,7 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    oauth::profile_credential_name(OAuthProvider::XAi, profile)
+    oauth::profile_credential_name(OAuthProvider::XAI, profile)
 }
 
 fn unix_time() -> Result<u64, XaiAuthError> {

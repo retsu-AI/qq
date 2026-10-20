@@ -266,10 +266,10 @@ pub(super) fn request_device_poll(
 pub(super) fn decode_device_authorization(
     response: Response,
 ) -> Result<DeviceAuthorization, CodexAuthError> {
-    decode_device_start(&oauth::OAuthResponse::read(
-        response,
-        MAX_DEVICE_RESPONSE_BYTES,
-    ))
+    decode_device_start(
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES)
+            .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
+    )
 }
 
 fn decode_device_start(
@@ -317,10 +317,10 @@ fn decode_device_start(
 
 #[cfg(test)]
 pub(super) fn decode_device_poll(response: Response) -> Result<DevicePoll, CodexAuthError> {
-    decode_poll(&oauth::OAuthResponse::read(
-        response,
-        MAX_DEVICE_RESPONSE_BYTES,
-    ))
+    decode_poll(
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES)
+            .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
+    )
 }
 
 fn decode_poll(response: &oauth::OAuthResponse) -> Result<DevicePoll, CodexAuthError> {
@@ -1113,7 +1113,7 @@ impl CredentialStore {
             return Ok((credential.runtime_credential(), epoch));
         }
 
-        let _refresh = self.lock_oauth_operation(OAuthProvider::OpenAiCodex)?;
+        let _refresh = self.lock_oauth_operation(OAuthProvider::OPENAI_CODEX)?;
         let (mut credential, epoch) = self.load_codex_with_epoch_uncached(&name)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -1295,7 +1295,7 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    oauth::profile_credential_name(OAuthProvider::OpenAiCodex, profile)
+    oauth::profile_credential_name(OAuthProvider::OPENAI_CODEX, profile)
 }
 
 fn unix_time() -> Result<u64, CodexAuthError> {

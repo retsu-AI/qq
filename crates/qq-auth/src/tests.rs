@@ -3045,8 +3045,8 @@ impl XaiTokenClient for CoordinatedXaiRefreshClient {
 #[test]
 fn oauth_operations_lock_the_published_per_provider_files() {
     for (name, provider) in [
-        ("openai-codex/default", Some(OAuthProvider::OpenAiCodex)),
-        ("xai/work", Some(OAuthProvider::XAi)),
+        ("openai-codex/default", Some(OAuthProvider::OPENAI_CODEX)),
+        ("xai/work", Some(OAuthProvider::XAI)),
         ("xai", None),
         ("xaii/work", None),
         ("openai/default", None),
@@ -3058,11 +3058,11 @@ fn oauth_operations_lock_the_published_per_provider_files() {
     let paths = CredentialPaths::new(directory.path());
     // Concurrently running QQ versions coordinate through these exact names.
     assert_eq!(
-        paths.provider_lock_file(OAuthProvider::OpenAiCodex.name()),
+        paths.provider_lock_file(OAuthProvider::OPENAI_CODEX.name()),
         directory.path().join("openai-codex.lock")
     );
     assert_eq!(
-        paths.provider_lock_file(OAuthProvider::XAi.name()),
+        paths.provider_lock_file(OAuthProvider::XAI.name()),
         directory.path().join("xai.lock")
     );
 }
@@ -3163,9 +3163,12 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
     xai_lock.try_lock().unwrap();
 }
 
-/// A provider with no lock file of its own gets interprocess exclusion
-/// through its derived `{provider}.lock`: while one store holds it, a second
-/// store over the same directory waits, and the legacy locks stay free.
+/// A provider that is only a row of `OAuthProvider::ALL`, with no legacy
+/// lock file, gets interprocess exclusion through its derived
+/// `{provider}.lock` on the generic mutation paths: while one store holds
+/// its operation lock (as a refresh does), a second store over the same
+/// directory cannot `set` one of its credentials, and the legacy locks stay
+/// free.
 #[test]
 fn a_new_provider_serialises_independent_stores_through_its_derived_lock() {
     let directory = TestDirectory::new();
@@ -3173,35 +3176,45 @@ fn a_new_provider_serialises_independent_stores_through_its_derived_lock() {
     let keyring = Arc::new(FakeKeyring::default());
     let protected = Arc::new(FakeWindowsProtected::default());
     let first = CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
-    let second = CredentialStore::with_backends(paths.clone(), keyring, protected);
+    let second = CredentialStore::with_backends(paths.clone(), keyring.clone(), protected);
     assert!(!directory.path().join("fixture-oauth.lock").exists());
-
-    let held = first.lock_provider_file("fixture-oauth").unwrap();
     assert_eq!(
-        paths.provider_lock_file("fixture-oauth"),
-        directory.path().join("fixture-oauth.lock")
+        OAuthProvider::for_credential("fixture-oauth/work"),
+        Some(OAuthProvider::FIXTURE)
     );
+
+    let held = first.lock_oauth_operation(OAuthProvider::FIXTURE).unwrap();
+    let lock = File::open(directory.path().join("fixture-oauth.lock")).unwrap();
+    assert!(matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)));
     for legacy in ["openai-codex.lock", "xai.lock"] {
         let file = File::create(directory.path().join(legacy)).unwrap();
         file.try_lock().unwrap();
     }
 
-    let (acquired, acquisition) = std::sync::mpsc::sync_channel(1);
-    let waiter = thread::spawn(move || {
-        let lock = second.lock_provider_file("fixture-oauth");
-        acquired.send(()).unwrap();
-        lock.map(drop)
+    let (stored, storing) = std::sync::mpsc::sync_channel(1);
+    let writer = thread::spawn(move || {
+        let result = second.set_with_metadata(
+            "fixture-oauth/work",
+            b"rotated",
+            false,
+            Some("fixture-oauth"),
+            None,
+        );
+        stored.send(()).unwrap();
+        result
     });
     // This can only pass spuriously, never fail spuriously: correct code
-    // never acquires the lock while the first store holds it.
+    // never stores while the first store holds the provider's lock.
     assert_eq!(
-        acquisition.recv_timeout(Duration::from_millis(200)),
+        storing.recv_timeout(Duration::from_millis(200)),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-        "a second store took fixture-oauth.lock while the first held it"
+        "a second store set a fixture-oauth credential while the first held its lock"
     );
+    assert!(keyring.value("fixture-oauth/work").is_none());
     drop(held);
-    acquisition.recv().unwrap();
-    waiter.join().unwrap().unwrap();
+    storing.recv().unwrap();
+    writer.join().unwrap().unwrap();
+    assert_eq!(keyring.value("fixture-oauth/work").unwrap(), b"rotated");
 }
 
 #[cfg(unix)]
@@ -3268,7 +3281,7 @@ fn codex_refresh_preserves_an_explicit_private_file_backend() {
         fs::metadata(
             store
                 .paths()
-                .provider_lock_file(OAuthProvider::OpenAiCodex.name())
+                .provider_lock_file(OAuthProvider::OPENAI_CODEX.name())
         )
         .unwrap()
         .permissions()

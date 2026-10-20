@@ -10,47 +10,71 @@ use serde::de::DeserializeOwned;
 
 use super::{AuthError, validate_credential_name};
 
-/// The built-in providers whose stored credentials are OAuth token sets that
+/// One built-in provider whose stored credentials are OAuth token sets that
 /// QQ refreshes. Logins, refreshes, rotations and removals of one provider's
-/// credentials are serialised through its process mutex and lock file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OAuthProvider {
-    OpenAiCodex,
-    XAi,
+/// credentials are serialised through its process mutex and its derived
+/// `{provider}.lock` file. A new OAuth provider is one row in
+/// [`Self::ALL`]: every operation lock, including the generic `set` and
+/// `remove` paths, finds it from there.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OAuthProvider {
+    /// The provider half of its `PROVIDER/PROFILE` credential names.
+    name: &'static str,
+    /// The error a poisoned process lock is reported as.
+    lock_unavailable: fn() -> AuthError,
 }
 
-impl OAuthProvider {
-    pub(crate) const ALL: [Self; 2] = [Self::OpenAiCodex, Self::XAi];
+impl PartialEq for OAuthProvider {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
 
-    /// The provider half of its `PROVIDER/PROFILE` credential names.
+impl Eq for OAuthProvider {}
+
+impl OAuthProvider {
+    pub(crate) const OPENAI_CODEX: Self = Self {
+        name: "openai-codex",
+        lock_unavailable: || super::codex::CodexAuthError::RefreshLockUnavailable.into(),
+    };
+    pub(crate) const XAI: Self = Self {
+        name: "xai",
+        lock_unavailable: || super::xai::XaiAuthError::RefreshLockUnavailable.into(),
+    };
+    /// A provider with no legacy lock file, for tests of the derived lock.
+    #[cfg(test)]
+    pub(crate) const FIXTURE: Self = Self {
+        name: "fixture-oauth",
+        lock_unavailable: || AuthError::CredentialCoordinator { operation: "lock" },
+    };
+
+    #[cfg(not(test))]
+    pub(crate) const ALL: &[Self] = &[Self::OPENAI_CODEX, Self::XAI];
+    #[cfg(test)]
+    pub(crate) const ALL: &[Self] = &[Self::OPENAI_CODEX, Self::XAI, Self::FIXTURE];
+
     pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::OpenAiCodex => "openai-codex",
-            Self::XAi => "xai",
-        }
+        self.name
     }
 
-    /// Position in [`Self::ALL`], for per-provider arrays.
-    pub(crate) const fn index(self) -> usize {
-        match self {
-            Self::OpenAiCodex => 0,
-            Self::XAi => 1,
-        }
+    /// Position in [`Self::ALL`], for per-provider process locks.
+    pub(crate) fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|provider| *provider == self)
+            .expect("every OAuth provider is a row of OAuthProvider::ALL")
     }
 
     /// The provider whose credentials are stored under `name`, if any.
     pub(crate) fn for_credential(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|provider| {
-            name.strip_prefix(provider.name())
+        Self::ALL.iter().copied().find(|provider| {
+            name.strip_prefix(provider.name)
                 .is_some_and(|rest| rest.starts_with('/'))
         })
     }
 
     pub(crate) fn lock_unavailable(self) -> AuthError {
-        match self {
-            Self::OpenAiCodex => super::codex::CodexAuthError::RefreshLockUnavailable.into(),
-            Self::XAi => super::xai::XaiAuthError::RefreshLockUnavailable.into(),
-        }
+        (self.lock_unavailable)()
     }
 }
 
@@ -109,8 +133,10 @@ impl OAuthResponse {
         serde_json::from_slice(self.body.as_deref()?).ok()
     }
 
-    /// Reads at most `limit` bytes of `response`.
-    pub(crate) fn read(mut response: Response, limit: usize) -> Self {
+    /// Reads at most `limit` bytes of `response`. The request's timeout
+    /// stays active while the body streams, so a body that stalls past it
+    /// is a timeout, not an unreadable body.
+    pub(crate) fn read(mut response: Response, limit: usize) -> Result<Self, TransportError> {
         let status = response.status().as_u16();
         let mut bytes = Vec::new();
         let body = match (&mut response)
@@ -118,10 +144,21 @@ impl OAuthResponse {
             .read_to_end(&mut bytes)
         {
             Ok(_) if bytes.len() <= limit => Some(bytes),
-            _ => None,
+            Ok(_) => None,
+            Err(error) if is_timeout(&error) => return Err(TransportError::TimedOut),
+            Err(_) => None,
         };
-        Self { status, body }
+        Ok(Self { status, body })
     }
+}
+
+/// Whether a body read failed because the request's timeout passed.
+fn is_timeout(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout)
 }
 
 /// Why an OAuth call produced no response.
@@ -181,7 +218,7 @@ impl OAuthTransport for SystemTransport {
                 TransportError::Failed
             }
         })?;
-        Ok(OAuthResponse::read(response, request.max_body))
+        OAuthResponse::read(response, request.max_body)
     }
 }
 
@@ -458,6 +495,49 @@ mod tests {
         );
         assert_eq!(during, Err(Ended::Cancelled));
         assert_eq!(remaining.len(), 1);
+    }
+
+    /// A response whose headers arrive but whose body then stalls past the
+    /// request's timeout is a timeout, not an unreadable body. The loopback
+    /// server holds the connection open until the client has given up, so
+    /// the timing cannot flake: the read can only end by timing out.
+    #[test]
+    fn a_body_that_stalls_past_the_timeout_is_a_timeout() {
+        use std::{io::Write as _, net::TcpListener};
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/token", listener.local_addr().unwrap());
+        let (done, finished) = std::sync::mpsc::sync_channel::<()>(1);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = std::io::Read::read(&mut stream, &mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+            // Keep the body incomplete until the client has returned.
+            finished.recv().unwrap();
+        });
+        let transport = SystemTransport::with_client(
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+        );
+        let result = transport.post(OAuthRequest {
+            url: &url,
+            body: OAuthBody::Form(vec![("grant_type", "device_code".to_owned())]),
+            headers: &[],
+            timeout: Some(Duration::from_millis(200)),
+            max_body: 1024,
+        });
+        done.send(()).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.err(), Some(TransportError::TimedOut));
     }
 
     #[test]

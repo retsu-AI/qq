@@ -339,7 +339,7 @@ pub struct CredentialStore {
     windows_protected: Arc<dyn WindowsProtectedBackend>,
     /// Every OAuth token, refresh and device call, for every provider.
     oauth: Arc<dyn oauth::OAuthTransport>,
-    oauth_operations: Arc<[Mutex<()>; OAuthProvider::ALL.len()]>,
+    oauth_operations: Arc<[Mutex<()>]>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
     stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
 
@@ -899,7 +899,7 @@ impl CredentialStore {
             keyring,
             windows_protected,
             oauth: Arc::new(oauth::SystemTransport::new()),
-            oauth_operations: Arc::new(OAuthProvider::ALL.map(|_| Mutex::new(()))),
+            oauth_operations: OAuthProvider::ALL.iter().map(|_| Mutex::new(())).collect(),
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
