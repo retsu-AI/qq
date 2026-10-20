@@ -39,7 +39,9 @@ and only when someone is attached.
 - Shell and exec children cannot write outside the writable roots, cannot
   reach the network except through the policy, and cannot outlive their
   call, on every supported OS.
-- When no sandbox is available, QQ **fails closed**: unattended runs refuse
+- When no sandbox is available, or the available backend cannot enforce
+  every guarantee above (filesystem, denied reads, egress, resource
+  ceilings), QQ **fails closed**: unattended and `auto` runs refuse
   to start, and interactive runs fall back to today's approval behavior and
   say so. It never silently runs commands unsandboxed.
 
@@ -49,9 +51,15 @@ Three layers, checked in order for every `shell`/`exec` call:
 
 1. **Policy rules** (configuration, saved grants). Exact command-prefix rules
    such as `git push origin <current branch>`, `gh pr create`, or
-   `cargo publish --dry-run` decide `allow-unsandboxed`, `allow-sandboxed`,
-   or `deny`. They are durable, reviewable, and trust-gated like today's
-   grants. `forbidden` shell shapes stay forbidden.
+   `cargo publish --dry-run` decide `allow` or `deny`. An `allow` rule never
+   leaves the sandbox: it runs the command sandboxed with **explicit extra
+   resources** named in the rule (hosts for the proxy such as `github.com`,
+   a credential such as the git/`gh` token exposed to that call only, extra
+   writable paths). This matters because commands like `git push` or
+   `cargo publish` run repository-controlled hooks, helpers and build
+   scripts; an unsandboxed durable rule would hand model-written code the
+   user's full authority. Rules are durable, reviewable, and trust-gated like
+   today's grants. `forbidden` shell shapes stay forbidden.
 2. **The sandbox** runs everything else, without asking:
    - **Filesystem:** the whole disk is readable except denied paths (credential
      stores, `~/.ssh`, `~/.config/qq` secrets, keychains). Writes are allowed
@@ -59,26 +67,42 @@ Three layers, checked in order for every `shell`/`exec` call:
      that `TMPDIR` points at, and configured extras. `.git` and `.qq` inside
      the workspace stay read-only unless policy allows them (so a goal can
      commit but cannot rewrite hooks or trust config).
+     Denied reads are enforced, not advisory, on every backend.
    - **Network:** off by default. When enabled, it goes only through a
      QQ-owned loopback proxy that enforces a host allowlist, backed by OS
      blocking of direct egress.
    - **Processes:** all children live in one kill-on-close group, have no new
      privileges, and are reaped when the call ends, is cancelled, or times
-     out.
+     out. Each call has hard ceilings that hold *while it runs*: process count,
+     memory, and CPU time (cgroup v2 `pids.max`/`memory.max` via a delegated
+     systemd scope or bwrap's cgroup on Linux, `RLIMIT_NPROC`/`RLIMIT_AS`
+     plus a supervising watchdog on macOS, Job Object process, memory and
+     CPU limits on Windows).
 3. **Escalation** happens only when the model explicitly asks for it: the
    call carries `sandbox: "escalate"`, a justification, and a proposed prefix
    rule. Then:
-   - **Unattended (goal, `qq run`, no client):** a policy rule decides;
-     otherwise the call is refused immediately with a typed
-     `sandbox_denied` result naming what was blocked. The run continues.
-     Optionally the request is queued as a non-blocking *pending grant* the
-     user can accept later, which turns it into a saved rule for future runs.
-   - **Attended:** the human is asked, as today. The existing
-     `reviewer_model` may pre-answer escalations only, never ordinary calls.
+   - **Unattended (goal, `qq run`, no client):** a matching `allow` rule
+     runs it sandboxed with the rule's extra resources; otherwise the call is
+     refused immediately with a typed `sandbox_denied` result naming what was
+     blocked. The run continues. Optionally the request is queued as a
+     non-blocking *pending grant* the user can accept later, which turns it
+     into a saved (still sandboxed) rule for future runs.
+   - **Attended:** the human is asked, as today. Only an attended human may
+     approve **unsandboxed** execution, and only as an exact, one-shot
+     approval of that command; it is never saved as a rule. The existing
+     `reviewer_model` may pre-answer sandboxed escalations only, never
+     ordinary calls and never unsandboxed ones.
 
-A command that fails inside the sandbox (EACCES, connection refused) returns
-its normal output plus a short, typed marker saying the sandbox blocked it,
-so the model can choose another route instead of retrying blindly.
+When the backend reports an authoritative denial for the call, the result
+carries a short, typed marker naming what was blocked, so the model can
+choose another route instead of retrying blindly. Authoritative signals are
+the proxy's own refusal log, seccomp `SECCOMP_RET_USER_NOTIF`/audit records,
+Seatbelt violation reports (`sandboxd` log, filtered to the call's process
+tree), and Windows denied-access ETW events for the sandbox SID. QQ never
+infers a sandbox denial from exit codes, `EACCES`, or a refused connection
+in ordinary output: without a backend signal there is no marker. Backends
+that cannot supply a signal for a class of denial report that in
+`qq doctor`, and the marker is omitted, not guessed.
 
 Approval modes collapse to: `read-only` (sandbox, no writable roots),
 `auto` (sandbox plus rules plus refuse-on-escalation, the unattended
@@ -99,12 +123,18 @@ exception explicitly. Every other crate stays forbid-unsafe.
 
 - Primary: **bubblewrap** (`bwrap`). Mount `/` read-only, bind writable
   roots read-write, re-bind `.git`/`.qq` read-only, use a fresh `/tmp`, and
-  set `--unshare-user --unshare-pid --unshare-net` (net shared only when
-  network is enabled through the proxy), `--die-with-parent`, and
-  `--new-session`.
+  set `--unshare-user --unshare-pid --unshare-net` **always**,
+  `--die-with-parent`, and `--new-session`. The host network namespace is
+  never shared, because seccomp cannot see a `connect` destination (it is
+  indirect memory) and so cannot tell the proxy from any other address.
+- Network, when enabled: the sandbox's own namespace has only loopback. The
+  session's proxy endpoint is bridged in as a Unix socket bind-mounted into
+  the sandbox, with a tiny in-namespace forwarder listening on
+  `127.0.0.1:<port>` that relays to that socket. Nothing else inside the
+  namespace has a route out, so direct egress fails by construction.
 - Inside, the helper sets `no_new_privs` and installs a **seccomp** filter
-  that blocks socket families other than AF_UNIX/loopback-to-proxy,
-  `AF_VSOCK`, `io_uring`, `ptrace`, and mount/namespace syscalls.
+  that blocks `AF_VSOCK`, `AF_NETLINK` beyond what the forwarder needs,
+  `io_uring`, `ptrace`, and mount/namespace syscalls.
 - Landlock is a fallback only for hosts without unprivileged user
   namespaces. It cannot isolate Unix sockets, so it is weaker and must be
   reported as such.
@@ -123,15 +153,24 @@ exception explicitly. Every other crate stays forbid-unsafe.
 
 ### Windows
 
-- **Restricted token:** `CreateRestrictedToken` with `WRITE_RESTRICTED` and a
-  per-session capability SID. Writable roots get an ACE for that SID, so
-  writes elsewhere fail. Children run in a **Job Object** with
-  `KILL_ON_JOB_CLOSE`, an active-process limit, and UI restrictions.
+- **Identity that actually removes access.** `WRITE_RESTRICTED` alone only
+  fences writes; the child would keep the user's read access to `~/.ssh` and
+  credential stores, so it is not enough. The backend runs children either
+  as a **dedicated low-privilege sandbox user** (created by a one-time
+  elevated `qq sandbox setup`) or in an **AppContainer**, so that reads are
+  granted only where ACLs allow them. Readable roots (toolchains, the
+  workspace) get read/execute ACEs for that identity, writable roots get
+  modify ACEs, and denied paths get none. A restricted token with full (not
+  write-only) restricting-SID semantics is a further option to evaluate.
+- Children run in a **Job Object** with `KILL_ON_JOB_CLOSE`, active-process,
+  memory and CPU limits, and UI restrictions.
 - Network: Windows Filtering Platform rules (or firewall rules keyed to the
-  sandbox SID or user) allow only loopback to the proxy. This may need a
-  one-time elevated `qq sandbox setup` that creates a dedicated low-privilege
-  sandbox user plus the WFP rules. Without setup, the backend is
-  filesystem-only and reports that network is unenforced.
+  sandbox user or AppContainer SID) allow only loopback to that session's
+  proxy port.
+- **Fail closed:** if setup has not run, or any guarantee (denied reads,
+  egress blocking) cannot be enforced, the backend counts as *unavailable*
+  for `auto` and unattended runs, which then refuse to start. It never runs
+  as a filesystem-only backend with network unenforced.
 - Shell: `cmd /C` today. Evaluate PowerShell and Git Bash for parity with the
   model's expectations, but the sandbox is independent of the shell choice.
 - AppContainer is a candidate for the no-admin path; its behaviour with
@@ -139,12 +178,16 @@ exception explicitly. Every other crate stays forbid-unsafe.
 
 ### Network proxy
 
-A QQ-owned HTTP CONNECT and SOCKS5 proxy on loopback, started per runtime.
-It enforces the host allowlist (configuration plus `allow_hosts` grants),
-denies private and link-local ranges as `fetch` does, logs each decision as
-a session event, and is the only route out where the OS backend blocks
-direct egress. `HTTP(S)_PROXY`/`ALL_PROXY` are set for children; OS blocking
-makes ignoring them fail closed rather than leak.
+A QQ-owned HTTP CONNECT and SOCKS5 proxy. Each sandboxed call gets its
+**own endpoint** bound to its session and run: a per-call Unix socket on
+Linux and macOS (bridged as above), and on Windows a per-call loopback port
+that requires an unguessable per-call credential in the proxy handshake.
+The proxy evaluates only that session's resolved host policy (configuration,
+`allow_hosts` grants, and the matched rule's extra hosts), so one session's
+grants never serve another, and every decision event is attributed to the
+right session and call. It denies private and link-local ranges as `fetch`
+does and is the only route out. `HTTP(S)_PROXY`/`ALL_PROXY` are set for
+children; OS blocking makes ignoring them fail closed rather than leak.
 
 ## Slices
 
@@ -154,11 +197,11 @@ until S6, and lands with its acceptance tests.
 | Slice | Scope | Acceptance |
 | --- | --- | --- |
 | S0 | Threat model and policy types. `SandboxPolicy` (writable roots, denied reads, network mode, allowlist), `sandbox` field on `shell`/`exec`, typed `sandbox_denied` result, protocol and config additions, no enforcement. | Protocol fixtures; config round-trips; ADR for the model above, including the `unsafe` exception. |
-| S1 | `qq-sandbox` crate and Linux bubblewrap + seccomp backend; per-session temp dir; process-group reaping. | Escape suite (below) passes on Linux CI; no leaked process after cancel, timeout, shutdown, or crash recovery; launch overhead p50 ≤ 15 ms reported. |
-| S2 | Loopback proxy with allowlist; network modes `off`/`proxy`. | Direct egress blocked; allowlisted host reachable through the proxy; private ranges refused; decisions appear as events. |
-| S3 | Policy rules and escalation: prefix rules with `allow-unsandboxed`/`allow-sandboxed`/`deny`; unattended refuse-with-reason; non-blocking pending grants. | A goal pushes to its branch via a rule with no prompt; an unruled escalation is refused at once and the run continues; a pending grant accepted later is honoured by the next run. |
+| S1 | `qq-sandbox` crate and Linux bubblewrap + seccomp backend (always its own network namespace); per-session temp dir; process-group reaping; per-call PID/memory/CPU ceilings. | Escape suite (below) passes on Linux CI; no leaked process after cancel, timeout, shutdown, or crash recovery; launch overhead p50 ≤ 15 ms reported. |
+| S2 | Proxy with a per-call, session-bound endpoint (Unix socket bridged into the namespace; authenticated loopback port on Windows); network modes `off`/`proxy`; authoritative denial signals. | Direct egress blocked with network on; allowlisted host reachable only through the call's own endpoint; another session's endpoint and grants unusable; private ranges refused; decisions attributed to the right session; no marker on ordinary `EACCES`. |
+| S3 | Policy rules and escalation: prefix rules with `allow` (sandboxed, with explicit extra hosts/credentials/paths) or `deny`; unattended refuse-with-reason; non-blocking pending grants; attended exact one-shot unsandboxed approval. | A goal pushes to its branch via a rule with no prompt, and the repository's push hook stays confined; an unruled escalation is refused at once and the run continues; a pending grant accepted later is honoured by the next run; no rule can grant unsandboxed execution. |
 | S4 | macOS Seatbelt backend. | Same escape suite on macOS CI. |
-| S5 | Windows restricted-token + Job Object backend; optional elevated setup for network. | Same escape suite on Windows CI, with the network rows marked as needing setup when it has not run. |
+| S5 | Windows backend: dedicated sandbox user or AppContainer with read/write ACLs, Job Object limits, WFP egress rules; elevated `qq sandbox setup`. | Same escape suite on Windows CI, including denied reads; without setup the backend reports unavailable and `auto`/unattended runs refuse to start. |
 | S6 | Make `auto` sandboxed by default; fail closed for unattended runs without a backend; `qq doctor` reports backend and guarantees; guide pages. | 24-hour unattended goal soak on each OS with zero blocking holds; docs updated. |
 
 ### Escape suite (every backend)
@@ -172,8 +215,18 @@ Run as real child processes, never mocked:
 - Symlink and hardlink escapes, `..` traversal, and bind-mount tricks fail.
 - Direct TCP/UDP egress fails; loopback to the proxy works; DNS exfiltration
   through the proxy is limited to allowlisted names.
-- `fork` bombs and daemonizing (`setsid`, `nohup`, double fork, Windows
-  `start /b`) die when the call ends.
+- A `fork` bomb and a memory hog stay within the call's process and memory
+  ceilings *while running* (the host stays responsive and its PID count is
+  bounded), and everything dies when the call ends.
+- Daemonizing (`setsid`, `nohup`, double fork, Windows `start /b`) dies when
+  the call ends.
+- One session's sandbox cannot use another session's proxy endpoint or
+  grants.
+- An `allow` rule's command (`git push` running a repository hook) stays
+  sandboxed: the hook cannot write outside writable roots or reach hosts the
+  rule does not name.
+- A program that fails with an ordinary `EACCES` or refused connection gets
+  no sandbox marker; a real backend denial does.
 - Privilege gain (`sudo`, setuid binaries, `ptrace` of the parent) fails.
 - Cancellation, timeout, runtime shutdown, and restart recovery leave no
   sandboxed process alive.
