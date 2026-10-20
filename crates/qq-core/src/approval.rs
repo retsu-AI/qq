@@ -62,7 +62,7 @@ pub(crate) fn deny_result(reason: &DenyReason) -> String {
     }
 }
 pub(crate) const USER_DENIED_RESULT: &str = "The user denied this tool call.";
-pub(crate) const TIMEOUT_DENIED_RESULT: &str = "No client resolved this tool approval within the configured wait; the call was denied by timeout.";
+pub(crate) const TIMEOUT_DENIED_RESULT: &str = "NOT EXECUTED: no one answered this tool approval in time, so the call did not run and its result is unknown. Do not continue as if it ran: tell the user what is waiting on approval, or use a step that does not need it.";
 pub(crate) const UNATTENDED_DENIED_RESULT: &str =
     "Tool approval is unavailable for this run; the call was denied.";
 pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
@@ -1026,12 +1026,27 @@ pub(crate) fn evaluate(
             }
             ApprovalMode::Auto => match class {
                 // Auto trusts workspace-bounded edits and external tools, and
-                // shell commands the classifier allows. Everything it would
-                // prompt for — mutations, remote operations, unlisted
-                // programs, dynamic words — asks; a grant lifts Prompt only.
+                // shell commands that are allowed or only change files inside
+                // the workspace (commits, redirects, in-place edits). Remote
+                // operations, downloads, deletions, installs, unlisted
+                // programs, and dynamic words still ask; a grant lifts Prompt.
                 ToolClass::Shell { command, .. } => {
+                    let verdict = classify_command(command, None);
+                    let workspace_local = verdict.decision == Decision::Prompt
+                        && verdict.reasons.iter().all(|rule| {
+                            matches!(
+                                rule,
+                                RuleId::GitMutation
+                                    | RuleId::RedirectIntoWorkspace
+                                    | RuleId::InPlaceEdit
+                                    | RuleId::Tee
+                                    | RuleId::Symlink
+                                    | RuleId::ChangeMode
+                            )
+                        });
                     if grants.covers(name, class)
-                        || classify_command(command, None).decision == Decision::Allow
+                        || verdict.decision == Decision::Allow
+                        || workspace_local
                     {
                         PolicyDecision::Execute
                     } else {
@@ -1893,6 +1908,36 @@ mod tests {
             ),
             PolicyDecision::RequireApproval
         );
+
+        // Workspace-local mutations run; remote, download, deletion, and
+        // unlisted programs still ask.
+        for (command, expected) in [
+            ("git add -A && git commit -m wip", PolicyDecision::Execute),
+            ("cargo test > target/test.log", PolicyDecision::Execute),
+            ("sed -i s/a/b/ src/lib.rs", PolicyDecision::Execute),
+            ("git push origin main", PolicyDecision::RequireApproval),
+            ("git fetch origin", PolicyDecision::RequireApproval),
+            (
+                "curl -o x https://example.com",
+                PolicyDecision::RequireApproval,
+            ),
+            (
+                "git commit -m x && rm notes.txt",
+                PolicyDecision::RequireApproval,
+            ),
+            ("some-unknown-tool --flag", PolicyDecision::RequireApproval),
+        ] {
+            assert_eq!(
+                evaluate(
+                    ApprovalMode::Auto,
+                    "shell",
+                    &shell(command),
+                    &grants(&[], &[])
+                ),
+                expected,
+                "{command}"
+            );
+        }
         // A grant covers a dangerous command explicitly.
         assert_eq!(
             evaluate(
@@ -2052,26 +2097,26 @@ mod tests {
         grants
             .delegate
             .commands
-            .insert("git commit -m x".to_owned());
+            .insert("git push origin x".to_owned());
         grants.delegate.hosts.insert("docs.rs".to_owned());
         for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
             assert_eq!(
-                evaluate(mode, "shell", &shell("git commit -m x"), &grants),
+                evaluate(mode, "shell", &shell("git push origin x"), &grants),
                 PolicyDecision::Execute,
                 "{mode:?}: the exact command is covered"
             );
             assert_eq!(
-                evaluate(mode, "shell", &shell("  git commit -m x "), &grants),
+                evaluate(mode, "shell", &shell("  git push origin x "), &grants),
                 PolicyDecision::Execute,
                 "{mode:?}: surrounding whitespace is not a different command"
             );
             assert_eq!(
-                evaluate(mode, "shell", &shell("git commit -m y"), &grants),
+                evaluate(mode, "shell", &shell("git push origin y"), &grants),
                 PolicyDecision::RequireApproval,
                 "{mode:?}: a different argument is a different command"
             );
             assert_eq!(
-                evaluate(mode, "shell", &shell("git commit -m x --amend"), &grants),
+                evaluate(mode, "shell", &shell("git push origin x --amend"), &grants),
                 PolicyDecision::RequireApproval,
                 "{mode:?}: a delegate grant is never a prefix"
             );

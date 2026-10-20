@@ -198,13 +198,9 @@ impl CompiledGeneration {
                         }
                         ProviderAuth::Header(name, secret) => name.len() + secret_bytes(secret),
                     },
-                    HttpCredential::ApiKey { explicit, .. } => {
-                        explicit.as_ref().map_or(0, secret_bytes)
-                    }
-                    HttpCredential::OpenAiCodex { profile } => {
-                        profile.as_ref().map_or(0, String::len)
-                    }
-                    HttpCredential::XAi { api_key, profile } => {
+                    HttpCredential::Builtin {
+                        api_key, profile, ..
+                    } => {
                         api_key.as_ref().map_or(0, secret_bytes)
                             + profile.as_ref().map_or(0, String::len)
                     }
