@@ -1244,8 +1244,25 @@ impl App {
             _ => return,
         };
         // `/agents` scopes to a component's top; when the missing parent of
-        // an orphan top arrives, the component's top moves up with it.
-        let scope = scope.map(|scope| self.loaded_top(scope));
+        // an orphan top arrives, the component's top moves up with it, and
+        // when the top itself is deleted (its agents become roots) the scope
+        // follows the highlighted row to its new top.
+        let highlighted = match &self.overlay {
+            Some(Overlay::Sessions { picker, .. }) => {
+                picker.current().map(|row| (row.id, row.root))
+            }
+            _ => None,
+        };
+        let scope = scope.map(|scope| {
+            if self.sessions.contains_key(&scope) {
+                self.loaded_top(scope)
+            } else {
+                highlighted
+                    .map(|(id, _)| id)
+                    .filter(|id| self.sessions.contains_key(id))
+                    .map_or(scope, |id| self.loaded_top(id))
+            }
+        });
         if let Some(Overlay::Sessions { scope: open, .. }) = &mut self.overlay {
             *open = scope;
         }
@@ -1265,8 +1282,9 @@ impl App {
             let before = picker.current().map(|row| row.id);
             picker.replace_items(rows, |row| row.id);
             // When the highlighted agent is no longer listed, fall back to the
-            // session it belongs to now: a deleted root re-parents its
-            // children, so the root comes from the rebuilt rows.
+            // session it belongs to now (a deleted root re-parents its
+            // children, so the root comes from the rebuilt rows); when the
+            // agent itself is gone, to the session it belonged to.
             if let Some(id) = before
                 && picker.current().map(|row| row.id) != Some(id)
                 && let Some(root) = picker
@@ -1274,6 +1292,7 @@ impl App {
                     .iter()
                     .find(|row| row.id == id)
                     .map(|row| row.root)
+                    .or(highlighted.map(|(_, root)| root))
                 && let Some(index) = picker.items().iter().position(|row| row.id == root)
             {
                 picker.select_item(index);

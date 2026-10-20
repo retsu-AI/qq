@@ -2762,6 +2762,39 @@ fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
     let mut expected = vec![missing, child.id, grandchild.id];
     expected.sort();
     assert_eq!(listed, expected);
+
+    // The scope's top is deleted: its agents become roots and `/agents`
+    // follows the highlighted agent to its new top instead of emptying.
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        missing,
+        SessionEvent::SessionDeleted {
+            session_id: missing,
+        },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(listed.contains(&grandchild.id), "{listed:?}");
+    assert!(!listed.is_empty());
+}
+
+#[test]
+fn a_deleted_agent_row_hands_the_cursor_to_its_session() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    app.handle_key(key(KeyCode::Tab));
+    while app.session_picker_selected() != Some(grandchild) {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        grandchild,
+        SessionEvent::SessionDeleted {
+            session_id: grandchild,
+        },
+    )));
+    assert!(!app.sessions.contains_key(&grandchild), "fixture: deleted");
+    assert_eq!(app.session_picker_selected(), Some(root), "not {other:?}");
+    let _ = child;
 }
 
 #[test]
