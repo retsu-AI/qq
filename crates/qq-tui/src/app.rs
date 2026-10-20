@@ -3356,19 +3356,15 @@ impl App {
             .is_some_and(|session| session.summary.purpose == qq_protocol::SessionPurpose::Audit)
     }
 
-    /// Sessions with a tool call awaiting the human's approval, in tree
-    /// order. Holds an approval delegate still owns are excluded (the human
-    /// is not asked yet), and so are audit sessions and anything under them,
-    /// which are never listed.
+    /// Sessions with a tool call awaiting the human's approval, in the order
+    /// of [`Self::sessions_needing_attention`] (approvals rank first there),
+    /// so the rule names the same session `Alt-A`/`Alt-D` answer. Holds an
+    /// approval delegate still owns are excluded (the human is not asked
+    /// yet), and so are audit sessions and anything under them.
     pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        let mut sessions = self.sessions.awaiting_approval();
-        sessions.extend(
-            self.orphan_trees()
-                .filter(|id| !self.sessions[id].live.awaiting_approval.is_empty()),
-        );
-        sessions
+        self.sessions_needing_attention()
             .into_iter()
-            .filter(|id| self.human_waiting(*id) && !self.under_audit(*id))
+            .take_while(|id| self.human_waiting(*id))
             .collect()
     }
 
@@ -3471,6 +3467,16 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // A picker confirmation against a session now known to sit under an
+        // audit is dropped before `y` can act on it.
+        if let Some(Overlay::Sessions {
+            confirm: Some(SessionConfirm::Delete(target)),
+            ..
+        }) = &self.overlay
+            && self.under_audit(*target)
+        {
+            self.clear_session_picker_confirm();
+        }
         // The session a workspace view returns to (and that `/goal`, `/btw`
         // act on while it is open) is replaced too.
         if self.view_return.is_some_and(|id| self.under_audit(id)) {

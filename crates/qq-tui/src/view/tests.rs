@@ -5571,6 +5571,56 @@ fn a_revealed_audit_drops_the_answers_and_amendment_in_progress() {
 }
 
 #[test]
+fn the_rule_names_the_approval_that_alt_a_answers() {
+    // A root waits, and so does a newer orphan (its parent not loaded): the
+    // one attention list ranks the newer component first, and the rule's
+    // named approval is the one `Alt-A` would answer.
+    let (mut app, root, ids) = app_with_fanout_where(1, |_, summary| {
+        summary.title = "orphan".to_owned();
+        summary.parent_id = Some(SessionId::from_bytes([0x77; 16]));
+        summary.updated_at_ms = 999;
+    });
+    app.layout.rail = PanePref::Hidden;
+    for id in [root, ids[0]] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let attention = app.sessions_needing_attention();
+    assert_eq!(attention.first(), Some(&ids[0]), "newest first");
+    assert_eq!(app.sessions_awaiting_approval().first(), Some(&ids[0]));
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    assert!(rule.contains("◇ orphan"), "{rule}");
+}
+
+#[test]
+fn a_revealed_audit_cancels_a_delete_confirmation_against_it() {
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.open_session_picker_with("", Some(ids[0]), Some(SessionConfirm::Delete(ids[0])));
+    assert_eq!(
+        app.session_picker_confirm(),
+        Some(SessionConfirm::Delete(ids[0]))
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert_eq!(app.session_picker_confirm(), None);
+}
+
+#[test]
 fn eighth_review_round_on_the_rail() {
     use qq_client::state::Need;
     // 1. A `/goal` view over an orphan whose missing parent arrives as an

@@ -459,17 +459,25 @@ async fn load_tui_models(
 /// The session `qq --session ID` may open: only a root. A sub-agent session
 /// is shown under its parent, never as the entry point, and an audit (even
 /// one whose parent was deleted, so a root) is bookkeeping, never shown.
+fn is_entry_point(session: &qq_protocol::SessionSummary) -> bool {
+    session.parent_id.is_none() && session.purpose != qq_protocol::SessionPurpose::Audit
+}
+
+/// The session a bare `qq` (and every reconnect) opens: the newest entry
+/// point. Sessions arrive newest first.
+fn newest_entry_point(sessions: &[qq_protocol::SessionSummary]) -> Option<qq_protocol::SessionId> {
+    sessions
+        .iter()
+        .find(|session| is_entry_point(session))
+        .map(|session| session.id)
+}
+
 fn openable(
     sessions: &[qq_protocol::SessionSummary],
     session_id: qq_protocol::SessionId,
 ) -> Result<qq_protocol::SessionId, ClientError> {
     match sessions.iter().find(|session| session.id == session_id) {
-        Some(session)
-            if session.parent_id.is_none()
-                && session.purpose != qq_protocol::SessionPurpose::Audit =>
-        {
-            Ok(session_id)
-        }
+        Some(session) if is_entry_point(session) => Ok(session_id),
         Some(_) => Err(ClientError::SessionIsChild(session_id)),
         None => Err(ClientError::SessionNotInWorkspace(session_id)),
     }
@@ -512,8 +520,8 @@ async fn bootstrap_tui(
             session_id
         }
         InitialSession::Open(session_id) => openable(&snapshot.sessions, *session_id)?,
-        InitialSession::Existing => match snapshot.sessions.first() {
-            Some(session) => session.id,
+        InitialSession::Existing => match newest_entry_point(&snapshot.sessions) {
+            Some(session_id) => session_id,
             None => return Ok((workspace_id, snapshot)),
         },
     };
@@ -694,6 +702,15 @@ mod tests {
             openable(&sessions, child),
             Err(ClientError::SessionIsChild(_))
         ));
+        // A bare `qq` opens the newest entry point, past newer agents and
+        // audits.
+        let newest_first = [
+            summary(child, Some(root), qq_protocol::SessionPurpose::default()),
+            summary(audit, None, qq_protocol::SessionPurpose::Audit),
+            summary(root, None, qq_protocol::SessionPurpose::default()),
+        ];
+        assert_eq!(newest_entry_point(&newest_first), Some(root));
+        assert_eq!(newest_entry_point(&newest_first[..2]), None);
     }
 
     #[test]
