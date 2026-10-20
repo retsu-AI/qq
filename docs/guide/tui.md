@@ -11,7 +11,7 @@ below works the same either way.
 ```
  qq  my-project › fix parser                    anthropic/claude-sonnet-5  12% ctx  $0.04
                                                                 │ NEEDS YOU  1
-  ▌ YOU                                                          │ ◐ fix parser    ↳1 ◐1
+  ▌ YOU                                                          │ ◐ fix parser       ↳1
   ▌ Fix the failing test in parser.rs                          │ ↳ ◇ add-tests
                                                                 │     ◇ approve run
   ● Read   src/parser.rs                                 0.1s   │
@@ -20,13 +20,16 @@ below works the same either way.
   ● Shell  cargo test -p parser                          4.1s   │
                                                                 │
     The test expected seconds but the parser…                   │
- ◇ add-tests needs approval  Ctrl-G jump  Alt-A/Alt-D answer ───── ? help  ^K commands
+                                                                │
+  ↳ 1 agent  /agents                                            │
+ ─────────────────────── M-A/M-D answer  ^G jump  ? help  ^K commands  ^O detail
  › Ask QQ...
 ```
 
 - **Top row**: workspace and session breadcrumb; on the right the model,
   `as <profile>` when not default, the approval mode when not `auto`,
-  context used, cost, and `connecting` / `offline` when relevant.
+  context used, cost once anything is spent, and `connecting` / `offline`
+  when relevant.
 - **Sidebar** (90 columns and wider; `Ctrl-\` toggles): your sessions
   grouped by what you should do — NEEDS YOU, WORKING, RECENT — with unread
   counts. A session's sub-agents (*agents*) roll up into its row as `↳N`;
@@ -41,7 +44,10 @@ below works the same either way.
   output tail, an MCP call its arguments). `Ctrl-O` folds finished blocks
   to one row each; `Alt-R` shows or hides reasoning.
 - **Rule**: running activity, elapsed time, time to first token, or the last
-  notice; key hints for the current state at the right. The help hint reads
+  notice; key hints for the current state at the right. An approval waiting
+  in another session or agent is named here unless the sidebar shows its
+  row (with every waiting approval on the sidebar the rule offers
+  `Alt-A`/`Alt-D` to answer and `Ctrl-G` to jump). The help hint reads
   `? help` while the composer is empty and `F1 help` once you have typed.
 - **Composer**: type and press `Enter`. `Shift-Enter` or `Alt-Enter` inserts
   a newline. `Alt-E` or `/editor` opens the draft in `$EDITOR`.
@@ -278,8 +284,10 @@ do not grant check consent.
 ## Files the agents changed
 
 `/changes` lists every file edited in this workspace by any session,
-flagging files touched by more than one. `Alt-I` opens the inspector pane
-with the focused session's details.
+flagging files touched by more than one. From 160 columns the inspector pane
+opens beside the transcript on its own while it has something to show (an
+expanded tool call, `/attention`, or `/changes`) and closes when it does not;
+`Alt-I` pins it open or hides it.
 
 ## Every command
 

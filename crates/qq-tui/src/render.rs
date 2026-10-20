@@ -105,6 +105,11 @@ pub(crate) struct Line {
     /// shift free for rows shared with the width-keyed caches.
     pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
+    /// The child session whose live card this row titles (`child_rows`).
+    /// The frame reads it to know which children a drawn card already
+    /// names; matching the row's text instead would let message content
+    /// that looks like a card (`↳ **title**`) stand in for one.
+    pub(crate) card: Option<qq_protocol::SessionId>,
 }
 
 impl Line {
@@ -115,6 +120,7 @@ impl Line {
                 text: text.into(),
                 style,
             }],
+            card: None,
         }
     }
 

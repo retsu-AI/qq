@@ -112,6 +112,8 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
                         .map(|accounting| accounting.inclusive.estimated_cost_usd_nanos)
                         .unwrap_or(session.estimated_cost_usd_nanos)
                 })
+                // A known zero says nothing; the cost appears once spent.
+                .filter(|nanos| *nanos > 0)
                 .map(|nanos| (format_cost(nanos), muted())),
             StatusItem::Workspace => {
                 (!app.workspace_path.is_empty()).then(|| (app.workspace_path.clone(), muted()))
@@ -145,9 +147,12 @@ pub(super) fn top_row(app: &App, width: usize) -> Line {
 /// needs while typing. A transient notice takes the left side while it
 /// lasts; otherwise a running session shows its activity, elapsed time, and
 /// time to first token. Approvals waiting in other sessions are named here
-/// too so they never stall silently. Context-sensitive key hints from the
-/// command table sit right, so the composer needs no hint row of its own.
-pub(super) fn composer_rule(app: &App, width: usize) -> Line {
+/// unless the rail painted their row (`rail_named`, `None` when the rail is
+/// off-screen), so each is named exactly once and none stalls silently;
+/// with every waiting approval on the rail the rule carries only the answer
+/// chords. Context-sensitive key hints from the command table sit right, so
+/// the composer needs no hint row of its own.
+pub(super) fn composer_rule(app: &App, width: usize, rail_named: Option<&[SessionId]>) -> Line {
     let mut left = Line::default();
     if let Some((status, level)) = app.visible_status() {
         let (prefix, style) = match level {
@@ -156,6 +161,101 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
             crate::app::NoticeLevel::Error => ("error: ", failure()),
         };
         left.push(format!(" {prefix}{status} "), style.bold());
+        // A notice takes the left side; attention elsewhere keeps a compact
+        // pointer on the right so a sticky error never hides a need: the
+        // answer chords for approvals, and a count of unseen failures and
+        // finishes with the jump chord, together when both exist.
+        let waiting = !app
+            .sessions_awaiting_approval()
+            .into_iter()
+            .all(|id| Some(id) == app.view().transcript());
+        let others: Vec<SessionId> = app
+            .sessions_needing_attention()
+            .into_iter()
+            .filter(|id| Some(*id) != app.view().transcript())
+            .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+            .filter(|id| {
+                app.sessions.get(id).is_some_and(|session| {
+                    matches!(
+                        super::sidebar::agent_need(session),
+                        Some(
+                            qq_client::state::Need::Failed | qq_client::state::Need::FinishedUnread
+                        )
+                    )
+                })
+            })
+            .collect();
+        // Forms of the right side, widest first, the first that fits beside
+        // a truncated status wins: the full chords and count, then shorter
+        // pointers, down to a bare `◇` or count, so even the narrowest
+        // terminal keeps something pointing at the need.
+        let count = (!others.is_empty()).then(|| {
+            let failed = others.iter().any(|id| {
+                app.sessions.get(id).is_some_and(|session| {
+                    super::sidebar::agent_need(session) == Some(qq_client::state::Need::Failed)
+                })
+            });
+            let mut count = Line::default();
+            count.push(
+                format!("{} {}", if failed { "✕" } else { "●" }, others.len()),
+                if failed { failure() } else { accent() },
+            );
+            count
+        });
+        let join = |parts: &[&Line]| {
+            let mut right = Line::default();
+            for part in parts {
+                if !right.is_empty() {
+                    right.push("  ", muted());
+                }
+                right.spans.extend(part.spans.iter().cloned());
+            }
+            right
+        };
+        let mut diamond = Line::default();
+        diamond.push("◇", warning().bold());
+        // With the strip on screen its `◇ N` / `● N new` already points
+        // at these needs: the rule keeps only the chords that answer or
+        // reach them, never a second count.
+        let sessions = crate::view::listed_sessions(app);
+        let strip = sessions > 1 && !crate::view::rail_visible(width, app.layout, sessions);
+        let jump_chord = app
+            .chord_label(crate::commands::Command::FocusNextApproval)
+            .map(|jump| {
+                let mut chord = Line::default();
+                chord.push(compact_chord(&jump), warning());
+                chord.push(" jump", muted());
+                chord
+            });
+        let mut candidates: Vec<Line> = Vec::new();
+        match (waiting, &count) {
+            (true, _) if strip => candidates.push(approval_chords(app)),
+            (false, Some(_)) if strip => candidates.extend(jump_chord),
+            (true, Some(count)) => {
+                let chords = approval_chords(app);
+                candidates.push(join(&[&chords, count]));
+                candidates.push(join(&[&diamond, count]));
+                candidates.push(diamond.clone());
+            }
+            (true, None) => {
+                candidates.push(approval_chords(app));
+                candidates.push(diamond.clone());
+            }
+            (false, Some(count)) => {
+                if let Some(chord) = &jump_chord {
+                    candidates.push(join(&[count, chord]));
+                }
+                candidates.push(count.clone());
+            }
+            (false, None) => {}
+        }
+        // `rule_keeping_right` keeps a side that leaves four cells of rule.
+        if let Some(right) = candidates
+            .into_iter()
+            .find(|right| right.width() + 2 + 4 <= width)
+        {
+            return rule_keeping_right(left, right, width);
+        }
         return rule_with(left, Line::default(), width);
     }
     // Standing guidance for a client that cannot create a session yet: it
@@ -286,48 +386,71 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     {
         left.push(" queued", muted());
     }
-    let waiting: Vec<&str> = app
+    let all_waiting: Vec<SessionId> = app
         .sessions_awaiting_approval()
         .into_iter()
         // A side view hides its source transcript's approval block.
         .filter(|id| Some(*id) != app.view().transcript())
-        .filter_map(|id| app.sessions.get(&id))
+        .collect();
+    let waiting: Vec<&str> = all_waiting
+        .iter()
+        .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+        .filter_map(|id| app.sessions.get(id))
         .map(|session| session.summary.title.as_str())
         .collect();
-    // With one session there is no rail (under `Auto`, or pinned on a
-    // terminal too narrow to fit it) and no strip, so an agent that failed
-    // or finished unseen has nowhere else to appear: the rule names or
-    // counts it, beside an approval too.
-    let lone = crate::view::listed_sessions(app) < 2
-        && !crate::view::rail_visible(width, app.layout, crate::view::listed_sessions(app));
-    let unseen: Vec<(&str, bool)> = if lone {
-        app.sessions_needing_attention()
-            .into_iter()
-            .filter(|id| Some(*id) != app.view().transcript())
-            .filter_map(|id| {
-                let need = app.attention_need(id)?;
-                let title = app.sessions.get(&id)?.summary.title.as_str();
-                match need {
-                    qq_client::state::Need::Failed => Some((title, true)),
-                    qq_client::state::Need::FinishedUnread => Some((title, false)),
-                    qq_client::state::Need::Approval => None,
-                }
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Sessions and agents that failed or finished unseen whose rail row is
+    // not on screen (rail hidden, Compact, collapsed or scrolled out): the
+    // strip only counts them, so the rule names them. Counted alongside
+    // approvals, so every unpainted item is named or counted. Only the
+    // transcript on screen is excluded: a finish behind `/goal` or `/btw`
+    // has not been seen.
+    let unseen: Vec<(&str, bool)> = app
+        .sessions_needing_attention()
+        .into_iter()
+        .filter(|id| Some(*id) != app.view().transcript())
+        .filter(|id| !rail_named.is_some_and(|named| named.contains(id)))
+        .filter_map(|id| app.sessions.get(&id))
+        .filter_map(|session| match super::sidebar::agent_need(session) {
+            Some(qq_client::state::Need::Failed) => Some((session.summary.title.as_str(), true)),
+            Some(qq_client::state::Need::FinishedUnread) => {
+                Some((session.summary.title.as_str(), false))
+            }
+            Some(qq_client::state::Need::Approval) | None => None,
+        })
+        .collect();
+    if waiting.is_empty()
+        && let [(first, failed), rest @ ..] = unseen.as_slice()
+    {
+        left.push(if left.is_empty() { " " } else { "  " }, muted());
+        let (glyph, verb, style) = if *failed {
+            ("✕ ", "failed", failure())
+        } else {
+            ("● ", "finished", accent())
+        };
+        left.push(glyph, style.bold());
+        left.push(
+            if rest.is_empty() {
+                format!("{first} {verb}")
+            } else {
+                format!("{first} {verb} +{} need you", rest.len())
+            },
+            style,
+        );
+        if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+            left.push(format!("  {chord} jump"), muted());
+        }
+    }
     if !waiting.is_empty() {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
+        // The most urgent item is named; approvals then the unseen agents
+        // are counted.
+        let others = waiting.len() - 1 + unseen.len();
         left.push(
-            match (waiting.as_slice(), unseen.len()) {
-                ([one], 0) => format!("{one} needs approval"),
-                ([first, rest @ ..], 0) => format!("{first} +{} need approval", rest.len()),
-                ([first, rest @ ..], unseen) => {
-                    format!("{first} needs approval +{} need you", rest.len() + unseen)
-                }
-                ([], _) => String::new(),
+            match (waiting[0], others, unseen.is_empty()) {
+                (one, 0, _) => format!("{one} needs approval"),
+                (first, rest, true) => format!("{first} +{rest} need approval"),
+                (first, rest, false) => format!("{first} needs approval +{rest} need you"),
             },
             warning().bold(),
         );
@@ -366,6 +489,15 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
     }
 
     let mut right = Line::default();
+    // With the rail naming every waiting approval, the rule keeps only the
+    // chords that answer or reach them. They outrank the ordinary hints:
+    // those are added only while the whole right side still fits beside the
+    // status, so a long status drops hints before it drops these.
+    let mut keep_right = false;
+    if !all_waiting.is_empty() && waiting.is_empty() {
+        keep_right = true;
+        right = approval_chords(app);
+    }
     for (command, label) in hints_for(app) {
         // `?` on an empty composer opens help too, and is the cheaper key
         // to discover; the hint names it while it works and falls back to
@@ -381,13 +513,65 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
             };
             compact_chord(&chord)
         };
+        let mut hint = Line::default();
+        if !right.is_empty() {
+            hint.push("  ", muted());
+        }
+        hint.push(chord, accent());
+        hint.push(format!(" {label}"), muted());
+        // Each lower-priority hint is dropped rather than the whole side.
+        if keep_right && left.width() + right.width() + hint.width() + 6 > width {
+            break;
+        }
+        right.spans.extend(hint.spans);
+    }
+    if keep_right {
+        return rule_keeping_right(left, right, width);
+    }
+    rule_with(left, right, width)
+}
+
+/// `M-A/M-D answer  ^G jump`: the in-place controls for approvals waiting
+/// in other sessions.
+fn approval_chords(app: &App) -> Line {
+    let mut right = Line::default();
+    let jump = app.chord_label(crate::commands::Command::FocusNextApproval);
+    let approve = app.chord_label(crate::commands::Command::ApproveBackground);
+    let deny = app.chord_label(crate::commands::Command::DenyBackground);
+    if let (Some(approve), Some(deny)) = (approve, deny) {
+        right.push(
+            format!("{}/{}", compact_chord(&approve), compact_chord(&deny)),
+            warning(),
+        );
+        right.push(" answer", muted());
+    }
+    if let Some(jump) = jump {
         if !right.is_empty() {
             right.push("  ", muted());
         }
-        right.push(chord, accent());
-        right.push(format!(" {label}"), muted());
+        right.push(compact_chord(&jump), warning());
+        right.push(" jump", muted());
     }
-    rule_with(left, right, width)
+    right
+}
+
+/// [`rule_with`] for a right side that must stay (the in-place approval
+/// chords): the status truncates to make room instead.
+fn rule_keeping_right(left: Line, right: Line, width: usize) -> Line {
+    let mut padded = Line::styled(" ", muted());
+    padded.spans.extend(right.spans);
+    padded.push(" ", muted());
+    if padded.width() + 4 > width {
+        return rule_with(left, Line::default(), width);
+    }
+    let mut rule = truncate_line(left, width.saturating_sub(padded.width() + 5));
+    if !rule.is_empty() {
+        rule.push(" ", muted());
+    }
+    let filler = width.saturating_sub(rule.width() + padded.width());
+    rule.push("─".repeat(filler), border());
+    rule.spans.extend(padded.spans);
+    truncate_line(rule, width)
 }
 
 pub(super) fn goal_duration(ms: u64) -> String {

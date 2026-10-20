@@ -214,19 +214,32 @@ pub(crate) const fn max_composer_rows(width: usize, height: usize) -> usize {
     }
 }
 
+/// What the model asks of the layout this frame: how many sessions the rail
+/// would list, and whether the inspector has anything to show. `Auto` panes
+/// hide when there is nothing for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LayoutDemand {
+    pub sessions: usize,
+    /// An expanded tool call or a workspace view in the focused pane.
+    pub inspector_content: bool,
+}
+
 /// Lay out a frame of `width` × `height` cells. `chrome_rows` are the rows
 /// below the body already claimed by drafts, the rule, and the composer; the
 /// layout subtracts the agent strip itself when it decides to show one, so
-/// the body gets what remains. The caller passes the current session count
-/// because `Auto` panes hide when there is nothing to list.
+/// the body gets what remains.
 #[must_use]
 pub(crate) fn compute_layout(
     width: usize,
     height: usize,
     chrome_rows: usize,
     prefs: LayoutPrefs,
-    sessions: usize,
+    demand: LayoutDemand,
 ) -> Layout {
+    let LayoutDemand {
+        sessions,
+        inspector_content,
+    } = demand;
     let tier = Tier::of(width);
 
     let rail_wanted = match prefs.rail {
@@ -253,11 +266,12 @@ pub(crate) fn compute_layout(
         .saturating_sub(usize::from(strip));
     let body = Rect::new(0, 1, width, body_height);
 
-    // `Auto` shows the inspector from Wide: it holds the focused session's
-    // expanded tool detail and the workspace views so the prose column
-    // stays prose. `Shown` opens it at any width that can carve one.
+    // `Auto` shows the inspector from Wide while it has something to hold:
+    // the focused session's expanded tool detail or a workspace view, so the
+    // prose column stays prose. An empty inspector gives its width back.
+    // `Shown` opens it at any width that can carve one.
     let inspector_wanted = match prefs.inspector {
-        PanePref::Auto => tier >= Tier::Wide,
+        PanePref::Auto => tier >= Tier::Wide && inspector_content,
         PanePref::Shown => true,
         PanePref::Hidden => false,
     };
@@ -321,7 +335,14 @@ mod tests {
     use super::*;
 
     fn layout(width: usize, height: usize, sessions: usize) -> Layout {
-        compute_layout(width, height, 2, LayoutPrefs::default(), sessions)
+        compute_layout(width, height, 2, LayoutPrefs::default(), demand(sessions))
+    }
+
+    fn demand(sessions: usize) -> LayoutDemand {
+        LayoutDemand {
+            sessions,
+            inspector_content: true,
+        }
     }
 
     #[test]
@@ -378,12 +399,12 @@ mod tests {
             rail: PanePref::Shown,
             inspector: PanePref::Auto,
         };
-        let tight = compute_layout(60, 24, 2, prefs, 3);
+        let tight = compute_layout(60, 24, 2, prefs, demand(3));
         assert_eq!(tight.rail, Some(Rect::new(40, 1, 20, 21)));
         assert_eq!(tight.transcripts[0].area.width, 40);
         // Narrower still: the rail gives way rather than the transcript,
         // and the strip returns.
-        let tiny = compute_layout(50, 24, 2, prefs, 3);
+        let tiny = compute_layout(50, 24, 2, prefs, demand(3));
         assert!(tiny.rail.is_none());
         assert!(tiny.strip);
         assert_eq!(tiny.transcripts[0].area.height, 20);
@@ -397,7 +418,33 @@ mod tests {
 
         let auto = layout(200, 60, 3);
         assert_eq!(auto.tier, Tier::Wide);
-        assert!(auto.inspector.is_some(), "Auto shows at Wide");
+        assert!(auto.inspector.is_some(), "Auto shows at Wide with content");
+        let empty = compute_layout(
+            200,
+            60,
+            2,
+            LayoutPrefs::default(),
+            LayoutDemand {
+                sessions: 3,
+                inspector_content: false,
+            },
+        );
+        assert!(empty.inspector.is_none(), "an empty Auto inspector hides");
+        assert_eq!(empty.transcripts[0].area.width, 200 - 28);
+        let pinned = compute_layout(
+            200,
+            60,
+            2,
+            LayoutPrefs {
+                rail: PanePref::Auto,
+                inspector: PanePref::Shown,
+            },
+            LayoutDemand {
+                sessions: 3,
+                inspector_content: false,
+            },
+        );
+        assert!(pinned.inspector.is_some(), "Shown pins it empty");
 
         let wide = compute_layout(
             200,
@@ -407,7 +454,7 @@ mod tests {
                 rail: PanePref::Auto,
                 inspector: PanePref::Shown,
             },
-            3,
+            demand(3),
         );
         assert_eq!(auto, wide, "Auto and Shown agree at Wide");
         let rail = wide.rail.expect("rail");
@@ -435,7 +482,7 @@ mod tests {
                 rail: PanePref::Auto,
                 inspector: PanePref::Shown,
             },
-            3,
+            demand(3),
         );
         assert_eq!(ultra.tier, Tier::Ultra);
         let rail = ultra.rail.expect("rail");
@@ -462,7 +509,7 @@ mod tests {
                 rail: PanePref::Hidden,
                 inspector: PanePref::Hidden,
             },
-            3,
+            demand(3),
         );
         assert!(hidden.rail.is_none());
         assert!(hidden.inspector.is_none());
@@ -478,7 +525,7 @@ mod tests {
                 rail: PanePref::Shown,
                 inspector: PanePref::Auto,
             },
-            1,
+            demand(1),
         );
         assert_eq!(shown.rail, Some(Rect::new(60, 1, 20, 21)));
     }

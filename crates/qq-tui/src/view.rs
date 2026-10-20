@@ -129,7 +129,37 @@ pub(crate) fn listed_sessions(app: &App) -> usize {
 /// with the app so event visibility and the toggle command agree with the
 /// frame.
 pub(crate) fn rail_visible(width: usize, prefs: LayoutPrefs, sessions: usize) -> bool {
-    compute_layout(width, layout::MIN_HEIGHT, 0, prefs, sessions).rail_visible()
+    compute_layout(
+        width,
+        layout::MIN_HEIGHT,
+        0,
+        prefs,
+        layout::LayoutDemand {
+            sessions,
+            inspector_content: false,
+        },
+    )
+    .rail_visible()
+}
+
+/// Whether the inspector would hold anything for `pane`: a workspace view, or
+/// an expanded tool call of the pane's session. `Auto` hides an empty one.
+fn inspector_has_content(app: &App, pane: &TranscriptPane) -> bool {
+    match pane.view {
+        View::Attention | View::Changes => true,
+        View::Goal(_) | View::SideQuestions(_) => false,
+        View::Transcript(session) => {
+            !app.expanded_tool_calls.is_empty()
+                && session
+                    .and_then(|id| app.sessions.get(&id))
+                    .and_then(|session| session.tool_calls.as_deref())
+                    .is_some_and(|calls| {
+                        calls
+                            .iter()
+                            .any(|call| app.expanded_tool_calls.contains(&call.id))
+                    })
+        }
+    }
 }
 
 /// Frame assembly and the row diff against the previous frame. Retained
@@ -155,6 +185,11 @@ pub(crate) struct FrameRenderer {
     cursor: Option<CursorPosition>,
     /// Sessions the last frame's rail window painted; handed to the app.
     rail_painted: Option<Vec<SessionId>>,
+    /// Sessions the last frame named outside the rule (painted rail rows and
+    /// child cards); handed to the app.
+    named: Vec<SessionId>,
+    /// Children whose card title row the last frame painted.
+    carded: Vec<SessionId>,
     /// Sessions whose transcript the last frame's panes drew; handed to the
     /// app.
     drawn: Vec<SessionId>,
@@ -171,6 +206,8 @@ impl FrameRenderer {
             }
         }
         app.rail_painted = self.rail_painted.take();
+        app.frame_named = std::mem::take(&mut self.named);
+        app.frame_carded = std::mem::take(&mut self.carded);
         app.drawn = std::mem::take(&mut self.drawn);
     }
 
@@ -266,7 +303,16 @@ impl FrameRenderer {
         let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
         let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
-        let layout = compute_layout(width, height, chrome_rows, app.layout, listed_sessions(app));
+        let layout = compute_layout(
+            width,
+            height,
+            chrome_rows,
+            app.layout,
+            layout::LayoutDemand {
+                sessions: listed_sessions(app),
+                inspector_content: inspector_has_content(app, app.pane()),
+            },
+        );
         let body_height = layout.body.height;
         let mode = app.mode();
         // With the inspector on screen, expanded tool bodies and the
@@ -357,14 +403,33 @@ impl FrameRenderer {
                 inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
             ));
         }
+        // A spawned child's live card under its spawn call names that child
+        // in the transcript on screen, but only while the card is inside the
+        // viewport: the card's `↳ title` row must be among the body rows
+        // drawn. Such a child is named once: the rule does not repeat it and
+        // the rail does not list it again under the focused session. The
+        // card row carries its child's id (`Line::card`), so neither a
+        // namesake's card nor message text that looks like a card stands in
+        // for it.
+        let mut carded: Vec<SessionId> = body.iter().filter_map(|line| line.card).collect();
+        carded.sort_unstable();
+        carded.dedup();
+        self.carded.clone_from(&carded);
+        let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            let (rows, painted) = sidebar(app, rail.width, body_height, density);
-            self.rail_painted = Some(painted);
+            let (rows, named, window) =
+                sidebar_without(app, rail.width, body_height, density, &carded);
+            rail_named = Some(named);
+            self.rail_painted = Some(window);
             columns.push((rail.x, rows));
         } else {
             self.rail_painted = Some(Vec::new());
         }
+        if !carded.is_empty() {
+            rail_named.get_or_insert_with(Vec::new).extend(carded);
+        }
+        self.named = rail_named.clone().unwrap_or_default();
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
         // transcript text once per pane on every frame.
@@ -379,6 +444,7 @@ impl FrameRenderer {
                 let mut row = Line {
                     indent: first.indent,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
+                    card: first.card,
                 };
                 row.spans.extend(first.spans);
                 for (x, column) in &mut columns {
@@ -415,7 +481,7 @@ impl FrameRenderer {
             lines.push(strip);
         }
         lines.extend(draft_lines);
-        lines.push(composer_rule(app, width));
+        lines.push(composer_rule(app, width, rail_named.as_deref()));
         let composer_top = lines.len();
         lines.extend(composer_lines);
         lines.extend(std::iter::repeat_n(Line::default(), padding_rows));

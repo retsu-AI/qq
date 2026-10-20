@@ -2867,9 +2867,18 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
         "one session: nothing to list"
     );
     let rail_width = |width, prefs, sessions| {
-        layout::compute_layout(width, 24, 2, prefs, sessions)
-            .rail
-            .map_or(0, |rail| rail.width)
+        layout::compute_layout(
+            width,
+            24,
+            2,
+            prefs,
+            layout::LayoutDemand {
+                sessions,
+                inspector_content: false,
+            },
+        )
+        .rail
+        .map_or(0, |rail| rail.width)
     };
     let auto = LayoutPrefs::default();
     assert_eq!(rail_width(100, auto, 2), 25);
@@ -2888,8 +2897,9 @@ fn the_sidebar_stays_hidden_with_one_session_and_scales_with_width() {
     );
 }
 
-#[test]
-fn spawned_children_render_under_their_spawn_call_and_never_fold() {
+/// A focused parent whose running `spawn_agent` call created `survey
+/// callers`, among four quiet reads; the rail is hidden.
+fn app_with_spawned_child() -> (App, SessionId) {
     let mut app = app_with_messages(1);
     let parent = app.focused().unwrap();
     let run_id = RunId::from_bytes([2; 16]);
@@ -2901,8 +2911,6 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         None,
         false,
     );
-    // Four quiet reads plus the spawn call: without the child this run
-    // would fold into one counted line at collapsed detail.
     let mut calls = vec![spawn_call.clone()];
     for byte in 0x22..0x26 {
         calls.push(tool_call_snapshot(
@@ -2944,6 +2952,14 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         )
     }));
     app.layout.rail = crate::view::PanePref::Hidden;
+    (app, child_id)
+}
+
+#[test]
+fn spawned_children_render_under_their_spawn_call_and_never_fold() {
+    // Four quiet reads plus the spawn call: without the child this run
+    // would fold into one counted line at collapsed detail.
+    let (mut app, child_id) = app_with_spawned_child();
 
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows
@@ -2958,17 +2974,21 @@ fn spawned_children_render_under_their_spawn_call_and_never_fold() {
         "{rows:?}"
     );
     assert!(
-        !rows.iter().any(|row| row.contains("related sessions")),
+        !rows.iter().any(|row| row.contains("↳ 1 agent")),
         "an inline child is not repeated below"
     );
 
-    // A child with no recorded call attaches nowhere in the transcript
-    // but still appears in related sessions.
+    // A child with no recorded call attaches nowhere in the transcript but
+    // is counted on one summary row below it.
     app.sessions.get_mut(&child_id).unwrap().summary.spawned_by = None;
     let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
     let spawn_row = rows.iter().position(|row| row.contains("Spawn")).unwrap();
     assert!(!rows[spawn_row + 1].contains("↳"));
-    assert!(rows.iter().any(|row| row.contains("related sessions")));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("↳ 1 agent") && row.contains("/agents")),
+        "{rows:#?}"
+    );
 }
 
 #[test]
@@ -5750,7 +5770,7 @@ fn thirteenth_review_round_on_the_rail() {
         0,
     );
     app.sessions.get_mut(&done).unwrap().finished_unread = true;
-    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200)]).join("");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200, None)]).join("");
     assert!(rule.contains("needs approval +1 need you"), "{rule}");
 
     // 5. A snapshot without a focused body whose only listed session is an
@@ -5873,6 +5893,70 @@ fn thirteenth_review_round_on_the_rail() {
 }
 
 #[test]
+fn alt_a_never_answers_an_approval_folded_into_a_need_you_row() {
+    // `folded` ranks first (its component is newest) but its need is folded
+    // into a `+N need you` row: pointed at, not painted. `shown`'s row is
+    // painted. Alt-A answers `shown`, never `folded` blind.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let (folded, shown) = (ids[0], ids[1]);
+    for id in [folded, shown] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let waiting = app.sessions_awaiting_approval();
+    assert_eq!(
+        waiting.first(),
+        Some(&folded),
+        "fixture: folded ranks first"
+    );
+    app.frame_named = vec![folded, shown];
+    app.rail_painted = Some(vec![shown]);
+    app.execute(Command::ApproveBackground);
+    assert_eq!(
+        app.focused(),
+        Some(shown),
+        "a painted one, never the folded"
+    );
+}
+
+#[test]
+fn alt_a_answers_the_approval_the_rule_names_beside_a_painted_one() {
+    // `agent 0` ranks first and its rail row is painted; `other` waits too
+    // and is not on the rail's named list, so the rule names it. The answer
+    // chords beside that name act on it (both bodies are cold, so the chord
+    // focuses its target).
+    let (mut app, root, ids) = app_with_fanout(1);
+    let other = SessionId::from_bytes([0x11; 16]);
+    for id in [ids[0], other] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    app.focus_session(root);
+    let waiting: Vec<_> = app.sessions_awaiting_approval();
+    assert_eq!(waiting.len(), 2, "{waiting:?}");
+    let (painted, named) = (waiting[0], waiting[1]);
+    app.frame_named = vec![painted];
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200, Some(&[painted]))]).join("");
+    let title = app.sessions[&named].summary.title.clone();
+    assert!(rule.contains(&format!("◇ {title}")), "{rule}");
+    app.execute(Command::ApproveBackground);
+    assert_eq!(
+        app.focused(),
+        Some(named),
+        "the chord acts on the named one"
+    );
+}
+
+#[test]
 fn the_rule_names_the_approval_that_alt_a_answers() {
     // A root waits, and so does a newer orphan (its parent not loaded): the
     // one attention list ranks the newer component first, and the rule's
@@ -5895,7 +5979,7 @@ fn the_rule_names_the_approval_that_alt_a_answers() {
     let attention = app.sessions_needing_attention();
     assert_eq!(attention.first(), Some(&ids[0]), "newest first");
     assert_eq!(app.sessions_awaiting_approval().first(), Some(&ids[0]));
-    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     assert!(rule.contains("◇ orphan"), "{rule}");
 }
 
@@ -6052,7 +6136,7 @@ fn eighth_review_round_on_the_rail() {
         view.finished_unread = true;
     }
     app.focus_session(root);
-    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     assert!(rule.contains("✕ agent 0 failed"), "{rule}");
 
     // 6. /attention shows the unseen failure, not the delegate-owned hold.
@@ -6089,7 +6173,7 @@ fn ninth_review_round_on_the_rail() {
     }
     app.focus_session(root);
     assert!(!crate::view::rail_visible(40, app.layout, 1));
-    let rule = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 40, None)]).join("");
     assert!(rule.contains("agent 0"), "{rule}");
 
     // 2. A side question under a root the rail window did not paint keeps
@@ -6473,6 +6557,749 @@ fn the_rail_is_one_row_per_session_at_regular_and_adds_tail_and_cost_at_wide() {
 }
 
 #[test]
+fn a_waiting_approval_is_named_once_per_frame_outside_its_transcript() {
+    // Deploy helper waits; the focused parent shows only its summary row.
+    let (mut app, _) = app_with_every_rail_group();
+    let named = |rows: &[String]| {
+        rows.iter()
+            .map(|row| row.matches("Deploy helper").count())
+            .sum::<usize>()
+    };
+    // Regular with the rail: the rail names it; the rule only offers chords.
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    let rule = &rows[rows.len() - 3];
+    assert!(!rule.contains("needs approval"), "{rule}");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("^G jump"),
+        "{rule}"
+    );
+    // Regular with the rail hidden: the strip counts, the rule names it.
+    app.layout.rail = PanePref::Hidden;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Deploy helper needs approval"))
+    );
+    // Compact: the same.
+    app.layout.rail = PanePref::Auto;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    assert_eq!(named(&rows), 1, "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Deploy helper needs approval"))
+    );
+}
+
+#[test]
+fn needs_collapsed_under_a_rail_pointer_are_not_repeated_on_the_rule() {
+    // Five waiting agents under an unfocused session: the rail names three
+    // and its `+2 need you` row points at the rest, so the rule adds no
+    // second pointer and offers only the answer chords.
+    let (mut app, _, ids) = app_with_fanout(5);
+    for (index, id) in ids.iter().enumerate() {
+        app.sessions
+            .get_mut(id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x90 + index as u8; 16]));
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    for index in 0..3 {
+        let name = format!("agent {index}");
+        let count: usize = rows.iter().map(|row| row.matches(&name).count()).sum();
+        assert_eq!(count, 1, "{name} named once: {rows:#?}");
+    }
+    assert!(
+        rows.iter().any(|row| row.contains("+2 need you")),
+        "{rows:#?}"
+    );
+    let rule = &rows[rows.len() - 3];
+    assert!(!rule.contains("need approval"), "no second pointer: {rule}");
+    assert!(rule.contains("M-A/M-D answer"), "{rule}");
+}
+
+#[test]
+fn a_notice_counts_failures_beside_approvals_and_a_finish_behind_a_side_view_is_named() {
+    // One session: an agent waits on the human and another failed unseen,
+    // with a notice on the rule.
+    let (mut app, root, ids) = app_with_fanout(2);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x84; 16]));
+    {
+        let view = app.sessions.get_mut(&ids[1]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    app.set_info_for_test("theme saved");
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("✕ 1"),
+        "{rule}"
+    );
+
+    // A finish of the followed session while `/goal` is open is unseen.
+    let (mut app, root, _) = app_with_fanout(0);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.focus_session(root);
+    app.sessions.get_mut(&root).unwrap().goal = Some(fixtures::goal_snapshot(root));
+    app.set_view(View::Goal(root));
+    {
+        let view = app.sessions.get_mut(&root).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Completed);
+        view.finished_unread = true;
+    }
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
+    assert!(rule.contains("Fan out finished"), "{rule}");
+}
+
+#[test]
+fn a_lone_sessions_failed_agent_is_named_on_the_rule() {
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    assert!(!rows.iter().any(|row| row.contains("RECENT")), "no rail");
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("✕ agent 0 failed"), "{rule}");
+    // Narrow and long: the name truncates before the rule loses its point.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.title = "x".repeat(200);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 60, 24));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.starts_with(" ✕ xxx"), "{rule}");
+    assert!(rule.chars().count() <= 60, "{rule}");
+}
+
+#[test]
+fn an_off_rail_failure_is_counted_beside_an_off_rail_approval() {
+    let (mut app, root, ids) = app_with_fanout(2);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x96; 16]));
+    {
+        let view = app.sessions.get_mut(&ids[1]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(
+        rule.contains("agent 0 needs approval +1 need you"),
+        "the failure is counted: {rule}"
+    );
+}
+
+#[test]
+fn the_approval_chords_survive_a_long_status_and_delegate_holds_are_not_answerable() {
+    let (mut app, [_, child, _, parent, _]) = app_with_every_rail_group();
+    // The focused session carries a goal: `goal · run 4/200 · 23h left ·
+    // next 0s` plus `◐ working` fills the left at this width, and every
+    // waiting approval is on the rail, so only the chords keep the rule
+    // actionable.
+    let mut goal = fixtures::goal_snapshot(parent);
+    goal.counters.runs = 4;
+    app.sessions.get_mut(&parent).unwrap().goal = Some(goal);
+    app.sessions.get_mut(&parent).unwrap().summary.status = SessionStatus::Running;
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 70, Some(&[child]))]).join("");
+    assert!(
+        rule.contains("M-A/M-D answer") && rule.contains("^G jump"),
+        "{rule}"
+    );
+    assert!(rule.chars().count() <= 70, "{rule}");
+    // A delegate-owned hold is neither named nor answered by Alt-A.
+    let held: Vec<_> = app.sessions[&child]
+        .live
+        .awaiting_approval
+        .iter()
+        .copied()
+        .collect();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .with_delegate
+        .extend(held);
+    assert!(app.sessions_awaiting_approval().is_empty());
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::ALT,
+    )));
+    assert!(effects.into_requests().is_empty(), "nothing approved");
+}
+
+#[test]
+fn alt_a_answers_the_escalated_call_not_an_earlier_delegate_owned_one() {
+    let (mut app, _, child, run_id, human_call) = app_with_child_awaiting_approval();
+    // An earlier call in the same session is still the delegate's.
+    let delegated = ToolCallId::from_bytes([0x3f; 16]);
+    app.apply_client_update(ClientUpdate::Event(SessionEventEnvelope {
+        run_id: Some(run_id),
+        occurred_at_ms: 4,
+        ..fixtures::envelope(
+            3,
+            child,
+            SessionEvent::ToolApprovalRequested {
+                tool_call: ToolCallSnapshot {
+                    run_id,
+                    call_ordinal: 0,
+                    provider_call_id: "d".to_owned(),
+                    arguments: r#"{"command":"ls"}"#.to_owned(),
+                    state: ToolCallState::AwaitingApproval,
+                    ..fixtures::tool_call(delegated, child, "shell")
+                },
+                shell: None,
+                edit: None,
+                question: None,
+                fetch: None,
+                delegated: true,
+            },
+        )
+    }));
+    let view = app.sessions.get_mut(&child).unwrap();
+    view.live.with_delegate.insert(delegated);
+    if let Some(calls) = view.tool_calls.as_mut() {
+        calls.sort_by_key(|call| call.id != delegated);
+    }
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Char('a'),
+        KeyModifiers::ALT,
+    )));
+    let requests = format!("{:?}", effects.into_requests());
+    assert!(requests.contains(&format!("{human_call:?}")), "{requests}");
+    assert!(!requests.contains(&format!("{delegated:?}")), "{requests}");
+}
+
+#[test]
+fn unpainted_session_failures_and_scrolled_agents_are_named_on_the_rule() {
+    let failed = |app: &mut App, id: SessionId| {
+        let view = app.sessions.get_mut(&id).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    };
+    // Compact: an unfocused session failed unseen; the strip only counts it.
+    let (mut app, root, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    failed(&mut app, other);
+    app.focus_session(root);
+    app.layout.rail = PanePref::Auto;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("✕ Other failed"), "{rule}");
+    // A short rail: a failed agent's row is scrolled out of the window.
+    let (mut app, root, ids) = app_with_fanout(30);
+    failed(&mut app, ids[29]);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Shown;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 12));
+    let named: usize = rows.iter().map(|row| row.matches("agent 29").count()).sum();
+    assert_eq!(named, 1, "named once, on the rail or the rule: {rows:#?}");
+    let _ = root;
+}
+
+#[test]
+fn the_approval_chords_stay_beside_a_notice() {
+    let (mut app, _) = app_with_every_rail_group();
+    app.set_info_for_test("theme saved");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("theme saved"), "{rule}");
+    assert!(rule.contains("M-A/M-D answer"), "{rule}");
+}
+
+#[test]
+fn the_related_agents_row_counts_work_by_the_rails_rules_and_names_no_approval() {
+    let (mut app, parent, child_id, _, _) = app_with_child_awaiting_approval();
+    {
+        let child = app.sessions.get_mut(&child_id).unwrap();
+        child.summary.spawned_by = None;
+        child.summary.status = SessionStatus::Idle;
+        child.summary.running_side_question = Some(RunId::from_bytes([0x90; 16]));
+        // Only the side question: an agent blocked on an approval is not
+        // working.
+        child.live.awaiting_approval.clear();
+    }
+    app.focus_session(parent);
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 80, 24));
+    let related = rows
+        .iter()
+        .find(|row| row.contains("↳ 1 agent"))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(related.contains("1") && !related.contains('◇'), "{related}");
+    assert!(
+        related.contains(" · "),
+        "the side question counts as work: {related}"
+    );
+}
+
+#[test]
+fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_nothing() {
+    // One session (no rail, no strip) whose agent failed unseen, and a
+    // sticky notice on the rule.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.sessions.remove(&SessionId::from_bytes([0x11; 16]));
+    app.layout.rail = PanePref::Auto;
+    {
+        let view = app.sessions.get_mut(&ids[0]).unwrap();
+        view.summary.last_outcome = Some(qq_protocol::RunOutcome::Failed {
+            failure: qq_protocol::RunFailure {
+                message: "boom".to_owned(),
+                kind: qq_protocol::RunFailureKind::Server,
+            },
+        });
+        view.finished_unread = true;
+    }
+    app.focus_session(root);
+    app.set_info_for_test("theme saved");
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 40));
+    let rule = &rows[rows.len() - 3];
+    assert!(rule.contains("theme saved"), "{rule}");
+    assert!(rule.contains("✕ 1") && rule.contains("^G jump"), "{rule}");
+
+    // A narrow rail whose badges leave no room for a waiting session's
+    // title does not report that session as named, so the rule names it;
+    // one surviving title cell (`F...`) still names it.
+    let (mut app, root, _) = app_with_fanout(30);
+    {
+        let view = app.sessions.get_mut(&root).unwrap();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x85; 16]));
+        view.unread = 999_999_999;
+    }
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    assert!(
+        !named.contains(&root),
+        "title truncated away: not named {:#?}",
+        frame_rows(&rows)
+    );
+    app.sessions.get_mut(&root).unwrap().unread = 99_999;
+    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    let texts = frame_rows(&rows);
+    assert!(texts.iter().any(|row| row.contains("◇ F...")), "{texts:#?}");
+    assert!(named.contains(&root), "one title cell names it: {texts:#?}");
+    let (_, named, _) = sidebar(&app, 60, 30, RailDensity::Compact);
+    assert!(named.contains(&root), "title visible: named");
+}
+
+#[test]
+fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names() {
+    // A session titled `30` beside an `↳30` badge on a rail so narrow the
+    // title is squeezed out: the badge's digits do not make the title
+    // visible.
+    let (mut app, root, ids) = app_with_fanout(30);
+    app.sessions.get_mut(&root).unwrap().summary.title = "30 and more".to_owned();
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x83; 16]));
+    app.sessions
+        .get_mut(&root)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x82; 16]));
+    app.sessions.get_mut(&root).unwrap().unread = 99_999;
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let (_, named, _) = sidebar(&app, 14, 30, RailDensity::Compact);
+    assert!(!named.contains(&root), "title not shown: not named");
+
+    // Five waiting agents. With the whole rail on screen the `+2 need you`
+    // row points at the collapsed two; in a window that starts below the
+    // session's title row it does not say whose they are.
+    let (mut app, root, ids) = app_with_fanout(5);
+    for (index, id) in ids.iter().enumerate() {
+        app.sessions
+            .get_mut(id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x70 + index as u8; 16]));
+    }
+    // Focus an agent so the window centres below the session's row.
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    let full = sidebar(&app, 40, 40, RailDensity::Compact).1;
+    assert!(full.contains(&ids[4]), "collapsed and pointed at: {full:?}");
+    // `Other` is focused and lists after `Fan out` (NEEDS YOU first), so a
+    // window of two rows centred on it starts below `Fan out`'s title row
+    // but can still reach the `+2` row only when the title is in view. A
+    // window that shows the `+2` row without the title must not name them.
+    let plan = plan_rail(&app, RailDensity::Compact);
+    let title = plan
+        .rows
+        .iter()
+        .position(|row| matches!(row, RailRow::Session(entry) if entry.id == root))
+        .unwrap();
+    let more = plan
+        .rows
+        .iter()
+        .position(|row| matches!(row, RailRow::MoreWaiting(..)))
+        .unwrap();
+    assert!(more > title + 1, "the agents sit between them");
+    let named = sidebar_at(
+        &app,
+        40,
+        more - title,
+        RailDensity::Compact,
+        Some(title + 1),
+    )
+    .1;
+    assert!(
+        !named.contains(&ids[4]),
+        "title clipped: the +2 is anonymous"
+    );
+    // A window that keeps the title row but ends before the `+2` row: the
+    // collapsed needs have no painted pointer, so they are not named.
+    let named = sidebar_at(&app, 40, more - title, RailDensity::Compact, Some(title)).1;
+    assert!(named.contains(&root) || !named.contains(&ids[4]));
+    assert!(
+        !named.contains(&ids[4]),
+        "the +2 row is clipped: the rule must name them"
+    );
+    let _ = root;
+}
+
+#[test]
+fn a_spawned_childs_card_names_it_so_the_rule_does_not() {
+    // The spawn-call fixture: `survey callers` has a live card under the
+    // parent's `Spawn` row; it now waits on the human.
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "the card names it: {rows:#?}"
+    );
+    // With the rail up too (a second session, pinned rail), the focused
+    // session's agent rows leave the carded child out.
+    let other = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(SessionId::from_bytes([0x5f; 16]))
+    };
+    let (mut railed, _) = app_with_spawned_child();
+    railed
+        .sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    railed.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        20,
+        other.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(other),
+        },
+    )));
+    railed.layout.rail = PanePref::Shown;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut railed, 160, 40));
+    let named: usize = rows
+        .iter()
+        .map(|row| row.matches("survey callers").count())
+        .sum();
+    // The `Spawn` row's subject repeats the task text, plus the card: two.
+    assert_eq!(named, 2, "card and spawn row only, no rail row: {rows:#?}");
+    let rule = &rows[rows.len() - 3];
+    assert!(
+        !rule.contains("survey callers") && !rule.contains("needs approval"),
+        "the rule does not repeat it: {rule}"
+    );
+    // A transcript long enough that, at the live tail of a short pane, the
+    // card scrolls out above: the rule names the child again.
+    let focused = app.focused().unwrap();
+    if let Some(messages) = app.sessions.get_mut(&focused).unwrap().messages.as_mut() {
+        for byte in 0..12u8 {
+            messages.push(MessageSnapshot {
+                turn_ordinal: 5,
+                ..fixtures::message(
+                    MessageId::from_bytes([0xa0 + byte; 16]),
+                    focused,
+                    &format!("later line {byte}"),
+                )
+            });
+        }
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
+    assert!(
+        !rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "fixture must scroll the card away: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        rule.contains("survey callers"),
+        "named when off screen: {rows:#?}"
+    );
+}
+
+#[test]
+fn message_text_shaped_like_a_card_does_not_card_the_child() {
+    // The real card scrolls away above; the last message renders a row that
+    // reads like one (`↳ ` then the bold title as its own span). Only the
+    // card row itself names the child, so the rule still does.
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let focused = app.focused().unwrap();
+    if let Some(messages) = app.sessions.get_mut(&focused).unwrap().messages.as_mut() {
+        for byte in 0..12u8 {
+            let text = if byte == 11 {
+                "↳ **survey callers**".to_owned()
+            } else {
+                format!("later line {byte}")
+            };
+            messages.push(MessageSnapshot {
+                turn_ordinal: 5,
+                ..fixtures::message(MessageId::from_bytes([0xa0 + byte; 16]), focused, &text)
+            });
+        }
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 12));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ survey callers"))
+            && !rows.iter().any(|row| row.contains("↳ ◇ survey callers")),
+        "the forged row is drawn, the card is not: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey callers"), "{rule}");
+}
+
+#[test]
+fn a_drawn_card_does_not_card_a_child_whose_title_it_contains() {
+    // `survey` is spawned by a call of a run the transcript does not draw,
+    // so it has no card; `survey callers`'s card contains its title.
+    let (mut app, child) = app_with_spawned_child();
+    let parent = app.focused().unwrap();
+    let hidden_call = tool_call_snapshot(
+        0x27,
+        "spawn_agent",
+        r#"{"task":"survey"}"#,
+        ToolCallState::Running,
+        None,
+        false,
+    );
+    let hidden_call = ToolCallSnapshot {
+        run_id: RunId::from_bytes([0x99; 16]),
+        ..hidden_call
+    };
+    app.sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(hidden_call.clone());
+    let survey = SessionId::from_bytes([0x32; 16]);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        survey,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                parent_id: Some(parent),
+                spawned_by: Some(qq_protocol::SpawnOrigin {
+                    run_id: hidden_call.run_id,
+                    tool_call_id: Some(hidden_call.id),
+                    depth: 1,
+                }),
+                title: "survey".to_owned(),
+                ..fixtures::session_summary(survey)
+            }),
+        },
+    )));
+    for id in [child, survey] {
+        app.sessions
+            .get_mut(&id)
+            .unwrap()
+            .live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x81; 16]));
+    }
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    assert!(
+        rows.iter().any(|row| row.contains("↳ ◇ survey callers"))
+            && !rows
+                .iter()
+                .any(|row| row.trim_end().ends_with("↳ ◇ survey")),
+        "only `survey callers` has a card: {rows:#?}"
+    );
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey needs approval"), "{rule}");
+}
+
+#[test]
+fn a_drawn_card_does_not_card_an_off_screen_namesake() {
+    // A second `survey callers` is spawned by a call the transcript does
+    // not draw: one drawn card cannot tell the two apart, so the rule still
+    // names the title.
+    let (mut app, child) = app_with_spawned_child();
+    let parent = app.focused().unwrap();
+    let hidden_call = ToolCallSnapshot {
+        run_id: RunId::from_bytes([0x99; 16]),
+        ..tool_call_snapshot(
+            0x27,
+            "spawn_agent",
+            r#"{"task":"survey callers"}"#,
+            ToolCallState::Running,
+            None,
+            false,
+        )
+    };
+    app.sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap()
+        .push(hidden_call.clone());
+    let twin = SessionId::from_bytes([0x33; 16]);
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        twin,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                parent_id: Some(parent),
+                spawned_by: Some(qq_protocol::SpawnOrigin {
+                    run_id: hidden_call.run_id,
+                    tool_call_id: Some(hidden_call.id),
+                    depth: 1,
+                }),
+                title: "survey callers".to_owned(),
+                ..fixtures::session_summary(twin)
+            }),
+        },
+    )));
+    app.sessions
+        .get_mut(&twin)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    let _ = child;
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, 40));
+    let cards = rows
+        .iter()
+        .filter(|row| row.contains("↳") && row.contains("survey callers"))
+        .count();
+    assert_eq!(cards, 1, "one card drawn: {rows:#?}");
+    let rule = rows
+        .iter()
+        .find(|row| row.contains('─'))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rule.contains("survey callers needs approval"), "{rule}");
+}
+
+#[test]
+fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
+    // A waiting session titled `◇ deploy` on a narrow rail whose badges
+    // clip its title away: the `◇ ` marker must not read as the title.
+    let (mut app, _, _) = app_with_fanout(0);
+    let other = SessionId::from_bytes([0x11; 16]);
+    {
+        let view = app.sessions.get_mut(&other).unwrap();
+        view.summary.title = "◇ deploy the whole thing".to_owned();
+        view.live
+            .awaiting_approval
+            .insert(ToolCallId::from_bytes([0x87; 16]));
+        view.unread = 999_999_999;
+    }
+    app.layout.rail = PanePref::Shown;
+    app.focus_session(SessionId::from_bytes([0x10; 16]));
+    let (rows, named, _) = super::sidebar::sidebar_without(
+        &app,
+        layout::RAIL_MIN_WIDTH,
+        30,
+        super::sidebar::RailDensity::Compact,
+        &[],
+    );
+    let texts = frame_rows(&rows);
+    let row = texts
+        .iter()
+        .find(|row| row.contains("999999999"))
+        .unwrap_or_else(|| panic!("{texts:#?}"));
+    assert!(!row.contains("deploy"), "the title is clipped: {row}");
+    // `│ ◇ ◇...`: the title keeps its own first cell after the state
+    // marker, so it names the session (the `◇ ` marker itself sits at
+    // another column and never counts).
+    assert!(named.contains(&other), "{texts:#?}");
+}
+
+#[test]
+fn the_top_row_omits_a_known_zero_cost() {
+    let mut app = app_with_messages(1);
+    let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
+    assert!(!top.contains('$'), "{top}");
+    let session = app.focused().unwrap();
+    app.sessions
+        .get_mut(&session)
+        .unwrap()
+        .summary
+        .estimated_cost_usd_nanos = Some(40_000_000);
+    let top = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 120, 24))[0].clone();
+    assert!(top.contains("$0.04"), "{top}");
+}
+
+#[test]
 fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
     let (mut app, _) = app_with_every_rail_group();
     app.layout.rail = PanePref::Shown;
@@ -6484,7 +7311,7 @@ fn a_pinned_rail_shows_at_compact_when_the_transcript_keeps_its_minimum() {
         "{rows:#?}"
     );
     assert!(
-        !rows.iter().any(|row| row.contains("agents")),
+        !rows.iter().any(|row| row.contains(" sessions  ")),
         "no strip: {rows:#?}"
     );
     // The narrow rail drops `new` from the badge and keeps the count.
@@ -7057,21 +7884,24 @@ fn transcript_and_inspector(frame: &[Line]) -> (String, String) {
 }
 
 #[test]
-fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
-    let (mut app, _) = app_with_expandable_read();
+fn the_inspector_shows_at_wide_only_with_content_and_the_toggle_cycles_it() {
+    let (mut app, call) = app_with_expandable_read();
     let mut renderer = FrameRenderer::default();
     let regular = renderer.frame_and_commit(&mut app, 120, 40);
     assert!(
         !frame_text(&regular).contains("INSPECTOR"),
         "Auto hides the inspector below Wide"
     );
+    // Nothing expanded: an empty Auto inspector gives its width back.
+    let empty = renderer.frame_and_commit(&mut app, 200, 60);
+    assert!(
+        !frame_text(&empty).contains("INSPECTOR"),
+        "empty Auto hides"
+    );
+    app.expanded_tool_calls.insert(call);
     let wide = renderer.frame_and_commit(&mut app, 200, 60);
     let (_, inspector) = transcript_and_inspector(&wide);
     assert!(inspector.contains("INSPECTOR"), "{inspector}");
-    assert!(
-        inspector.contains("Nothing expanded — Ctrl-Up selects a tool row, Enter expands it"),
-        "empty hint names the real chord: {inspector}"
-    );
     for row in &wide[1..wide.len() - 3] {
         assert_eq!(
             row.width(),
@@ -7080,18 +7910,24 @@ fn the_inspector_shows_at_wide_by_default_and_the_toggle_cycles_it() {
             frame_rows(std::slice::from_ref(row))
         );
     }
+    app.expanded_tool_calls.clear();
 
     // Alt-I: Auto → Hidden even at Wide; again → Shown, which wins over
-    // width; again → Hidden.
+    // width and keeps the empty hint; again → Hidden.
     let toggle = TerminalEvent::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT));
     app.handle_terminal_event(toggle.clone());
     assert_eq!(app.layout.inspector, PanePref::Hidden);
     assert!(!frame_text(&renderer.frame_and_commit(&mut app, 200, 60)).contains("INSPECTOR"));
     app.handle_terminal_event(toggle.clone());
     assert_eq!(app.layout.inspector, PanePref::Shown);
+    let pinned = frame_text(&renderer.frame_and_commit(&mut app, 150, 40));
     assert!(
-        frame_text(&renderer.frame_and_commit(&mut app, 150, 40)).contains("INSPECTOR"),
+        pinned.contains("INSPECTOR"),
         "pinned: shown below Wide when the width can carve one"
+    );
+    assert!(
+        squash(&pinned).contains("Nothing expanded — Ctrl-Up selects a tool r"),
+        "a pinned empty inspector names the real chord: {pinned}"
     );
     app.handle_terminal_event(toggle);
     assert_eq!(app.layout.inspector, PanePref::Hidden);
@@ -7228,8 +8064,10 @@ fn workspace_views_render_in_the_inspector_when_it_is_shown_and_inline_otherwise
     )));
     assert_eq!(app.focused(), Some(session_id));
     let back = renderer.frame_and_commit(&mut app, 200, 60);
-    let (_, inspector) = transcript_and_inspector(&back);
-    assert!(inspector.contains("Nothing expanded"), "{inspector}");
+    assert!(
+        !frame_text(&back).contains("INSPECTOR"),
+        "back on the transcript with nothing expanded, the inspector closes"
+    );
 }
 
 #[test]
@@ -7715,7 +8553,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
     goal.next_run_at_ms = 240_000;
     initial.focused.as_mut().unwrap().goal = Some(goal);
     app.apply_client_update(ClientUpdate::Snapshot(initial));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     for expected in ["goal", "run 12/200", "17h left", "next 4m"] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
@@ -7725,7 +8563,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         qq_protocol::RunId::from_bytes([0x71; 16]),
         qq_protocol::RunActivity::PreparingToolCall,
     ));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 80)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 80, None)]).join("");
     assert!(
         text.contains("17h left") && text.contains("next 4m"),
         "{text}"
@@ -7737,7 +8575,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         reason: GoalPauseReason::User,
     };
     goal.pending_run_id = Some(qq_protocol::RunId::from_bytes([0x71; 16]));
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     assert!(text.contains("paused by you"), "{text}");
     assert!(text.contains("cancellation draining"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
@@ -7748,7 +8586,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .pending_run_id = None;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     assert!(text.contains("/goal resume"), "{text}");
     app.sessions
         .get_mut(&session_id)
@@ -7757,7 +8595,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
         .as_mut()
         .unwrap()
         .status = GoalStatus::Achieved;
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 40)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 40, None)]).join("");
     assert!(text.contains("goal") && text.contains("achieved"), "{text}");
     assert!(!text.contains("/goal resume"), "{text}");
     assert!(unicode_width::UnicodeWidthStr::width(text.as_str()) <= 40);
@@ -7772,7 +8610,7 @@ fn goal_status_line_shows_live_budget_wait_and_settled_resume_hint() {
             reason: "bad\u{1b}[2J\ninput".to_owned(),
         },
     };
-    let text = frame_rows(&[super::chrome::composer_rule(&app, 120)]).join("");
+    let text = frame_rows(&[super::chrome::composer_rule(&app, 120, None)]).join("");
     assert!(text.contains("blocked"), "{text}");
     assert!(!text.contains('\u{1b}') && !text.contains('\n'), "{text}");
 }
@@ -7826,6 +8664,132 @@ fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
         panic!("form")
     };
     assert_eq!(form.fields[1].expanded(), exact);
+}
+
+#[test]
+fn a_sticky_error_beside_the_strip_keeps_chords_and_no_second_count() {
+    // Two sessions at Compact: the strip is on screen and already points at
+    // the waiting agent and the unseen finish; the rule keeps the chords.
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    let other = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "X".to_owned(),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(other)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&other).unwrap().finished_unread = true;
+    app.apply_notice(
+        None,
+        qq_client::state::NoticeLevel::Error,
+        "boom happened".to_owned(),
+    );
+    for width in [32, 33, 80] {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, width, 16));
+        let strip = rows
+            .iter()
+            .position(|row| row.contains("2 sessions"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(rows[strip].contains("◇ 2"), "{rows:#?}");
+        let rule = &rows[strip + 1];
+        assert!(rule.contains("jump"), "{width}: {rule}");
+        assert!(
+            !rule.contains('◇') && !rule.contains("● 1"),
+            "no second count: {width}: {rule}"
+        );
+    }
+}
+
+#[test]
+fn a_long_sticky_error_without_the_strip_reserves_the_pointer() {
+    // One session (no rail, no strip): a waiting agent and an unseen
+    // finished agent are pointed at only by the rule. A notice far wider
+    // than the terminal truncates; the pointer stays at every width.
+    let (mut app, parent, _, _, _) = app_with_child_awaiting_approval();
+    let done = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "done agent".to_owned(),
+            parent_id: Some(parent),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(done)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&done).unwrap().finished_unread = true;
+    app.apply_notice(
+        None,
+        qq_client::state::NoticeLevel::Error,
+        "the provider rejected the request ".repeat(8),
+    );
+    for width in [32, 33, 60, 79] {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, width, 16));
+        assert!(
+            !rows.iter().any(|row| row.contains("sessions ")),
+            "{rows:#?}"
+        );
+        let rule = rows
+            .iter()
+            .find(|row| row.contains("error:"))
+            .unwrap_or_else(|| panic!("{rows:#?}"));
+        assert!(
+            (rule.contains('◇') || rule.contains("answer")) && rule.contains("● 1"),
+            "{width}: {rule}"
+        );
+        assert!(unicode_width::UnicodeWidthStr::width(rule.as_str()) <= width);
+    }
+}
+
+#[test]
+fn a_card_whose_title_row_scrolled_away_does_not_name_its_child() {
+    let (mut app, child) = app_with_spawned_child();
+    app.sessions
+        .get_mut(&child)
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x81; 16]));
+    // Two more completed calls under the card; at the live tail a short
+    // pane clips the body from the top, and some height starts the
+    // viewport on the card's status row.
+    let parent = app.focused().unwrap();
+    let calls = app
+        .sessions
+        .get_mut(&parent)
+        .unwrap()
+        .tool_calls
+        .as_mut()
+        .unwrap();
+    for byte in 0x26..0x2a {
+        calls.push(tool_call_snapshot(
+            byte,
+            "read_file",
+            r#"{"path":"b.rs"}"#,
+            ToolCallState::Completed,
+            Some("ok"),
+            false,
+        ));
+    }
+    let mut found = false;
+    for height in 6..20 {
+        let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 100, height));
+        if rows.iter().any(|row| row.contains("◇ approve tool"))
+            && !rows.iter().any(|row| row.contains("↳ ◇ survey callers"))
+        {
+            let rule = rows
+                .iter()
+                .find(|row| row.contains('─'))
+                .unwrap_or_else(|| panic!("{rows:#?}"));
+            assert!(rule.contains("survey callers"), "{rows:#?}");
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "no height kept only the status row");
 }
 
 #[test]

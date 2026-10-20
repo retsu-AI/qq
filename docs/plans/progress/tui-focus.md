@@ -76,6 +76,32 @@ whole terminal row.
   2 updated. Goldens unchanged (no golden scene opens the picker).
 - No hot-path change (picker rows are built on open and on tree change).
 
+### 2026-10-18 — F4–F5 receipt
+
+- `compute_layout` takes `LayoutDemand { sessions, inspector_content }`;
+  `Auto` shows the inspector from Wide only while an expanded call of the
+  focused pane's session or a workspace view needs it. `Shown` still pins it.
+- `composer_rule(app, width, rail_visible)`: the named approval notice shows
+  only when the rail is off-screen; with the rail up the rule leads with
+  `M-A/M-D answer  ^G jump`.
+- `related sessions` is one row `↳ N agents · ◐ n · ◇ n  /agents`; the top
+  row omits a known zero cost.
+- Tests: 2 new (`a_waiting_approval_is_named_once_per_frame_outside_its_transcript`,
+  `the_top_row_omits_a_known_zero_cost`), layout test extended (empty Auto
+  hides, Shown pins), 5 updated. Goldens: 65 moved (no `$0.00`, no empty
+  inspector at 200+, summary row, rule chords).
+- Bench (`target/qq-perf/tui-focus-F4-2026-10-18/after.txt` vs F1 after):
+  steady 22.4 → 22.0 µs; with_sidebar 34.1 → 33.7; streaming_focused 35.5 →
+  35.3; run_on_32kb 438.5 → 420.9; golden_path 39.5 → 38.8; resize 30.6 →
+  30.4; resize_ultra 125.2 (F1 baseline) → 101.2 (no empty inspector).
+
+### 2026-10-18 — F4–F5 merge of the F1–F3 fixes
+
+- `sidebar` returns the waiting sessions/agents whose rows it painted;
+  `composer_rule(app, width, rail_named)` names every other waiting approval
+  (collapsed under `+N need you` or scrolled out of the rail window), so each
+  is named exactly once (`approvals_collapsed_off_the_rail_are_named_on_the_rule_instead`).
+- Layout session count uses `listed_sessions` (audit roots excluded).
 ### 2026-10-18 — F1–F2 third review round (Codex on #356)
 
 - `agent_need`: an approval needs the user only while the human is asked

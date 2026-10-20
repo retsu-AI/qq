@@ -1,4 +1,4 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
+ qq  Session 0                                                                                          openai/gpt-test
    ┃                                                                                        │ RECENT  3
    ┃  edited                                                                                │ ○ Session 0
    ┃                                                                                        │ ○ Session 1

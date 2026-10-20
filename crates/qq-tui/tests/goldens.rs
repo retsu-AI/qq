@@ -125,9 +125,10 @@ fn prose_is_placed_at_the_measure_on_wide_terminals() {
         .find(|row| row.contains("First paragraph of prose."))
         .expect("gallery paragraph");
     let indent = first_paragraph.len() - first_paragraph.trim_start().len();
-    // 320 - 28 rail - 80 inspector = 212 pane; (212 - 100) / 3 = 37 inset,
-    // plus the transcript's own 3-column prose rail.
-    assert_eq!(indent, 37 + 3, "{first_paragraph:?}");
+    // 320 - 28 rail = 292 pane (the empty inspector is not carved);
+    // (292 - 100) / 3 = 64 inset, plus the transcript's own 3-column prose
+    // rail.
+    assert_eq!(indent, 64 + 3, "{first_paragraph:?}");
 }
 
 /// Expanded tool detail is the same text whether it renders inline (Regular,

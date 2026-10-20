@@ -1,4 +1,4 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
+ qq  Session 0                                                                                          openai/gpt-test
                                                                                             │ NEEDS YOU  2
  ▌ YOU                                                                                      │ ● Refactor          1 new
  ▌ plan the release                                                                         │ ○ Session 0            ↳1
@@ -7,8 +7,8 @@
    Drafted the checklist.                                                                   │
    ✓ 0.0s · ttft 0.0s                                                                       │ WORKING  2
                                                                                             │ ◐ Write tests       1 new
-  related sessions                                                                          │    compacting context
-  ↳ ◇ Deploy helper                                                                         │ ◐ Survey callers    1 new
+  ↳ 1 agent  /agents                                                                        │    compacting context
+                                                                                            │ ◐ Survey callers    1 new
                                                                                             │    Found twelve call ...
                                                                                             │
                                                                                             │ RECENT  3
@@ -35,6 +35,6 @@
                                                                                             │
                                                                                             │
                                                                                             │
- ◇ Deploy helper needs approval  Ctrl-G jump  Alt-A/Alt-D answer ─────────────────────── ? help  ^K commands  ^O detail
+─────────────────────────────────────────────────────────────── M-A/M-D answer  ^G jump  ? help  ^K commands  ^O detail
  › Ask QQ...
 

@@ -924,11 +924,27 @@ impl TranscriptCache {
                 })
                 .collect();
             if !children.is_empty() {
-                body.push_line(Line::default());
-                body.push_line(Line::styled("  related sessions", muted().bold()));
-                for child in children {
-                    body.push_line(session_line(app, child, width, "  ↳ "));
+                // One summary row: the rail and `/agents` list the agents;
+                // the transcript only says they exist and how many work.
+                // No `◇` count: a waiting agent is named on the rail or
+                // the rule and pointed at by the strip already.
+                let working = children
+                    .iter()
+                    .filter(|child| super::sidebar::is_working(&app.sessions[*child]))
+                    .count();
+                let mut line = Line::styled(
+                    format!("  ↳ {}", count_noun(children.len(), "agent", "agents")),
+                    muted(),
+                );
+                if working > 0 {
+                    line.push(
+                        format!(" · {} {working}", spinner(app.animation_tick)),
+                        info(),
+                    );
                 }
+                line.push("  /agents", muted().italic());
+                body.push_line(Line::default());
+                body.push_line(truncate_line(line, width));
             }
         }
         body

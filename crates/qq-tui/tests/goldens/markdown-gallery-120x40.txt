@@ -1,4 +1,4 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
+ qq  Session 0                                                                                          openai/gpt-test
    1. First numbered item                                                                   │ RECENT  3
    2. Second numbered item that is deliberately long enough to wrap onto a second row at    │ ○ Session 0
       this width                                                                            │ ○ Session 1

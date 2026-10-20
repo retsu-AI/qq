@@ -1,4 +1,4 @@
- qq  Session 0                                                                                   openai/gpt-test  $0.00
+ qq  Session 0                                                                                          openai/gpt-test
  GOAL CHECK explicit consent                                                                │ RECENT  3
 PgUp/PgDn read command · arrows choose · Enter applies · Esc cancels                        │ ○ Session 0
   search: deny, once, repeated                                                              │ ○ Session 1
