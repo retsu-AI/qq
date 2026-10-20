@@ -2,11 +2,19 @@
 //! it supervises, so it stores credentials exactly as `qq auth login` does:
 //! the same `qq-auth` store, the same OS keyring entries. The server reads
 //! credentials on every catalog request, so a stored key takes effect as
-//! soon as each project re-reads its model catalog.
+//! soon as each project re-reads its model catalog. Which providers exist,
+//! how each signs in and where its key may be sent all come from the
+//! engine's built-in provider table (ADR-0064), never a copy of it.
 
 use std::{collections::HashSet, sync::Mutex};
 
-use qq_auth::{AuthError, CodexLogin, CredentialStore, LOGIN_PROVIDERS, XaiLogin};
+use qq_auth::{
+    AuthError, CodexLogin, CredentialStore, OPENAI_CODEX_CREDENTIAL_ENDPOINT,
+    XAI_CREDENTIAL_ENDPOINT, XaiLogin,
+};
+use qq_config::{
+    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_provider, builtin_providers,
+};
 use serde::Serialize;
 
 /// The profile every desktop sign-in uses, matching `qq auth login`'s default.
@@ -50,7 +58,7 @@ pub struct ProviderDto {
     pub accepts_key: bool,
     pub browser_sign_in: bool,
     /// The model the app selects first after this provider connects.
-    pub recommended_model: &'static str,
+    pub recommended_model: String,
 }
 
 /// What the UI shows while a browser sign-in waits.
@@ -67,58 +75,56 @@ pub struct AuthChanged {
     pub error: Option<String>,
 }
 
-/// Model routes chosen for a provider with nothing selected yet, from the
-/// shipped catalog (the same picks `qq init` offers).
-pub fn recommended_model(provider: &str) -> Option<&'static str> {
-    match provider {
-        "openai" => Some("openai/gpt-5.6"),
-        "anthropic" => Some("anthropic/claude-sonnet-5"),
-        "google" => Some("google/gemini-2.5-flash"),
-        "xai" => Some("xai/grok-4.6"),
-        "openai-codex" => Some("openai-codex/gpt-5.6-luna"),
-        _ => None,
+/// The model route chosen for a provider with nothing selected yet: the
+/// table's `qq init` pick.
+pub fn recommended_model(provider: &str) -> Option<String> {
+    builtin_provider(provider).map(|row| format!("{}/{}", row.id, row.init_model))
+}
+
+/// The endpoint a provider's stored key is bound to, mapped exactly as the
+/// engine's composition root maps it, so a key is never sent elsewhere.
+const fn audience(provider: &BuiltinProvider) -> &'static str {
+    match provider.audience {
+        BuiltinAudience::Table(audience) => audience,
+        BuiltinAudience::OpenAiCodex => OPENAI_CODEX_CREDENTIAL_ENDPOINT,
+        BuiltinAudience::XAi => XAI_CREDENTIAL_ENDPOINT,
     }
 }
 
-fn environment_variables(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "openai" => &["OPENAI_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY"],
-        "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "xai" => &["XAI_API_KEY"],
-        _ => &[],
-    }
+fn known(provider: &str) -> Result<BuiltinProvider, SignInError> {
+    builtin_provider(provider).ok_or_else(|| SignInError::UnknownProvider(provider.to_owned()))
 }
 
-fn known(provider: &str) -> Result<&'static str, SignInError> {
-    LOGIN_PROVIDERS
-        .iter()
-        .copied()
-        .find(|id| *id == provider)
-        .ok_or_else(|| SignInError::UnknownProvider(provider.to_owned()))
+fn browser_sign_in(provider: &BuiltinProvider) -> bool {
+    provider.login.iter().any(|method| {
+        matches!(
+            method,
+            LoginMethod::OpenAiCodexBrowser | LoginMethod::XAiOAuth
+        )
+    })
 }
 
 /// Blocking: reads the credential index.
 pub fn providers() -> Result<Vec<ProviderDto>, SignInError> {
     let store = CredentialStore::system()?;
     let stored = store.list()?;
-    Ok(LOGIN_PROVIDERS
-        .iter()
-        .map(|&id| {
-            let name = format!("{id}/{PROFILE}");
+    Ok(builtin_providers()
+        .map(|provider| {
+            let name = provider.stored_name(Some(PROFILE));
             ProviderDto {
-                id,
+                id: provider.id,
                 stored: stored
                     .iter()
                     .find(|metadata| metadata.name == name)
                     .map(|metadata| metadata.backend.to_string()),
-                environment: environment_variables(id)
+                environment: provider
+                    .variables
                     .iter()
                     .copied()
                     .find(|variable| std::env::var_os(variable).is_some_and(|v| !v.is_empty())),
-                accepts_key: id != "openai-codex",
-                browser_sign_in: matches!(id, "openai-codex" | "xai"),
-                recommended_model: recommended_model(id).unwrap_or_default(),
+                accepts_key: provider.login.contains(&LoginMethod::ApiKey),
+                browser_sign_in: browser_sign_in(&provider),
+                recommended_model: format!("{}/{}", provider.id, provider.init_model),
             }
         })
         .collect())
@@ -127,14 +133,21 @@ pub fn providers() -> Result<Vec<ProviderDto>, SignInError> {
 /// Blocking: writes the OS keyring.
 pub fn save_key(provider: &str, key: &str) -> Result<(), SignInError> {
     let provider = known(provider)?;
-    if provider == "openai-codex" {
-        return Err(SignInError::BrowserOnly(provider.to_owned()));
+    if !provider.login.contains(&LoginMethod::ApiKey) {
+        return Err(SignInError::BrowserOnly(provider.id.to_owned()));
     }
     let key = key.trim();
     if key.is_empty() {
         return Err(SignInError::EmptyKey);
     }
-    CredentialStore::system()?.login_with_api_key(provider, PROFILE, key, false)?;
+    // Stored exactly as `qq auth login`'s API-key path stores it.
+    CredentialStore::system()?.set_with_metadata(
+        &provider.stored_name(Some(PROFILE)),
+        key,
+        false,
+        Some(provider.id),
+        Some(audience(&provider)),
+    )?;
     Ok(())
 }
 
@@ -142,7 +155,7 @@ pub fn save_key(provider: &str, key: &str) -> Result<(), SignInError> {
 /// environment variable is outside the store and stays in effect.
 pub fn sign_out(provider: &str) -> Result<(), SignInError> {
     let provider = known(provider)?;
-    CredentialStore::system()?.remove(&format!("{provider}/{PROFILE}"))?;
+    CredentialStore::system()?.remove(&provider.stored_name(Some(PROFILE)))?;
     Ok(())
 }
 
@@ -179,7 +192,7 @@ pub fn start_browser(
     pending: &PendingSignIns,
     provider: &str,
 ) -> Result<(StartedSignIn, BrowserSignIn), SignInError> {
-    let provider = known(provider)?;
+    let provider = known(provider)?.id;
     pending.claim(provider)?;
     let started = match provider {
         "openai-codex" => CodexLogin::start().map(|login| {
