@@ -3380,7 +3380,7 @@ dependencies = [
 
 [[package]]
 name = "qq-auth"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -3401,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "qq-client"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -3416,7 +3416,7 @@ dependencies = [
 
 [[package]]
 name = "qq-config"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "directories",
  "objc2-core-foundation",
@@ -3432,7 +3432,7 @@ dependencies = [
 
 [[package]]
 name = "qq-core"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -3455,6 +3455,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "tree-sitter",
  "tree-sitter-bash",
  "url",
@@ -3462,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "qq-desktop"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "qq-auth",
  "qq-client",
@@ -3486,7 +3487,7 @@ dependencies = [
 
 [[package]]
 name = "qq-protocol"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "getrandom 0.3.4",
  "qq-reasoning",
@@ -3497,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "qq-provider"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "bytes",
@@ -3517,14 +3518,14 @@ dependencies = [
 
 [[package]]
 name = "qq-reasoning"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qq-server"
-version = "0.1.6"
+version = "0.1.8"
 dependencies = [
  "async-stream",
  "axum",
