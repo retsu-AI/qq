@@ -2986,6 +2986,7 @@ dependencies = [
 name = "qq-tui"
 version = "0.1.8"
 dependencies = [
+ "base64 0.22.1",
  "crossterm",
  "futures-util",
  "pulldown-cmark",

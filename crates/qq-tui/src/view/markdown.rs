@@ -485,7 +485,11 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 for (index, mut row) in wrapped.into_iter().enumerate() {
                     trim_trailing_whitespace(&mut row);
                     let mut assembled = if index == 0 {
-                        prefix.clone()
+                        // The quote rail before the marker is layout too; the
+                        // marker itself is the item's text.
+                        let mut first = prefix.clone();
+                        first.chrome = quote_rail_width(hang.rail);
+                        first
                     } else {
                         let mut continuation = Line::default();
                         push_quote_rail(&mut continuation, hang.rail);
@@ -493,8 +497,13 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                             " ".repeat(hang.width - quote_rail_width(hang.rail)),
                             normal(),
                         );
+                        // The hanging indent (and a quote's repeated rail) is
+                        // layout, not text: a copy of the wrapped item joins
+                        // its rows without it.
+                        continuation.chrome = hang.width;
                         continuation
                     };
+                    assembled.wrapped = row.wrapped;
                     for span in row.spans {
                         assembled.push(span.text, span.style);
                     }
@@ -1190,6 +1199,10 @@ impl PanelStyles {
         };
         let mut row = Line {
             indent,
+            wrapped: content.wrapped,
+            chrome: CODE_PANEL_INSET,
+            fill_at: 0,
+            fill: 0,
             spans: Vec::with_capacity(content.spans.len() + 2),
             ..Line::default()
         };
@@ -1212,6 +1225,8 @@ impl PanelStyles {
             row.spans.push(span);
         }
         if used < width {
+            row.fill_at = used;
+            row.fill = width - used;
             row.spans.push(Span {
                 text: " ".repeat(width - used),
                 style: self.fill,

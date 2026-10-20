@@ -664,23 +664,26 @@ pub(super) fn rail_window_start(rows: usize, focused_row: usize, height: usize) 
         .min(rows.saturating_sub(height))
 }
 
+/// One painted rail: its rows, the waiting sessions and agents whose rows
+/// were painted (the composer rule names only the rest), and the session a
+/// click on each row focuses.
+pub(super) struct RailFrame {
+    pub rows: Vec<Line>,
+    pub named: Vec<SessionId>,
+    pub targets: Vec<Option<SessionId>>,
+    /// Every session and agent with a row inside the window.
+    pub window: Vec<SessionId>,
+}
+
 /// Right-hand session list grouped by what the user should do about each
 /// session: NEEDS YOU, WORKING, RECENT. Each session takes one row of state
 /// glyph, name, agent count, and unread badge; at
 /// [`RailDensity::Detailed`] a second muted row carries the live tail and
 /// the session's cost. Agents appear only under the focused session and
 /// when they need the user. The focused row sits on the selection
-/// background. Always `height` rows so it zips against the body. Also
-/// returns the sessions and agents with a waiting approval whose row was
-/// painted, so the composer rule names only the rest, and every session
-/// or agent whose row is inside the window.
+/// background. Always `height` rows so it zips against the body.
 #[cfg(test)]
-pub(super) fn sidebar(
-    app: &App,
-    width: usize,
-    height: usize,
-    density: RailDensity,
-) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+pub(super) fn sidebar(app: &App, width: usize, height: usize, density: RailDensity) -> RailFrame {
     sidebar_at(app, width, height, density, None)
 }
 
@@ -693,7 +696,7 @@ pub(super) fn sidebar_at(
     height: usize,
     density: RailDensity,
     window_start: Option<usize>,
-) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+) -> RailFrame {
     sidebar_inner(app, width, height, density, window_start, &[])
 }
 
@@ -705,7 +708,7 @@ pub(super) fn sidebar_without(
     height: usize,
     density: RailDensity,
     shown: &[SessionId],
-) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+) -> RailFrame {
     sidebar_inner(app, width, height, density, None, shown)
 }
 
@@ -716,7 +719,7 @@ fn sidebar_inner(
     density: RailDensity,
     window_start: Option<usize>,
     shown: &[SessionId],
-) -> (Vec<Line>, Vec<SessionId>, Vec<SessionId>) {
+) -> RailFrame {
     let inner = width.saturating_sub(2);
     let RailPlan {
         rows: plan,
@@ -725,12 +728,14 @@ fn sidebar_inner(
     } = plan_rail_without(app, density, shown);
     let mut rows: Vec<Line> = Vec::with_capacity(height);
     let mut named: Vec<SessionId> = Vec::new();
+    let mut targets: Vec<Option<SessionId>> = Vec::with_capacity(height);
     // Sessions and agents whose titled row is on screen.
     // Every session and agent with a row inside the window.
     let mut window: Vec<SessionId> = Vec::new();
     let mut painted: Vec<SessionId> = Vec::new();
     if plan.is_empty() {
         rows.push(Line::styled("│   no sessions yet", muted().italic()));
+        targets.push(None);
     }
     let start = window_start.unwrap_or_else(|| rail_window_start(plan.len(), focused_row, height));
     let select = |line: &mut Line| {
@@ -784,6 +789,13 @@ fn sidebar_inner(
             RailRow::Session(RailEntry { id, .. }) | RailRow::Agent(id) => Some(id),
             _ => None,
         };
+        targets.push(match row {
+            RailRow::Session(entry) | RailRow::Detail(entry) => Some(entry.id),
+            RailRow::Agent(id) | RailRow::AgentDetail(id) => Some(id),
+            RailRow::Gap | RailRow::Header(..) | RailRow::More(_) | RailRow::MoreWaiting(..) => {
+                None
+            }
+        });
         match row {
             RailRow::Session(RailEntry { id, .. })
             | RailRow::Detail(RailEntry { id, .. })
@@ -927,7 +939,13 @@ fn sidebar_inner(
         rows.push(Line::styled("│", border()));
     }
     rows.truncate(height);
-    (rows, named, window)
+    targets.resize(height, None);
+    RailFrame {
+        rows,
+        named,
+        targets,
+        window,
+    }
 }
 
 /// One row above the composer when the rail is hidden and more than one

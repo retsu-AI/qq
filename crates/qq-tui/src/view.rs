@@ -45,18 +45,28 @@ pub(crate) use layout::LayoutPrefs;
 #[cfg(any(test, feature = "bench-support"))]
 pub(crate) use layout::PanePref;
 use layout::{TranscriptSlot, compute_layout};
+#[cfg(test)]
+pub(crate) use markdown::markdown_lines as markdown_lines_for_test;
+#[cfg(test)]
+pub(crate) use markdown::panel_rows as panel_rows_for_test;
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;
 use sidebar::*;
 use tools::*;
 use transcript::*;
 use workspace::*;
+#[cfg(test)]
+pub(crate) use wrap::indent_lines as indent_lines_for_test;
 pub(crate) use wrap::preview;
 #[cfg(test)]
 use wrap::transcript_viewport;
 use wrap::{
     bounded_tail, fit_height, indent_lines, selection_viewport, truncate_line, wrap_line,
     wrap_line_chars,
+};
+#[cfg(test)]
+pub(crate) use wrap::{
+    wrap_line as wrap_line_for_test, wrap_line_chars as wrap_line_chars_for_test,
 };
 
 /// Bounds on the cells one frame lays out. A 48-inch display at a small font
@@ -183,6 +193,13 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
+    /// What the mouse can act on in the last frame; handed to the app on
+    /// commit.
+    geometry: crate::selection::FrameGeometry,
+    /// The app's selection no longer matches the frame's cells.
+    selection_stale: bool,
+    /// The app's selection with the fingerprint of the frame just built.
+    selection_seen: Option<crate::selection::Selection>,
     /// Sessions the last frame's rail window painted; handed to the app.
     rail_painted: Option<Vec<SessionId>>,
     /// Sessions the last frame named outside the rule (painted rail rows and
@@ -205,10 +222,34 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
+        // Every frame's hit map replaces the last, even an empty one (a
+        // too-small terminal), so a click never lands on stale rows.
+        app.geometry = std::mem::take(&mut self.geometry);
         app.rail_painted = self.rail_painted.take();
+        // A selection whose cells changed under it (streamed text reflowed
+        // or pushed the rows) no longer marks what the user pressed on.
+        if self.selection_stale {
+            app.selection = None;
+            self.selection_stale = false;
+        }
+        // The first frame after a press or drag records what the selection
+        // covers, so a later frame that moved those rows can tell.
+        if let Some(remembered) = self.selection_seen.take()
+            && app
+                .selection
+                .is_some_and(|current| current.same_range(&remembered))
+        {
+            app.selection = Some(remembered);
+        }
         app.frame_named = std::mem::take(&mut self.named);
         app.frame_carded = std::mem::take(&mut self.carded);
         app.drawn = std::mem::take(&mut self.drawn);
+    }
+
+    /// The rows of the last drawn frame, which a selection's text is read
+    /// from.
+    pub(crate) fn last_frame(&self) -> &[Line] {
+        &self.previous
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -273,6 +314,9 @@ impl FrameRenderer {
             self.invalidate();
         }
         if width < layout::MIN_WIDTH || height < layout::MIN_HEIGHT {
+            // Nothing under the pointer is clickable or selectable.
+            self.geometry = crate::selection::FrameGeometry::default();
+            self.selection_stale = app.selection.is_some();
             // Nothing but the warning is drawn: no rail row, no transcript.
             self.rail_painted = Some(Vec::new());
             self.drawn.clear();
@@ -403,6 +447,25 @@ impl FrameRenderer {
                 inspector_pane(app, &self.cache, app.pane(), inspector.width, body_height),
             ));
         }
+        let mut rail_named: Option<Vec<SessionId>> = None;
+        let mut geometry = crate::selection::FrameGeometry::default();
+        if let Some(slot) = layout.transcripts.first() {
+            geometry.transcript = Some(crate::selection::Area {
+                x: slot.area.x,
+                y: slot.area.y,
+                width: slot.area.width,
+                height: body_height,
+            });
+            // Prose starts after the measure inset and, on a transcript, the
+            // 3-column message rail (`   ` / ` ▌ `); workspace views put
+            // their content right after the inset. A copy keeps text from
+            // there.
+            let rail = match shown_view(app, app.pane(), inline_detail) {
+                View::Transcript(_) => 3,
+                View::Attention | View::Changes | View::Goal(_) | View::SideQuestions(_) => 0,
+            };
+            geometry.text_x = slot.area.x + slot.inset + rail;
+        }
         // A spawned child's live card under its spawn call names that child
         // in the transcript on screen, but only while the card is inside the
         // viewport: the card's `↳ title` row must be among the body rows
@@ -415,20 +478,26 @@ impl FrameRenderer {
         carded.sort_unstable();
         carded.dedup();
         self.carded.clone_from(&carded);
-        let mut rail_named: Option<Vec<SessionId>> = None;
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            let (rows, named, window) =
-                sidebar_without(app, rail.width, body_height, density, &carded);
-            rail_named = Some(named);
-            self.rail_painted = Some(window);
-            columns.push((rail.x, rows));
+            let painted = sidebar_without(app, rail.width, body_height, density, &carded);
+            rail_named = Some(painted.named);
+            self.rail_painted = Some(painted.window);
+            geometry.rail = Some(crate::selection::Area {
+                x: rail.x,
+                y: rail.y,
+                width: rail.width,
+                height: body_height,
+            });
+            geometry.rail_targets = painted.targets;
+            columns.push((rail.x, painted.rows));
         } else {
             self.rail_painted = Some(Vec::new());
         }
         if !carded.is_empty() {
             rail_named.get_or_insert_with(Vec::new).extend(carded);
         }
+        self.geometry = geometry;
         self.named = rail_named.clone().unwrap_or_default();
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the
@@ -443,6 +512,10 @@ impl FrameRenderer {
                 let first = std::mem::take(slot);
                 let mut row = Line {
                     indent: first.indent,
+                    wrapped: first.wrapped,
+                    chrome: first.chrome,
+                    fill_at: first.fill_at,
+                    fill: first.fill,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
                     card: first.card,
                 };
@@ -494,7 +567,18 @@ impl FrameRenderer {
         {
             self.cursor = Some(CursorPosition { column, row });
         }
-        fit_height(lines, height)
+        let mut lines = fit_height(lines, height);
+        if let Some(selection) = &app.selection {
+            if selection.fits(&self.geometry) && selection.matches(&lines) {
+                let mut remembered = *selection;
+                remembered.remember(&lines);
+                self.selection_seen = Some(remembered);
+                selection.paint(&mut lines);
+            } else {
+                self.selection_stale = true;
+            }
+        }
+        lines
     }
 
     /// Render one pane's main area through the transcript cache into `slot`

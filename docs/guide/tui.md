@@ -352,8 +352,25 @@ The keys for creating sessions, the navigator, cancel, and interrupt are
 defaults; rebind them in [`tui.ron`](configuration.md#tuiron).
 
 Scrolling: mouse wheel, `PageUp` / `PageDown`, `Shift-Up` / `Shift-Down`,
-`Ctrl-Home` / `Ctrl-End` for top and live tail. Hold `Shift` to select text
-with the mouse, or `/mouse` to hand the mouse back to the terminal.
+`Ctrl-Home` / `Ctrl-End` for top and live tail.
+
+## Mouse: click, select, copy
+
+- **Click** a session or agent in the sidebar to focus it.
+- **Drag** in the transcript to select text. The selection stays inside the
+  transcript: the sidebar, inspector, borders, top row and composer are never
+  included, however far the pointer goes. Releasing copies the text to your
+  clipboard and the rule reads `copied N lines`. Lines are copied without
+  the transcript's margin or trailing spaces; indentation inside the text
+  (code) is kept, and wide characters are copied whole. `Esc`, any key,
+  scrolling, a resize, or new text arriving under the selection clears the
+  highlight.
+- Copying uses the terminal's clipboard escape (OSC 52), which most
+  terminals support; in tmux enable `set -g set-clipboard on`. A selection
+  larger than 1 MiB copies its first 1 MiB and says so.
+- To select with the terminal instead (for example across the whole
+  screen), hold `Shift` while dragging where your terminal supports it, or
+  run `/mouse` to hand the mouse back to the terminal.
 
 Rebind `toggle_navigator`, `create_root_session`, `create_child_session`,
 `cancel_run`, and `interrupt_run` in [`tui.ron`](configuration.md#tuiron);

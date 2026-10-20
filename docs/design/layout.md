@@ -250,6 +250,28 @@ agent itself when it stays listed), not the first row. `Left` on an agent
 row clears any search and moves to its session; `Ctrl-A` works with an
 empty result. Audit agents have no row.
 
+## Mouse
+
+Mouse capture is on so the wheel scrolls the transcript; the TUI owns
+clicks and selection (`src/selection.rs`). The renderer records the frame's
+`FrameGeometry` on commit: the transcript pane's cells and, per rail body
+row, the session that row focuses (`sidebar` returns it with the rows). A
+left press on a rail row focuses its target. A press in the transcript pane
+starts a `Selection` (screen-anchored cells, clamped to the pane on drag);
+the last frame repaints the selected cells on the `selection` background
+after composition, so no cache sees it. Release emits
+`Effect::CopySelection`; the loop reads the text from the last drawn frame
+(the pane margin and message rail left of `FrameGeometry::text_x` and
+trailing spaces removed; text indentation kept; a glyph is selected when any
+of its cells is and a combining mark travels with its base; bounded by
+`MAX_COPY_BYTES`), writes OSC 52, and the rule reports the line count. Keys,
+the wheel, a resize and a new press clear the selection, as does a frame
+whose selected rows changed (the first frame after a press or drag records a
+fingerprint of them). A press released where it started copies and paints
+nothing. Shift-, Alt- and Ctrl-modified clicks and drags are left to the
+terminal. The hit map is replaced on every frame, so a too-small terminal
+leaves nothing clickable.
+
 ## Bounds
 
 A frame is laid out for at most 1024 × 512 cells (`view::MAX_RENDER_WIDTH`,

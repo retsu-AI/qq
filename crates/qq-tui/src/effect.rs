@@ -29,6 +29,12 @@ pub(crate) enum Effect {
     Attention(Attention),
     /// Turn terminal mouse reporting on or off.
     MouseCapture(bool),
+    /// Copy this selection's text from the last drawn frame to the system
+    /// clipboard (OSC 52), then tell the app what was copied.
+    CopySelection(crate::selection::Selection),
+    /// A selection just started: fingerprint its cells in the last drawn
+    /// frame (what the user pressed on) before any update moves them.
+    AnchorSelection,
     /// Answer the trust prompt: the composition root records or admits the
     /// pending files off the loop and calls back with what loaded.
     ResolveTrust(crate::app::TrustChoice),

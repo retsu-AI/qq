@@ -6668,6 +6668,492 @@ fn a_notice_counts_failures_beside_approvals_and_a_finish_behind_a_side_view_is_
     assert!(rule.contains("Fan out finished"), "{rule}");
 }
 
+fn mouse_at(kind: crossterm::event::MouseEventKind, column: u16, row: u16) -> TerminalEvent {
+    TerminalEvent::Mouse(crossterm::event::MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+#[test]
+fn clicking_a_rail_row_focuses_that_session_or_agent() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, root, ids) = app_with_fanout(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let row_of = |rows: &[String], label: &str| {
+        u16::try_from(rows.iter().position(|row| row.contains(label)).unwrap()).unwrap()
+    };
+    let column = u16::try_from(rail_x + 4).unwrap();
+    // The agent row under the focused session.
+    let agent = row_of(&rows, "agent 1");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        agent,
+    ));
+    assert_eq!(app.focused(), Some(ids[1]));
+    // Another session's row.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let other = row_of(&rows, "Other");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        other,
+    ));
+    assert_eq!(app.focused(), Some(SessionId::from_bytes([0x11; 16])));
+    // A group header focuses nothing.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let header = row_of(&rows, "RECENT");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        header,
+    ));
+    assert_eq!(app.focused(), Some(SessionId::from_bytes([0x11; 16])));
+    let _ = root;
+}
+
+#[test]
+fn a_drag_in_the_transcript_selects_only_its_text_and_copies_it_on_release() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let other = SessionSummary {
+        title: "Other".to_owned(),
+        ..fixtures::session_summary(SessionId::from_bytes([0x11; 16]))
+    };
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        other.id,
+        SessionEvent::SessionCreated {
+            session: Box::new(other),
+        },
+    )));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 30));
+    let first = rows.iter().position(|row| row.contains("row 0")).unwrap();
+    let last = rows.iter().position(|row| row.contains("row 2")).unwrap();
+    // Press at the left edge of `row 0`, drag past the rail to the right
+    // edge of the terminal on `row 2`'s line.
+    let down = mouse_at(MouseEventKind::Down(MouseButton::Left), 0, first as u16);
+    assert!(app.handle_terminal_event(down).split().0 || app.selection.is_some());
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        119,
+        last as u16,
+    ));
+    let effects = app.handle_terminal_event(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        119,
+        last as u16,
+    ));
+    let selection = effects
+        .iter()
+        .find_map(|effect| match effect {
+            crate::effect::Effect::CopySelection(selection) => Some(*selection),
+            _ => None,
+        })
+        .expect("release copies");
+    // Painted on the selection background, the rail untouched.
+    let frame = renderer.frame_and_commit(&mut app, 120, 30);
+    let background = crate::render::selection(crate::render::normal()).background;
+    assert!(
+        frame[first]
+            .spans
+            .iter()
+            .any(|span| span.style.background == background && span.text.contains("row 0")),
+        "{:?}",
+        frame[first]
+    );
+    // The copy reads the frame without the selection paint.
+    app.selection = None;
+    let plain = renderer.frame_and_commit(&mut app, 120, 30);
+    let copied = selection.text(&plain);
+    assert_eq!(copied.text, "row 0\n\nQQ\nrow 1\n\nQQ\nrow 2", "{copied:?}");
+    assert!(!copied.text.contains('│') && !copied.text.contains("Other"));
+    app.note_copied(&copied);
+    let rule = frame_rows(&renderer.frame_and_commit(&mut app, 120, 30)).join("\n");
+    assert!(rule.contains("copied"), "{rule}");
+    // Esc clears a selection without doing anything else.
+    app.selection = Some(selection);
+    app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::Esc,
+        KeyModifiers::NONE,
+    )));
+    assert!(app.selection.is_none());
+    // So does a wheel scroll.
+    app.selection = Some(selection);
+    app.handle_terminal_event(mouse_at(MouseEventKind::ScrollUp, 5, 5));
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn a_rail_click_focuses_the_row_that_was_drawn_even_after_the_rail_reordered() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let other_row =
+        u16::try_from(rows.iter().position(|row| row.contains("Other")).unwrap()).unwrap();
+    // An update moves the rail before anything is redrawn: agent 1 now
+    // waits on an approval, so its session jumps to NEEDS YOU above `Other`
+    // and adds rows.
+    app.sessions
+        .get_mut(&ids[1])
+        .unwrap()
+        .live
+        .awaiting_approval
+        .insert(ToolCallId::from_bytes([0x97; 16]));
+    let column = u16::try_from(rail_x + 4).unwrap();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        other_row,
+    ));
+    assert_eq!(
+        app.focused(),
+        Some(SessionId::from_bytes([0x11; 16])),
+        "the click lands on the row the user saw"
+    );
+}
+
+#[test]
+fn modified_drags_pass_through_and_clearing_a_selection_always_repaints() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    let shifted = |kind| {
+        TerminalEvent::Mouse(MouseEvent {
+            kind,
+            column: 3,
+            row,
+            modifiers: KeyModifiers::SHIFT,
+        })
+    };
+    // Shift-press and Shift-drag leave the terminal's own selection alone.
+    app.handle_terminal_event(shifted(MouseEventKind::Down(MouseButton::Left)));
+    app.handle_terminal_event(shifted(MouseEventKind::Drag(MouseButton::Left)));
+    assert!(app.selection.is_none());
+    // An unbound key that clears a visible selection still repaints.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    let effects = app.handle_terminal_event(TerminalEvent::Key(KeyEvent::new(
+        KeyCode::F(12),
+        KeyModifiers::NONE,
+    )));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws(), "{effects:?}");
+    // A click-only press and release clears the old selection and repaints.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 4, row));
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 4, row));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws(), "{effects:?}");
+}
+
+#[test]
+fn a_selection_is_dropped_when_streamed_text_moves_its_rows() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, session_id, run_id, mut sequence) = running_view_app();
+    let message_id = MessageId::from_bytes([0x71; 16]);
+    let mut event = |event: SessionEvent| {
+        sequence += 1;
+        ClientUpdate::Event(SessionEventEnvelope {
+            run_id: Some(run_id),
+            ..fixtures::envelope(sequence, session_id, event)
+        })
+    };
+    app.apply_client_update(event(SessionEvent::AssistantMessageStarted {
+        message: MessageSnapshot {
+            run_id,
+            state: MessageState::Streaming,
+            ..fixtures::message(message_id, session_id, "streaming answer")
+        },
+    }));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(
+        rows.iter()
+            .position(|row| row.contains("streaming answer"))
+            .unwrap(),
+    )
+    .unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 40, row));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some(), "the first frame records it");
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some(), "an unchanged frame keeps it");
+    // A streamed delta changes the selected row's text.
+    app.apply_client_update(event(SessionEvent::TextAppended {
+        message_id,
+        channel: qq_protocol::TextChannel::Output,
+        text: " grows\nand pushes more rows\n".repeat(4),
+    }));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_none(), "stale selections are dropped");
+
+    // Streamed text that lands after a bare press but before any drag or
+    // frame: the press fingerprinted the frame it landed on, so the next
+    // frame's moved rows drop the selection too.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("grows")).unwrap()).unwrap();
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::AnchorSelection)),
+        "the press asks to be fingerprinted"
+    );
+    app.anchor_selection(renderer.last_frame());
+    app.apply_client_update(event(SessionEvent::TextAppended {
+        message_id,
+        channel: qq_protocol::TextChannel::Output,
+        text: " more\nand more rows\n".repeat(6),
+    }));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(
+        app.selection.is_none(),
+        "the pressed cells moved before a frame"
+    );
+}
+
+#[test]
+fn a_too_small_frame_leaves_nothing_clickable() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let (mut app, _, _) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    // Two identical frames: the second leaves an equal hit map on both
+    // sides, which a conditional hand-off would keep across the small frame.
+    renderer.frame_and_commit(&mut app, 120, 40);
+    renderer.frame_and_commit(&mut app, 120, 40);
+    assert!(app.geometry.rail.is_some());
+    renderer.frame_and_commit(&mut app, 20, 5);
+    assert_eq!(app.geometry, crate::selection::FrameGeometry::default());
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 110, 3));
+    assert_eq!(app.focused(), before);
+    assert!(app.selection.is_none());
+}
+
+#[test]
+fn workspace_views_copy_from_the_inset_and_stale_rail_targets_are_ignored() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    // `/attention` has no message rail: its first cells are content.
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    app.execute(Command::ShowAttention);
+    let mut renderer = FrameRenderer::default();
+    let frame = renderer.frame_and_commit(&mut app, 100, 24);
+    let rows = frame_rows(&frame);
+    let row = u16::try_from(
+        rows.iter()
+            .position(|row| row.contains("NEEDS YOU"))
+            .unwrap(),
+    )
+    .unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 0, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 40, row));
+    let selection = app.selection.unwrap();
+    let copied = selection.text(&frame);
+    assert!(
+        copied.text.trim_start().starts_with("NEEDS YOU"),
+        "the header is copied whole: {copied:?}"
+    );
+
+    // A Shift-press clears a visible QQ selection and repaints.
+    let effects = app.handle_terminal_event(TerminalEvent::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 3,
+        row,
+        modifiers: KeyModifiers::SHIFT,
+    }));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws());
+
+    // A rail row whose session was deleted after the frame focuses nothing.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let rail_x = rows[1]
+        .find('│')
+        .map(|at| rows[1][..at].chars().count())
+        .unwrap();
+    let agent_row =
+        u16::try_from(rows.iter().position(|row| row.contains("agent 1")).unwrap()).unwrap();
+    app.sessions.remove(&ids[1]);
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        u16::try_from(rail_x + 4).unwrap(),
+        agent_row,
+    ));
+    assert_eq!(app.focused(), before);
+
+    // A drawn row whose session has since been found to sit under an audit
+    // (its missing parent arrived and is one) focuses nothing either.
+    let (mut app, _, ids) = app_with_fanout(2);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 120, 40));
+    let agent_row =
+        u16::try_from(rows.iter().position(|row| row.contains("agent 1")).unwrap()).unwrap();
+    let fan_out = app.sessions[&ids[1]].summary.parent_id.unwrap();
+    app.sessions.get_mut(&fan_out).unwrap().summary.purpose = qq_protocol::SessionPurpose::Audit;
+    let before = app.focused();
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        u16::try_from(rail_x + 4).unwrap(),
+        agent_row,
+    ));
+    assert_eq!(app.focused(), before, "an audit's agent is never focused");
+}
+
+#[test]
+fn a_release_at_another_cell_without_a_drag_selects_and_copies() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 9, row));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::CopySelection(_))),
+        "{effects:?}"
+    );
+}
+
+#[test]
+fn a_wrapped_paragraph_dragged_in_the_real_transcript_copies_as_one_line() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let summary = fixtures::session_summary(SESSION);
+    let paragraph = "the quick brown fox jumps over the lazy dog and keeps on running far away";
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![summary.clone()],
+        focused: Some(SessionSnapshot {
+            messages: vec![completed_message(1, paragraph.to_owned())],
+            ..fixtures::session_snapshot(summary)
+        }),
+        ..fixtures::workspace_snapshot()
+    }));
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 40, 24));
+    let first = rows
+        .iter()
+        .position(|row| row.contains("the quick"))
+        .unwrap();
+    let last = rows.iter().rposition(|row| row.contains("away")).unwrap();
+    assert!(last > first, "the paragraph wraps: {rows:#?}");
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Down(MouseButton::Left),
+        0,
+        u16::try_from(first).unwrap(),
+    ));
+    app.handle_terminal_event(mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        39,
+        u16::try_from(last).unwrap(),
+    ));
+    let effects = app.handle_terminal_event(mouse_at(
+        MouseEventKind::Up(MouseButton::Left),
+        39,
+        u16::try_from(last).unwrap(),
+    ));
+    let selection = effects
+        .iter()
+        .find_map(|effect| match effect {
+            crate::effect::Effect::CopySelection(selection) => Some(*selection),
+            _ => None,
+        })
+        .expect("release copies");
+    // The frame the loop reads, with the selection painted on it.
+    let drawn = renderer.frame_and_commit(&mut app, 40, 24);
+    let copied = selection.text(&drawn);
+    assert_eq!(copied.text, paragraph, "{copied:?}");
+}
+
+#[test]
+fn a_right_click_clears_a_selection() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 9, row));
+    assert!(app.selection.is_some());
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Right), 5, row));
+    assert!(app.selection.is_none());
+    assert!(effects.redraws());
+}
+
+#[test]
+fn a_selection_is_dropped_when_the_rail_appears() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    // One session at 100 columns: no rail. A second session arrives during
+    // the drag and the rail takes the right edge; the selected cells (`row`,
+    // inside the text) are unchanged, only the pane's bounds move.
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 6, row));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some());
+    let other = fixtures::session_summary(SessionId::from_bytes([0x5d; 16]));
+    app.sessions.upsert_summary(other, &app.models, 0);
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    assert!(
+        rows.iter().any(|row| row.contains('│')),
+        "the rail is up: {rows:#?}"
+    );
+    assert!(
+        app.selection.is_none(),
+        "the old bounds would reach the rail"
+    );
+}
+
+#[test]
+fn a_click_without_a_drag_selects_and_copies_nothing() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut app = app_with_messages(1);
+    FrameRenderer::default().frame_and_commit(&mut app, 100, 24);
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 3));
+    let effects = app.handle_terminal_event(mouse_at(MouseEventKind::Up(MouseButton::Left), 5, 3));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, crate::effect::Effect::CopySelection(_)))
+    );
+    assert!(app.selection.is_none());
+    // A press on the composer or the top row starts nothing.
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 0));
+    assert!(app.selection.is_none());
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 5, 22));
+    assert!(app.selection.is_none());
+}
+
 #[test]
 fn a_lone_sessions_failed_agent_is_named_on_the_rule() {
     let (mut app, root, ids) = app_with_fanout(1);
@@ -6909,18 +7395,21 @@ fn a_notice_keeps_a_pointer_to_unseen_failures_and_a_titleless_rail_row_names_no
         view.unread = 999_999_999;
     }
     app.focus_session(SessionId::from_bytes([0x11; 16]));
-    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    let frame = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
     assert!(
-        !named.contains(&root),
+        !frame.named.contains(&root),
         "title truncated away: not named {:#?}",
-        frame_rows(&rows)
+        frame_rows(&frame.rows)
     );
     app.sessions.get_mut(&root).unwrap().unread = 99_999;
-    let (rows, named, _) = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
-    let texts = frame_rows(&rows);
+    let frame = sidebar(&app, layout::RAIL_MIN_WIDTH, 30, RailDensity::Compact);
+    let texts = frame_rows(&frame.rows);
     assert!(texts.iter().any(|row| row.contains("◇ F...")), "{texts:#?}");
-    assert!(named.contains(&root), "one title cell names it: {texts:#?}");
-    let (_, named, _) = sidebar(&app, 60, 30, RailDensity::Compact);
+    assert!(
+        frame.named.contains(&root),
+        "one title cell names it: {texts:#?}"
+    );
+    let named = sidebar(&app, 60, 30, RailDensity::Compact).named;
     assert!(named.contains(&root), "title visible: named");
 }
 
@@ -6945,7 +7434,7 @@ fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names()
         .insert(ToolCallId::from_bytes([0x82; 16]));
     app.sessions.get_mut(&root).unwrap().unread = 99_999;
     app.focus_session(SessionId::from_bytes([0x11; 16]));
-    let (_, named, _) = sidebar(&app, 14, 30, RailDensity::Compact);
+    let named = sidebar(&app, 14, 30, RailDensity::Compact).named;
     assert!(!named.contains(&root), "title not shown: not named");
 
     // Five waiting agents. With the whole rail on screen the `+2 need you`
@@ -6962,7 +7451,7 @@ fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names()
     }
     // Focus an agent so the window centres below the session's row.
     app.focus_session(SessionId::from_bytes([0x11; 16]));
-    let full = sidebar(&app, 40, 40, RailDensity::Compact).1;
+    let full = sidebar(&app, 40, 40, RailDensity::Compact).named;
     assert!(full.contains(&ids[4]), "collapsed and pointed at: {full:?}");
     // `Other` is focused and lists after `Fan out` (NEEDS YOU first), so a
     // window of two rows centred on it starts below `Fan out`'s title row
@@ -6987,14 +7476,14 @@ fn rail_naming_needs_the_title_and_clipped_sessions_keep_their_collapsed_names()
         RailDensity::Compact,
         Some(title + 1),
     )
-    .1;
+    .named;
     assert!(
         !named.contains(&ids[4]),
         "title clipped: the +2 is anonymous"
     );
     // A window that keeps the title row but ends before the `+2` row: the
     // collapsed needs have no painted pointer, so they are not named.
-    let named = sidebar_at(&app, 40, more - title, RailDensity::Compact, Some(title)).1;
+    let named = sidebar_at(&app, 40, more - title, RailDensity::Compact, Some(title)).named;
     assert!(named.contains(&root) || !named.contains(&ids[4]));
     assert!(
         !named.contains(&ids[4]),
@@ -7265,7 +7754,7 @@ fn a_rail_marker_does_not_stand_in_for_a_clipped_title() {
     }
     app.layout.rail = PanePref::Shown;
     app.focus_session(SessionId::from_bytes([0x10; 16]));
-    let (rows, named, _) = super::sidebar::sidebar_without(
+    let super::sidebar::RailFrame { rows, named, .. } = super::sidebar::sidebar_without(
         &app,
         layout::RAIL_MIN_WIDTH,
         30,

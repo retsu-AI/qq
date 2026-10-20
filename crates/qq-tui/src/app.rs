@@ -482,6 +482,12 @@ pub(crate) struct App {
     /// wheel scrolls the transcript; `/mouse` turns it off for native
     /// selection and copy (most terminals also select with Shift held).
     pub(crate) mouse_capture: bool,
+    /// A QQ-owned text selection in the transcript pane, while dragging and
+    /// after release until the next key, scroll, or resize.
+    pub(crate) selection: Option<crate::selection::Selection>,
+    /// What the mouse can act on in the last frame (rail rows, the
+    /// transcript pane), committed by the renderer.
+    pub(crate) geometry: crate::selection::FrameGeometry,
     /// Sessions whose row the last frame's rail window painted, committed by
     /// the renderer; `None` before the first frame. A background delta for a
     /// session outside it changes no cell.
@@ -568,6 +574,8 @@ impl App {
             layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
+            selection: None,
+            geometry: crate::selection::FrameGeometry::default(),
             rail_painted: None,
             frame_named: Vec::new(),
             frame_carded: Vec::new(),
@@ -1588,7 +1596,17 @@ impl App {
     pub fn handle_terminal_event(&mut self, event: Event) -> Effects {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                self.handle_key(key)
+                // Any key ends a selection; Esc only clears it. Clearing it
+                // always repaints, even when the key itself does nothing.
+                let cleared = self.selection.take().is_some();
+                if cleared && key.code == KeyCode::Esc {
+                    return Effects::redraw(Redraw::Immediate);
+                }
+                let mut effects = self.handle_key(key);
+                if cleared {
+                    effects.push(Effect::Redraw(Redraw::Immediate));
+                }
+                effects
             }
             Event::Paste(text) => {
                 let changed = match &mut self.overlay {
@@ -1597,17 +1615,7 @@ impl App {
                 };
                 Effects::changed_now(changed)
             }
-            Event::Mouse(mouse) if self.overlay.is_none() => {
-                // The wheel scrolls the transcript wherever the pointer is, so
-                // a wheel over the chrome still does something useful.
-                let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
-                let changed = match mouse.kind {
-                    MouseEventKind::ScrollUp => self.viewport_mut().scroll(rows),
-                    MouseEventKind::ScrollDown => self.viewport_mut().scroll(-rows),
-                    _ => false,
-                };
-                Effects::changed_now(changed)
-            }
+            Event::Mouse(mouse) if self.overlay.is_none() => self.handle_mouse(mouse),
             Event::FocusGained => {
                 self.terminal_focused = true;
                 Effects::redraw(Redraw::Immediate)
@@ -1618,10 +1626,130 @@ impl App {
             }
             Event::Resize(columns, _) => {
                 self.terminal_width = usize::from(columns);
+                self.selection = None;
                 Effects::redraw(Redraw::Immediate)
             }
             Event::Key(_) | Event::Mouse(_) => Effects::none(),
         }
+    }
+
+    /// The wheel scrolls the transcript wherever the pointer is; a click on a
+    /// rail row focuses its session or agent; a drag in the transcript pane
+    /// selects text there and copies it on release. A modifier-held drag is
+    /// left alone (terminals that forward it select natively).
+    fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Effects {
+        use crossterm::event::MouseButton;
+        let (column, row) = (usize::from(mouse.column), usize::from(mouse.row));
+        let rows = isize::try_from(MOUSE_SCROLL_ROWS).unwrap_or(isize::MAX);
+        // Modified clicks and drags belong to the terminal (Shift-drag is the
+        // native-selection escape hatch where a terminal forwards it).
+        let modified = mouse
+            .modifiers
+            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL);
+        if modified
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
+            )
+        {
+            // An old QQ highlight would sit over the terminal's own selection.
+            return Effects::changed_now(self.selection.take().is_some());
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                // The selection is screen-anchored; scrolling would move the
+                // text out from under it.
+                let cleared = self.selection.take().is_some();
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    rows
+                } else {
+                    -rows
+                };
+                Effects::changed_now(self.viewport_mut().scroll(delta) || cleared)
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let cleared = self.selection.take().is_some();
+                // The hit map is from the drawn frame; a session deleted, or
+                // revealed to be under an audit, since then is not a target.
+                if let Some(target) = self.geometry.rail_target(column, row).filter(|target| {
+                    self.sessions.contains_key(target) && !self.under_audit(*target)
+                }) {
+                    let mut effects = self.focus_session(target);
+                    effects.push(Effect::Redraw(Redraw::Immediate));
+                    return effects;
+                }
+                self.selection = self.geometry.transcript.and_then(|area| {
+                    crate::selection::Selection::start(area, self.geometry.text_x, column, row)
+                });
+                let mut effects = Effects::changed_now(cleared);
+                if self.selection.is_some() {
+                    // Fingerprinted against the frame the press landed on,
+                    // before streamed output can move what is under it.
+                    effects.push(Effect::AnchorSelection);
+                }
+                effects
+            }
+            MouseEventKind::Drag(MouseButton::Left) => match &mut self.selection {
+                Some(selection) => {
+                    selection.extend(column, row);
+                    Effects::redraw(Redraw::Immediate)
+                }
+                None => Effects::none(),
+            },
+            MouseEventKind::Up(MouseButton::Left) => {
+                // A quick drag can arrive as a press then a release at another
+                // cell with no drag event between: the release is the head.
+                if let Some(selection) = &mut self.selection {
+                    selection.extend(column, row);
+                }
+                match self.selection {
+                    Some(selection) if selection.is_empty() => {
+                        self.selection = None;
+                        Effects::redraw(Redraw::Immediate)
+                    }
+                    Some(selection) => {
+                        let mut effects = Effects::redraw(Redraw::Immediate);
+                        effects.push(Effect::CopySelection(selection));
+                        effects
+                    }
+                    None => Effects::none(),
+                }
+            }
+            // Any other button pressed (right, middle) still ends a
+            // selection: mouse capture sends the press to QQ, not the
+            // terminal.
+            MouseEventKind::Down(_) => Effects::changed_now(self.selection.take().is_some()),
+            _ => Effects::none(),
+        }
+    }
+
+    /// Fingerprint a just-started selection against `frame`, the frame the
+    /// press landed on, so a later frame whose cells moved under it (output
+    /// streamed before the first drag or redraw) drops it.
+    pub(crate) fn anchor_selection(&mut self, frame: &[crate::render::Line]) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.remember(frame);
+        }
+    }
+
+    /// The terminal loop read the selected text from the last frame and put
+    /// it on the clipboard; say what was copied.
+    pub(crate) fn note_copied(&mut self, copied: &crate::selection::Copied) -> Effects {
+        if copied.text.is_empty() {
+            return Effects::none();
+        }
+        let lines = match copied.lines {
+            1 => "1 line".to_owned(),
+            count => format!("{count} lines"),
+        };
+        if copied.truncated {
+            self.set_warning(format!(
+                "copied the first {lines}; the selection was too large"
+            ));
+        } else {
+            self.set_info(format!("copied {lines}"));
+        }
+        Effects::redraw(Redraw::Immediate)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Effects {

@@ -8,7 +8,7 @@ use crossterm::{
     queue,
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{app::terminal_safe_character, theme};
 
@@ -105,6 +105,20 @@ pub(crate) struct Line {
     /// shift free for rows shared with the width-keyed caches.
     pub(crate) indent: usize,
     pub(crate) spans: Vec<Span>,
+    /// How the row continues into the next one: a real line break, a prose
+    /// wrap (a copy joins with a space, since the wrap dropped the space it
+    /// broke on), or a literal wrap of code or a table (joins with nothing).
+    pub(crate) wrapped: Wrap,
+    /// Display cells after the indent that are chrome, not text (a code
+    /// panel's `┃  ` gutter): a copy skips them.
+    pub(crate) chrome: usize,
+    /// Where layout fill begins, in display cells after the indent (a code
+    /// panel's padding to the slab's width); zero when the row has none. A
+    /// copy skips the `fill` cells from there, so a literal wrap that left a
+    /// row short of full does not gain a space. Columns glued on after the
+    /// fill (side panes) are outside the copy's area anyway.
+    pub(crate) fill_at: usize,
+    pub(crate) fill: usize,
     /// The child session whose live card this row titles (`child_rows`).
     /// The frame reads it to know which children a drawn card already
     /// names; matching the row's text instead would let message content
@@ -112,10 +126,23 @@ pub(crate) struct Line {
     pub(crate) card: Option<qq_protocol::SessionId>,
 }
 
+/// See [`Line::wrapped`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Wrap {
+    #[default]
+    Break,
+    Prose,
+    Literal,
+}
+
 impl Line {
     pub(crate) fn styled(text: impl Into<String>, style: Style) -> Self {
         Self {
             indent: 0,
+            wrapped: Wrap::Break,
+            chrome: 0,
+            fill_at: 0,
+            fill: 0,
             spans: vec![Span {
                 text: text.into(),
                 style,
@@ -138,12 +165,27 @@ impl Line {
         self.spans.push(Span { text, style });
     }
 
+    /// Display cells of the row. A grapheme cluster split across two spans
+    /// (a style change inside `☀️`, `👩‍💻` or a flag) is measured whole, as
+    /// the terminal draws it; a row without such a split (almost every row)
+    /// takes one pass per span.
     pub(crate) fn width(&self) -> usize {
-        self.indent
+        let simple = self.indent
             + self
                 .spans
                 .iter()
                 .map(|span| text_width(&span.text))
+                .sum::<usize>();
+        if self.spans.len() < 2 || !crate::selection::splits_a_cluster(&self.spans) {
+            return simple;
+        }
+        let mut state = crate::selection::Clusters::default();
+        self.indent
+            + self
+                .spans
+                .iter()
+                .flat_map(|span| crate::selection::clusters(&span.text, &mut state))
+                .map(|(_, width, _)| width)
                 .sum::<usize>()
     }
 
@@ -152,13 +194,13 @@ impl Line {
     }
 }
 
-/// Display columns of `text`. One pass over the characters; a printable-ASCII
-/// byte-scan fast path measured +8 % on the 32 KiB streaming ceiling because
-/// `wrap_line` measures every span and the second scan cost more than the
-/// width table saves.
+/// Display columns of `text`, measured the way the terminal renders it: an
+/// emoji presentation sequence (`☀️`), a ZWJ sequence (`👩‍💻`), or a skin-tone
+/// modifier counts as the one wide glyph it draws, not the sum of its
+/// characters. Control characters count zero (they never reach the screen).
 pub(crate) fn text_width(text: &str) -> usize {
-    text.chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+    text.split(char::is_control)
+        .map(UnicodeWidthStr::width)
         .sum()
 }
 
