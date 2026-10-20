@@ -232,6 +232,9 @@ struct Project {
     capabilities: Option<Arc<ServerCapabilities>>,
     pending: HashMap<CommandId, PendingIntent>,
     notice: Option<Notice>,
+    /// A goal's interrupted completion check holds the workspace until it is
+    /// acknowledged (from the TUI or `qq goal`); shown as a notice on change.
+    check_interruption: Option<qq_protocol::CheckInterruption>,
     dirty: bool,
     last_emitted: Option<ProjectStateDto>,
 }
@@ -264,6 +267,7 @@ impl Project {
             capabilities: None,
             pending: HashMap::new(),
             notice: None,
+            check_interruption: None,
             dirty: true,
             last_emitted: None,
         }
@@ -405,9 +409,7 @@ impl Project {
                 // recommended model, then whatever the catalog lists first.
                 let valid = |id: &String| self.models.iter().any(|m| &view::model_id(m) == id);
                 let recommended = self.models.iter().find_map(|option| {
-                    crate::auth::recommended_model(&option.provider)
-                        .map(str::to_owned)
-                        .filter(|id| valid(id))
+                    crate::auth::recommended_model(&option.provider).filter(|id| valid(id))
                 });
                 self.selected_model = self
                     .selected_model
@@ -565,6 +567,22 @@ impl Project {
         );
         for effect in effects {
             match effect {
+                StateEffect::CheckInterruptionChanged(interruption) => {
+                    if self.check_interruption != interruption {
+                        self.check_interruption = interruption;
+                        if self.check_interruption.is_some() {
+                            self.set_notice(
+                                NoticeLevel::Warning,
+                                "An interrupted goal completion check holds this workspace until it is acknowledged with `qq goal` or in the TUI.",
+                            );
+                        } else {
+                            self.set_notice(
+                                NoticeLevel::Info,
+                                "Completion check interruption acknowledged; workspace work may continue.",
+                            );
+                        }
+                    }
+                }
                 StateEffect::Notice { level, text, .. } => self.set_notice(level, text),
                 StateEffect::Attention(attention) => {
                     if let Some(app) = &self.app {
@@ -1397,6 +1415,7 @@ mod submission_tests {
                 },
                 sessions: vec![*session.clone()],
                 focused: Some(qq_protocol::SessionSnapshot {
+                    goal: None,
                     side_questions: vec![],
                     summary: *session,
                     messages: vec![message],
@@ -1407,6 +1426,7 @@ mod submission_tests {
                 }),
                 included: vec![],
                 has_older_sessions: false,
+                check_interruption: None,
             },
         );
         let transcript = project.state().transcript.unwrap();
