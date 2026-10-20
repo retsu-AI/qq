@@ -44,6 +44,13 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
         .write(true)
         .open(gate_path)
         .unwrap();
+    let start_path = workspace.path().join("begin");
+    crate::tools::create_test_fifo(&start_path).await;
+    let mut start_gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(start_path)
+        .unwrap();
     let owner = CommandOwner::open(root.path().join("owner"), "unknown")
         .await
         .unwrap();
@@ -51,7 +58,7 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
     let request = command(
         workspace.path(),
         id,
-        "printf started >> count; read token < release; printf finished",
+        "read token < begin; printf started >> count; read token < release; printf finished",
     );
     owner.submit(request.clone()).await.unwrap();
     let running = owner.wait(id, 0).await.unwrap();
@@ -61,13 +68,23 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
     assert!(futures_util::poll!(observer.as_mut()).is_pending());
     drop(observer);
     owner.submit(request).await.unwrap();
-    tokio::task::spawn_blocking(move || gate.write_all(b"continue\n").unwrap())
-        .await
-        .unwrap();
-    let mut finished = owner.wait(id, running.version).await.unwrap();
-    while finished.status != CommandStatus::Finished {
-        finished = owner.wait(id, finished.version).await.unwrap();
-    }
+    let gate = tokio::task::spawn_blocking(move || {
+        gate.write_all(b"continue\n").unwrap();
+        // Keep the FIFO and its buffered release alive until the child opens
+        // its reader; the process receipt can arrive before that happens.
+        gate
+    })
+    .await
+    .unwrap();
+    let start_gate = tokio::task::spawn_blocking(move || {
+        start_gate.write_all(b"begin\n").unwrap();
+        start_gate
+    })
+    .await
+    .unwrap();
+    let finished = wait_finished(&owner, id, running.version).await;
+    drop(gate);
+    drop(start_gate);
     assert_eq!(finished.status, CommandStatus::Finished);
     assert!(!finished.result.as_ref().unwrap().is_error());
     assert!(
