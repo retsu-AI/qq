@@ -66,6 +66,7 @@ written.
 | 0063 | [Opt-in metadata-only structured tracing](0063-opt-in-structured-tracing.md) | Proposed (AF5, ENG-1028) |
 | 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Proposed (auth-providers AP7, ENG-1066) |
 | 0065 | [The desktop app is a Tauri client of the local server with a native Rust client core and a TypeScript UI](0065-desktop-client-native-core-ts-ui.md) | Proposed (desktop D1–D3 for the local server; applies ADR-0017's documented TypeScript fallback to desktop only) |
+| 0066 | [Android and iOS share the desktop Tauri client](0066-mobile-targets-share-the-desktop-client.md) | Proposed (mobile M0; remote use awaits maintainer S2/S4) |
 
 The following numbers were reserved or released by retired plans. These
 historical reservations do not schedule work or require new ADRs:
