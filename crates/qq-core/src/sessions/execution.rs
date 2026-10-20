@@ -2741,6 +2741,25 @@ async fn execute_started_run(
                     }
                 }
             }
+            RunInput::Event(Some(RuntimeEvent::ToolProcessStarted { id, receipt })) => {
+                if internal {
+                    continue;
+                }
+                if let Err(error) = inner.store.record_tool_process(&claimed, id, receipt).await {
+                    let Ok(teardown) = resources.stop(&mut events).await else {
+                        inner.failed.send_replace(true);
+                        return;
+                    };
+                    finish_run(
+                        &inner,
+                        &claimed,
+                        persistence_failure("failed to persist the command process", &error),
+                        teardown,
+                    )
+                    .await;
+                    return;
+                }
+            }
             RunInput::Event(Some(RuntimeEvent::ToolCallOutputDelta { id, chunk })) => {
                 if internal || chunk.is_empty() {
                     continue;

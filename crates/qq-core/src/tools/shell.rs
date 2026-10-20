@@ -251,7 +251,7 @@ pub(super) async fn run_shell(
     call_id: Option<qq_protocol::ToolCallId>,
     launch: Launch<'_>,
     cancelled: &ToolCancellation,
-    output: Option<&mpsc::Sender<String>>,
+    output: Option<&mpsc::Sender<super::ToolUpdate>>,
     process_pending: &mut bool,
 ) -> ToolOutput {
     if cancelled.is_cancelled() {
@@ -344,6 +344,18 @@ pub(super) async fn run_shell(
     // entire group on every abnormal exit path — timeout, cancellation, and
     // this future being dropped mid-flight — so no descendant is orphaned.
     let mut guard = ProcessGroupGuard::new(child.id());
+    if let (Some(output), Some(receipt), Some(_)) = (output, receipt.as_ref(), call_id)
+        && output
+            .try_send(super::ToolUpdate::ProcessStarted(receipt.clone()))
+            .is_err()
+    {
+        return match stop_shell(&mut child, &mut guard, process_pending).await {
+            Ok(()) => ToolOutput::interrupted(
+                "the command's process observer did not accept its start receipt",
+            ),
+            Err(message) => ToolOutput::unobserved(message),
+        };
+    }
     #[cfg(test)]
     {
         let hook = {
@@ -567,7 +579,11 @@ where
 
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
-fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usize, bytes: &[u8]) {
+fn forward_shell_chunk(
+    output: Option<&mpsc::Sender<super::ToolUpdate>>,
+    streamed: &mut usize,
+    bytes: &[u8],
+) {
     let Some(sender) = output else {
         return;
     };
@@ -577,7 +593,7 @@ fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usi
     let remaining = MAX_SHELL_OUTPUT_BYTES - *streamed;
     let bytes = &bytes[..bytes.len().min(remaining)];
     let chunk = String::from_utf8_lossy(bytes).into_owned();
-    match sender.try_send(chunk) {
+    match sender.try_send(super::ToolUpdate::Output(chunk)) {
         Ok(()) => *streamed += bytes.len(),
         // Live output is a best-effort view of the same bounded bytes carried
         // by the terminal result. A slow renderer may miss deltas, but it can

@@ -2955,7 +2955,7 @@ impl RunState {
                         let detach_spawns = !bounded_child_spend;
                         let execute_one = |call: RuntimeToolCall,
                                            output: Option<
-                            tokio::sync::mpsc::Sender<String>,
+                            tokio::sync::mpsc::Sender<tools::ToolUpdate>,
                         >, child_limits: Result<runtime::ChildBudget, BudgetLimitKind>, offered: bool| {
                             let workspace = (*workspace).clone();
                             let file_state = Arc::clone(file_state);
@@ -3585,7 +3585,7 @@ impl RunState {
                                 let call_id = call.id;
                                 let mut call_id_holder = Some(call.clone());
                                 let (delta_sender, mut deltas) =
-                                    tokio::sync::mpsc::channel::<String>(SHELL_OUTPUT_QUEUE_CAPACITY);
+                                    tokio::sync::mpsc::channel::<tools::ToolUpdate>(SHELL_OUTPUT_QUEUE_CAPACITY);
                                 let offered = catalog.exposure() == catalog::Exposure::Full || run.pins.names().contains(&call.name);
                                 let mut execution = Box::pin(execute_one(call, Some(delta_sender), run.budget.child_budget(tokio::time::Instant::now()), offered));
                                 let mut execution_scope = ExecutionScope { output_closed: false };
@@ -3613,7 +3613,10 @@ impl RunState {
                                             break (call_id_holder.take().expect("call retained"), tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()), None);
                                         }
                                         chunk = deltas.recv(), if !execution_scope.output_closed => match chunk {
-                                            Some(chunk) => {
+                                            Some(tools::ToolUpdate::ProcessStarted(receipt)) => {
+                                                yield TurnStep::Emit(RuntimeEvent::ToolProcessStarted { id: call_id, receipt });
+                                            }
+                                            Some(tools::ToolUpdate::Output(chunk)) => {
                                                 yield TurnStep::Emit( RuntimeEvent::ToolCallOutputDelta { id: call_id, chunk });
                                             }
                                             // Keep selecting interruption after output closes.
@@ -3632,8 +3635,11 @@ impl RunState {
                                 let interrupted_here = result.model_text == INTERRUPTED_TOOL_RESULT && result.is_error && result.file_states.is_empty() && steering.as_ref().is_some_and(|steering| *steering.interrupts.borrow() > run.handled_interrupt);
                                 // Chunks sent in the execution's final poll may still
                                 // be buffered; drain them before the terminal event.
-                                while let Ok(chunk) = deltas.try_recv() {
-                                    yield TurnStep::Emit( RuntimeEvent::ToolCallOutputDelta { id: call_id, chunk });
+                                while let Ok(update) = deltas.try_recv() {
+                                    yield TurnStep::Emit(match update {
+                                        tools::ToolUpdate::ProcessStarted(receipt) => RuntimeEvent::ToolProcessStarted { id: call_id, receipt },
+                                        tools::ToolUpdate::Output(chunk) => RuntimeEvent::ToolCallOutputDelta { id: call_id, chunk },
+                                    });
                                 }
                                 if let Some(spend) = child_spend {
                                     run.budget.charge_child(spend.usage, spend.cost_usd_nanos);

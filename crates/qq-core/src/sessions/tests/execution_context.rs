@@ -4,6 +4,186 @@ use crate::tools::process_context::{
     UnverifiedReason, arguments_digest,
 };
 
+#[cfg(unix)]
+#[tokio::test]
+async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
+    use std::io::Write as _;
+
+    for cancel in [false, true] {
+        let mut harness = scripted_runs_harness(
+            ApprovalMode::Full,
+            vec![vec![(
+                "shell",
+                r#"{"command":"printf ready; read token < release; printf finished"}"#.to_owned(),
+            )]],
+        )
+        .await;
+        let release = harness.workspace_path.join("release");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &release,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        let gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)
+            .unwrap();
+        let run = submit_prompt(&harness, "run the command").await;
+        collect_until(&mut harness.events, |event| {
+            matches!(event,
+                SessionEvent::ToolCallOutputDelta { chunk, .. } if chunk.contains("ready")
+            )
+        })
+        .await;
+        let live: (String, Option<String>) = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT state,execution_context_json FROM tool_calls WHERE run_id=?1",
+                    [run.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+
+        if cancel {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::CancelRun { run_id: run },
+                )
+                .await
+                .unwrap();
+        } else {
+            let mut writer = gate.try_clone().unwrap();
+            tokio::task::spawn_blocking(move || writer.write_all(b"continue\n").unwrap())
+                .await
+                .unwrap();
+        }
+        let terminal = collect_until(&mut harness.events, finished_for(run)).await;
+        assert!(matches!(&terminal.last().unwrap().event,
+            SessionEvent::RunFinished { outcome, .. } if outcome == &if cancel { RunOutcome::Cancelled } else { RunOutcome::Completed }
+        ));
+        let path = harness.workspace_path.join("sessions.sqlite3");
+        harness.runtime.shutdown().await.unwrap();
+        assert_eq!(live.0, "running");
+        let live = live
+            .1
+            .expect("the running native command must already have its persisted process receipt");
+        let receipt: ExecutionContextReceipt = serde_json::from_str(&live).unwrap();
+        assert_ne!(receipt.facts().pid, 0);
+        let (connection, _) = open_database(&path).unwrap();
+        let finished: String = connection
+            .query_row(
+                "SELECT execution_context_json FROM tool_calls WHERE run_id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            finished, live,
+            "completion and reopen must retain the same process identity"
+        );
+    }
+}
+
+#[tokio::test]
+async fn completion_cannot_replace_a_recorded_process_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path().join("sessions.sqlite3"))
+        .await
+        .unwrap();
+    let (claimed, id, receipt) = process_call_fixture(&store, directory.path()).await;
+    store
+        .record_tool_process(&claimed, id, Box::new(receipt.clone()))
+        .await
+        .unwrap();
+    let mut other = receipt.clone();
+    other.facts_mut().pid += 1;
+    let result = store
+        .finish_tool_call(
+            &claimed,
+            id,
+            "wrong process".to_owned(),
+            false,
+            Vec::new(),
+            None,
+            None,
+            Some(Box::new(other)),
+        )
+        .await;
+    store
+        .finish_tool_call(
+            &claimed,
+            id,
+            "interrupted without a final receipt".to_owned(),
+            true,
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let recorded: String = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT execution_context_json FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    assert!(
+        result.is_err(),
+        "a command may only finish with its recorded process identity"
+    );
+    assert_eq!(
+        serde_json::from_str::<ExecutionContextReceipt>(&recorded).unwrap(),
+        receipt
+    );
+}
+
+#[tokio::test]
+async fn restart_recovery_retains_the_interrupted_command_receipt() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (claimed, id, receipt) = process_call_fixture(&store, directory.path()).await;
+    store
+        .record_tool_process(&claimed, id, Box::new(receipt.clone()))
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+
+    let reopened = Store::open(path).await.unwrap();
+    reopened.recover_interrupted_runs().await.unwrap();
+    let (state, context): (String, String) = reopened
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT state,execution_context_json FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    reopened.close().await.unwrap();
+    assert_eq!(state, "interrupted");
+    assert_eq!(
+        serde_json::from_str::<ExecutionContextReceipt>(&context).unwrap(),
+        receipt
+    );
+}
+
 pub(super) async fn process_call_fixture(
     store: &Store,
     path: &Path,

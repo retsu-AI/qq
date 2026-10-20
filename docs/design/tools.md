@@ -1042,6 +1042,13 @@ Deferred).
 
 ## Shell Execution
 
+Session execution persists the native process receipt as soon as spawn is
+observed, before forwarding live output. The receipt is private recovery
+evidence bound to the tool call and its arguments; it is not authorization or
+proof of completion. Completion must retain the same process identity, and
+an interrupted result cannot erase it. A receipt alone does not support
+reattachment or justify signalling a persisted PID after a server restart.
+
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).

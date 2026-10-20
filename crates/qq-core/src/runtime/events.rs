@@ -192,6 +192,11 @@ pub(crate) enum RuntimeEvent {
     ToolCallStarted {
         id: ToolCallId,
     },
+    /// Native process identity, persisted before forwarding any live output.
+    ToolProcessStarted {
+        id: ToolCallId,
+        receipt: Box<crate::tools::process_context::ExecutionContextReceipt>,
+    },
     ToolCallDenied {
         id: ToolCallId,
         message: String,
