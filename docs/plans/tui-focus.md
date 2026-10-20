@@ -74,14 +74,19 @@ in its PR.
   the server's `accounting.inclusive` (the session and its immediate
   children) plus the direct spend of deeper loaded agents; a summary
   without accounting sums the direct spend of its loaded tree, audits
-  included, since hidden work still costs. Agents that are not loaded are
-  missing from the sum, a recorded limit of the bounded snapshot.
+  included, since hidden work still costs. If any summed part is unknown
+  (no cost recorded), the total is unknown and no spend is shown, as the
+  protocol never treats a missing cost as zero. Agents that are not loaded
+  are missing from the sum, a recorded limit of the bounded snapshot.
 - An agent **needs the user** when an approval waits on the human (a
   delegate-owned hold is working until it escalates) or when it failed or
   finished unseen. The TUI derives this from each summary and its live
   holds (the client store's `need()` counts delegate holds as approvals, so
-  it is not used here). One attention list, most urgent first, feeds every
-  attention surface (`Ctrl-G`, `Alt-A`/`Alt-D`, `/attention`, the rule).
+  it is not used here). One attention list feeds every attention surface
+  (`Ctrl-G`, `Alt-A`/`Alt-D`, `/attention`, the rule): human-owned
+  approvals first, then unseen failures, then unseen finishes; within a
+  rank, components (a session's tree) newest first by their top session,
+  and tree order inside one.
 - The rail shows groups NEEDS YOU, WORKING and RECENT, one row per session
   with an `↳N` agent badge. Agents get their own rows only when they need
   the user (capped, with a `+N need you` row) or belong to the focused
@@ -107,8 +112,8 @@ Acceptance: roll-up unit tests (each need, delegate holds, counts, spend,
 audit exclusion, orphans); rail view tests (shape, caps, rank order);
 startup and revealed-audit tests; a `fanout` golden at the five golden
 sizes; the `sessions_200_with_sidebar` and `children_20_with_sidebar`
-benches within the gate below. Background output from an agent that no
-surface shows schedules no redraw.
+benches within the render gate below. Background output from an agent
+that no surface shows schedules no redraw.
 
 ### F3: picker
 
@@ -131,10 +136,11 @@ cursor fallback, and audit exclusion in every mode.
   counts as naming a need only while it is painted in the committed frame
   (title cells visible, not scrolled out or clipped), and a card is
   identified by its child's id, not by its text.
-- The rule's notice names the most urgent need that nothing else names, and
-  counts the rest (`◇ Deploy helper +3 need you`). A painted `+N need you`
-  rail row points at the needs it collapses, so those are counted, not
-  named again. The strip only counts, so beside it the notice still names.
+- The rule's notice considers the needs that nothing on screen names or
+  points at, names the first of them in attention order, and counts the
+  rest (`◇ Deploy helper +3 need you`). A painted `+N need you` rail row
+  points at the needs it collapses, so those are neither named nor counted
+  again. The strip only counts, so beside it the notice still names.
 - A transient notice (info, warning, error) takes the rule's left side. If
   needs are unnamed, the right side keeps a pointer to them (answer and jump
   chords, plus a count unless the strip already shows one), and the notice
@@ -162,15 +168,21 @@ Mouse capture stays on, so the wheel still scrolls; QQ owns selection.
   copy holds only text: no pane inset, message rail, panel gutter or fill,
   list or quote prefix, or trailing spaces. Soft-wrapped prose rejoins with
   a space; code and long tokens rejoin with nothing; real newlines stay.
-  Copies are bounded (`MAX_COPY_BYTES`) and cut at a cluster boundary.
+  Copies are bounded (`MAX_COPY_BYTES`) and cut at a cluster boundary; a
+  cut copy says so (`copied the first N lines; the selection was too
+  large`) as a warning instead of the plain notice.
 - `Esc`, keys, scrolling, resize, another button, or a change to the
   selected cells clears the selection, so a copy is always what the user
   saw. `Shift`-drag (where the terminal supports it) and `/mouse` still give
   native selection.
 - Grapheme clusters (ZWJ, combining-mark, flag, modifier and virama
-  sequences) are kept whole and measured at their rendered width in
-  layout, wrapping, truncation, previews and selection alike. Full UAX #29
-  is out of scope (it needs a crate); rarer clusters are a known limit.
+  sequences) are kept whole and measured with one deterministic rule in
+  layout, wrapping, truncation, previews and selection alike: a cluster's
+  width is `unicode-width`'s `UnicodeWidthStr::width` of the whole cluster
+  (so `☀️` and `👩‍💻` are two cells). A terminal or font that draws a cluster
+  at another width (ambiguous-width characters, older emoji tables) can
+  disagree with that layout; that, rarer clusters, and full UAX #29 (which
+  needs a crate) are recorded limits.
 
 Acceptance: app tests for click-to-focus against a stale frame, a clamped
 drag, copies in both directions, wide and joined glyphs, wraps against
@@ -190,5 +202,6 @@ split transcripts (L4), no double-click word or line selection.
 - `cargo bench -p qq-tui --bench render` before and after each code slice:
   the `steady_state`, `streaming_focused`, `streaming_run_on_32kb`,
   `golden_path_first_minute`, `sessions_200_with_sidebar`,
-  `children_20_with_sidebar` and `resize_horizontal` medians within 5 %.
+  `children_20_with_sidebar` and `resize_horizontal` medians no more than
+  5 % slower than the stack base (any speed-up passes).
 - Each PR is done when its Codex review reports no major issues.
