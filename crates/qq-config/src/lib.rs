@@ -74,7 +74,9 @@ pub use document::{
     DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
 };
-pub use providers::provider_credential_variables;
+pub use providers::{
+    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_providers, provider_credential_variables,
+};
 
 /// All process-dependent inputs captured before a configuration load begins.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -1042,6 +1044,21 @@ pub enum HttpCredential {
         api_key: Option<SecretRef>,
         profile: Option<String>,
     },
+}
+
+impl HttpCredential {
+    /// The patchable credential slots of a built-in HTTP preset: its explicit
+    /// API key and its profile, where the credential has them.
+    pub(crate) fn builtin_slots(
+        &mut self,
+    ) -> (Option<&mut Option<SecretRef>>, Option<&mut Option<String>>) {
+        match self {
+            Self::ApiKey { explicit, .. } => (Some(explicit), None),
+            Self::OpenAiCodex { profile } => (None, Some(profile)),
+            Self::XAi { api_key, profile } => (Some(api_key), Some(profile)),
+            Self::Configured(_) => (None, None),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

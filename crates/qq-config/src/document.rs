@@ -19,8 +19,8 @@ use super::{
     BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
     ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
     DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, HttpCredential, InputModality,
-    JevReviewMode, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
+    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality, JevReviewMode,
+    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
     MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
     MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
     ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
@@ -329,34 +329,74 @@ enum ProviderEntryPatch {
     Remove,
 }
 
+/// The credential fields of one built-in HTTP provider patch. The RON form
+/// keeps one variant per provider (each accepting only its own fields under
+/// `deny_unknown_fields`, and hashing into trust digests as it always has);
+/// everything downstream treats them uniformly through this view and the
+/// provider's table row (ADR-0064).
+struct BuiltinPatch<'a> {
+    kind: ProviderKind,
+    api_key: Option<&'a Field<SecretRef>>,
+    profile: Option<&'a StringField>,
+    models: &'a Field<UniqueMap<String, ModelEntryPatch>>,
+}
+
 impl ProviderEntryPatch {
-    pub(super) fn contains_literal_secret(&self) -> bool {
-        match self {
-            Self::OpenAi { api_key, .. }
-            | Self::Anthropic { api_key, .. }
-            | Self::Google { api_key, .. }
-            | Self::XAi { api_key, .. } => {
-                matches!(api_key, Field::Set(SecretRef::Value(_)))
+    fn builtin(&self) -> Option<BuiltinPatch<'_>> {
+        let (kind, api_key, profile, models) = match self {
+            Self::OpenAi { api_key, models } => (ProviderKind::OpenAi, Some(api_key), None, models),
+            Self::OpenAiCodex { profile, models } => {
+                (ProviderKind::OpenAiCodex, None, Some(profile), models)
             }
+            Self::Anthropic { api_key, models } => {
+                (ProviderKind::Anthropic, Some(api_key), None, models)
+            }
+            Self::Google { api_key, models } => (ProviderKind::Google, Some(api_key), None, models),
+            Self::XAi {
+                api_key,
+                profile,
+                models,
+            } => (ProviderKind::XAi, Some(api_key), Some(profile), models),
+            Self::LiteLlm { .. }
+            | Self::AmazonBedrock { .. }
+            | Self::AmazonBedrockMantle { .. }
+            | Self::Custom { .. }
+            | Self::Remove => return None,
+        };
+        Some(BuiltinPatch {
+            kind,
+            api_key,
+            profile,
+            models,
+        })
+    }
+
+    pub(super) fn contains_literal_secret(&self) -> bool {
+        if let Some(patch) = self.builtin() {
+            return matches!(patch.api_key, Some(Field::Set(SecretRef::Value(_))));
+        }
+        match self {
             Self::LiteLlm { connection, .. } | Self::Custom { connection, .. } => {
                 matches!(connection, Field::Set(value) if value.contains_literal_secret())
             }
             Self::AmazonBedrock { auth, .. } | Self::AmazonBedrockMantle { auth, .. } => {
                 matches!(auth, Field::Set(value) if value.contains_literal_secret())
             }
-            Self::OpenAiCodex { .. } | Self::Remove => false,
+            Self::OpenAi { .. }
+            | Self::OpenAiCodex { .. }
+            | Self::Anthropic { .. }
+            | Self::Google { .. }
+            | Self::XAi { .. }
+            | Self::Remove => false,
         }
     }
 
     fn references_local_credential(&self) -> bool {
+        if let Some(patch) = self.builtin() {
+            return matches!(patch.api_key, Some(Field::Set(_)))
+                || matches!(patch.profile, Some(StringField::Set(_)));
+        }
         match self {
-            Self::OpenAi { api_key, .. }
-            | Self::Anthropic { api_key, .. }
-            | Self::Google { api_key, .. } => matches!(api_key, Field::Set(_)),
-            Self::XAi {
-                api_key, profile, ..
-            } => matches!(api_key, Field::Set(_)) || matches!(profile, StringField::Set(_)),
-            Self::OpenAiCodex { profile, .. } => matches!(profile, StringField::Set(_)),
             Self::LiteLlm { connection, .. } | Self::Custom { connection, .. } => {
                 matches!(
                     connection,
@@ -366,7 +406,12 @@ impl ProviderEntryPatch {
             Self::AmazonBedrock { auth, .. } | Self::AmazonBedrockMantle { auth, .. } => {
                 matches!(auth, Field::Set(value) if value.references_local_credential())
             }
-            Self::Remove => false,
+            Self::OpenAi { .. }
+            | Self::OpenAiCodex { .. }
+            | Self::Anthropic { .. }
+            | Self::Google { .. }
+            | Self::XAi { .. }
+            | Self::Remove => false,
         }
     }
 }
@@ -925,11 +970,17 @@ impl Document {
             Field::Set(providers) => {
                 for (name, patch) in &providers.0 {
                     let kind = match patch {
-                        ProviderEntryPatch::OpenAi { .. } => "openai",
-                        ProviderEntryPatch::OpenAiCodex { .. } => "openai-codex",
-                        ProviderEntryPatch::Anthropic { .. } => "anthropic",
-                        ProviderEntryPatch::Google { .. } => "google",
-                        ProviderEntryPatch::XAi { .. } => "xai",
+                        ProviderEntryPatch::OpenAi { .. }
+                        | ProviderEntryPatch::OpenAiCodex { .. }
+                        | ProviderEntryPatch::Anthropic { .. }
+                        | ProviderEntryPatch::Google { .. }
+                        | ProviderEntryPatch::XAi { .. } => {
+                            patch
+                                .builtin()
+                                .and_then(|builtin| crate::providers::builtin_http(builtin.kind))
+                                .expect("every built-in patch has a table row")
+                                .id
+                        }
                         ProviderEntryPatch::LiteLlm { .. } => "litellm",
                         ProviderEntryPatch::AmazonBedrock { .. } => "bedrock",
                         ProviderEntryPatch::AmazonBedrockMantle { .. } => "bedrock-mantle",
@@ -2093,54 +2144,24 @@ impl MergeState {
             ProviderEntryPatch::Remove => {
                 self.providers.remove(name);
             }
-            ProviderEntryPatch::OpenAi { api_key, models } => {
-                let provider = self.provider_for_patch(name, ProviderKind::OpenAi);
-                let current = api_key_slot(provider, ProviderKind::OpenAi);
-                apply_optional(api_key, current);
-                apply_models(models, provider.models_mut());
-            }
-            ProviderEntryPatch::OpenAiCodex { profile, models } => {
-                let provider = self.provider_for_patch(name, ProviderKind::OpenAiCodex);
+            ProviderEntryPatch::OpenAi { .. }
+            | ProviderEntryPatch::OpenAiCodex { .. }
+            | ProviderEntryPatch::Anthropic { .. }
+            | ProviderEntryPatch::Google { .. }
+            | ProviderEntryPatch::XAi { .. } => {
+                let patch = patch.builtin().expect("matched a built-in patch");
+                let provider = self.provider_for_patch(name, patch.kind);
                 let Some(ProviderAccess::Http(access)) = provider.access_mut().as_mut() else {
-                    unreachable!("OpenAI Codex preset is HTTP")
+                    unreachable!("built-in HTTP presets are HTTP")
                 };
-                let HttpCredential::OpenAiCodex { profile: current } = &mut access.auth else {
-                    unreachable!("OpenAI Codex preset uses Codex credentials")
-                };
-                apply_optional_string(profile, current);
-                apply_models(models, provider.models_mut());
-            }
-            ProviderEntryPatch::Anthropic { api_key, models } => {
-                let provider = self.provider_for_patch(name, ProviderKind::Anthropic);
-                let current = api_key_slot(provider, ProviderKind::Anthropic);
-                apply_optional(api_key, current);
-                apply_models(models, provider.models_mut());
-            }
-            ProviderEntryPatch::Google { api_key, models } => {
-                let provider = self.provider_for_patch(name, ProviderKind::Google);
-                let current = api_key_slot(provider, ProviderKind::Google);
-                apply_optional(api_key, current);
-                apply_models(models, provider.models_mut());
-            }
-            ProviderEntryPatch::XAi {
-                api_key,
-                profile,
-                models,
-            } => {
-                let provider = self.provider_for_patch(name, ProviderKind::XAi);
-                let Some(ProviderAccess::Http(access)) = provider.access_mut().as_mut() else {
-                    unreachable!("xAI preset is HTTP")
-                };
-                let HttpCredential::XAi {
-                    api_key: current_key,
-                    profile: current_profile,
-                } = &mut access.auth
-                else {
-                    unreachable!("xAI preset uses xAI credentials")
-                };
-                apply_optional(api_key, current_key);
-                apply_optional_string(profile, current_profile);
-                apply_models(models, provider.models_mut());
+                let (current_key, current_profile) = access.auth.builtin_slots();
+                if let (Some(field), Some(slot)) = (patch.api_key, current_key) {
+                    apply_optional(field, slot);
+                }
+                if let (Some(field), Some(slot)) = (patch.profile, current_profile) {
+                    apply_optional_string(field, slot);
+                }
+                apply_models(patch.models, provider.models_mut());
             }
             ProviderEntryPatch::LiteLlm { connection, models } => {
                 let provider = self.provider_for_patch(name, ProviderKind::LiteLlm);
@@ -2830,16 +2851,6 @@ fn apply_default<T: Clone>(field: &Field<T>, current: &mut T, default: T) -> boo
             true
         }
     }
-}
-
-fn api_key_slot(provider: &mut ProviderConfig, kind: ProviderKind) -> &mut Option<SecretRef> {
-    let Some(ProviderAccess::Http(access)) = provider.access_mut().as_mut() else {
-        unreachable!("{kind:?} preset is HTTP")
-    };
-    let HttpCredential::ApiKey { explicit, .. } = &mut access.auth else {
-        unreachable!("{kind:?} preset uses API-key credentials")
-    };
-    explicit
 }
 
 fn apply_connection(field: &Field<Connection>, provider: &mut ProviderConfig) {
