@@ -36,12 +36,35 @@ impl BenchHarness {
         Self::with_options(size, sessions, messages, TuiOptions::default())
     }
 
+    /// One focused root session with `messages` loaded and `agents` agent
+    /// sessions under it (indexes 1..=agents), for the many-agents benches.
+    #[must_use]
+    pub fn with_agents(size: (u16, u16), agents: u8, messages: u8) -> Self {
+        Self::build(size, agents + 1, messages, TuiOptions::default(), true)
+    }
+
     /// `new`, with the TUI options (themes, settings) supplied by the caller.
     #[must_use]
     pub fn with_options(size: (u16, u16), sessions: u8, messages: u8, options: TuiOptions) -> Self {
+        Self::build(size, sessions, messages, options, false)
+    }
+
+    fn build(
+        size: (u16, u16),
+        sessions: u8,
+        messages: u8,
+        options: TuiOptions,
+        agents: bool,
+    ) -> Self {
         assert!(sessions >= 1, "at least one session is required");
         let summaries: Vec<SessionSummary> = (0..sessions)
-            .map(|index| summary(session_id(index), SessionStatus::Idle))
+            .map(|index| {
+                let mut summary = summary(session_id(index), SessionStatus::Idle);
+                if agents && index > 0 {
+                    summary.parent_id = Some(session_id(0));
+                }
+                summary
+            })
             .collect();
         let focused = SessionSnapshot {
             side_questions: Vec::new(),
@@ -76,11 +99,19 @@ impl BenchHarness {
         let message = assistant_message(session_id(index), 200 + index, "");
         let id = message.id;
         let run_id = message.run_id;
+        // Keep the session's place in the tree: a fresh summary would turn
+        // an agent fixture back into a root.
+        let mut running = summary(session_id(index), SessionStatus::Running);
+        running.parent_id = self
+            .app
+            .sessions
+            .get(&session_id(index))
+            .and_then(|session| session.summary.parent_id);
         self.apply(
             index,
             SessionEvent::RunStarted {
                 origin: None,
-                session: Box::new(summary(session_id(index), SessionStatus::Running)),
+                session: Box::new(running),
                 run_id,
                 plan: None,
             },
@@ -619,10 +650,14 @@ pub enum Scene {
     /// an unread finish, a child, and quiet idle and done sessions. The rail
     /// follows the tier, so the Compact frame shows the strip.
     Sessions,
+    /// Three sessions with wide fan-outs: the focused one has twenty quiet
+    /// agents (capped on the rail), another has four agents waiting on
+    /// approvals (capped at three), and a third is a quiet single session.
+    Fanout,
 }
 
 impl Scene {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::GoalForm,
         Self::GoalReplace,
         Self::Goal,
@@ -635,6 +670,7 @@ impl Scene {
         Self::Reasoning,
         Self::Steering,
         Self::Sessions,
+        Self::Fanout,
     ];
 
     /// The file stem goldens and gallery frames use for this scene.
@@ -653,6 +689,7 @@ impl Scene {
             Self::Reasoning => "reasoning",
             Self::Steering => "steering",
             Self::Sessions => "sessions",
+            Self::Fanout => "fanout",
         }
     }
 }
@@ -760,6 +797,10 @@ impl BenchHarness {
             Scene::Sessions => {
                 harness.completed_turn("plan the release", "Drafted the checklist.");
                 harness.many_agents();
+            }
+            Scene::Fanout => {
+                harness.completed_turn("survey every crate", "Spawned one agent per crate.");
+                harness.fanout();
             }
         }
         harness
@@ -924,6 +965,73 @@ impl BenchHarness {
                 final_output: None,
             },
         );
+    }
+
+    /// Session 0 (focused) fans out to twenty idle agents; `Release` (a
+    /// second session) has four agents each waiting on a `shell` approval;
+    /// `Notes` is a quiet third session. Ids and titles are fixed so the
+    /// frame is the same every run.
+    fn fanout(&mut self) {
+        let titled = |index: u8, title: &str, status: SessionStatus, parent_id| {
+            let mut summary = summary(session_id(index), status);
+            summary.title = title.to_owned();
+            summary.parent_id = parent_id;
+            summary.updated_at_ms = u64::from(index);
+            summary
+        };
+        let release = titled(1, "Release", SessionStatus::Idle, None);
+        let notes = titled(2, "Notes", SessionStatus::Idle, None);
+        let mut created = vec![release, notes];
+        for index in 0..20 {
+            created.push(titled(
+                10 + index,
+                &format!("crate {index:02}"),
+                SessionStatus::Idle,
+                Some(session_id(0)),
+            ));
+        }
+        for index in 0..4 {
+            created.push(titled(
+                40 + index,
+                &format!("publish step {index}"),
+                SessionStatus::Running,
+                Some(session_id(1)),
+            ));
+        }
+        for session in &created {
+            let index = session.id.as_bytes()[15];
+            self.apply(
+                index,
+                SessionEvent::SessionCreated {
+                    session: Box::new(session.clone()),
+                },
+            );
+        }
+        for index in 0..4u8 {
+            let session = 40 + index;
+            let mut call_id = [0x70; 16];
+            call_id[15] = session;
+            self.apply(
+                session,
+                SessionEvent::ToolApprovalRequested {
+                    tool_call: ToolCallSnapshot {
+                        run_id: run_id(session),
+                        arguments: r#"{"command":"cargo publish"}"#.to_owned(),
+                        state: qq_protocol::ToolCallState::AwaitingApproval,
+                        ..fixtures::tool_call(
+                            ToolCallId::from_bytes(call_id),
+                            session_id(session),
+                            "shell",
+                        )
+                    },
+                    shell: None,
+                    edit: None,
+                    question: None,
+                    fetch: None,
+                    delegated: false,
+                },
+            );
+        }
     }
 
     /// One completed exchange in session 0: the user's `prompt`, then a

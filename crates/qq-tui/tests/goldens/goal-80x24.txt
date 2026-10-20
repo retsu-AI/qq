@@ -18,7 +18,7 @@ used; new consent required
 → ship migration
 
 Notes
- 3 agents
+ 3 sessions
  goal · check consent required ───────────────── ? help  ^K commands  ^O detail
  › Ask QQ...
 

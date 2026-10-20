@@ -10,27 +10,31 @@ below works the same either way.
 
 ```
  qq  my-project › fix parser                    anthropic/claude-sonnet-5  12% ctx  $0.04
- ─────────────────────────────────────────────────────────────────────────────────────────
- │ NEEDS YOU                 │  you › Fix the failing test in parser.rs
- │   ◇ add-tests   approval  │
- │ WORKING                   │  ● Read   src/parser.rs                          0.1s
- │   ● fix parser            │  ● Search "fn parse_duration"                    0.0s
- │ IDLE                      │  ● Edit   src/parser.rs  +4 −1                   0.3s
- │   refactor cli            │  ● Shell  cargo test -p parser                   4.1s
- │                           │
- │                           │  The test expected seconds but the parser…
- ─────────────────────────────────────────────────────────────────────────────────────────
- running · 12s · first token 0.8s                         ? help  ^K commands  ^O detail
+                                                                │ NEEDS YOU  1
+  ▌ YOU                                                          │ ◐ fix parser    ↳1 ◐1
+  ▌ Fix the failing test in parser.rs                          │ ↳ ◇ add-tests
+                                                                │     ◇ approve run
+  ● Read   src/parser.rs                                 0.1s   │
+  ● Search "fn parse_duration"                           0.0s   │ RECENT  1
+  ● Edit   src/parser.rs  +4 −1                          0.3s   │ ● refactor cli
+  ● Shell  cargo test -p parser                          4.1s   │
+                                                                │
+    The test expected seconds but the parser…                   │
+ ◇ add-tests needs approval  Ctrl-G jump  Alt-A/Alt-D answer ───── ? help  ^K commands
  › Ask QQ...
 ```
 
 - **Top row**: workspace and session breadcrumb; on the right the model,
   `as <profile>` when not default, the approval mode when not `auto`,
   context used, cost, and `connecting` / `offline` when relevant.
-- **Sidebar** (100 columns and wider; `Ctrl-\` toggles): sessions grouped by
-  what you should do — NEEDS YOU, WORKING, IDLE, DONE — with unread counts.
-  Below 100 columns a one-line agent strip above the composer carries the
-  same counts.
+- **Sidebar** (90 columns and wider; `Ctrl-\` toggles): your sessions
+  grouped by what you should do — NEEDS YOU, WORKING, RECENT — with unread
+  counts. A session's sub-agents (*agents*) roll up into its row as `↳N`;
+  an agent appears on its own only when it needs you (an approval, a
+  failure, or a finish you have not seen; up to three per session, then
+  `+N need you  Ctrl-G`), or under the session you are focused on (up to
+  six, then `+N more  /agents`). Below 90 columns a one-line strip above the
+  composer carries the same counts. One session and its agents get neither.
 - **Transcript**: your prompts, the model's text, and one row per tool call
   with live elapsed time. `Ctrl-Up` / `Ctrl-Down` select a row; `Enter`
   expands it (a read shows the result head, an edit its diff, a command its

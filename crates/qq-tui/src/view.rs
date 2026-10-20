@@ -87,6 +87,44 @@ pub(crate) fn render_size(actual_size: (u16, u16)) -> (usize, usize) {
     )
 }
 
+/// Sessions the rail and the strip list, counted only as far as the layout
+/// needs: it compares the count with one, so the scan stops at two. Roots
+/// that are not audit agents orphaned by a deleted parent, plus agents whose
+/// session is not loaded. Agents never count.
+pub(crate) fn listed_sessions(app: &App) -> usize {
+    let roots = app
+        .sessions
+        .roots()
+        .iter()
+        .filter(|id| {
+            app.sessions
+                .get(id)
+                .is_some_and(|session| !is_audit(session))
+        })
+        .take(2)
+        .count();
+    if roots >= 2 {
+        return roots;
+    }
+    // Count orphans only as far as the threshold, without ordering them.
+    if app.sessions.thread_order().len() == app.sessions.len() {
+        return roots;
+    }
+    roots
+        + app
+            .sessions
+            .values()
+            .filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !app.sessions.contains_key(&parent))
+                    && !is_audit(session)
+            })
+            .take(2 - roots)
+            .count()
+}
+
 /// Whether the sessions rail is on screen at `width` under `prefs`. Shared
 /// with the app so event visibility and the toggle command agree with the
 /// frame.
@@ -115,6 +153,11 @@ pub(crate) struct FrameRenderer {
     pane_updates: Vec<(usize, PaneUpdate)>,
     /// Where the terminal cursor belongs after the last frame, or hidden.
     cursor: Option<CursorPosition>,
+    /// Sessions the last frame's rail window painted; handed to the app.
+    rail_painted: Option<Vec<SessionId>>,
+    /// Sessions whose transcript the last frame's panes drew; handed to the
+    /// app.
+    drawn: Vec<SessionId>,
 }
 
 impl FrameRenderer {
@@ -127,6 +170,8 @@ impl FrameRenderer {
                 pane.live_message_ranges = update.live_message_ranges;
             }
         }
+        app.rail_painted = self.rail_painted.take();
+        app.drawn = std::mem::take(&mut self.drawn);
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -191,6 +236,9 @@ impl FrameRenderer {
             self.invalidate();
         }
         if width < layout::MIN_WIDTH || height < layout::MIN_HEIGHT {
+            // Nothing but the warning is drawn: no rail row, no transcript.
+            self.rail_painted = Some(Vec::new());
+            self.drawn.clear();
             return fit_height(
                 vec![
                     Line::styled(" qq", brand().bold()),
@@ -218,7 +266,7 @@ impl FrameRenderer {
         let draft_lines = queued_drafts(app, width);
         let (composer_lines, caret) = composer(app, width, max_composer_rows);
         let chrome_rows = fixed_rows - 1 + draft_lines.len() + composer_lines.len();
-        let layout = compute_layout(width, height, chrome_rows, app.layout, app.sessions.len());
+        let layout = compute_layout(width, height, chrome_rows, app.layout, listed_sessions(app));
         let body_height = layout.body.height;
         let mode = app.mode();
         // With the inspector on screen, expanded tool bodies and the
@@ -239,14 +287,23 @@ impl FrameRenderer {
             .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
             .collect();
         self.cache.retain_visible(app, &shown);
+        // Recorded as each pane's body is emitted: an overlay that takes the
+        // focused pane's cells draws no transcript there.
+        self.drawn.clear();
         // Transcript panes fill their slots left to right. Overlays take the
         // focused pane's cells; the rail stays so the picker is read in
         // context. The transcript caches stay warm behind an overlay so
         // closing one costs no relayout or highlight storm.
         let mut body: Vec<Line> = Vec::new();
         let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
+        let mut drawn: Vec<SessionId> = Vec::with_capacity(slots);
         for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
             let slot_width = slot.area.width;
+            let overlaid = index == app.focused_pane
+                && !matches!(mode, Mode::Approval | Mode::Trust | Mode::Compose);
+            if !overlaid && let Some(session) = shown_view(app, pane, inline_detail).session() {
+                drawn.push(session);
+            }
             let rows = if index == app.focused_pane {
                 match mode {
                     Mode::GoalForm => goal_form(app, slot_width, body_height),
@@ -290,6 +347,7 @@ impl FrameRenderer {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
         }
+        self.drawn = drawn;
         // Side panes are blitted column-wise onto the body rows: each row is
         // padded to the pane's `x`, then the pane's cells appended. Columns
         // are built at pane width so a blit never re-measures the row.
@@ -301,7 +359,11 @@ impl FrameRenderer {
         }
         if let Some(rail) = layout.rail {
             let density = RailDensity::of(layout.tier);
-            columns.push((rail.x, sidebar(app, rail.width, body_height, density)));
+            let (rows, painted) = sidebar(app, rail.width, body_height, density);
+            self.rail_painted = Some(painted);
+            columns.push((rail.x, rows));
+        } else {
+            self.rail_painted = Some(Vec::new());
         }
         // Each row is measured once and the running width carried through
         // the columns: measuring the row again per column would scan the

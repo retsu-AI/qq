@@ -18,7 +18,7 @@ withhold check consent; pause an active goal
 one start only; failure does not refund consent
   Allow repeated checks for this goal
 only this goal and its exact check command
- 3 agents
+ 3 sessions
  goal · check consent required ─────────────────────────────────────────────────
  › Ask QQ...
 

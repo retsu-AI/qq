@@ -482,6 +482,15 @@ pub(crate) struct App {
     /// wheel scrolls the transcript; `/mouse` turns it off for native
     /// selection and copy (most terminals also select with Shift held).
     pub(crate) mouse_capture: bool,
+    /// Sessions whose row the last frame's rail window painted, committed by
+    /// the renderer; `None` before the first frame. A background delta for a
+    /// session outside it changes no cell.
+    pub(crate) rail_painted: Option<Vec<SessionId>>,
+    /// Sessions whose transcript (or side view) the last frame's panes drew,
+    /// committed by the renderer. A workspace view the inspector holds
+    /// leaves the transcript it replaced in the main pane; one drawn inline
+    /// leaves none.
+    pub(crate) drawn: Vec<SessionId>,
     /// Terminal width from the last resize event, so update paths can decide
     /// whether a change to an unshown session is visible at all. Zero until
     /// the first resize, which reads as "assume visible".
@@ -553,6 +562,8 @@ impl App {
             layout: crate::view::LayoutPrefs::default(),
             terminal_width: 0,
             mouse_capture: true,
+            rail_painted: None,
+            drawn: Vec::new(),
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
             } else {
@@ -687,6 +698,7 @@ impl App {
                 self.workspace_id = None;
                 self.workspace_path.clear();
                 self.sessions.clear();
+                self.drop_focused_interaction();
                 for pane in &mut self.panes {
                     pane.view = View::Transcript(None);
                 }
@@ -1024,6 +1036,8 @@ impl App {
             self.sessions
                 .install_session_snapshot(body, &self.models, snapshot_sequence);
         }
+        // A fallback chosen over an audit focus, whose body is fetched.
+        let mut fallback_fetch: Option<Effects> = None;
         if let Some(focused) = snapshot.focused {
             let focused_id = focused.summary.id;
             if let Some(Overlay::GoalForm(form)) = &mut self.overlay
@@ -1047,17 +1061,38 @@ impl App {
             // A side view over this session keeps showing side questions.
             let side_view =
                 matches!(self.view(), View::SideQuestions(id) | View::Goal(id) if id == focused_id);
-            if !side_view
-                && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
+            // An audit is never shown: a snapshot that names one (it was the
+            // newest root) focuses the newest non-audit session instead.
+            if self.under_audit(focused_id) {
+                if initial || self.nothing_shown() || self.focused() == Some(focused_id) {
+                    // `focus_session` fetches the fallback's body: it may be
+                    // a summary only.
+                    match self.first_listed_root() {
+                        Some(target) => fallback_fetch = Some(self.focus_session(target)),
+                        None => self.set_view(View::Transcript(None)),
+                    }
+                }
+            } else if !side_view
+                && (initial || self.nothing_shown() || self.focused() == Some(focused_id))
             {
                 self.set_focus(focused_id);
             } else {
                 self.set_focus_clock(focused_id);
             }
-        } else if self.focused().is_none()
-            && let Some(first) = self.sessions.roots().first().copied()
+        } else if self.nothing_shown()
+            && let Some(first) = self.first_listed_root()
         {
-            self.set_focus(first);
+            // The snapshot carried no body: fetch the one now shown.
+            fallback_fetch = Some(self.focus_session(first));
+        }
+        // The summaries may have revealed that the session on screen, or one
+        // an overlay or picker confirmation targets, sits under an audit,
+        // whichever body this snapshot carried. Always run: after a
+        // fallback above it finds focus moved and only drops the rest.
+        let hidden = self.leave_hidden_focus();
+        match fallback_fetch.as_mut() {
+            Some(fetch) => fetch.extend(hidden),
+            None => fallback_fetch = Some(hidden),
         }
         self.evict_cold_bodies();
         if initial {
@@ -1073,6 +1108,9 @@ impl App {
             .cloned()
             .collect::<Vec<_>>();
         let mut effects = Effects::redraw(Redraw::Scheduled);
+        if let Some(fetch) = fallback_fetch {
+            effects.extend(fetch);
+        }
         if may_refetch_focused
             && let Some(session_id) = snapshot_focus
             && self.focused() == Some(session_id)
@@ -1207,9 +1245,28 @@ impl App {
                 } => self.apply_notice(session, level, text),
                 StateEffect::Attention(attention) => effects.push(Effect::Attention(attention)),
                 StateEffect::RequestSnapshot(request) => {
-                    effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                    // A body fetch for a session that will not be shown (an
+                    // audit the refocus below rejects) is not sent; the
+                    // replacement's own fetch follows.
+                    if request
+                        .focused_session_id
+                        .is_none_or(|id| !self.under_audit(id))
+                    {
+                        effects.push(Effect::Send(ClientRequest::Snapshot(request)));
+                    }
                 }
-                StateEffect::Refocus(target) => self.set_view(View::Transcript(target)),
+                StateEffect::Refocus(target) => {
+                    // The store picks a neighbour in tree order, which can be
+                    // an audit about to become a root; never show one, and
+                    // fetch the replacement when its body is cold.
+                    match target.filter(|id| !self.under_audit(*id)) {
+                        Some(target) => self.set_view(View::Transcript(Some(target))),
+                        None => match self.first_listed_root() {
+                            Some(fallback) => effects.extend(self.focus_session(fallback)),
+                            None => self.set_view(View::Transcript(None)),
+                        },
+                    }
+                }
                 StateEffect::AdoptCreated(session_id) => self.adopt_created_session(session_id),
                 StateEffect::SubmitDraft { session_id, text } => {
                     effects.extend(self.submit_text(session_id, text));
@@ -1299,6 +1356,7 @@ impl App {
         if !already_loaded {
             effects.extend(self.reduce_event(&event));
         }
+        effects.extend(self.leave_hidden_focus());
         if let Some(command_id) = event.caused_by {
             if matches!(event.event, SessionEvent::GoalUpdated { .. }) {
                 self.finish_goal_form(command_id, true);
@@ -1316,6 +1374,11 @@ impl App {
     /// and tool output for a session no pane shows only matter when the
     /// sidebar (which shows every session's live tail) is visible; every
     /// other event may move focus, attention, or chrome and always redraws.
+    #[cfg(test)]
+    pub(crate) fn event_is_visible_for_test(&self, event: &SessionEventEnvelope) -> bool {
+        self.event_is_visible(event)
+    }
+
     fn event_is_visible(&self, event: &SessionEventEnvelope) -> bool {
         let background_only = matches!(
             event.event,
@@ -1327,20 +1390,52 @@ impl App {
         if !background_only {
             return true;
         }
-        if self.focused() == Some(event.session_id) {
+        // The sessions the last frame's panes drew (a workspace view the
+        // inspector holds leaves its transcript in the main pane), and the
+        // view now followed.
+        let drawn = |id: SessionId| self.is_drawn(id);
+        if drawn(event.session_id) {
             return true;
         }
         // A child's live status renders under its spawn call in the parent.
+        // An audit child has no card (its spawn is synthetic), so its
+        // stream changes nothing under the drawn parent.
         if self
             .sessions
             .get(&event.session_id)
+            .filter(|session| session.summary.purpose != qq_protocol::SessionPurpose::Audit)
             .and_then(|session| session.summary.parent_id)
-            .is_some_and(|parent| self.focused() == Some(parent))
+            .is_some_and(drawn)
         {
             return true;
         }
-        self.terminal_width == 0
-            || crate::view::rail_visible(self.terminal_width, self.layout, self.sessions.len())
+        // The rail shows live tails for sessions only; a hidden agent's (or a
+        // hidden audit's) stream changes no cell, so it does not wake the
+        // frame. A rail row shows the message tail and the activity, never
+        // reasoning or tool output, and only rows inside the rail's window
+        // are drawn.
+        let rail_shown = matches!(
+            event.event,
+            SessionEvent::TextAppended { .. } | SessionEvent::RunActivityChanged { .. }
+        );
+        let listed_on_rail = self.sessions.get(&event.session_id).is_some_and(|session| {
+            session.summary.purpose != qq_protocol::SessionPurpose::Audit
+                && session
+                    .summary
+                    .parent_id
+                    .is_none_or(|parent| !self.sessions.contains_key(&parent))
+        });
+        rail_shown
+            && listed_on_rail
+            && (self.terminal_width == 0
+                || (crate::view::rail_visible(
+                    self.terminal_width,
+                    self.layout,
+                    crate::view::listed_sessions(self),
+                ) && self
+                    .rail_painted
+                    .as_ref()
+                    .is_none_or(|painted| painted.contains(&event.session_id))))
     }
 
     fn set_notice_for(&mut self, session_id: Option<SessionId>, text: String, level: NoticeLevel) {
@@ -1750,6 +1845,21 @@ impl App {
         self.view().session()
     }
 
+    /// Whether `id`'s transcript (or side view) is on screen: drawn by the
+    /// last frame's panes, or newly followed by the focused pane with no
+    /// overlay covering it (the next frame draws it).
+    fn is_drawn(&self, id: SessionId) -> bool {
+        self.drawn.contains(&id)
+            || (self.focused() == Some(id)
+                && matches!(self.mode(), Mode::Approval | Mode::Trust | Mode::Compose))
+    }
+
+    /// The focused pane shows no session at all: neither a transcript nor a
+    /// workspace view (`/attention`, `/changes`) the user opened over one.
+    fn nothing_shown(&self) -> bool {
+        self.view() == View::Transcript(None)
+    }
+
     /// The focused transcript pane. `panes` always holds at least one and
     /// `focused_pane` is kept in range, so this never fails.
     pub(crate) fn pane(&self) -> &TranscriptPane {
@@ -1774,8 +1884,16 @@ impl App {
     }
 
     /// Point the focused pane at `view`. Its viewport returns to the tail on
-    /// the next frame, as `Viewport::update` does for any view change.
+    /// the next frame, as `Viewport::update` does for any view change. When
+    /// the session it follows changes, what was being answered there (a
+    /// partly answered `ask_user` form, an armed amendment and its note) is
+    /// dropped, so it is never applied to another session's call. Keys cannot
+    /// move focus while such a form is open, so only a forced move (a
+    /// deletion, a revealed audit, a reconnect) reaches this with one.
     pub(crate) fn set_view(&mut self, view: View) {
+        if view.session() != self.view().session() {
+            self.drop_focused_interaction();
+        }
         self.pane_mut().view = view;
     }
 
@@ -1813,8 +1931,8 @@ impl App {
         let target = self
             .view_return
             .take()
-            .filter(|id| self.sessions.contains_key(id))
-            .or_else(|| self.sessions.thread_order().first().copied());
+            .filter(|id| self.sessions.contains_key(id) && !self.under_audit(*id))
+            .or_else(|| self.first_listed_root());
         match target {
             Some(session) => self.focus_session(session),
             None => {
@@ -1953,10 +2071,13 @@ impl App {
                 Some(parent) => self.focus_session(parent),
                 None => Effects::none(),
             },
-            Command::FocusFirstChild => match self
-                .focused()
-                .and_then(|focused| self.sessions.children_of(focused).first().copied())
-            {
+            Command::FocusFirstChild => match self.focused().and_then(|focused| {
+                self.sessions
+                    .children_of(focused)
+                    .iter()
+                    .copied()
+                    .find(|child| !self.is_audit(*child))
+            }) {
                 Some(child) => self.focus_session(child),
                 None => Effects::none(),
             },
@@ -2755,13 +2876,15 @@ impl App {
     /// one, without moving focus. The banner names that session; this is
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
-        let Some(session_id) = self.sessions_needing_attention().into_iter().find(|id| {
-            Some(*id) != self.view().transcript()
-                && !self.sessions[id].live.awaiting_approval.is_empty()
-        }) else {
+        let Some(session_id) = self
+            .sessions_needing_attention()
+            .into_iter()
+            .find(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
+        else {
             self.set_info("no other session is waiting for approval".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
+        let with_delegate = &self.sessions[&session_id].live.with_delegate;
         let Some(call) = self
             .sessions
             .get(&session_id)
@@ -2769,6 +2892,7 @@ impl App {
             .and_then(|calls| {
                 calls.iter().find(|call| {
                     call.state == ToolCallState::AwaitingApproval
+                        && !with_delegate.contains(&call.id)
                         && !self.answered_approvals.contains(&call.id)
                 })
             })
@@ -2779,6 +2903,15 @@ impl App {
         };
         let tool_call_id = call.id;
         let run_id = call.run_id;
+        // An `ask_user` hold needs its answers, not a yes or no: focus the
+        // session so its question block takes the keys.
+        if self.sessions[&session_id]
+            .approval_previews
+            .get(&tool_call_id)
+            .is_some_and(|preview| preview.question.is_some())
+        {
+            return self.focus_session(session_id);
+        }
         let title = self.sessions[&session_id].summary.title.clone();
         self.answered_approvals.insert(tool_call_id);
         self.set_info(format!(
@@ -3157,7 +3290,7 @@ impl App {
         let active = self
             .sessions
             .values()
-            .any(|session| matches!(session.summary.status, qq_protocol::SessionStatus::Running));
+            .any(|session| self.activity_shown(session));
         self.expire_status()
             || active
             || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
@@ -3180,9 +3313,59 @@ impl App {
     pub fn has_activity(&self) -> bool {
         self.has_active_goal()
             || self.status.is_some()
-            || self.sessions.values().any(|session| {
-                matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-            })
+            || self
+                .sessions
+                .values()
+                .any(|session| self.activity_shown(session))
+    }
+
+    /// Whether `session`'s activity (a running run, or a side question) has
+    /// a spinner on screen: in the view that follows it, on its painted rail
+    /// row or the badge of a painted ancestor. While the rail is down (the
+    /// strip's working count may show it) or before the first frame, every
+    /// one counts. An audit's activity is never shown.
+    fn activity_shown(&self, session: &qq_client::state::SessionView) -> bool {
+        if session.summary.running_side_question.is_none()
+            && session.summary.status != qq_protocol::SessionStatus::Running
+        {
+            return false;
+        }
+        if self.under_audit(session.summary.id) {
+            return false;
+        }
+        let Some(painted) = self.rail_painted.as_ref() else {
+            return true;
+        };
+        if self.terminal_width == 0
+            || !crate::view::rail_visible(
+                self.terminal_width,
+                self.layout,
+                crate::view::listed_sessions(self),
+            )
+        {
+            return true;
+        }
+        let mut id = session.summary.id;
+        // The sessions the last frame's panes drew (its own view, or the
+        // transcript an inspector-held workspace view left in the main pane),
+        // plus the view now followed, which the next frame draws.
+        let drawn = |id: SessionId| self.is_drawn(id);
+        // Loaded parent links up to a missing parent: `depth` is zero outside
+        // `thread_order`, so an orphan component is walked by its links.
+        for _ in 0..=self.sessions.len() {
+            if drawn(id) || painted.contains(&id) {
+                return true;
+            }
+            match self
+                .sessions
+                .get(&id)
+                .and_then(|view| view.summary.parent_id)
+            {
+                Some(parent) if self.sessions.contains_key(&parent) => id = parent,
+                _ => break,
+            }
+        }
+        false
     }
 
     /// Prompts and steering sent to `session_id` whose receipt has not
@@ -3227,13 +3410,18 @@ impl App {
 
     /// The focused session's sibling `offset` places away in spawn order
     /// (oldest-first), wrapping at either end. Roots are siblings of roots.
+    /// Audit sessions are never listed, so navigation skips them too.
     fn sibling(&self, offset: isize) -> Option<SessionId> {
         let focused = self.focused()?;
         let parent = self.sessions.get(&focused)?.summary.parent_id;
-        let siblings = match parent {
+        let siblings: Vec<SessionId> = match parent {
             Some(parent) => self.sessions.children_of(parent),
             None => self.sessions.roots(),
-        };
+        }
+        .iter()
+        .copied()
+        .filter(|id| *id == focused || !self.is_audit(*id))
+        .collect();
         if siblings.len() < 2 {
             return None;
         }
@@ -3242,15 +3430,259 @@ impl App {
         Some(siblings[next])
     }
 
-    /// Sessions with a tool call awaiting approval, in tree order.
-    pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
-        self.sessions.awaiting_approval()
+    fn is_audit(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .is_some_and(|session| session.summary.purpose == qq_protocol::SessionPurpose::Audit)
     }
 
-    /// Sessions that need the user, most urgent first and then in tree
-    /// order: approvals, then unread failures, then unread finishes.
+    /// Sessions with a tool call awaiting the human's approval, in the order
+    /// of [`Self::sessions_needing_attention`] (approvals rank first there),
+    /// so the rule names the same session `Alt-A`/`Alt-D` answer. Holds an
+    /// approval delegate still owns are excluded (the human is not asked
+    /// yet), and so are audit sessions and anything under them.
+    pub(crate) fn sessions_awaiting_approval(&self) -> Vec<SessionId> {
+        self.sessions_needing_attention()
+            .into_iter()
+            .take_while(|id| self.human_waiting(*id))
+            .collect()
+    }
+
+    /// Sessions in components `thread_order` omits because their topmost
+    /// session's parent is not loaded (a bounded snapshot can carry a child
+    /// without its parent), depth-first. Empty in the common case.
+    pub(super) fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
+        let complete = self.sessions.thread_order().len() == self.sessions.len();
+        let mut stack: Vec<SessionId> = if complete {
+            Vec::new()
+        } else {
+            self.sessions
+                .values()
+                .filter(|session| {
+                    session
+                        .summary
+                        .parent_id
+                        .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                })
+                .map(|session| (session.summary.updated_at_ms, session.summary.id))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect()
+        };
+        // Newest first, as the rail lists these temporary sessions: the
+        // stack pops from the back, so the newest goes last.
+        stack.sort_by_key(|id| {
+            self.sessions
+                .get(id)
+                .map(|session| (session.summary.updated_at_ms, session.summary.id))
+        });
+        std::iter::from_fn(move || {
+            let id = stack.pop()?;
+            stack.extend(self.sessions.children_of(id).iter().rev().copied());
+            Some(id)
+        })
+    }
+
+    fn human_waiting(&self, id: SessionId) -> bool {
+        self.sessions.get(&id).is_some_and(|session| {
+            // `with_delegate` is a subset of `awaiting_approval`.
+            session.live.awaiting_approval.len() > session.live.with_delegate.len()
+        })
+    }
+
+    /// Whether `id` or a loaded ancestor is an audit session. Walks parent
+    /// links (not the root index, whose depth is zero inside a component
+    /// whose top parent is not loaded), bounded by the session count.
+    fn under_audit(&self, mut id: SessionId) -> bool {
+        for _ in 0..=self.sessions.len() {
+            let Some(session) = self.sessions.get(&id) else {
+                return false;
+            };
+            if session.summary.purpose == qq_protocol::SessionPurpose::Audit {
+                return true;
+            }
+            match session.summary.parent_id {
+                Some(parent) => id = parent,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The newest listed session that is not an audit: a root, or an agent
+    /// whose parent is not loaded (listed as a session until it arrives).
+    /// Where focus goes when the session it would land on is hidden.
+    fn first_listed_root(&self) -> Option<SessionId> {
+        let root = self
+            .sessions
+            .roots()
+            .iter()
+            .rev()
+            .copied()
+            .find(|id| !self.under_audit(*id));
+        // Orphan components are outside `thread_order`; the newest one whose
+        // loaded ancestry has no audit competes with the newest root.
+        let orphan = self
+            .sessions
+            .values()
+            .filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !self.sessions.contains_key(&parent))
+                    && !self.under_audit(session.summary.id)
+            })
+            .max_by_key(|session| (session.summary.updated_at_ms, session.summary.id))
+            .map(|session| session.summary.id);
+        let updated = |id: &SessionId| self.sessions.get(id).map(|s| s.summary.updated_at_ms);
+        match (root, orphan) {
+            (Some(root), Some(orphan)) if updated(&orphan) > updated(&root) => Some(orphan),
+            (Some(root), _) => Some(root),
+            (None, orphan) => orphan,
+        }
+    }
+
+    /// When an update reveals that the focused transcript sits under an audit
+    /// (a missing parent arrived and is an audit), focus moves to the newest
+    /// non-audit root and its body is fetched.
+    fn leave_hidden_focus(&mut self) -> Effects {
+        // A goal form or goal-check consent for a session now known to sit
+        // under an audit is closed: its accept would act on that session.
+        let goal_target = match &self.overlay {
+            Some(Overlay::GoalForm(form)) => Some(form.session),
+            Some(Overlay::GoalCheck { target, .. }) => Some(target.session_id),
+            _ => None,
+        };
+        if goal_target.is_some_and(|id| self.under_audit(id)) {
+            self.overlay = None;
+        }
+        // An open picker drops rows now known to sit under an audit.
+        if let Some(Overlay::Sessions { picker, .. }) = &self.overlay
+            && picker.items().iter().any(|row| self.under_audit(row.id))
+        {
+            self.refresh_session_picker();
+        }
+        // A picker confirmation against a session now known to sit under an
+        // audit is dropped before `y` can act on it.
+        if let Some(Overlay::Sessions {
+            confirm: Some(SessionConfirm::Delete(target)),
+            ..
+        }) = &self.overlay
+            && self.under_audit(*target)
+        {
+            self.clear_session_picker_confirm();
+        }
+        // The session a workspace view returns to (and that `/goal`, `/btw`
+        // act on while it is open) is replaced too; an inspector-held view
+        // draws it in the main pane, so a cold one is fetched.
+        let mut effects = Effects::none();
+        if self.view_return.is_some_and(|id| self.under_audit(id)) {
+            self.view_return = self.first_listed_root();
+            if let Some(fallback) = self.view_return
+                && let Some(workspace_id) = self.workspace_id
+                && self
+                    .sessions
+                    .get(&fallback)
+                    .is_some_and(|session| !session.is_warm())
+            {
+                effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                    workspace_id,
+                    fallback,
+                ))));
+            }
+        }
+        // The followed session, so a `/goal` or `/btw` view over a session
+        // now known to sit under an audit moves too.
+        let Some(focused) = self.view().session() else {
+            return effects;
+        };
+        if !self.under_audit(focused) {
+            return effects;
+        }
+        match self.first_listed_root() {
+            Some(fallback) => self.focus_session(fallback),
+            None => {
+                self.set_view(View::Transcript(None));
+                Effects::redraw(Redraw::Scheduled)
+            }
+        }
+    }
+
+    /// Forget the focus-scoped interaction: a partly answered `ask_user`
+    /// form and an armed Shift-Y/Shift-N amendment with its note.
+    fn drop_focused_interaction(&mut self) {
+        if self.approval_amendment.take().is_some() || !self.question_answers.is_empty() {
+            self.composer.clear();
+        }
+        self.question_answers.clear();
+    }
+
+    /// The one attention list every surface reads (`Ctrl-G`, `Alt-A`/`Alt-D`,
+    /// `/attention`, the rule): sessions that need the user, most urgent
+    /// first and then in tree order. Approvals count only while the human is
+    /// asked; audit sessions and their subtrees are excluded.
     pub(crate) fn sessions_needing_attention(&self) -> Vec<SessionId> {
-        self.sessions.needing_attention()
+        // Every loaded session, `thread_order` first and then orphan trees,
+        // ranked by the human-aware need: an approval only while the human
+        // is asked, else an unseen failure or finish (which a later run
+        // waiting on a delegate does not hide). Within a rank, components
+        // (a root's tree, an orphan's tree) go newest first, as the rail
+        // lists them, and tree order holds inside one.
+        let top_updated = |mut id: SessionId| {
+            for _ in 0..=self.sessions.len() {
+                match self
+                    .sessions
+                    .get(&id)
+                    .and_then(|view| view.summary.parent_id)
+                {
+                    Some(parent) if self.sessions.contains_key(&parent) => id = parent,
+                    _ => break,
+                }
+            }
+            self.sessions
+                .get(&id)
+                .map_or(0, |view| view.summary.updated_at_ms)
+        };
+        let mut ranked: Vec<(
+            qq_client::state::Need,
+            std::cmp::Reverse<u64>,
+            usize,
+            SessionId,
+        )> = self
+            .sessions
+            .thread_order()
+            .iter()
+            .copied()
+            .chain(self.orphan_trees())
+            .enumerate()
+            .filter(|(_, id)| !self.under_audit(*id))
+            .filter_map(|(position, id)| {
+                self.attention_need(id)
+                    .map(|need| (need, std::cmp::Reverse(top_updated(id)), position, id))
+            })
+            .collect();
+        ranked.sort();
+        ranked.into_iter().map(|(_, _, _, id)| id).collect()
+    }
+
+    /// Why the human is needed by `id`, if they are: like
+    /// [`SessionView::need`], but an approval counts only while the human is
+    /// asked, and an unseen outcome is still reported when every waiting
+    /// hold belongs to a delegate.
+    pub(crate) fn attention_need(&self, id: SessionId) -> Option<qq_client::state::Need> {
+        use qq_client::state::Need;
+        let session = self.sessions.get(&id)?;
+        if self.human_waiting(id) {
+            return Some(Need::Approval);
+        }
+        if !session.finished_unread {
+            return None;
+        }
+        Some(match session.summary.last_outcome {
+            Some(qq_protocol::RunOutcome::Failed { .. }) => Need::Failed,
+            _ => Need::FinishedUnread,
+        })
     }
 
     /// The next session (after the focused one, wrapping) that needs the

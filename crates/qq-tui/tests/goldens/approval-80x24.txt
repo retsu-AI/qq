@@ -18,7 +18,7 @@
    ✓ 0.0s · ttft 0.0s
 
 
- 3 agents  ◇ 1 (Ctrl-G)
+ 3 sessions  ◇ 1 (Ctrl-G)
  ◐ working ──────────────────────────────────────────────────────────── F1 help
  ✎ Answer the approval above
 

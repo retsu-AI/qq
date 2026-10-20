@@ -1,5 +1,5 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
-                                                                                            │ IDLE  3
+                                                                                            │ RECENT  3
  ▌ YOU                                                                                      │ ○ Session 0
  ▌ why does the test flake?                                                                 │ ○ Session 1
                                                                                             │ ○ Session 2

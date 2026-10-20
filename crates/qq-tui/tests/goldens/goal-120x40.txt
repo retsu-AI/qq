@@ -1,5 +1,5 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
- GOAL Esc returns to the transcript                                                         │ IDLE  3
+ GOAL Esc returns to the transcript                                                         │ RECENT  3
                                                                                             │ ○ Session 0
 check consent required                                                                      │ ○ Session 1
 Finish the billing migration                                                                │ ○ Session 2

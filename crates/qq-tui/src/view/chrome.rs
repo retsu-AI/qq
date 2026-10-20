@@ -294,14 +294,40 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         .filter_map(|id| app.sessions.get(&id))
         .map(|session| session.summary.title.as_str())
         .collect();
+    // With one session there is no rail (under `Auto`, or pinned on a
+    // terminal too narrow to fit it) and no strip, so an agent that failed
+    // or finished unseen has nowhere else to appear: the rule names or
+    // counts it, beside an approval too.
+    let lone = crate::view::listed_sessions(app) < 2
+        && !crate::view::rail_visible(width, app.layout, crate::view::listed_sessions(app));
+    let unseen: Vec<(&str, bool)> = if lone {
+        app.sessions_needing_attention()
+            .into_iter()
+            .filter(|id| Some(*id) != app.view().transcript())
+            .filter_map(|id| {
+                let need = app.attention_need(id)?;
+                let title = app.sessions.get(&id)?.summary.title.as_str();
+                match need {
+                    qq_client::state::Need::Failed => Some((title, true)),
+                    qq_client::state::Need::FinishedUnread => Some((title, false)),
+                    qq_client::state::Need::Approval => None,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if !waiting.is_empty() {
         left.push(if left.is_empty() { " " } else { "  " }, muted());
         left.push("◇ ", warning().bold());
         left.push(
-            match waiting.as_slice() {
-                [one] => format!("{one} needs approval"),
-                [first, rest @ ..] => format!("{first} +{} need approval", rest.len()),
-                [] => String::new(),
+            match (waiting.as_slice(), unseen.len()) {
+                ([one], 0) => format!("{one} needs approval"),
+                ([first, rest @ ..], 0) => format!("{first} +{} need approval", rest.len()),
+                ([first, rest @ ..], unseen) => {
+                    format!("{first} needs approval +{} need you", rest.len() + unseen)
+                }
+                ([], _) => String::new(),
             },
             warning().bold(),
         );
@@ -317,6 +343,25 @@ pub(super) fn composer_rule(app: &App, width: usize) -> Line {
         }
         if !hints.is_empty() {
             left.push(format!("  {}", hints.join("  ")), muted());
+        }
+    } else if let [(first, failed), rest @ ..] = unseen.as_slice() {
+        left.push(if left.is_empty() { " " } else { "  " }, muted());
+        let (glyph, verb, style) = if *failed {
+            ("✕ ", "failed", failure())
+        } else {
+            ("● ", "finished", accent())
+        };
+        left.push(glyph, style.bold());
+        left.push(
+            if rest.is_empty() {
+                format!("{first} {verb}")
+            } else {
+                format!("{first} {verb} +{} need you", rest.len())
+            },
+            style,
+        );
+        if let Some(chord) = app.chord_label(crate::commands::Command::FocusNextApproval) {
+            left.push(format!("  {chord} jump"), muted());
         }
     }
 

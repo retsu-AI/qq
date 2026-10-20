@@ -171,11 +171,11 @@ async fn run_tui_client(
         }
     };
     let mut cursor = snapshot.cursor;
-    // An attached client with an empty workspace creates one session once
-    // the catalog has validated the model. `New` already created; `Open`
-    // never creates.
+    // An attached client with no session to open (an empty workspace, or
+    // only agents and audits) creates one once the catalog has validated
+    // the model. `New` already created; `Open` never creates.
     let create_after_validation =
-        initial == InitialSession::Existing && snapshot.sessions.is_empty();
+        initial == InitialSession::Existing && newest_entry_point(&snapshot.sessions).is_none();
     if updates
         .send(ClientUpdate::Snapshot(snapshot))
         .await
@@ -217,7 +217,7 @@ async fn run_tui_client(
                         workspace.clone(),
                         workspace_id,
                         selection.clone(),
-                        snapshot.sessions.is_empty(),
+                        newest_entry_point(&snapshot.sessions).is_none(),
                         updates.clone(),
                     ));
                     reconnect_delay = Duration::from_millis(50);
@@ -315,7 +315,7 @@ async fn run_tui_client(
                     workspace.clone(),
                     workspace_id,
                     selection.clone(),
-                    snapshot.sessions.is_empty(),
+                    newest_entry_point(&snapshot.sessions).is_none(),
                     updates.clone(),
                 ));
                 reconnect_delay = Duration::from_millis(50);
@@ -408,14 +408,14 @@ async fn load_tui_models(
             workspace_id,
             focused_session_id: None,
             include_sessions: Vec::new(),
-            session_limit: 1,
+            session_limit: 512,
             message_limit: 1,
         })
         .await
     else {
         return;
     };
-    if !snapshot.sessions.is_empty() {
+    if newest_entry_point(&snapshot.sessions).is_some() {
         return;
     }
     let Ok(command_id) = CommandId::generate() else {
@@ -456,6 +456,33 @@ async fn load_tui_models(
     let _ = updates.send(ClientUpdate::Snapshot(snapshot)).await;
 }
 
+/// The session `qq --session ID` may open: only a root. A sub-agent session
+/// is shown under its parent, never as the entry point, and an audit (even
+/// one whose parent was deleted, so a root) is bookkeeping, never shown.
+fn is_entry_point(session: &qq_protocol::SessionSummary) -> bool {
+    session.parent_id.is_none() && session.purpose != qq_protocol::SessionPurpose::Audit
+}
+
+/// The session a bare `qq` (and every reconnect) opens: the newest entry
+/// point. Sessions arrive newest first.
+fn newest_entry_point(sessions: &[qq_protocol::SessionSummary]) -> Option<qq_protocol::SessionId> {
+    sessions
+        .iter()
+        .find(|session| is_entry_point(session))
+        .map(|session| session.id)
+}
+
+fn openable(
+    sessions: &[qq_protocol::SessionSummary],
+    session_id: qq_protocol::SessionId,
+) -> Result<qq_protocol::SessionId, ClientError> {
+    match sessions.iter().find(|session| session.id == session_id) {
+        Some(session) if is_entry_point(session) => Ok(session_id),
+        Some(_) => Err(ClientError::SessionIsChild(session_id)),
+        None => Err(ClientError::SessionNotInWorkspace(session_id)),
+    }
+}
+
 async fn bootstrap_tui(
     client: &SessionClient,
     workspace: &Path,
@@ -492,21 +519,9 @@ async fn bootstrap_tui(
             };
             session_id
         }
-        InitialSession::Open(session_id) => {
-            // Only root sessions are openable; a sub-agent session is shown
-            // under its parent, never as the entry point.
-            match snapshot
-                .sessions
-                .iter()
-                .find(|session| session.id == *session_id)
-            {
-                Some(session) if session.parent_id.is_none() => *session_id,
-                Some(_) => return Err(ClientError::SessionIsChild(*session_id)),
-                None => return Err(ClientError::SessionNotInWorkspace(*session_id)),
-            }
-        }
-        InitialSession::Existing => match snapshot.sessions.first() {
-            Some(session) => session.id,
+        InitialSession::Open(session_id) => openable(&snapshot.sessions, *session_id)?,
+        InitialSession::Existing => match newest_entry_point(&snapshot.sessions) {
+            Some(session_id) => session_id,
             None => return Ok((workspace_id, snapshot)),
         },
     };
@@ -650,6 +665,53 @@ async fn send_bootstrap_failure(updates: &mpsc::Sender<ClientUpdate>, error: Cli
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_non_audit_root_is_openable() {
+        let root = qq_protocol::SessionId::from_bytes([1; 16]);
+        let audit = qq_protocol::SessionId::from_bytes([2; 16]);
+        let child = qq_protocol::SessionId::from_bytes([3; 16]);
+        let summary = |id: qq_protocol::SessionId,
+                       parent_id: Option<qq_protocol::SessionId>,
+                       purpose: qq_protocol::SessionPurpose| {
+            let mut summary: qq_protocol::SessionSummary =
+                serde_json::from_value(serde_json::json!({
+                    "id": id,
+                    "workspace_id": qq_protocol::WorkspaceId::from_bytes([7; 16]),
+                    "title": "s",
+                    "status": "idle",
+                    "queued_prompts": 0,
+                    "updated_at_ms": 1,
+                }))
+                .expect("summary");
+            summary.parent_id = parent_id;
+            summary.purpose = purpose;
+            summary
+        };
+        let sessions = [
+            summary(root, None, qq_protocol::SessionPurpose::default()),
+            summary(audit, None, qq_protocol::SessionPurpose::Audit),
+            summary(child, Some(root), qq_protocol::SessionPurpose::default()),
+        ];
+        assert!(matches!(openable(&sessions, root), Ok(id) if id == root));
+        assert!(matches!(
+            openable(&sessions, audit),
+            Err(ClientError::SessionIsChild(id)) if id == audit
+        ));
+        assert!(matches!(
+            openable(&sessions, child),
+            Err(ClientError::SessionIsChild(_))
+        ));
+        // A bare `qq` opens the newest entry point, past newer agents and
+        // audits.
+        let newest_first = [
+            summary(child, Some(root), qq_protocol::SessionPurpose::default()),
+            summary(audit, None, qq_protocol::SessionPurpose::Audit),
+            summary(root, None, qq_protocol::SessionPurpose::default()),
+        ];
+        assert_eq!(newest_entry_point(&newest_first), Some(root));
+        assert_eq!(newest_entry_point(&newest_first[..2]), None);
+    }
 
     #[test]
     fn stream_connection_state_distinguishes_initial_and_reconnect_attempts() {

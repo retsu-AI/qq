@@ -462,6 +462,12 @@ impl App {
                 let Some(id) = picker.current().map(|row| row.id) else {
                     return Effects::none();
                 };
+                // A row revealed to sit under an audit since it was listed
+                // is never opened.
+                if self.under_audit(id) {
+                    self.refresh_session_picker();
+                    return Effects::redraw(Redraw::Immediate);
+                }
                 self.overlay = None;
                 self.focus_session(id)
             }
@@ -1040,15 +1046,19 @@ impl App {
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Rows for the session picker in tree order, restricted to `scope`'s
-    /// subtree when set.
+    /// Rows for the session picker in tree order, then each component whose
+    /// top's parent is not loaded (listed as sessions, as on the rail),
+    /// restricted to `scope`'s subtree when set. Audit sessions and their
+    /// subtrees are never listed.
     fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
         self.sessions
             .thread_order()
             .iter()
             .copied()
+            .chain(self.orphan_trees())
             .filter(|session_id| {
                 scope.is_none_or(|root| self.is_descendant_or_self(*session_id, root))
+                    && !self.under_audit(*session_id)
             })
             .map(|id| SessionRow {
                 id,

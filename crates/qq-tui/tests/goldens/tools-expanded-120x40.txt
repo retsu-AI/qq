@@ -1,5 +1,5 @@
  qq  Session 0                                                                                   openai/gpt-test  $0.00
-   ┃                                                                                        │ IDLE  3
+   ┃                                                                                        │ RECENT  3
    ┃  edited                                                                                │ ○ Session 0
    ┃                                                                                        │ ○ Session 1
  ● Run    cargo test -p crate_2                                                             │ ○ Session 2
