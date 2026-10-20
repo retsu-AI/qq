@@ -7,7 +7,7 @@ bench reports live under `target/qq-perf/tui-focus-<slice>-<date>/`
 | Slice | Goal | Status | Branch / PR | Notes |
 | --- | --- | --- | --- | --- |
 | P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In review | `docs/eng-1068-tui-focus-plan` (#354) | Stack base |
-| F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | Planned | | On P0; its PR records its bench receipts here |
+| F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | In review | `feat/eng-1069-tui-session-rail` (#356) | On P0; render gate receipt in the 2026-10-19 entry below |
 | F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | Planned | | On F1–F2 |
 | F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | Planned | | On F3 |
 | F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | Planned | | On F4–F5 |

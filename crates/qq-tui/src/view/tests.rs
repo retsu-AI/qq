@@ -7753,3 +7753,84 @@ fn goal_form_render_keeps_long_exact_commands_scrollable_and_terminal_safe() {
     };
     assert_eq!(form.fields[1].expanded(), exact);
 }
+
+#[test]
+fn fifteenth_review_round_on_the_rail() {
+    use crossterm::event::Event;
+    // 1. A quiet orphan is listed in `/sessions`, so it can be focused.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id =
+        Some(SessionId::from_bytes([0x77; 16]));
+    app.execute(Command::OpenSessions);
+    assert!(app.filtered_sessions().contains(&ids[0]), "orphan listed");
+    app.overlay = None;
+
+    // 2. An undersized frame paints nothing, so a running session wakes no
+    // animation tick.
+    let (mut app, root, _) = app_with_fanout(1);
+    app.sessions.get_mut(&root).unwrap().summary.status = SessionStatus::Running;
+    app.handle_terminal_event(TerminalEvent::Resize(20, 5));
+    FrameRenderer::default().frame_and_commit(&mut app, 20, 5);
+    assert_eq!(app.rail_painted, Some(Vec::new()));
+    assert!(app.drawn.is_empty());
+
+    // 3. An unfocused session's agent's new output shows on the session row.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.focus_session(SessionId::from_bytes([0x11; 16]));
+    app.sessions.get_mut(&ids[0]).unwrap().unread = 2;
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.unread, 2);
+
+    // 4. A goal form over an orphan whose parent arrives as an audit closes.
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    let focused = app.focused().unwrap();
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&focused).unwrap().summary.parent_id = Some(missing);
+    app.composer.replace("/goal ship it".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(matches!(
+        app.overlay,
+        Some(crate::input::Overlay::GoalForm(_))
+    ));
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    assert!(
+        app.sessions.contains_key(&missing),
+        "fixture: audit arrived"
+    );
+    assert!(app.overlay.is_none(), "the goal form closed");
+
+    // 5. A picker over the focused pane: its session is not drawn, so a
+    // child's stream behind it schedules no redraw.
+    let (mut app, root, ids) = app_with_fanout(1);
+    app.focus_session(root);
+    app.execute(Command::OpenSessions);
+    FrameRenderer::default().frame_and_commit(&mut app, 120, 40);
+    assert!(!app.drawn.contains(&root), "the picker covers it");
+    let event = fixtures::envelope(
+        5,
+        ids[0],
+        SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([0x91; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "more".to_owned(),
+        },
+    );
+    assert!(!app.event_is_visible_for_test(&event));
+}
