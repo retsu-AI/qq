@@ -15,13 +15,14 @@ val tauriProperties = Properties().apply {
 }
 
 android {
-    compileSdk = 37
+    // API 36 is available from the CI SDK repository; the CLI template uses 37.
+    compileSdk = 36
     namespace = "ai.qq.mobile"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "ai.qq.mobile"
         minSdk = 24
-        targetSdk = 37
+        targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }

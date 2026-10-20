@@ -26,7 +26,7 @@ host-only modules. The shared UI and generated DTO contract stay in this app.
 Mobile is currently a disconnected development shell, not a usable remote client.
 
 Install the [Tauri mobile prerequisites](https://v2.tauri.app/start/prerequisites/#configure-for-mobile-targets).
-Android CI uses Linux, Java 17, SDK 37, build-tools 36.0.0 and NDK 28.2.13676358.
+Android CI uses Linux, Java 17, SDK 36, build-tools 36.0.0 and NDK 28.2.13676358.
 With `JAVA_HOME`, `ANDROID_HOME` and `NDK_HOME` set, from `apps/desktop`:
 
 ```sh
