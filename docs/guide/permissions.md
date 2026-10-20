@@ -88,6 +88,10 @@ Nothing in your global configuration needs trust: you wrote it.
 Built-in `write_file` and `edit_file` refuse project configuration
 (`.qq/config.ron`, `.qq/config.d/`, `.qq/packs/`, and `qq.ron`) and Git
 trust files under `.git`, including nested repositories and symlink aliases.
+Resolved configured pack directories inside the workspace (for example,
+`vendor/reviewer`) and their aliases are protected too, even when that pack
+is not selected for the current run. Unconfigured vendor directories remain
+ordinary task files.
 This applies in every approval mode; approving a file tool cannot grant it
 permission to rewrite its own policy. Ordinary task files, `.github/`, and
 `.qq/skills/` remain writable when the mode permits writes. A refused edit

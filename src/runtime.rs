@@ -1632,7 +1632,14 @@ impl RuntimeFactory {
                 .with_output_ceiling(output_ceiling)
                 .with_provenance(provenance)
                 .with_credential_epoch(epoch)
-                .with_profile_id(profile_id.clone());
+                .with_profile_id(profile_id.clone())
+                .with_protected_pack_roots(
+                    snapshot
+                        .packs()
+                        .values()
+                        .map(|pack| pack.directory().to_owned())
+                        .collect(),
+                );
         if let Some(effort) = snapshot.reasoning_effort() {
             profile = profile.with_reasoning_effort(effort);
         }
@@ -8104,6 +8111,7 @@ mod tests {
                 version: 1,
                 model: "custom/test-model",
                 max_output_tokens: 64,
+                packs: { "review-kit": Pack(path: "../vendor/review-kit") },
                 providers: {
                     "custom": Custom(
                         connection: (
@@ -8123,7 +8131,7 @@ mod tests {
         .unwrap();
         for (path, content) in [
             (
-                "work/.qq/packs/review-kit/pack.ron",
+                "work/vendor/review-kit/pack.ron",
                 r#"(
                     schema: 1,
                     id: "review-kit",
@@ -8139,9 +8147,9 @@ mod tests {
                     },
                 )"#,
             ),
-            ("work/.qq/packs/review-kit/persona.md", "Persona v1.\n"),
+            ("work/vendor/review-kit/persona.md", "Persona v1.\n"),
             (
-                "work/.qq/packs/review-kit/skills/audit/SKILL.md",
+                "work/vendor/review-kit/skills/audit/SKILL.md",
                 "---\ndescription: Audit it\n---\nbody\n",
             ),
         ] {
@@ -8183,6 +8191,11 @@ mod tests {
         let default_plan = factory.plan_for(&request).unwrap();
         assert_eq!(default_plan.descriptor().mcp_servers.len(), 2);
         assert!(default_plan.descriptor().pack.is_none());
+        assert_eq!(
+            default_plan.descriptor().protected_pack_roots,
+            ["vendor/review-kit"]
+        );
+        assert_eq!(descriptor.protected_pack_roots, ["vendor/review-kit"]);
         assert!(default_plan.catalog().names().any(|n| n == "shell"));
 
         // Warm lookups do no discovery and hit the cache.
@@ -8192,7 +8205,7 @@ mod tests {
         );
         // Editing the persona recompiles; the old plan stays valid for holders.
         fs::write(
-            fixture.path("work/.qq/packs/review-kit/persona.md"),
+            fixture.path("work/vendor/review-kit/persona.md"),
             "Persona v2.\n",
         )
         .unwrap();
@@ -8211,7 +8224,7 @@ mod tests {
 
         // A pack that needs a newer protocol fails as configuration.
         fs::write(
-            fixture.path("work/.qq/packs/review-kit/pack.ron"),
+            fixture.path("work/vendor/review-kit/pack.ron"),
             r#"(schema: 1, id: "review-kit", version: "9", requires: (protocol: 999),
                 profiles: { "reviewer": Profile(max_output_tokens: 8) })"#,
         )
@@ -8366,7 +8379,7 @@ mod tests {
                 "descriptor leaked {forbidden}"
             );
         }
-        assert!(canonical.starts_with("qq-agent-plan-descriptor-v15\0{"));
+        assert!(canonical.starts_with("qq-agent-plan-descriptor-v16\0{"));
     }
 
     #[test]

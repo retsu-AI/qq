@@ -5788,3 +5788,87 @@ async fn parent_readonly_revocation_denies_a_late_human_child_approval() {
     assert!(consulted.lock().unwrap().is_empty());
     harness.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn nested_write_requests_preserve_the_root_only_write_boundary() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let grandchild: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "write_file",
+            r#"{"path":"nested.txt","content":"reviewed"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"write nested.txt","model":"test/grandchild","authority":"write"}"#
+                .to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"delegate the write","model":"test/child","authority":"write"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = 8;
+    options = options.with_approval_reviewer(reviewer);
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(DepthLoader {
+            inner: QueueLoader {
+                routed: vec![("test/child", child), ("test/grandchild", grandchild)],
+                queue: StdMutex::new(vec![parent]),
+            },
+            max_depth: 2,
+            write_children: true,
+            pricing: None,
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Auto).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("expected session")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    let run = submit_prompt_to(&runtime, session_id, "delegate twice").await;
+    let observed = collect_until_run_finished(&mut events, run).await;
+    assert!(!directory.path().join("nested.txt").exists());
+    assert_eq!(
+        consulted.lock().unwrap().len(),
+        1,
+        "the supervised child reviews its spawn request, but cannot grant write authority onward"
+    );
+    assert_eq!(
+        observed
+            .iter()
+            .filter(|event| matches!(&event.event,
+                SessionEvent::SessionCreated { session } if session.parent_id.is_some()
+            ))
+            .count(),
+        1,
+        "no write grandchild is admitted"
+    );
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "spawn_agent"
+            && tool_call.is_error
+            && tool_call.result.as_deref().is_some_and(|text| text.contains("write sub-agents are not enabled"))
+    )));
+    runtime.shutdown().await.unwrap();
+}

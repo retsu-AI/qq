@@ -18,6 +18,7 @@ static APPLY_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLoc
 pub(crate) struct Workspace {
     root: Arc<Dir>,
     path: Arc<PathBuf>,
+    protected_pack_roots: Arc<[PathBuf]>,
     /// Serializes the hash-check-and-rename apply section for this workspace.
     apply_lock: Arc<Mutex<()>>,
 }
@@ -82,7 +83,25 @@ impl Workspace {
             root: Arc::new(Dir::from_std_file(root)),
             apply_lock: apply_lock(path),
             path: Arc::new(path.to_owned()),
+            protected_pack_roots: Arc::from([]),
         })
+    }
+
+    /// Canonical configured pack directories inside this workspace are trust
+    /// inputs even when their resources live outside `.qq/packs`.
+    pub(crate) fn with_protected_pack_roots(mut self, roots: &[PathBuf]) -> Self {
+        let mut relative: Vec<_> = roots
+            .iter()
+            .filter_map(|root| root.strip_prefix(self.path()).ok().map(Path::to_owned))
+            .collect();
+        relative.sort();
+        relative.dedup();
+        self.protected_pack_roots = relative.into();
+        self
+    }
+
+    pub(crate) fn protected_pack_roots(&self) -> &[PathBuf] {
+        &self.protected_pack_roots
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -163,7 +182,13 @@ impl Workspace {
             }
             false
         }
-        if protected(Path::new(requested)) || protected(resolved) {
+        if protected(Path::new(requested))
+            || protected(resolved)
+            || self
+                .protected_pack_roots
+                .iter()
+                .any(|root| Path::new(requested).starts_with(root) || resolved.starts_with(root))
+        {
             return Err(WorkspacePathError::ProtectedMutation);
         }
         Ok(())
@@ -211,7 +236,7 @@ pub(crate) fn blocking_permits() -> Arc<Semaphore> {
 #[derive(Debug, Error)]
 pub enum WorkspacePathError {
     #[error(
-        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron) or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
+        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
     )]
     ProtectedMutation,
     #[error("path must not be empty")]

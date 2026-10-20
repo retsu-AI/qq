@@ -11,10 +11,11 @@ use super::PlanCompileError;
 /// Version of the descriptor's canonical encoding. Bump it whenever a field is
 /// added, removed, renamed, or its normalization changes, so historical digests
 /// are never compared against a different encoding.
-pub const DESCRIPTOR_VERSION: u16 = 15;
+pub const DESCRIPTOR_VERSION: u16 = 16;
 
 /// Domain separator prepended to the canonical bytes before hashing.
-const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v15\0";
+const DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v16\0";
+const V15_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v15\0";
 const V14_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v14\0";
 const LEGACY_DIGEST_DOMAIN: &[u8] = b"qq-agent-plan-descriptor-v13\0";
 
@@ -187,6 +188,10 @@ pub struct AgentPlanDescriptor {
     pub model: ResolvedModel,
     /// Canonical workspace root the plan executes in.
     pub workspace: String,
+    /// Sorted workspace-relative configured pack directories protected from
+    /// built-in mutation, including packs not selected for this run (v16).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub protected_pack_roots: Vec<String>,
     pub prompt_version: PromptVersion,
     pub instruction_hash: qq_protocol::InstructionHash,
     /// `AGENTS.md` or `CLAUDE.md` when one was selected.
@@ -290,17 +295,24 @@ impl AgentPlanDescriptor {
         let domain = match self.version {
             13 => LEGACY_DIGEST_DOMAIN,
             14 => V14_DIGEST_DOMAIN,
-            15 => DIGEST_DOMAIN,
+            15 => V15_DIGEST_DOMAIN,
+            16 => DIGEST_DOMAIN,
             _ => {
                 return Err(PlanCompileError::Encode {
                     message: format!("unsupported descriptor version {}", self.version),
                 });
             }
         };
-        if (self.version == 15) != self.tool_output_projection.is_some() {
+        if (self.version >= 15) != self.tool_output_projection.is_some() {
             return Err(PlanCompileError::Encode {
-                message: "tool output projection identity must be present only in descriptor 15"
-                    .to_owned(),
+                message:
+                    "tool output projection identity must be present in descriptor 15 and later"
+                        .to_owned(),
+            });
+        }
+        if self.version < 16 && !self.protected_pack_roots.is_empty() {
+            return Err(PlanCompileError::Encode {
+                message: "protected pack roots require descriptor 16".to_owned(),
             });
         }
         let mut bytes = domain.to_vec();

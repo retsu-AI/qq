@@ -63,6 +63,10 @@ below. Historical descriptor JSON remains historical evidence.
 PROTOCOL_VERSION = 37
 ```
 
+Descriptor 16 adds sorted workspace-relative configured pack roots to the
+compiled authority identity; descriptor 15 and earlier retain their original
+encoding and digest domains.
+
 Version 37 adds `strict` approval mode for explicit per-call human consent.
 Stored grants and reviewer delegation cannot authorize a strict call.
 

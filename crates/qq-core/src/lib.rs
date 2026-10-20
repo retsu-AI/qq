@@ -1031,6 +1031,8 @@ pub struct Runtime {
     pub(crate) context_sources: Arc<[context_source::RegisteredSource]>,
     pub(crate) context_cache: Arc<ContextCache>,
     spawn_model_routes: Arc<[String]>,
+    /// Canonical configured pack trust inputs retained by direct runtime runs.
+    protected_pack_roots: Arc<[PathBuf]>,
     /// The roster and bounds `spawn_agent` advertises and resolves through.
     pub(crate) delegation: Arc<DelegationRoster>,
     /// When a root run's final answer is audited before completion.
@@ -1085,6 +1087,7 @@ impl Runtime {
             context_sources: Arc::from([]),
             context_cache: Arc::new(ContextCache::default()),
             spawn_model_routes: Arc::from([]),
+            protected_pack_roots: Arc::from([]),
             delegation: Arc::new(DelegationRoster::default()),
             audit: runtime::AuditPolicy::default(),
             reasoning_effort: None,
