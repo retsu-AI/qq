@@ -100,8 +100,10 @@ in its PR.
 - Audits are never listed, counted, focused or reachable: not on the rail,
   the strip, in the picker, tree navigation, attention, or a fallback focus.
   At startup `qq --session ID` opens only a non-audit root (an agent, an
-  audit, or an orphan is refused; an orphan is reachable from the TUI), and
-  a bare `qq` opens the newest non-audit root. Ancestry is
+  audit, or an orphan is refused; an orphan is reachable from the TUI). A
+  bare `qq` still starts a new session; when the TUI attaches to an
+  existing workspace or reconnects (`InitialSession::Existing`), it focuses
+  the newest non-audit root, never an agent, audit or orphan. Ancestry is
   known only over loaded sessions; a task agent whose audit ancestor is not
   loaded shows as a task until that ancestor arrives (closing that needs a
   protocol change, ENG-1080). When an arrival reveals that a shown or
@@ -143,13 +145,12 @@ cursor fallback, and audit exclusion in every mode.
   points at the needs it collapses, so those are neither named nor counted
   again. The strip only counts, so beside it the notice still names.
 - `Alt-A`/`Alt-D` act on one target: the first human-owned approval in
-  attention order, outside the focused transcript, that the last frame did
-  not name elsewhere (the one the rule names, or would name were a
-  transient notice not covering it); with every one named elsewhere, the
-  first of them. So the chords on the rule always act on the approval the
-  rule names or points at. An `ask_user` target is never answered yes or
-  no: the chord focuses its session, whose question block takes the
-  answers.
+  attention order, outside the focused transcript, that the last frame
+  neither named nor pointed at elsewhere (the one the rule names, or would
+  name were a transient notice not covering it); with none, the first
+  approval the frame names. A need folded into a `+N need you` row is never
+  answered blind. An `ask_user` target is never answered yes or no: the
+  chord focuses its session, whose question block takes the answers.
 - A transient notice (info, warning, error) takes the rule's left side. If
   needs are unnamed, the right side keeps a pointer to them (answer and jump
   chords, plus a count unless the strip already shows one), and the notice
@@ -162,7 +163,8 @@ Acceptance: frame tests that every need is named or pointed at and never
 named twice, at Compact, Regular with and without the rail, past the agent
 cap, under a transient notice, and at narrow widths; with the rail painting
 the first approval and the rule naming (or a transient notice covering) the
-second, `Alt-A` answers the second; inspector `Auto` hidden and shown;
+second, `Alt-A` answers the second; an approval folded into a `+N need you`
+row is never what `Alt-A` answers; inspector `Auto` hidden and shown;
 goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
