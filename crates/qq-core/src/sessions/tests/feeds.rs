@@ -201,7 +201,7 @@ async fn replay_decodes_events_from_removed_jev_features() {
     assert_eq!(sequences.len(), 4, "the fixture needs four journal rows");
     let mut events = harness
         .runtime
-        .subscribe(SubscribeRequest {
+        .subscribe_published(SubscribeRequest {
             workspace_id: harness.workspace_id,
             after: EventCursor {
                 store_id: harness.runtime.inner.store.store_id(),
@@ -211,9 +211,18 @@ async fn replay_decodes_events_from_removed_jev_features() {
         })
         .unwrap();
     for sequence in sequences {
-        let envelope = events.next().await.unwrap().unwrap();
-        assert_eq!(envelope.cursor.sequence, sequence);
-        assert_eq!(envelope.event, SessionEvent::Retired);
+        let published = events.next().await.unwrap().unwrap();
+        assert_eq!(published.envelope.cursor.sequence, sequence);
+        assert_eq!(published.envelope.event, SessionEvent::Retired);
+        // The bytes a server forwards over SSE are the normalized form,
+        // which a protocol-36 client decodes; never the legacy row.
+        let forwarded: SessionEventEnvelope = serde_json::from_str(&published.json).unwrap();
+        assert_eq!(forwarded, published.envelope);
+        assert!(
+            published.json.contains(r#""type":"retired""#),
+            "{}",
+            published.json
+        );
     }
     harness.runtime.close().await.unwrap();
 }

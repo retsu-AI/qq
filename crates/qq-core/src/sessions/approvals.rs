@@ -300,7 +300,7 @@ impl ToolGate for SessionToolGate {
                                                     &claimed,
                                                     call.id,
                                                     delegate_grant.take(),
-                                                    verdict.delegate,
+                                                    DelegateIdentity::Reviewer,
                                                 )
                                                 .await
                                             {
@@ -337,7 +337,7 @@ impl ToolGate for SessionToolGate {
                                                     &claimed,
                                                     call.id,
                                                     message.clone(),
-                                                    verdict.delegate,
+                                                    DelegateIdentity::Reviewer,
                                                 )
                                                 .await
                                             {
@@ -364,7 +364,7 @@ impl ToolGate for SessionToolGate {
                                                 .escalate_tool_approval(
                                                     &claimed,
                                                     call.id,
-                                                    Some(verdict.delegate),
+                                                    Some(DelegateIdentity::Reviewer),
                                                     truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
                                                 )
                                                 .await
@@ -383,7 +383,7 @@ impl ToolGate for SessionToolGate {
                                                 .escalate_tool_approval(
                                                     &claimed,
                                                     call.id,
-                                                    Some(verdict.delegate),
+                                                    Some(DelegateIdentity::Reviewer),
                                                     format!(
                                                         "{} {}",
                                                         approval::ADVISORY_DENIAL_PREFIX,

@@ -4621,6 +4621,43 @@ fn environment_variables_are_the_ones_from_process_env_reads() {
 }
 
 #[test]
+fn removed_jev_environment_variables_fail_by_name() {
+    // A deployment still launched with `QQ_JEV_CHECKPOINTS=enforce` (what
+    // `qq jev setup` used to print) must not silently lose its review.
+    for name in REMOVED_ENVIRONMENT_VARIABLES {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::removed_environment_variable_child",
+                "--nocapture",
+            ])
+            .env("QQ_TEST_REMOVED_ENVIRONMENT_CHILD", name)
+            .env(name, "on")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("test result: ok. 1 passed"),
+            "{name}: stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn removed_environment_variable_child() {
+    let Ok(name) = std::env::var("QQ_TEST_REMOVED_ENVIRONMENT_CHILD") else {
+        return;
+    };
+    let error = LoadRequest::from_process_env("/tmp", None).unwrap_err();
+    assert!(
+        matches!(error, ConfigError::RemovedSetting(removed) if removed == name),
+        "{error}"
+    );
+    assert!(error.to_string().contains(&name), "{error}");
+}
+
+#[test]
 fn environment_variables_child() {
     if std::env::var_os("QQ_TEST_ENVIRONMENT_VARIABLES_CHILD").is_none() {
         return;
