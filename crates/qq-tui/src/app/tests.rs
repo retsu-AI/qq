@@ -2746,6 +2746,22 @@ fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
     let mut expected = vec![child.id, grandchild.id];
     expected.sort();
     assert_eq!(listed, expected);
+
+    // The missing parent arrives: the component's top moves up and the open
+    // picker keeps the tree rather than emptying.
+    let missing = SessionId::from_bytes([0x8f; 16]);
+    app.apply_live_event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(fixtures::session_summary(missing)),
+        },
+    ));
+    let mut listed = app.filtered_sessions();
+    listed.sort();
+    let mut expected = vec![missing, child.id, grandchild.id];
+    expected.sort();
+    assert_eq!(listed, expected);
 }
 
 #[test]

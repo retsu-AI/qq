@@ -2581,6 +2581,22 @@ fn a_found_agent_keeps_its_title_beside_a_long_session_name() {
         "the matched title stays visible: {row:?}"
     );
     assert!(row.chars().count() <= 60, "{row:?}");
+
+    // A wide (CJK) session name takes its rendered cells, so its third of a
+    // narrow row still leaves the agent's title readable.
+    app.sessions.get_mut(&root).unwrap().summary.title = "会话名称很长的一个标题".to_owned();
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 32, 20));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("› "))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(row.contains("agent"), "the agent still shows: {row:?}");
+    assert!(
+        unicode_width::UnicodeWidthStr::width(row.as_str()) <= 32,
+        "{row:?}"
+    );
 }
 
 #[test]

@@ -1054,16 +1054,25 @@ impl App {
         };
         // The topmost loaded ancestor: an agent whose parent is not loaded
         // tops its own component, which the picker lists as a session.
-        let mut root = focused;
-        while let Some(parent) = self
-            .sessions
-            .get(&root)
-            .and_then(|session| session.summary.parent_id)
-            .filter(|parent| self.sessions.contains_key(parent))
-        {
-            root = parent;
-        }
+        let root = self.loaded_top(focused);
         self.open_session_picker(Some(root))
+    }
+
+    /// The topmost loaded ancestor of `id`: a root, or an orphan whose parent
+    /// is not loaded. Bounded by the session count.
+    fn loaded_top(&self, mut id: SessionId) -> SessionId {
+        for _ in 0..=self.sessions.len() {
+            match self
+                .sessions
+                .get(&id)
+                .and_then(|session| session.summary.parent_id)
+                .filter(|parent| self.sessions.contains_key(parent))
+            {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        id
     }
 
     fn open_session_picker(&mut self, scope: Option<SessionId>) -> Effects {
@@ -1234,6 +1243,12 @@ impl App {
             }) => (*scope, expanded.clone(), *every_agent),
             _ => return,
         };
+        // `/agents` scopes to a component's top; when the missing parent of
+        // an orphan top arrives, the component's top moves up with it.
+        let scope = scope.map(|scope| self.loaded_top(scope));
+        if let Some(Overlay::Sessions { scope: open, .. }) = &mut self.overlay {
+            *open = scope;
+        }
         let rows = self.session_rows(scope, &expanded, every_agent);
         if let Some(Overlay::Sessions {
             picker, confirm, ..
