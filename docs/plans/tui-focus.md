@@ -71,13 +71,14 @@ in its PR.
 
 - One linear pass rolls each session up: its state and its agents' (most
   urgent wins), agent counts, waiting agents, unread, and spend. Spend is
-  the server's `accounting.inclusive` (the session and its immediate
-  children) plus the direct spend of deeper loaded agents; a summary
+  the server's `accounting.inclusive` (the session's whole subtree, as
+  `ACCOUNTING_ROWS_SQL` folds it), taken once; a summary
   without accounting sums the direct spend of its loaded tree, audits
   included, since hidden work still costs. If any summed part is unknown
   (no cost recorded), the total is unknown and no spend is shown, as the
-  protocol never treats a missing cost as zero. Agents that are not loaded
-  are missing from the sum, a recorded limit of the bounded snapshot.
+  protocol never treats a missing cost as zero. For such legacy summaries
+  agents that are not loaded are missing from the sum, a recorded limit of
+  the bounded snapshot.
 - An agent **needs the user** when an approval waits on the human (a
   delegate-owned hold is working until it escalates) or when it failed or
   finished unseen. The TUI derives this from each summary and its live
@@ -99,8 +100,10 @@ in its PR.
 - Audits are never listed, counted, focused or reachable: not on the rail,
   the strip, in the picker, tree navigation, attention, or a fallback focus.
   At startup `qq --session ID` opens only a non-audit root (an agent, an
-  audit, or an orphan is refused; an orphan is reachable from the TUI), and
-  a bare `qq` opens the newest non-audit root. Ancestry is
+  audit, or an orphan is refused; an orphan is reachable from the TUI). A
+  bare `qq` still starts a new session; when the TUI attaches to an
+  existing workspace or reconnects (`InitialSession::Existing`), it focuses
+  the newest non-audit root, never an agent, audit or orphan. Ancestry is
   known only over loaded sessions; a task agent whose audit ancestor is not
   loaded shows as a task until that ancestor arrives (closing that needs a
   protocol change, ENG-1080). When an arrival reveals that a shown or
@@ -132,23 +135,30 @@ cursor fallback, and audit exclusion in every mode.
 
 - A need is **named** (its title on screen) at most once outside its own
   transcript: by its rail row, by a child's live card under the spawn call
-  in the focused transcript, or by the composer-rule notice. Something
-  counts as naming a need only while it is painted in the committed frame
-  (title cells visible, not scrolled out or clipped), and a card is
-  identified by its child's id, not by its text.
+  in the focused transcript, by the composer-rule notice, or by the
+  `/attention` view, which lists every need by title. While `/attention` is
+  on screen it is the one naming surface: the rail keeps its rows (it is
+  navigation) but the rule names nothing and keeps only its chords.
+  Something counts as naming a need only while it is painted in the
+  committed frame (title cells visible, not scrolled out or clipped), and a
+  card is identified by its child's id, not by its text.
 - The rule's notice considers the needs that nothing on screen names or
   points at, names the first of them in attention order, and counts the
   rest (`◇ Deploy helper +3 need you`). A painted `+N need you` rail row
   points at the needs it collapses, so those are neither named nor counted
   again. The strip only counts, so beside it the notice still names.
-- `Alt-A`/`Alt-D` answer the approval the rule names when it names one,
-  and otherwise the first human-owned approval in attention order outside
-  the focused transcript; so the chords beside a named approval always act
-  on that approval, never on another the rail paints.
+- `Alt-A`/`Alt-D` act on one target: the first human-owned approval in
+  attention order, outside the focused transcript, that the last frame
+  neither named nor pointed at elsewhere (the one the rule names, or would
+  name were a transient notice not covering it); with none, the first
+  approval the frame names. A need folded into a `+N need you` row is never
+  answered blind. An `ask_user` target is never answered yes or no: the
+  chord focuses its session, whose question block takes the answers.
 - A transient notice (info, warning, error) takes the rule's left side. If
-  needs are unnamed, the right side keeps a pointer to them (answer and jump
-  chords, plus a count unless the strip already shows one), and the notice
-  truncates first.
+  needs are unnamed, the right side keeps a pointer to them: the answer
+  chords only when the covered target is a human-owned approval (they act
+  on it), the jump chord, plus a count unless the strip already shows one;
+  the notice truncates first.
 - `related sessions` becomes one muted summary row with no attention count.
 - The inspector's `Auto` shows only while it has content. The top row omits
   a known zero cost.
@@ -156,8 +166,12 @@ cursor fallback, and audit exclusion in every mode.
 Acceptance: frame tests that every need is named or pointed at and never
 named twice, at Compact, Regular with and without the rail, past the agent
 cap, under a transient notice, and at narrow widths; with the rail painting
-the first approval and the rule naming the second, `Alt-A` answers the
-second; inspector `Auto` hidden and shown; goldens moved deliberately.
+the first approval and the rule naming (or a transient notice covering) the
+second, `Alt-A` answers the second; an approval folded into a `+N need you`
+row is never what `Alt-A` answers; a transient notice covering only a
+failure beside a named approval shows no answer chords; `/attention` with
+the rail up names each need once; inspector `Auto` hidden and shown;
+goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
 

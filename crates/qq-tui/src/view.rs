@@ -188,6 +188,9 @@ pub(crate) struct FrameRenderer {
     /// Sessions the last frame named outside the rule (painted rail rows and
     /// child cards); handed to the app.
     named: Vec<SessionId>,
+    /// Sessions whose transcript the last frame's panes drew; handed to the
+    /// app.
+    drawn: Vec<SessionId>,
 }
 
 impl FrameRenderer {
@@ -202,6 +205,7 @@ impl FrameRenderer {
         }
         app.rail_painted = self.rail_painted.take();
         app.frame_named = std::mem::take(&mut self.named);
+        app.drawn = std::mem::take(&mut self.drawn);
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -266,6 +270,9 @@ impl FrameRenderer {
             self.invalidate();
         }
         if width < layout::MIN_WIDTH || height < layout::MIN_HEIGHT {
+            // Nothing but the warning is drawn: no rail row, no transcript.
+            self.rail_painted = Some(Vec::new());
+            self.drawn.clear();
             return fit_height(
                 vec![
                     Line::styled(" qq", brand().bold()),
@@ -323,14 +330,23 @@ impl FrameRenderer {
             .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
             .collect();
         self.cache.retain_visible(app, &shown);
+        // Recorded as each pane's body is emitted: an overlay that takes the
+        // focused pane's cells draws no transcript there.
+        self.drawn.clear();
         // Transcript panes fill their slots left to right. Overlays take the
         // focused pane's cells; the rail stays so the picker is read in
         // context. The transcript caches stay warm behind an overlay so
         // closing one costs no relayout or highlight storm.
         let mut body: Vec<Line> = Vec::new();
         let mut columns: Vec<(usize, Vec<Line>)> = Vec::with_capacity(slots + 1);
+        let mut drawn: Vec<SessionId> = Vec::with_capacity(slots);
         for ((index, pane), slot) in shown_panes().zip(&layout.transcripts) {
             let slot_width = slot.area.width;
+            let overlaid = index == app.focused_pane
+                && !matches!(mode, Mode::Approval | Mode::Trust | Mode::Compose);
+            if !overlaid && let Some(session) = shown_view(app, pane, inline_detail).session() {
+                drawn.push(session);
+            }
             let rows = if index == app.focused_pane {
                 match mode {
                     Mode::GoalForm => goal_form(app, slot_width, body_height),
@@ -374,6 +390,7 @@ impl FrameRenderer {
                 columns.push((slot.area.x, fit_height(rows, body_height)));
             }
         }
+        self.drawn = drawn;
         // Side panes are blitted column-wise onto the body rows: each row is
         // padded to the pane's `x`, then the pane's cells appended. Columns
         // are built at pane width so a blit never re-measures the row.

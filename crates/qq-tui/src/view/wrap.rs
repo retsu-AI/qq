@@ -232,17 +232,23 @@ pub(crate) fn fit_height(mut lines: Vec<Line>, height: usize) -> Vec<Line> {
 
 pub(crate) fn preview(text: &str, width: usize) -> String {
     let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if plain.chars().count() <= width {
-        plain
-    } else {
-        format!(
-            "{}...",
-            plain
-                .chars()
-                .take(width.saturating_sub(3))
-                .collect::<String>()
-        )
+    // Measured in display columns, so a wide (CJK, emoji) title takes the
+    // cells it renders in, not one per character.
+    if crate::render::text_width(&plain) <= width {
+        return plain;
     }
+    let budget = width.saturating_sub(3);
+    let mut used = 0;
+    let mut end = 0;
+    for (offset, character) in plain.char_indices() {
+        let cells = unicode_width::UnicodeWidthChar::width(character).unwrap_or_default();
+        if used + cells > budget {
+            break;
+        }
+        used += cells;
+        end = offset + character.len_utf8();
+    }
+    format!("{}...", &plain[..end])
 }
 
 pub(crate) fn bounded_tail(text: &str, max_bytes: usize) -> &str {
