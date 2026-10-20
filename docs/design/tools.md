@@ -1558,7 +1558,8 @@ configured choice could. The override is `SessionSummary.approval_delegate`,
 absent when none is set.
 
 "The reviewer" in the table is `reviewer_model`, then the human (ADR-0041).
-`ReviewVerdict` names the delegate that decided; a delegate-recorded grant
+The gate attributes every reviewer verdict to `reviewer` (`ReviewVerdict`
+carries only the decision and spend); a delegate-recorded grant
 row carries `source = 'delegate'` (§ Grant Lifetimes), and the
 `tool_approval_resolved` event carries `delegate: reviewer` beside
 `approved_by_reviewer` / `denied_by_reviewer` (protocol 28), so a supervisor
