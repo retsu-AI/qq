@@ -2719,8 +2719,385 @@ fn agents_picker_lists_only_the_focused_roots_subtree() {
     assert_eq!(listed, expected);
     assert!(!app.filtered_sessions().contains(&other_root.id));
 
-    // /sessions lists everything.
+    // /sessions lists sessions only; agents come back on Tab or a search.
+    app.focus_session(root);
     app.execute(Command::OpenSessions);
+    let listed = app.filtered_sessions();
+    assert_eq!(listed.len(), 2, "sessions only: {listed:?}");
+    assert!(listed.contains(&root) && listed.contains(&other_root.id));
+}
+
+#[test]
+fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
+    // `child`'s parent is not loaded: `/agents` from its grandchild lists
+    // the orphan component, not nothing.
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let mut child = summary_named(0x81, "child");
+    child.parent_id = Some(SessionId::from_bytes([0x8f; 16]));
+    let mut grandchild = summary_named(0x82, "grandchild");
+    grandchild.parent_id = Some(child.id);
+    initial.sessions.extend([child.clone(), grandchild.clone()]);
+    app.apply_snapshot(initial);
+    app.focus_session(grandchild.id);
+    app.execute(Command::OpenAgents);
+    let mut listed = app.filtered_sessions();
+    listed.sort();
+    let mut expected = vec![child.id, grandchild.id];
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    // The missing parent arrives: the component's top moves up and the open
+    // picker keeps the tree rather than emptying.
+    let missing = SessionId::from_bytes([0x8f; 16]);
+    app.apply_live_event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(fixtures::session_summary(missing)),
+        },
+    ));
+    let mut listed = app.filtered_sessions();
+    listed.sort();
+    let mut expected = vec![missing, child.id, grandchild.id];
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    // The scope's top is deleted: its agents become roots and `/agents`
+    // follows the highlighted agent to its new top instead of emptying.
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        missing,
+        SessionEvent::SessionDeleted {
+            session_id: missing,
+        },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(listed.contains(&grandchild.id), "{listed:?}");
+    assert!(!listed.is_empty());
+}
+
+#[test]
+fn agents_picker_survives_its_highlighted_top_being_deleted() {
+    let (mut app, root, child, grandchild, _) = app_with_agent_tree();
+    app.execute(Command::OpenAgents);
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(root),
+        "cursor on the top"
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(
+        listed.contains(&child) && listed.contains(&grandchild),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn a_snapshot_that_adds_sessions_refreshes_an_open_picker() {
+    let (mut app, _, _, _, _) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    let added = summary_named(0x84, "arrived later");
+    let mut sessions: Vec<SessionSummary> = app
+        .sessions
+        .values()
+        .map(|view| view.summary.clone())
+        .collect();
+    sessions.push(added.clone());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions,
+        focused: None,
+        cursor: fixtures::cursor(9),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(app.filtered_sessions().contains(&added.id));
+}
+
+#[test]
+fn a_deleted_agent_row_hands_the_cursor_to_its_session() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    app.handle_key(key(KeyCode::Tab));
+    while app.session_picker_selected() != Some(grandchild) {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        grandchild,
+        SessionEvent::SessionDeleted {
+            session_id: grandchild,
+        },
+    )));
+    assert!(!app.sessions.contains_key(&grandchild), "fixture: deleted");
+    assert_eq!(app.session_picker_selected(), Some(root), "not {other:?}");
+    let _ = child;
+}
+
+#[test]
+fn the_picker_merges_orphans_newest_first_and_drops_audit_targets() {
+    // An older root, and a newer orphan (its parent is not loaded).
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    initial.sessions[0].updated_at_ms = 1;
+    let root = initial.sessions[0].id;
+    let missing = SessionId::from_bytes([0x8e; 16]);
+    let mut orphan = summary_named(0x81, "orphan");
+    orphan.parent_id = Some(missing);
+    orphan.updated_at_ms = 9;
+    initial.sessions.push(orphan.clone());
+    app.apply_snapshot(initial);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.filtered_sessions(), [orphan.id, root], "newest first");
+
+    // A delete confirmation on the orphan, then its parent arrives as an
+    // audit: the confirmation is cancelled and `y` deletes nothing.
+    // The cursor opens on the focused root, below the newer orphan.
+    assert_eq!(app.session_picker_selected(), Some(root));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.session_picker_selected(), Some(orphan.id));
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Sessions {
+            confirm: Some(SessionConfirm::Delete(id)),
+            ..
+        }) if *id == orphan.id
+    ));
+    app.apply_live_event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    ));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Sessions { confirm: None, .. })
+    ));
+    let (_, requests) = app.handle_key(key(KeyCode::Char('y'))).split();
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientRequest::Command(CommandRequest {
+                command: SessionCommand::DeleteSession { .. },
+                ..
+            })
+        )),
+        "{requests:#?}"
+    );
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// Two sessions; `root` has a child with a grandchild. Focused on `root`.
+fn app_with_agent_tree() -> (App, SessionId, SessionId, SessionId, SessionId) {
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    let root = initial.sessions[0].id;
+    let mut child = summary_named(0x81, "child");
+    child.parent_id = Some(root);
+    let mut grandchild = summary_named(0x82, "grandchild");
+    grandchild.parent_id = Some(child.id);
+    let other_root = summary_named(0x83, "other root");
+    initial
+        .sessions
+        .extend([child.clone(), grandchild.clone(), other_root.clone()]);
+    app.apply_snapshot(initial);
+    app.focus_session(root);
+    (app, root, child.id, grandchild.id, other_root.id)
+}
+
+#[test]
+fn the_session_picker_expands_and_collapses_a_sessions_agents() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Tab expands the highlighted session in tree order.
+    app.handle_key(key(KeyCode::Tab));
+    let listed = app.filtered_sessions();
+    let position = |id| listed.iter().position(|row| *row == id).unwrap();
+    assert!(position(root) < position(child) && position(child) < position(grandchild));
+    assert!(listed.contains(&other));
+    // Down onto the agent; Left collapses back to its session.
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.session_picker_selected(), Some(child));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.filtered_sessions().len(), 2);
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Right expands, Tab toggles closed again.
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.filtered_sessions().len(), 2);
+    // Ctrl-A lists every agent under every session, and toggles off.
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 2);
+}
+
+#[test]
+fn a_session_picker_search_finds_agents_and_clearing_it_falls_back_to_their_session() {
+    let (mut app, root, _, grandchild, _) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.filtered_sessions(), [grandchild]);
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    // Clearing the query hides the agent row; the cursor lands on its session.
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    app.refresh_session_picker();
+    assert_eq!(app.filtered_sessions().len(), 2);
+    // A tree change while the cursor is on a now-hidden agent falls back too.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(grandchild),
+        "still matched"
+    );
+    let _ = root;
+}
+
+#[test]
+fn the_session_picker_never_lists_audit_agents_or_anything_under_them() {
+    let (mut app, root, child, grandchild, _) = app_with_agent_tree();
+    // The child audits the root's answer; the grandchild is under the audit.
+    app.sessions.get_mut(&child).unwrap().summary.purpose = qq_protocol::SessionPurpose::Audit;
+    app.execute(Command::OpenSessions);
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    let listed = app.filtered_sessions();
+    assert!(
+        !listed.contains(&child) && !listed.contains(&grandchild),
+        "{listed:?}"
+    );
+    app.handle_terminal_event(Event::Paste("child".to_owned()));
+    assert!(
+        app.filtered_sessions().is_empty(),
+        "a search finds no audit row"
+    );
+    app.execute(Command::OpenAgents);
+    assert_eq!(app.filtered_sessions(), [root]);
+    // An audit whose parent was deleted is not listed as a session either.
+    app.sessions.get_mut(&child).unwrap().summary.parent_id = None;
+    app.sessions.remove(&root);
+    app.execute(Command::OpenSessions);
+    assert!(!app.filtered_sessions().contains(&child));
+}
+
+#[test]
+fn the_session_picker_left_and_ctrl_a_work_while_searching() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.focus_session(other);
+    app.execute(Command::OpenSessions);
+    // A search highlights an agent under the second-listed session; Left
+    // moves to its session row even though the search keeps it listed.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    // Clearing the query lands on the agent's session, not the first row.
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_ne!(
+        app.filtered_sessions()[0],
+        root,
+        "fixture: root is not first"
+    );
+    assert_eq!(app.session_picker_selected(), Some(root));
+    // Left on a searched agent clears the search and lands on its session.
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.session_picker_selected(), Some(root), "Left moved");
+    assert_eq!(
+        app.filtered_sessions().len(),
+        2,
+        "search cleared, collapsed"
+    );
+    // From an expanded session, Left on a found agent keeps it expanded.
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.filtered_sessions().len(), 4);
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.session_picker_selected(), Some(root));
+    assert_eq!(app.filtered_sessions().len(), 4, "still expanded");
+    // Under Ctrl-A with no search, Left on an agent still collapses its
+    // session, which shows once Ctrl-A is off again.
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.session_picker_selected(), Some(child));
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(app.filtered_sessions().len(), 2, "collapsed");
+    let _ = child;
+    // Ctrl-A toggles with nothing matched.
+    app.handle_terminal_event(Event::Paste("zzz".to_owned()));
+    assert!(app.filtered_sessions().is_empty());
+    app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(app.filtered_sessions().len(), 4, "every agent listed");
+}
+
+#[test]
+fn the_session_picker_lists_orphan_agents_as_sessions_and_tracks_reparented_agents() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    // The root goes away: `child` is now an orphan session with
+    // `grandchild` under it.
+    app.sessions.remove(&root);
+    app.focus_session(other);
+    app.execute(Command::OpenSessions);
+    let listed = app.filtered_sessions();
+    assert!(
+        listed.contains(&child),
+        "the orphan is a session: {listed:?}"
+    );
+    assert!(!listed.contains(&grandchild), "its agent is collapsed");
+    app.handle_terminal_event(Event::Paste("grandch".to_owned()));
+    assert_eq!(app.filtered_sessions(), [grandchild], "search reaches it");
+    for _ in 0.."grandch".len() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(child),
+        "the cursor falls back to the agent's session as rebuilt"
+    );
+}
+
+#[test]
+fn the_session_picker_opens_a_focused_orphan_descendant_under_its_session() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    // The root goes away, so `child` tops an orphan component.
+    app.sessions.remove(&root);
+    app.focus_session(grandchild);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(grandchild));
+    assert!(app.filtered_sessions().contains(&child));
+    let _ = other;
+}
+
+#[test]
+fn the_session_picker_opens_a_focused_agents_session_expanded() {
+    let (mut app, root, child, _, _) = app_with_agent_tree();
+    app.focus_session(child);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.session_picker_selected(), Some(child));
+    assert!(app.filtered_sessions().contains(&root));
     assert_eq!(app.filtered_sessions().len(), 4);
 }
 

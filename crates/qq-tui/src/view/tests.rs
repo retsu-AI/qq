@@ -2539,8 +2539,64 @@ fn session_picker_pins_search_and_keeps_the_selection_visible() {
     let text = frame_text(&frame);
 
     assert!(text.contains("SESSIONS"));
-    assert!(text.contains("search: all sessions"));
+    assert!(text.contains("search: sessions and agents"));
     assert!(text.contains("Session 10"));
+}
+
+#[test]
+fn the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_session() {
+    let (mut app, _, _) = app_with_fanout(3);
+    app.layout.rail = PanePref::Hidden;
+    app.execute(Command::OpenSessions);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 100, 20));
+    assert!(text.contains("Fan out") && text.contains("▸ ↳3"), "{text}");
+    assert!(
+        !text.contains("agent 1"),
+        "agents hidden by default: {text}"
+    );
+    assert!(text.contains("Tab agents"), "{text}");
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 100, 20));
+    assert!(
+        text.contains("Fan out › "),
+        "a found agent names its session: {text}"
+    );
+    assert!(text.contains("agent 1"), "{text}");
+}
+
+#[test]
+fn a_found_agent_keeps_its_title_beside_a_long_session_name() {
+    let (mut app, root, _) = app_with_fanout(2);
+    app.sessions.get_mut(&root).unwrap().summary.title = "a very long session name ".repeat(6);
+    app.layout.rail = PanePref::Hidden;
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 60, 20));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("› "))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(
+        row.contains("agent 1"),
+        "the matched title stays visible: {row:?}"
+    );
+    assert!(row.chars().count() <= 60, "{row:?}");
+
+    // A wide (CJK) session name takes its rendered cells, so its third of a
+    // narrow row still leaves the agent's title readable.
+    app.sessions.get_mut(&root).unwrap().summary.title = "会话名称很长的一个标题".to_owned();
+    app.execute(Command::OpenSessions);
+    app.handle_terminal_event(TerminalEvent::Paste("agent 1".to_owned()));
+    let rows = frame_rows(&FrameRenderer::default().frame_and_commit(&mut app, 32, 20));
+    let row = rows
+        .iter()
+        .find(|row| row.contains("› "))
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(row.contains("agent"), "the agent still shows: {row:?}");
+    assert!(
+        unicode_width::UnicodeWidthStr::width(row.as_str()) <= 32,
+        "{row:?}"
+    );
 }
 
 #[test]
@@ -2555,6 +2611,24 @@ fn session_picker_renders_an_empty_search_result() {
     assert!(text.contains("No matching sessions."));
 }
 
+#[test]
+fn a_store_holding_only_audits_offers_the_creation_hint() {
+    let mut app = App::new(TuiOptions::default());
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        ..fixtures::session_summary(SessionId::from_bytes([0x5a; 16]))
+    };
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit],
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    app.execute(Command::OpenSessions);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 80, 12));
+    assert!(text.contains("creates a root session"), "{text}");
+    assert!(!text.contains("No matching sessions."), "{text}");
+}
 #[test]
 fn session_picker_renders_delete_and_prune_confirmations() {
     let mut app = app_with_messages(0);

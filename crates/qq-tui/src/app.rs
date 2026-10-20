@@ -1156,10 +1156,10 @@ impl App {
                     }
                 }
             }
-            if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
-                self.refresh_session_picker();
-            }
         }
+        // The snapshot (and its replay) may have changed the tree an open
+        // picker lists: rebuild it once.
+        self.refresh_session_picker();
         effects
     }
 

@@ -4,6 +4,8 @@
 //! owns opening each picker with its rows and interpreting `Accept`,
 //! `Cancel`, and picker-specific chords.
 
+use std::collections::BTreeSet;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use qq_protocol::{
     AgentProfileId, ApprovalDelegate, ApprovalMode, GuidanceKind, ModelDescriptor, ModelSelection,
@@ -376,7 +378,28 @@ impl App {
         let Some(overlay) = self.overlay.as_mut() else {
             return Effects::none();
         };
+        // A query edit resets the cursor to the first row; in the session
+        // picker, clearing the search lands on the session the highlighted
+        // row belongs to instead, so a found agent's session stays in view.
+        let searched_root = match &*overlay {
+            Overlay::Sessions { picker, .. } if key.code == KeyCode::Backspace => {
+                picker.current().map(|row| (row.id, row.root))
+            }
+            _ => None,
+        };
         let outcome = overlay.handle_key(key);
+        if let (Some((id, root)), Overlay::Sessions { picker, .. }) = (searched_root, &mut *overlay)
+            && picker.query.is_empty()
+        {
+            let target = picker
+                .items()
+                .iter()
+                .position(|row| row.id == id && row.listed)
+                .or_else(|| picker.items().iter().position(|row| row.id == root));
+            if let Some(index) = target {
+                picker.select_item(index);
+            }
+        }
         match (outcome, overlay) {
             (PickerOutcome::Ignored, _) => Effects::none(),
             (PickerOutcome::Changed, Overlay::Themes { picker, .. }) => {
@@ -501,6 +524,15 @@ impl App {
                 let selected = picker.current().map(|row| row.id);
                 self.request_delete_confirmation(selected)
             }
+            (
+                PickerOutcome::Chord(
+                    code @ (KeyCode::Tab
+                    | KeyCode::Left
+                    | KeyCode::Right
+                    | KeyCode::Char('a' | 'A')),
+                ),
+                Overlay::Sessions { .. },
+            ) => self.session_picker_expand(code),
             (PickerOutcome::Chord(_), _) => Effects::none(),
         }
     }
@@ -1013,26 +1045,53 @@ impl App {
         self.open_session_picker(None)
     }
 
-    /// `/agents`: the focused session's root and every descendant, so the
-    /// user can see and jump between the agents one task fanned out into.
+    /// `/agents`: the focused session and every agent under it, expanded, so
+    /// the user can see and jump between the agents one task fanned out into.
     pub(super) fn open_agents(&mut self) -> Effects {
         let Some(focused) = self.focused() else {
             self.set_warning("focus a session to view its agents".to_owned());
             return Effects::redraw(Redraw::Immediate);
         };
-        let mut root = focused;
-        while let Some(parent) = self
-            .sessions
-            .get(&root)
-            .and_then(|session| session.summary.parent_id)
-        {
-            root = parent;
-        }
+        // The topmost loaded ancestor: an agent whose parent is not loaded
+        // tops its own component, which the picker lists as a session.
+        let root = self.loaded_top(focused);
         self.open_session_picker(Some(root))
     }
 
+    /// The topmost loaded ancestor of `id`: a root, or an orphan whose parent
+    /// is not loaded. Bounded by the session count.
+    fn loaded_top(&self, mut id: SessionId) -> SessionId {
+        for _ in 0..=self.sessions.len() {
+            match self
+                .sessions
+                .get(&id)
+                .and_then(|session| session.summary.parent_id)
+                .filter(|parent| self.sessions.contains_key(parent))
+            {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        id
+    }
+
     fn open_session_picker(&mut self, scope: Option<SessionId>) -> Effects {
-        let mut picker = Picker::with_items(self.session_rows(scope));
+        let mut expanded = BTreeSet::new();
+        // A focused agent opens with its session expanded so the cursor can
+        // start on it. The session comes from the picker's own rows, which
+        // know the top of an orphan component too (`root_of` does not).
+        if let Some(focused) = self.focused()
+            && let Some(root) = self
+                .session_rows(scope, &expanded, true)
+                .into_iter()
+                .find(|row| row.id == focused)
+                .map(|row| row.root)
+            && root != focused
+        {
+            expanded.insert(root);
+        }
+        let every_agent = scope.is_some();
+        let mut picker = Picker::with_items(self.session_rows(scope, &expanded, every_agent));
         if let Some(focused) = self.focused()
             && let Some(index) = picker.items().iter().position(|row| row.id == focused)
         {
@@ -1041,57 +1100,279 @@ impl App {
         self.overlay = Some(Overlay::Sessions {
             picker,
             scope,
+            expanded,
+            every_agent,
             confirm: None,
         });
         Effects::redraw(Redraw::Immediate)
     }
 
-    /// Rows for the session picker in tree order, then each component whose
-    /// top's parent is not loaded (listed as sessions, as on the rail),
-    /// restricted to `scope`'s subtree when set. Audit sessions and their
-    /// subtrees are never listed.
-    fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
-        self.sessions
-            .thread_order()
-            .iter()
-            .copied()
-            .chain(self.orphan_trees())
-            .filter(|session_id| {
-                scope.is_none_or(|root| self.is_descendant_or_self(*session_id, root))
-                    && !self.under_audit(*session_id)
+    /// Rows for the session picker in tree order, restricted to `scope`'s
+    /// tree when set. Every session and agent has a row so a search finds
+    /// agents; an agent row is listed under an empty query only when its
+    /// session is in `expanded` or `every_agent` is set. Audit agents and
+    /// anything under them have no row.
+    fn session_rows(
+        &self,
+        scope: Option<SessionId>,
+        expanded: &BTreeSet<SessionId>,
+        every_agent: bool,
+    ) -> Vec<SessionRow> {
+        // Components (a root's tree from `thread_order`, or a tree whose
+        // topmost session's parent is not loaded, listed as a session until
+        // the parent arrives), newest first by their top session, each in
+        // depth-first order with depths relative to that top.
+        // `(updated, is an orphan, top id, rows)`: an orphan sorts after a
+        // root updated at the same moment, and orphans tie-break by id so
+        // the order never follows the map's iteration.
+        type Rows = Vec<(SessionId, usize, bool)>;
+        let mut components: Vec<(u64, bool, SessionId, Rows)> = Vec::new();
+        for &id in self.sessions.thread_order() {
+            let depth = self.sessions.depth(id);
+            if depth == 0 {
+                let updated = self.sessions[&id].summary.updated_at_ms;
+                components.push((updated, false, id, Vec::new()));
+            }
+            if let Some((_, _, _, rows)) = components.last_mut() {
+                rows.push((id, depth, false));
+            }
+        }
+        if self.sessions.thread_order().len() < self.sessions.len() {
+            for orphan in self.sessions.values().filter(|session| {
+                session
+                    .summary
+                    .parent_id
+                    .is_some_and(|parent| !self.sessions.contains_key(&parent))
+            }) {
+                let mut rows = Vec::new();
+                let mut stack = vec![(orphan.summary.id, 0usize)];
+                while let Some((id, depth)) = stack.pop() {
+                    rows.push((id, depth, depth == 0));
+                    stack.extend(
+                        self.sessions
+                            .children_of(id)
+                            .iter()
+                            .rev()
+                            .map(|child| (*child, depth + 1)),
+                    );
+                }
+                components.push((orphan.summary.updated_at_ms, true, orphan.summary.id, rows));
+            }
+        }
+        // Stable, so roots keep `thread_order`'s own tie-breaking.
+        components.sort_by(|a, b| {
+            b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then_with(|| {
+                if a.1 {
+                    a.2.cmp(&b.2)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
             })
-            .map(|id| SessionRow {
+        });
+        let order: Vec<(SessionId, usize, bool)> = components
+            .into_iter()
+            .flat_map(|(_, _, _, rows)| rows)
+            .collect();
+        let mut rows: Vec<SessionRow> = Vec::new();
+        let mut root: Option<(SessionId, usize)> = None;
+        let mut audit_depth: Option<usize> = None;
+        for (id, depth, orphan_root) in order {
+            let session = &self.sessions[&id];
+            let is_root = session.summary.parent_id.is_none() || orphan_root;
+            if let Some(limit) = audit_depth {
+                if depth > limit && !is_root {
+                    continue;
+                }
+                audit_depth = None;
+            }
+            if session.summary.purpose == qq_protocol::SessionPurpose::Audit {
+                // An audit root (its parent was deleted) also ends the
+                // previous session's agents.
+                if is_root {
+                    root = None;
+                }
+                audit_depth = Some(depth);
+                continue;
+            }
+            if is_root {
+                root = scope
+                    .is_none_or(|scope| scope == id)
+                    .then_some((id, rows.len()));
+                if root.is_some() {
+                    rows.push(SessionRow {
+                        id,
+                        title: session.summary.title.clone(),
+                        root: id,
+                        root_title: None,
+                        agents: 0,
+                        depth: 0,
+                        listed: true,
+                    });
+                }
+                continue;
+            }
+            // An agent whose session is out of scope or not loaded.
+            let Some((root_id, root_row)) = root else {
+                continue;
+            };
+            rows[root_row].agents += 1;
+            let root_title = rows[root_row].title.clone();
+            rows.push(SessionRow {
                 id,
-                title: self.sessions[&id].summary.title.clone(),
-            })
-            .collect()
+                title: session.summary.title.clone(),
+                root: root_id,
+                root_title: Some(root_title),
+                agents: 0,
+                depth,
+                listed: every_agent || expanded.contains(&root_id),
+            });
+        }
+        rows
     }
 
-    /// Rebuild the open session picker's rows after the tree changed,
-    /// keeping the cursor on the same session.
+    /// Rebuild the open session picker's rows after the tree or the
+    /// expansion changed, keeping the cursor on the same row. When that row
+    /// is an agent that is no longer listed, the cursor moves to its session.
     pub(super) fn refresh_session_picker(&mut self) {
-        let scope = match &self.overlay {
-            Some(Overlay::Sessions { scope, .. }) => *scope,
+        let (scope, expanded, every_agent) = match &self.overlay {
+            Some(Overlay::Sessions {
+                scope,
+                expanded,
+                every_agent,
+                ..
+            }) => (*scope, expanded.clone(), *every_agent),
             _ => return,
         };
-        let rows = self.session_rows(scope);
-        if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay {
+        // `/agents` scopes to a component's top; when the missing parent of
+        // an orphan top arrives, the component's top moves up with it, and
+        // when the top itself is deleted (its agents become roots) the scope
+        // follows the highlighted row, or else the first old row still
+        // loaded, to its new top.
+        let (highlighted, survivor) = match &self.overlay {
+            Some(Overlay::Sessions { picker, .. }) => (
+                picker.current().map(|row| (row.id, row.root)),
+                picker
+                    .items()
+                    .iter()
+                    .map(|row| row.id)
+                    .find(|id| self.sessions.contains_key(id)),
+            ),
+            _ => (None, None),
+        };
+        let scope = scope.map(|scope| {
+            if self.sessions.contains_key(&scope) {
+                self.loaded_top(scope)
+            } else {
+                highlighted
+                    .map(|(id, _)| id)
+                    .filter(|id| self.sessions.contains_key(id))
+                    .or(survivor)
+                    .map_or(scope, |id| self.loaded_top(id))
+            }
+        });
+        if let Some(Overlay::Sessions { scope: open, .. }) = &mut self.overlay {
+            *open = scope;
+        }
+        let rows = self.session_rows(scope, &expanded, every_agent);
+        if let Some(Overlay::Sessions {
+            picker, confirm, ..
+        }) = &mut self.overlay
+        {
+            // A delete confirmation whose target lost its row (it was
+            // revealed to sit under an audit) is cancelled before `y` can
+            // act on it.
+            if let Some(SessionConfirm::Delete(target)) = confirm
+                && !rows.iter().any(|row| row.id == *target)
+            {
+                *confirm = None;
+            }
+            let before = picker.current().map(|row| row.id);
             picker.replace_items(rows, |row| row.id);
+            // When the highlighted agent is no longer listed, fall back to the
+            // session it belongs to now (a deleted root re-parents its
+            // children, so the root comes from the rebuilt rows); when the
+            // agent itself is gone, to the session it belonged to.
+            if let Some(id) = before
+                && picker.current().map(|row| row.id) != Some(id)
+                && let Some(root) = picker
+                    .items()
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| row.root)
+                    .or(highlighted.map(|(_, root)| root))
+                && let Some(index) = picker.items().iter().position(|row| row.id == root)
+            {
+                picker.select_item(index);
+            }
         }
     }
 
-    fn is_descendant_or_self(&self, session_id: SessionId, root: SessionId) -> bool {
-        let mut cursor = Some(session_id);
-        while let Some(current) = cursor {
-            if current == root {
-                return true;
+    /// `Tab`/`Right` expand the highlighted session's agents, `Left`
+    /// collapses them (from an agent row, its session), `Ctrl-A` lists every
+    /// agent. Returns whether the rows changed.
+    fn session_picker_expand(&mut self, code: KeyCode) -> Effects {
+        let Some(Overlay::Sessions {
+            picker,
+            expanded,
+            every_agent,
+            scope,
+            ..
+        }) = &mut self.overlay
+        else {
+            return Effects::none();
+        };
+        // Ctrl-A does not depend on a highlighted row: it works on an empty
+        // search result too.
+        if matches!(code, KeyCode::Char('a' | 'A')) {
+            if scope.is_some() {
+                return Effects::none();
             }
-            cursor = self
-                .sessions
-                .get(&current)
-                .and_then(|session| session.summary.parent_id);
+            *every_agent = !*every_agent;
+            self.refresh_session_picker();
+            return Effects::redraw(Redraw::Immediate);
         }
-        false
+        let Some((root, agent, agents)) = picker
+            .current()
+            .map(|row| (row.root, row.is_agent(), row.agents))
+        else {
+            return Effects::none();
+        };
+        let changed = match code {
+            KeyCode::Tab => {
+                if agents > 0 && !expanded.remove(&root) {
+                    expanded.insert(root);
+                }
+                agents > 0
+            }
+            KeyCode::Right => agents > 0 && expanded.insert(root),
+            KeyCode::Left if agent => {
+                // Always land on the session row: a search or `Ctrl-A` can
+                // keep the agent listed, so collapsing alone may not move
+                // the cursor, and a search may hide the session row, so
+                // `Left` from a found agent clears the search to show it,
+                // leaving the session's expansion as it was. Outside a search
+                // it collapses the session even under `Ctrl-A`, so turning
+                // `Ctrl-A` off later leaves it collapsed.
+                if picker.query.is_empty() {
+                    expanded.remove(&root);
+                }
+                picker.query.clear();
+                self.refresh_session_picker();
+                if let Some(Overlay::Sessions { picker, .. }) = &mut self.overlay
+                    && let Some(index) = picker.items().iter().position(|row| row.id == root)
+                {
+                    picker.select_item(index);
+                }
+                return Effects::redraw(Redraw::Immediate);
+            }
+            KeyCode::Left => expanded.remove(&root),
+            _ => false,
+        };
+        if !changed {
+            return Effects::none();
+        }
+        self.refresh_session_picker();
+        Effects::redraw(Redraw::Immediate)
     }
 
     /// The highlighted session in the picker, if any.
@@ -1149,6 +1430,10 @@ impl App {
             KeyCode::Char('y' | 'Y') => {
                 self.clear_session_picker_confirm();
                 match confirm {
+                    // Revalidated here too: an audit is never acted on.
+                    SessionConfirm::Delete(session_id) if self.under_audit(session_id) => {
+                        Effects::redraw(Redraw::Immediate)
+                    }
                     SessionConfirm::Delete(session_id) => self.delete_session(session_id),
                     SessionConfirm::Prune => self.prune_sessions(),
                 }
@@ -1280,7 +1565,7 @@ impl App {
         selected: Option<SessionId>,
         confirm: Option<SessionConfirm>,
     ) {
-        let rows = self.session_rows(None);
+        let rows = self.session_rows(None, &BTreeSet::new(), false);
         self.overlay = Some(Overlay::sessions(rows, query, selected, confirm));
     }
 

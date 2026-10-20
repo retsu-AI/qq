@@ -8,7 +8,7 @@ bench reports live under `target/qq-perf/tui-focus-<slice>-<date>/`
 | --- | --- | --- | --- | --- |
 | P0 ([ENG-1068](https://linear.app/retsu-ai/issue/ENG-1068)) | Plan and ledger | In review | `docs/eng-1068-tui-focus-plan` (#354) | Stack base |
 | F1–F2 ([ENG-1069](https://linear.app/retsu-ai/issue/ENG-1069)) | Roll-up and sessions-only rail | In review | `feat/eng-1069-tui-session-rail` (#356) | On P0; render gate receipt in the 2026-10-19 entry below |
-| F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | Planned | | On F1–F2 |
+| F3 ([ENG-1070](https://linear.app/retsu-ai/issue/ENG-1070)) | Sessions picker | In review | `feat/eng-1070-tui-session-picker` (#358) | On F1–F2; no render-path change (2026-10-18 F3 receipt) |
 | F4–F5 ([ENG-1071](https://linear.app/retsu-ai/issue/ENG-1071)) | One place per fact, inspector on demand | Planned | | On F3 |
 | F6 ([ENG-1072](https://linear.app/retsu-ai/issue/ENG-1072)) | Clickable rail, scoped selection and copy | Planned | | On F4–F5 |
 
@@ -60,6 +60,21 @@ whole terminal row.
 - Tests: `failed_and_unseen_agents_lift_their_session_and_rank_after_approvals`,
   `an_audit_root_left_by_a_deleted_parent_is_not_a_session`. Guide diagram
   shows RECENT.
+### 2026-10-18 — F3 receipt
+
+- `/sessions` lists sessions with a `▸ ↳N` badge. `SessionRow` gains root,
+  depth, agent count and `listed`; `PickerItem::listed` (default true) keeps
+  unlisted rows out of an empty query only, so a search still finds agents,
+  shown as `Session › agent`. `Tab`/`Right`/`Left` expand and collapse,
+  `Ctrl-A` lists every agent; `/agents` is the scoped picker, fully listed.
+  A focused agent opens its session expanded. Cursor fallback: a no-longer
+  listed agent moves the cursor to its session. Audit agents have no row.
+- Tests: 4 new (`the_session_picker_expands_and_collapses_a_sessions_agents`,
+  `a_session_picker_search_finds_agents_and_clearing_it_falls_back_to_their_session`,
+  `the_session_picker_opens_a_focused_agents_session_expanded`,
+  `the_session_picker_shows_sessions_with_agent_badges_and_names_a_found_agents_session`);
+  2 updated. Goldens unchanged (no golden scene opens the picker).
+- No hot-path change (picker rows are built on open and on tree change).
 
 ### 2026-10-18 — F1–F2 third review round (Codex on #356)
 

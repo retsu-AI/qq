@@ -52,7 +52,7 @@ below works the same either way.
 | --- | --- | --- |
 | new session | `Alt-N` | `/new`, `/clear` |
 | new child session (sub-agent under the focused one) | `Alt-C` | |
-| open the session list; type to search names | | `/sessions`, `/resume` |
+| open the session list (sessions only; `Tab` / `Right` show a session's agents, `Left` hides them, `Ctrl-A` every agent); type to search sessions and agents | | `/sessions`, `/resume` |
 | the focused session's agent tree | | `/agents` |
 | focus parent / first child / next / previous sibling | `Esc`* / `Alt-Down` / `Alt-Right` / `Alt-Left` | |
 | jump to the next session that needs you | `Ctrl-G` | |

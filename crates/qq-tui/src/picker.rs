@@ -16,6 +16,13 @@ pub(crate) trait PickerItem {
     /// Text the query is matched against, case-insensitively, as a
     /// subsequence. Return every spelling a user might type.
     fn search_text<'a>(&'a self, out: &mut Vec<&'a str>);
+
+    /// Whether the item is listed while the query is empty. Items that are
+    /// not still match a search: the session picker keeps agents out of the
+    /// default list but finds them by name.
+    fn listed(&self) -> bool {
+        true
+    }
 }
 
 impl PickerItem for usize {
@@ -192,7 +199,9 @@ impl<T: PickerItem> Picker<T> {
         self.filtered.clear();
         for (index, item) in self.items.iter().enumerate() {
             if query.is_empty() {
-                self.filtered.push(index);
+                if item.listed() {
+                    self.filtered.push(index);
+                }
                 continue;
             }
             texts.clear();
