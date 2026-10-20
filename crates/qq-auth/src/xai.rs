@@ -163,8 +163,9 @@ fn start_device(store: &CredentialStore) -> Result<DeviceAuthorization, XaiAuthE
     body.try_into()
 }
 
-/// One device poll, bounded by the time left on the device code: a stalled
-/// token endpoint ends the login at its deadline, as a timeout.
+/// One device poll, bounded by the time left on the device code as well as
+/// the transport's own cap: a stalled token endpoint ends the login at its
+/// deadline as a timeout, and otherwise fails the poll at the cap.
 fn poll_device(
     store: &CredentialStore,
     device_code: &str,
@@ -182,7 +183,7 @@ fn poll_device(
         Some(remaining),
     )
     .map_err(|error| match error {
-        oauth::TransportError::TimedOut => XaiAuthError::AuthorizationTimedOut,
+        oauth::TransportError::DeadlineReached => XaiAuthError::AuthorizationTimedOut,
         oauth::TransportError::Failed => XaiAuthError::DeviceRequestFailed,
     })?;
     decode_poll(&response)
@@ -695,8 +696,9 @@ mod tests {
         assert_eq!(authorization.interval, 5);
     }
 
-    /// Answers every poll by timing out, as a stalled token endpoint does
-    /// once the request's bound passes, recording that bound.
+    /// Answers every poll as a stalled token endpoint does: the call runs
+    /// until the shorter of its deadline and the transport cap, and reports
+    /// which one ended it. Records each request's deadline.
     struct StalledTokenEndpoint {
         timeouts: std::sync::Mutex<Vec<Option<Duration>>>,
     }
@@ -708,17 +710,18 @@ mod tests {
         ) -> Result<oauth::OAuthResponse, oauth::TransportError> {
             assert_eq!(request.url, TOKEN_ENDPOINT);
             self.timeouts.lock().unwrap().push(request.timeout);
-            Err(oauth::TransportError::TimedOut)
+            Err(match request.timeout {
+                Some(timeout) if timeout < oauth::REQUEST_TIMEOUT => {
+                    oauth::TransportError::DeadlineReached
+                }
+                _ => oauth::TransportError::Failed,
+            })
         }
     }
 
-    /// A device poll is bounded by the time left on the device code, and a
-    /// poll that runs out that time ends the login as a timeout, not as a
-    /// failed request.
-    #[test]
-    fn xai_device_polls_are_bounded_by_the_remaining_lifetime() {
+    fn stalled_login(expires_in: u64) -> (AuthError, Vec<Option<Duration>>, std::path::PathBuf) {
         let directory = std::env::temp_dir().join(format!(
-            "qq-auth-xai-poll-{}-{:?}",
+            "qq-auth-xai-poll-{}-{expires_in}-{:?}",
             std::process::id(),
             Instant::now()
         ));
@@ -733,7 +736,7 @@ mod tests {
                 user_code: "USER-CODE".to_owned(),
                 verification_uri: "https://accounts.x.ai/activate".to_owned(),
                 verification_uri_complete: None,
-                expires_in: 40,
+                expires_in,
                 interval: 5,
             },
         };
@@ -751,15 +754,35 @@ mod tests {
                 },
             )
             .unwrap_err();
+        let timeouts = endpoint.timeouts.lock().unwrap().clone();
+        (error, timeouts, directory)
+    }
 
+    /// With more time left than the transport's cap, a stalled poll fails at
+    /// the cap as a failed request; the device lifetime never lengthens a
+    /// single call.
+    #[test]
+    fn xai_device_polls_with_a_long_lifetime_fail_at_the_transport_cap() {
+        let (error, timeouts, directory) = stalled_login(1800);
+        assert!(
+            matches!(error, AuthError::XAi(XaiAuthError::DeviceRequestFailed)),
+            "{error:?}"
+        );
+        assert_eq!(timeouts, [Some(Duration::from_secs(1795))]);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A device poll is bounded by the time left on the device code, and a
+    /// poll that runs out that time ends the login as a timeout, not as a
+    /// failed request.
+    #[test]
+    fn xai_device_polls_are_bounded_by_the_remaining_lifetime() {
+        let (error, timeouts, directory) = stalled_login(40);
         assert!(
             matches!(error, AuthError::XAi(XaiAuthError::AuthorizationTimedOut)),
             "{error:?}"
         );
-        assert_eq!(
-            endpoint.timeouts.lock().unwrap().as_slice(),
-            [Some(Duration::from_secs(35))]
-        );
+        assert_eq!(timeouts, [Some(Duration::from_secs(35))]);
         let _ = std::fs::remove_dir_all(directory);
     }
 }

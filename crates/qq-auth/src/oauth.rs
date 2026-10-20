@@ -89,7 +89,9 @@ pub(crate) struct OAuthRequest<'a> {
     pub(crate) url: &'a str,
     pub(crate) body: OAuthBody,
     pub(crate) headers: &'a [(&'static str, &'static str)],
-    /// Bounds the whole call when set, e.g. to a login's remaining time.
+    /// The caller's deadline for the whole call, e.g. a login's remaining
+    /// time. It only ever shortens [`REQUEST_TIMEOUT`]; running it out is
+    /// [`TransportError::DeadlineReached`], running out the cap is not.
     pub(crate) timeout: Option<Duration>,
     /// The largest response body read; a longer one reads as `None`.
     pub(crate) max_body: usize,
@@ -136,7 +138,11 @@ impl OAuthResponse {
     /// Reads at most `limit` bytes of `response`. The request's timeout
     /// stays active while the body streams, so a body that stalls past it
     /// is a timeout, not an unreadable body.
-    pub(crate) fn read(mut response: Response, limit: usize) -> Result<Self, TransportError> {
+    pub(crate) fn read(
+        mut response: Response,
+        limit: usize,
+        deadline_bound: bool,
+    ) -> Result<Self, TransportError> {
         let status = response.status().as_u16();
         let mut bytes = Vec::new();
         let body = match (&mut response)
@@ -145,7 +151,13 @@ impl OAuthResponse {
         {
             Ok(_) if bytes.len() <= limit => Some(bytes),
             Ok(_) => None,
-            Err(error) if is_timeout(&error) => return Err(TransportError::TimedOut),
+            Err(error) if is_timeout(&error) => {
+                return Err(if deadline_bound {
+                    TransportError::DeadlineReached
+                } else {
+                    TransportError::Failed
+                });
+            }
             Err(_) => None,
         };
         Ok(Self { status, body })
@@ -164,8 +176,11 @@ fn is_timeout(error: &std::io::Error) -> bool {
 /// Why an OAuth call produced no response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransportError {
+    /// The call failed, or ran out the transport's own [`REQUEST_TIMEOUT`].
     Failed,
-    TimedOut,
+    /// The call ran out the shorter deadline its request carried, e.g. a
+    /// device login's remaining lifetime.
+    DeadlineReached,
 }
 
 /// The one contract every OAuth token exchange, refresh, device start and
@@ -178,11 +193,16 @@ pub(crate) trait OAuthTransport: Send + Sync {
 /// The HTTPS transport real stores use.
 pub(crate) struct SystemTransport {
     client: Option<Client>,
+    /// The longest any one call may take: [`REQUEST_TIMEOUT`] outside tests.
+    cap: Duration,
 }
 
 impl SystemTransport {
     pub(crate) const fn new() -> Self {
-        Self { client: None }
+        Self {
+            client: None,
+            cap: REQUEST_TIMEOUT,
+        }
     }
 
     /// A transport over `client`, for loopback fixtures that are not HTTPS.
@@ -190,7 +210,16 @@ impl SystemTransport {
     pub(crate) const fn with_client(client: Client) -> Self {
         Self {
             client: Some(client),
+            cap: REQUEST_TIMEOUT,
         }
+    }
+
+    /// The same transport with a shorter per-call cap, so a test can run
+    /// the cap out quickly.
+    #[cfg(test)]
+    pub(crate) const fn with_cap(mut self, cap: Duration) -> Self {
+        self.cap = cap;
+        self
     }
 }
 
@@ -208,17 +237,22 @@ impl OAuthTransport for SystemTransport {
             OAuthBody::Form(fields) => builder.form(&fields),
             OAuthBody::Json(value) => builder.json(&value),
         };
-        if let Some(timeout) = request.timeout {
-            builder = builder.timeout(timeout);
-        }
+        // The caller's deadline can only shorten the transport's cap, and
+        // only a timeout it caused is reported as reaching it.
+        let deadline_bound = request.timeout.is_some_and(|timeout| timeout < self.cap);
+        builder = builder.timeout(
+            request
+                .timeout
+                .map_or(self.cap, |timeout| timeout.min(self.cap)),
+        );
         let response = builder.send().map_err(|error| {
-            if request.timeout.is_some() && error.is_timeout() {
-                TransportError::TimedOut
+            if deadline_bound && error.is_timeout() {
+                TransportError::DeadlineReached
             } else {
                 TransportError::Failed
             }
         })?;
-        OAuthResponse::read(response, request.max_body)
+        OAuthResponse::read(response, request.max_body, deadline_bound)
     }
 }
 
@@ -311,10 +345,14 @@ pub(super) fn http_client() -> Result<Client, reqwest::Error> {
         .https_only(true)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(60))
+        .timeout(REQUEST_TIMEOUT)
         .user_agent(concat!("qq/", env!("CARGO_PKG_VERSION")))
         .build()
 }
+
+/// The longest any one OAuth call may take. A request's own timeout only
+/// ever shortens it.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Whether `value` is an absolute HTTPS URL with a host. Verification URLs
 /// shown to the user come from the authorization server's response; only
@@ -340,8 +378,24 @@ pub(super) fn profile_credential_name(
     Ok(name)
 }
 
+/// Sends every request to a loopback server whose body stalls, through a
+/// [`SystemTransport`] with a short cap, so provider code runs the real
+/// timeout path.
 #[cfg(test)]
-mod tests {
+pub(crate) struct StalledBodyTransport(pub(crate) Duration);
+
+#[cfg(test)]
+impl OAuthTransport for StalledBodyTransport {
+    fn post(&self, request: OAuthRequest<'_>) -> Result<OAuthResponse, TransportError> {
+        tests::post_to_a_stalled_body(
+            &tests::loopback_transport().with_cap(self.0),
+            request.timeout,
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use std::{cell::Cell, collections::VecDeque};
 
     use super::*;
@@ -497,12 +551,13 @@ mod tests {
         assert_eq!(remaining.len(), 1);
     }
 
-    /// A response whose headers arrive but whose body then stalls past the
-    /// request's timeout is a timeout, not an unreadable body. The loopback
-    /// server holds the connection open until the client has given up, so
-    /// the timing cannot flake: the read can only end by timing out.
-    #[test]
-    fn a_body_that_stalls_past_the_timeout_is_a_timeout() {
+    /// Posts to a loopback server that sends response headers and one body
+    /// byte, then holds the connection open until the client has returned,
+    /// so the body read can only end by timing out.
+    pub(crate) fn post_to_a_stalled_body(
+        transport: &SystemTransport,
+        timeout: Option<Duration>,
+    ) -> Result<OAuthResponse, TransportError> {
         use std::{io::Write as _, net::TcpListener};
 
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -518,26 +573,48 @@ mod tests {
                 )
                 .unwrap();
             stream.flush().unwrap();
-            // Keep the body incomplete until the client has returned.
             finished.recv().unwrap();
         });
-        let transport = SystemTransport::with_client(
-            Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
-        );
         let result = transport.post(OAuthRequest {
             url: &url,
             body: OAuthBody::Form(vec![("grant_type", "device_code".to_owned())]),
             headers: &[],
-            timeout: Some(Duration::from_millis(200)),
-            max_body: 1024,
+            timeout,
+            max_body: 1024 * 1024,
         });
         done.send(()).unwrap();
         server.join().unwrap();
+        result
+    }
 
-        assert_eq!(result.err(), Some(TransportError::TimedOut));
+    pub(crate) fn loopback_transport() -> SystemTransport {
+        SystemTransport::with_client(
+            Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+        )
+    }
+
+    /// A body that stalls past the request's own deadline reaches that
+    /// deadline, rather than reading as an unreadable body.
+    #[test]
+    fn a_body_that_stalls_past_the_request_deadline_reaches_it() {
+        let result =
+            post_to_a_stalled_body(&loopback_transport(), Some(Duration::from_millis(200)));
+        assert_eq!(result.err(), Some(TransportError::DeadlineReached));
+    }
+
+    /// A request's deadline never extends the transport's cap: a call with
+    /// hours left still ends at the cap, as an ordinary failure, and so does
+    /// a call with no deadline at all.
+    #[test]
+    fn a_long_deadline_still_ends_at_the_transport_cap() {
+        let transport = loopback_transport().with_cap(Duration::from_millis(200));
+        for timeout in [Some(Duration::from_secs(2 * 60 * 60)), None] {
+            let result = post_to_a_stalled_body(&transport, timeout);
+            assert_eq!(result.err(), Some(TransportError::Failed), "{timeout:?}");
+        }
     }
 
     #[test]

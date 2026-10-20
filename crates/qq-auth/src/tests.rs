@@ -294,7 +294,7 @@ fn codex_failure(
     use codex::CodexAuthError as E;
     match error {
         E::TokenRequestFailed { .. } | E::DeviceRequestFailed => Err(oauth::TransportError::Failed),
-        E::DeviceAuthorizationTimedOut => Err(oauth::TransportError::TimedOut),
+        E::DeviceAuthorizationTimedOut => Err(oauth::TransportError::DeadlineReached),
         E::TokenRequestRejected { status, .. } | E::DeviceRequestRejected { status } => {
             Ok(response(status, serde_json::json!({})))
         }
@@ -2281,6 +2281,43 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
             .expose_secret_str()
             .unwrap(),
         access_token
+    );
+}
+
+/// The browser login's token exchange carries no device deadline, so a
+/// token endpoint whose body stalls past the transport cap fails it as an
+/// ordinary exchange failure, never as a device-authorization timeout.
+#[test]
+fn a_stalled_browser_exchange_is_an_exchange_failure_not_a_device_timeout() {
+    let (mut store, _keyring, _directory) = test_store();
+    store.oauth = Arc::new(oauth::StalledBodyTransport(Duration::from_millis(200)));
+
+    let browser = codex::exchange(&store, "code", "http://localhost/cb", "verifier", None)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            browser,
+            codex::CodexAuthError::TokenRequestFailed {
+                operation: "exchange"
+            }
+        ),
+        "{browser:?}"
+    );
+
+    // The device flow's exchange carries its remaining time and reaches it.
+    let device = codex::exchange(
+        &store,
+        "code",
+        "https://auth.openai.com/deviceauth/callback",
+        "verifier",
+        Some(Duration::from_millis(100)),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        matches!(device, codex::CodexAuthError::DeviceAuthorizationTimedOut),
+        "{device:?}"
     );
 }
 

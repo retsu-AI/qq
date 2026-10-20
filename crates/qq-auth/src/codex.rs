@@ -147,8 +147,11 @@ pub(super) fn exchange(
             timeout,
             max_body: MAX_TOKEN_RESPONSE_BYTES,
         })
+        // Only an exchange carrying a device login's deadline can reach it;
+        // the browser flow's exchange has none, so its timeouts are ordinary
+        // request failures.
         .map_err(|error| match error {
-            oauth::TransportError::TimedOut => CodexAuthError::DeviceAuthorizationTimedOut,
+            oauth::TransportError::DeadlineReached => CodexAuthError::DeviceAuthorizationTimedOut,
             oauth::TransportError::Failed => CodexAuthError::TokenRequestFailed {
                 operation: "exchange",
             },
@@ -256,7 +259,7 @@ pub(super) fn request_device_poll(
             max_body: MAX_DEVICE_RESPONSE_BYTES,
         })
         .map_err(|error| match error {
-            oauth::TransportError::TimedOut => CodexAuthError::DeviceAuthorizationTimedOut,
+            oauth::TransportError::DeadlineReached => CodexAuthError::DeviceAuthorizationTimedOut,
             oauth::TransportError::Failed => CodexAuthError::DeviceRequestFailed,
         })?;
     decode_poll(&response)
@@ -267,7 +270,7 @@ pub(super) fn decode_device_authorization(
     response: Response,
 ) -> Result<DeviceAuthorization, CodexAuthError> {
     decode_device_start(
-        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES)
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, true)
             .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
     )
 }
@@ -318,7 +321,7 @@ fn decode_device_start(
 #[cfg(test)]
 pub(super) fn decode_device_poll(response: Response) -> Result<DevicePoll, CodexAuthError> {
     decode_poll(
-        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES)
+        &oauth::OAuthResponse::read(response, MAX_DEVICE_RESPONSE_BYTES, true)
             .map_err(|_| CodexAuthError::DeviceAuthorizationTimedOut)?,
     )
 }
