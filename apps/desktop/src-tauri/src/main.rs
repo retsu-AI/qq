@@ -793,6 +793,17 @@ async fn auth_browser_sign_in(
     Ok(shown)
 }
 
+#[tauri::command]
+fn client_platform() -> &'static str {
+    if cfg!(target_os = "android") {
+        "android"
+    } else if cfg!(target_os = "ios") {
+        "ios"
+    } else {
+        "desktop"
+    }
+}
+
 fn main() {
     let engine = Arc::new(Engine::default());
     let shutdown_engine = Arc::clone(&engine);
@@ -852,6 +863,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            client_platform,
             launch_paths,
             recent_projects,
             open_project,

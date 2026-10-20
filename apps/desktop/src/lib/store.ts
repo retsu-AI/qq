@@ -6,6 +6,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
 import { drafts } from "./drafts";
+import { platform } from "./platform";
 import type { PendingFile, ProjectInfo, ProjectState } from "./types";
 
 interface AppSnapshot {
@@ -66,6 +67,7 @@ export function activeProject(app: AppSnapshot): ProjectState | null {
 
 /** Resolves to the opened project, or null when opening failed. */
 export async function openProject(path: string): Promise<ProjectInfo | null> {
+  if (!platform.features.localProjects) return null;
   try {
     const info = await api.openProject(path);
     const open = snapshot.open.some((p) => p.id === info.id)
@@ -121,6 +123,7 @@ export async function removeWorktree(projectId: string, force: boolean) {
 }
 
 export async function pickProject() {
+  if (!platform.features.localProjects) return;
   const path = await openDialog({
     directory: true,
     multiple: false,
@@ -137,6 +140,7 @@ export function activate(projectId: string) {
 }
 
 export async function checkTrust(projectId: string) {
+  if (!platform.features.hostConfiguration) return;
   try {
     const pending = await api.projectTrust(projectId);
     set({ trust: { ...snapshot.trust, [projectId]: pending } });
@@ -172,6 +176,7 @@ export async function refreshRecents() {
 }
 
 export function showProviders(open: boolean) {
+  if (!platform.features.hostConfiguration) return;
   set({ providersOpen: open });
 }
 
@@ -185,6 +190,8 @@ let started = false;
 export async function start() {
   if (started) return;
   started = true;
+  // Remote enrollment is deliberately unavailable until maintainer S2/S4 land.
+  if (platform.mobile) return;
   await listen<string[]>("open-paths", (event) => {
     for (const path of event.payload) void openProject(path);
   });

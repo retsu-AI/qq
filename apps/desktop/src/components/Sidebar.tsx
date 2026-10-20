@@ -44,6 +44,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Dropdown } from "./Dropdown";
 import { toast } from "../lib/toast";
 import { showWorktreeDialog } from "../lib/worktree-dialog";
+import { platform } from "../lib/platform";
 
 interface Props {
   app: {
@@ -53,9 +54,10 @@ interface Props {
   };
   project: ProjectState | null;
   openSettings: () => void;
+  onNavigate?: () => void;
 }
 
-export function Sidebar({ app, project, openSettings }: Props) {
+export function Sidebar({ app, project, openSettings, onNavigate }: Props) {
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [metadata, setMetadata] = useState<SessionPreferences>(() =>
@@ -122,7 +124,7 @@ export function Sidebar({ app, project, openSettings }: Props) {
       {project && (
         <div className="px-2 pb-2">
           <button
-            onClick={() => void api.newSession(project.project_id)}
+            onClick={() => { void api.newSession(project.project_id); onNavigate?.(); }}
             className={clsx(
               "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-hover",
               project.focused === null && "bg-active",
@@ -215,6 +217,7 @@ export function Sidebar({ app, project, openSettings }: Props) {
                       key={row.id}
                       row={row}
                       projectId={project.project_id}
+                      onNavigate={onNavigate}
                       active={row.id === project.focused}
                       archived={metadata.archived.includes(row.id)}
                       onChange={(update) => change(row.id, update)}
@@ -250,14 +253,14 @@ export function Sidebar({ app, project, openSettings }: Props) {
             <span className="text-faint"> · shared server</span>
           )}
         </span>
-        <button
+        {platform.features.hostConfiguration && <button
           onClick={() => showProviders(true)}
           title="Model providers"
           className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-muted hover:bg-hover hover:text-fg"
         >
           <KeyRound className="h-3.5 w-3.5" />
           Providers
-        </button>
+        </button>}
         <button
           onClick={openSettings}
           title="Settings (Ctrl ,)"
@@ -330,12 +333,12 @@ function ProjectSwitcher({
         })}
         onChange={activate}
         actions={[
-          {
+          ...(platform.features.localProjects ? [{
             label: "Open project…",
             icon: <FolderPlus className="h-3.5 w-3.5" />,
             onSelect: () => void pickProject(),
-          },
-          ...(active
+          }] : []),
+          ...(active && platform.features.worktrees
             ? [
                 {
                   label: "New worktree session…",
@@ -344,7 +347,7 @@ function ProjectSwitcher({
                 },
               ]
             : []),
-          ...(active?.worktree
+          ...(active?.worktree && platform.features.worktrees
             ? [
                 {
                   label: "Remove this worktree…",
@@ -462,12 +465,14 @@ function SessionItem({
   active,
   archived,
   onChange,
+  onNavigate,
 }: {
   row: SessionRow;
   projectId: string;
   active: boolean;
   archived: boolean;
   onChange: (update: { title?: string; archived?: boolean }) => void;
+  onNavigate?: () => void;
 }) {
   const working = row.status !== "idle";
   const [renaming, setRenaming] = useState(false);
@@ -494,7 +499,7 @@ function SessionItem({
         />
       ) : (
         <button
-          onClick={() => void api.focusSession(projectId, row.id)}
+          onClick={() => { void api.focusSession(projectId, row.id); onNavigate?.(); }}
           onDoubleClick={() => setRenaming(true)}
           aria-current={active ? "page" : undefined}
           className={clsx(
