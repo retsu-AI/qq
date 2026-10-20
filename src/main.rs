@@ -2130,7 +2130,7 @@ fn read_secret(prompt: &str) -> Result<auth::Secret, Box<dyn Error>> {
 
 /// The built-in provider `qq auth login` names, from the provider table.
 fn login_provider(id: &str) -> Option<config::BuiltinProvider> {
-    config::builtin_providers().find(|provider| provider.id == id)
+    config::builtin_provider(id)
 }
 
 /// Providers `qq auth login` accepts, in the order the error lists them.
@@ -2144,11 +2144,7 @@ fn login_providers() -> Vec<&'static str> {
 /// to: the table's for an API-key preset, `qq-auth`'s for a provider whose
 /// credential it owns (ADR-0064 §1).
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
-    Some(match login_provider(provider)?.audience {
-        config::BuiltinAudience::Table(audience) => audience,
-        config::BuiltinAudience::OpenAiCodex => auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT,
-        config::BuiltinAudience::XAi => auth::XAI_CREDENTIAL_ENDPOINT,
-    })
+    Some(runtime::builtin_audience(&login_provider(provider)?))
 }
 
 async fn run_blocking_command(

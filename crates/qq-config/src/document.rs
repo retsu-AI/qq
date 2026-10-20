@@ -2154,12 +2154,17 @@ impl MergeState {
                 let Some(ProviderAccess::Http(access)) = provider.access_mut().as_mut() else {
                     unreachable!("built-in HTTP presets are HTTP")
                 };
-                let (current_key, current_profile) = access.auth.builtin_slots();
-                if let (Some(field), Some(slot)) = (patch.api_key, current_key) {
-                    apply_optional(field, slot);
+                let crate::HttpCredential::Builtin {
+                    api_key, profile, ..
+                } = &mut access.auth
+                else {
+                    unreachable!("built-in HTTP presets use a built-in credential")
+                };
+                if let Some(field) = patch.api_key {
+                    apply_optional(field, api_key);
                 }
-                if let (Some(field), Some(slot)) = (patch.profile, current_profile) {
-                    apply_optional_string(field, slot);
+                if let Some(field) = patch.profile {
+                    apply_optional_string(field, profile);
                 }
                 apply_models(patch.models, provider.models_mut());
             }

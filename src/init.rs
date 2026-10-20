@@ -24,7 +24,7 @@ static CHOICES: std::sync::LazyLock<Vec<(&str, &str, Option<&str>)>> =
                 (
                     provider.id,
                     provider.init_model,
-                    provider.environment_variable,
+                    provider.environment_variable(),
                 )
             })
             .collect()
@@ -232,8 +232,8 @@ pub fn run<R: BufRead, W: Write>(
         "bedrock" | "bedrock-mantle" => {
             "sign in to AWS (AWS_PROFILE or the default credential chain)".to_owned()
         }
-        name => match config::builtin_providers().find(|provider| provider.id == name) {
-            Some(provider) => match (provider.login.first(), provider.environment_variable) {
+        name => match config::builtin_provider(name) {
+            Some(provider) => match (provider.login.first(), provider.environment_variable()) {
                 (Some(config::LoginMethod::OpenAiCodexBrowser), _) => {
                     format!("qq auth login {name:<12}    # signs in through the browser")
                 }
