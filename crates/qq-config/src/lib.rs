@@ -1155,6 +1155,20 @@ impl ProviderConfig {
         &self.models
     }
 
+    /// Effective context limit, including recognized gateway aliases.
+    /// Explicit per-deployment limits always take precedence.
+    #[must_use]
+    pub fn model_context_window(&self, model: &str) -> Option<u32> {
+        self.models
+            .get(model)
+            .and_then(ModelMetadata::context_window)
+            .or_else(|| {
+                self.uses_custom_endpoint()
+                    .then(|| models::gateway_context_window(model))
+                    .flatten()
+            })
+    }
+
     #[must_use]
     pub const fn kind(&self) -> ProviderKind {
         self.kind

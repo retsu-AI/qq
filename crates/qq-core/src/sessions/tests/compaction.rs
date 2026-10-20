@@ -1545,6 +1545,172 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
 }
 
 #[tokio::test]
+async fn manual_compaction_folds_all_portions_and_commits_only_the_final_summary() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text(format!("BEGIN {} END", "evidence ".repeat(12_000))),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("PARTIAL_ONLY")),
+            AutoCompactScript::Text(valid_summary("FINAL_ONLY")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let first = request_texts(&requests[2]).join("\n");
+    let last = request_texts(&requests[3]).join("\n");
+    assert!(first.contains("BEGIN"));
+    assert!(last.contains("END"));
+    assert!(last.contains("PARTIAL_ONLY"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("FINAL_ONLY"));
+    assert!(!summary.contains("PARTIAL_ONLY"));
+}
+
+#[tokio::test]
+async fn manual_fold_restart_discards_abandoned_truncated_summary() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::Truncated("ABANDONED partial summary".to_owned()),
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("intermediate")),
+            AutoCompactScript::Text(valid_summary("FINAL_RESTART")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("FINAL_RESTART"));
+    assert!(!summary.contains("ABANDONED"));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(!request_texts(&requests[4]).join("\n").contains("ABANDONED"));
+}
+
+#[tokio::test]
+async fn a_single_inherited_summary_recovers_at_the_same_cutoff() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Text(valid_summary("old summary")),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("replacement summary")),
+            AutoCompactScript::Text("recovered".to_owned()),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "continue".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests[2].messages().len(), 2);
+    assert_eq!(requests.len(), 5);
+    assert!(request_texts(&requests[4])[0].contains("replacement summary"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let cutoffs = connection
+        .prepare("SELECT cutoff_ordinal FROM session_compactions ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, u64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(cutoffs.len(), 2);
+    assert_eq!(cutoffs[0], cutoffs[1]);
+}
+
+#[tokio::test]
+async fn inherited_context_overflow_recovers_the_same_prompt_without_manual_compaction() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("first portion recovered")),
+            AutoCompactScript::Text(valid_summary("inherited history recovered")),
+            AutoCompactScript::Text("continued automatically".to_owned()),
+        ]),
+        AutoCompactScript::Text("follow up".to_owned()),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "continue".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )), "{:?}", observed.iter().filter_map(|event| match &event.event { SessionEvent::RunFinished { outcome, .. } => Some(outcome), _ => None }).collect::<Vec<_>>());
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(
+            crate::measure_messages(requests[3].messages())
+                < crate::measure_messages(requests[2].messages())
+        );
+        assert!(
+            request_texts(&requests[5])
+                .iter()
+                .any(|text| text == "continue")
+        );
+    }
+    let next = queue_prompt(&harness.runtime, harness.session_id, "after".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(next)).await;
+    let requests = harness.requests.lock().unwrap();
+    let replay = request_texts(requests.last().unwrap());
+    assert!(
+        replay
+            .iter()
+            .any(|text| text.contains("inherited history recovered")),
+        "{replay:?}"
+    );
+    assert!(replay.iter().any(|text| text == "continue"));
+    assert!(
+        !replay
+            .iter()
+            .any(|text| text == &"evidence ".repeat(12_000))
+    );
+}
+
+#[tokio::test]
 async fn a_context_overflow_failure_compacts_before_the_next_prompt() {
     // The provider rejects the first prompt as exceeding the model
     // context window while the session is still under the byte
@@ -1678,9 +1844,12 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
     let mut scripts = vec![AutoCompactScript::ReadNoteThenText("read it".to_owned())];
     scripts.extend((0..CONTEXT_PRUNE_KEEP_TURNS).map(|_| AutoCompactScript::Text("ok".to_owned())));
     scripts.extend([
-        AutoCompactScript::ContextOverflow,
-        AutoCompactScript::Text(valid_summary("the summary")),
-        AutoCompactScript::Text("recovered".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("the summary")),
+            AutoCompactScript::Text("recovered".to_owned()),
+        ]),
+        AutoCompactScript::Text("follow up".to_owned()),
     ]);
     let mut harness = auto_compact_harness(scripts).await;
     std::fs::write(harness.workspace_path.join("note.txt"), "n".repeat(600)).unwrap();
@@ -1701,14 +1870,19 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
         &event.event,
         SessionEvent::RunFinished {
             run_id,
-            outcome: RunOutcome::Failed { failure },
+            outcome: RunOutcome::Completed,
             ..
-        } if *run_id == overflow && failure.kind == RunFailureKind::ProviderContextExceeded
+        } if *run_id == overflow
     )));
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
     let requests_before_retry = harness.requests.lock().unwrap().len();
     {
         let requests = harness.requests.lock().unwrap();
-        let overflowing = requests.last().unwrap();
+        let overflowing = &requests[requests.len() - 3];
         assert!(
             overflowing
                 .messages()
@@ -1724,18 +1898,15 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
 
     let retry = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(retry)).await;
-    let compacted = position_of(&observed, |event| {
-        matches!(event, SessionEvent::SessionCompacted { .. })
-    });
-    let prompt_started = position_of(
-        &observed,
-        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == retry),
+    assert!(
+        observed
+            .iter()
+            .all(|event| !matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    assert!(compacted < prompt_started);
     assert_eq!(
         harness.requests.lock().unwrap().len(),
-        requests_before_retry + 2,
-        "compaction then the retry: the known overflow is never re-sent"
+        requests_before_retry + 1,
+        "the follow-up needs no manual retry or second compaction"
     );
 }
 
@@ -4190,8 +4361,15 @@ async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempt
         !message.contains("summarizer step"),
         "an oversized unit is not a spent retry: {message}"
     );
-    // Seed, one summarizer attempt, nothing else.
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    // Seed plus the initial summarizer request and three strictly smaller attempts.
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 9);
+    for pair in requests[1..].windows(2) {
+        assert!(
+            crate::measure_messages(pair[1].messages())
+                < crate::measure_messages(pair[0].messages())
+        );
+    }
 }
 
 #[tokio::test]
@@ -4214,11 +4392,17 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text("invalid summary".to_owned()),
             ]),
             // The retry compacts first: step two ("b" folded with the
             // summary) is rejected; the retry then runs from the summary
             // alone and the provider rejects that too.
-            AutoCompactScript::ContextOverflow,
+            // The next admission sees the failed fold, rejects an invalid
+            // summary, then sends the summary-only downgrade.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text("invalid summary".to_owned()),
+                AutoCompactScript::ContextOverflow,
+            ]),
         ],
         Some(window),
     )
@@ -4265,14 +4449,13 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
         ),
         "{outcome:?}"
     );
-    // Two seeds; step one; prompt three's rejected send; step two; the
-    // summary-only retry. The known-overflowing shape was never resent, and
-    // the downgraded request carried the summary in place of "b".
+    // The summary-only retry can now recover its single inherited message.
+    // Its provider also rejects summarization; bounded recovery commits nothing.
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 6);
+    assert_eq!(requests.len(), 9);
     let steps = summarizer_requests(&requests);
-    assert_eq!(steps.len(), 2, "{steps:?}");
-    let downgraded = request_texts(requests.last().unwrap());
+    assert_eq!(steps.len(), 5, "{steps:?}");
+    let downgraded = request_texts(&requests[6]);
     assert!(downgraded[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
     assert!(downgraded[0].contains("step one"));
     assert!(
@@ -5254,7 +5437,7 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
         matches!(
             &outcome,
             RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Policy, message } }
-                if message.contains("in-run compaction did not produce") && message.contains("summarizer failed")
+                if message.contains("automatic context recovery") && message.contains("summarizer failed")
         ),
         "{outcome:?}"
     );
@@ -5761,11 +5944,12 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text("invalid summary".to_owned()),
             ]),
             // The retry's step two is rejected too: the fold is exhausted.
             // The retry then runs from the summary alone and completes.
             AutoCompactScript::Sequence(vec![
-                AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text("invalid summary".to_owned()),
                 AutoCompactScript::Text("recovered".to_owned()),
             ]),
         ],

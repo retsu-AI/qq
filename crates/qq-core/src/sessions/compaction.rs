@@ -670,6 +670,7 @@ pub(super) fn start_in_run_compaction(
     prompt_run: &ClaimedRun,
     resolved_model: &ResolvedModel,
     turn_cutoff: u32,
+    inherited_prefix: bool,
 ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
     let run_id = RunId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
     let command_id = CommandId::generate().map_err(|_| SessionRuntimeError::Unavailable)?;
@@ -757,6 +758,15 @@ pub(super) fn start_in_run_compaction(
             activity: RunActivity::Compacting,
         },
     )?;
+    let inherited_cutoff = if inherited_prefix {
+        Some(transaction.query_row(
+            "SELECT m.ordinal - 1 FROM messages m JOIN runs r ON r.user_message_id=m.id WHERE r.id=?1 AND m.session_id=?2",
+            params![prompt_run.identity.run_id.to_string(), prompt_run.identity.session_id.to_string()],
+            |row| row.get::<_, u64>(0),
+        )?)
+    } else {
+        None
+    };
     transaction.commit()?;
     let mut claimed = prompt_run.panic_settlement_claim();
     claimed.origin = Some(qq_protocol::RunOrigin::InRunCompaction {
@@ -769,7 +779,7 @@ pub(super) fn start_in_run_compaction(
     claimed.goal_spend_owner = prompt_run
         .goal_spend_owner
         .or_else(|| prompt_run.goal.as_ref().map(|goal| goal.goal_id));
-    claimed.compaction_cutoff_ordinal = None;
+    claimed.compaction_cutoff_ordinal = inherited_cutoff;
     claimed.in_run_turn_cutoff = Some((prompt_run.identity.run_id, turn_cutoff));
     Ok(Some((claimed, started)))
 }
@@ -840,9 +850,12 @@ pub(super) fn complete_in_run_compaction(
         let record = render_compaction_record(
             &transaction,
             session,
-            RecordScope::Run {
-                run_id: scope_run_id,
-                turn_cutoff,
+            match claimed.compaction_cutoff_ordinal {
+                Some(cutoff_ordinal) => RecordScope::Session { cutoff_ordinal },
+                None => RecordScope::Run {
+                    run_id: scope_run_id,
+                    turn_cutoff,
+                },
             },
             record_budget,
         )?;
@@ -851,16 +864,17 @@ pub(super) fn complete_in_run_compaction(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
                      before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff, goal_notice
-                 ) VALUES (?1, ?2, ?3, 0, ?4, 0, ?5, ?6, ?7, ?8)",
+                 ) VALUES (?1, ?2, ?3, ?9, ?4, 0, ?5, ?6, ?7, ?8)",
             params![
                 session.to_string(),
                 claimed.identity.run_id.to_string(),
                 summary,
                 u64::try_from(before_bytes).unwrap_or(u64::MAX),
                 now,
-                scope_run_id.to_string(),
-                turn_cutoff,
+                claimed.compaction_cutoff_ordinal.is_none().then(|| scope_run_id.to_string()),
+                claimed.compaction_cutoff_ordinal.is_none().then_some(turn_cutoff),
                 goal_notice,
+                claimed.compaction_cutoff_ordinal.unwrap_or(0),
             ],
         )?;
         let after_bytes = assembled_context_bytes(&transaction, session)?;
@@ -913,7 +927,12 @@ pub(super) fn complete_in_run_compaction(
             // with the new one (ADR-0048 § 1). The summary is framed exactly
             // as the live splice frames it.
             let framed_summary_bytes = crate::measure_message(&Message::user(format!(
-                "{IN_RUN_COMPACTION_PREAMBLE}\n\n{summary}"
+                "{}\n\n{summary}",
+                if claimed.compaction_cutoff_ordinal.is_some() {
+                    COMPACTION_SUMMARY_PREAMBLE
+                } else {
+                    IN_RUN_COMPACTION_PREAMBLE
+                }
             )));
             let context_base_bytes =
                 i64::try_from(retained_bytes.saturating_add(framed_summary_bytes))
