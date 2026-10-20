@@ -140,18 +140,15 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
-    pub(crate) async fn record_process(
+    pub(crate) fn record_process(
         &self,
         id: qq_protocol::ToolCallId,
         receipt: Box<super::process_context::ExecutionContextReceipt>,
-    ) -> Result<(), crate::sessions::SessionRuntimeError> {
-        if let Some(recorder) = self.tasks.process_recorder.get()
-            && let Err(error) = recorder(id, receipt).await
-        {
-            self.tasks.unrecorded_process.store(true, Ordering::Release);
-            return Err(error);
-        }
-        Ok(())
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.process_recorder.get() else {
+            return Box::pin(async { Ok(()) });
+        };
+        self.record(recorder(id, receipt), RecordKind::Process)
     }
 
     pub(super) fn output_record(
@@ -160,17 +157,21 @@ impl ToolTaskLease {
         bytes: &[u8],
     ) -> Option<RecordFuture> {
         let recorder = self.tasks.output_recorder.get()?;
-        let write = recorder(id, bytes.to_vec());
-        let mut record = OutputRecordGuard {
+        Some(self.record(recorder(id, bytes.to_vec()), RecordKind::Output))
+    }
+
+    fn record(&self, write: RecordFuture, kind: RecordKind) -> RecordFuture {
+        let mut record = RecordGuard {
             tasks: Arc::clone(&self.tasks),
             completed: false,
+            kind,
         };
-        Some(Box::pin(async move {
+        Box::pin(async move {
             let result = write.await;
             record.completed = result.is_ok();
             drop(record);
             result
-        }))
+        })
     }
 
     pub(crate) fn process_started(&mut self) {
@@ -181,14 +182,24 @@ impl ToolTaskLease {
     }
 }
 
-struct OutputRecordGuard {
+enum RecordKind {
+    Process,
+    Output,
+}
+
+struct RecordGuard {
     tasks: Arc<ToolTaskState>,
     completed: bool,
+    kind: RecordKind,
 }
-impl Drop for OutputRecordGuard {
+impl Drop for RecordGuard {
     fn drop(&mut self) {
         if !self.completed {
-            self.tasks.unrecorded_output.store(true, Ordering::Release);
+            let failed = match self.kind {
+                RecordKind::Process => &self.tasks.unrecorded_process,
+                RecordKind::Output => &self.tasks.unrecorded_output,
+            };
+            failed.store(true, Ordering::Release);
         }
     }
 }

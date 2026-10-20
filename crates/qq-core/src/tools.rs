@@ -4542,6 +4542,65 @@ mod tests {
 
     #[cfg(any(unix, windows))]
     #[tokio::test]
+    async fn stalled_process_receipt_cannot_delay_cancellation_or_timeout() {
+        for expire in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let tasks = ToolTasks::default();
+            let cancelled = RunCancellation::new();
+            let (sender, spawned) = tokio::sync::oneshot::channel();
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let hook = std::sync::Mutex::new(Some((sender, gate)));
+            tasks
+                .set_process_recorder(move |_, receipt| {
+                    let (sender, gate) = hook.lock().unwrap().take().unwrap();
+                    sender.send(receipt.facts().pid).unwrap();
+                    async move {
+                        gate.await.unwrap();
+                        Ok(())
+                    }
+                })
+                .unwrap();
+            let execution = tokio::spawn(dispatch::execute_with_images(
+                workspace,
+                Arc::default(),
+                "shell".to_owned(),
+                PANIC_SHELL_ARGUMENTS.to_owned(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Some(qq_protocol::ToolCallId::generate().unwrap()),
+            ));
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+                .await
+                .unwrap()
+                .unwrap();
+            let stopped = shell::observe_shell_termination(pid);
+            if expire {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(121)).await;
+                tokio::time::resume();
+            } else {
+                cancelled.cancel();
+            }
+            let terminated = tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await;
+            release.send(()).unwrap();
+            let result = execution.await.unwrap();
+            tasks.drain().await.unwrap();
+            assert!(
+                matches!(terminated, Ok(Ok(()))),
+                "receipt persistence must not extend execution (timeout={expire})"
+            );
+            assert!(result.is_error);
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
     async fn panicked_shell_task_never_reports_confirmed_quiescence() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();

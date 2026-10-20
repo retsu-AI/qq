@@ -186,6 +186,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::small_output_chunks_reach_the_durable_journal_without_omissions
           bash .github/scripts/test-exact.sh command_owner::tests::a_stalled_output_write_cannot_extend_the_task_execution_deadline
           bash .github/scripts/test-exact.sh tools::tests::dropped_durable_output_recording_is_not_a_clean_drain
+          bash .github/scripts/test-exact.sh tools::tests::stalled_process_receipt_cannot_delay_cancellation_or_timeout
       - name: Unix output and observer regressions
         if: runner.os == 'macOS'
         shell: bash

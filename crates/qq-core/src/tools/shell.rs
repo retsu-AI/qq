@@ -409,17 +409,38 @@ pub(super) async fn run_shell(
             let _ = hook.release.await;
         }
     }
-    // This write belongs to the execution task, not its result/output observer.
-    // Cancellation drops that observer but drains this task through persistence and reap.
-    if let (Some(id), Some(receipt)) = (call_id, receipt.as_ref())
-        && let Err(error) = process.record_process(id, receipt.clone()).await
-    {
-        return match stop_shell(&mut child, &mut guard, process).await {
-            Ok(()) => {
-                ToolOutput::unobserved(format!("could not persist the command process: {error}"))
+    // Keep the persistence future owned through acknowledgement, but terminate
+    // the child promptly if cancellation or the command deadline wins first.
+    if let (Some(id), Some(receipt)) = (call_id, receipt.as_ref()) {
+        let mut write = process.record_process(id, receipt.clone());
+        let deadline = tokio::time::Instant::from_std(preparation_deadline);
+        let interrupted = tokio::select! {
+            biased;
+            () = cancelled.cancelled() => Some("tool execution was cancelled"),
+            () = tokio::time::sleep_until(deadline) => Some("command timed out"),
+            result = &mut write => {
+                if let Err(error) = result {
+                    return match stop_shell(&mut child, &mut guard, process).await {
+                        Ok(()) => ToolOutput::unobserved(format!("could not persist the command process: {error}")),
+                        Err(message) => ToolOutput::unobserved(message),
+                    };
+                }
+                None
             }
-            Err(message) => ToolOutput::unobserved(message),
         };
+        if let Some(reason) = interrupted {
+            let stopped = stop_shell(&mut child, &mut guard, process).await;
+            let recorded = write.await;
+            let mut output = match (stopped, recorded) {
+                (Err(message), _) => ToolOutput::unobserved(message),
+                (_, Err(error)) => ToolOutput::unobserved(format!(
+                    "could not persist the command process: {error}"
+                )),
+                (Ok(()), Ok(())) => ToolOutput::interrupted(reason),
+            };
+            output.execution_context = receipt.clone().into();
+            return output;
+        }
     }
     #[cfg(test)]
     {
