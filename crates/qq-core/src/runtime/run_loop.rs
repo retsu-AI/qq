@@ -1265,7 +1265,7 @@ impl RunState {
                             ));
                         if still_overflows && let Some(compactor) = compactor.as_ref() {
                             let run_start = reducible_messages.saturating_add(1 + usize::from(goal.is_some()));
-                            let inherited_prefix = provider_rejected_window && reducible_messages > 1 && !run.inherited_compaction_attempted
+                            let inherited_prefix = provider_rejected_window && reducible_messages > 0 && !run.inherited_compaction_attempted
                                 && sessions::in_run_compaction_boundary(&messages[run_start..], sessions::CONTEXT_PRUNE_KEEP_TURNS).is_none();
                             let boundary = if inherited_prefix {
                                 Some((0, 0))
@@ -2010,6 +2010,10 @@ impl RunState {
                                         && run.summary_fold.split(Arc::make_mut(messages))
                                     {
                                         run.summary_fold_requests += 1;
+                                        env.reducible_messages = messages.len().saturating_sub(1);
+                                        env.inherited_effects.clear();
+                                        window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
+                                        window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
                                         window.compatible_request = None;
                                         yield TurnStep::NextTurn; return;
                                     }
@@ -2025,7 +2029,7 @@ impl RunState {
                                         && attempt.pending_calls.is_empty()
                                         && !attempt.reasoning_observed
                                         && attempt.replay.is_none()
-                                        && (reducible_messages > 1 && !run.inherited_compaction_attempted || sessions::in_run_compaction_boundary(
+                                        && (reducible_messages > 0 && !run.inherited_compaction_attempted || sessions::in_run_compaction_boundary(
                                             &messages[reducible_messages.saturating_add(1)..],
                                             sessions::CONTEXT_PRUNE_KEEP_TURNS,
                                         ).is_some());
@@ -3140,6 +3144,10 @@ impl RunState {
                          }).collect::<String>();
                          if let Some(next) = run.summary_fold.advance(summary) {
                              *messages = Arc::new(next);
+                             env.reducible_messages = messages.len().saturating_sub(1);
+                             env.inherited_effects.clear();
+                             window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
+                             window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
                              window.compatible_request = None;
                              yield TurnStep::NextTurn; return;
                          }

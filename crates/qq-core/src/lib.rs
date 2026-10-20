@@ -2888,6 +2888,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_fold_request_weights_match_each_replaced_transcript() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(
+                    vec![
+                        vec![Err(ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "overflow".to_owned(),
+                        })],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "partial".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Completed { usage: None }),
+                        ],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "final".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Completed { usage: None }),
+                        ],
+                    ]
+                    .into(),
+                ),
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![
+                    Message::user("evidence ".repeat(12_000)),
+                    Message::user(sessions::COMPACTION_INSTRUCTION),
+                ],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::restricted().summarizer(plan::PromptPrefixKey {
+                    tools: None,
+                    guidance: false,
+                    subagent: None,
+                }),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let weights = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::Prepared { weight, .. } => Some(weight),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(weights.len(), 3);
+        for (weight, request) in weights.iter().zip(requests.iter()) {
+            let boundary = request.messages().len() - 1;
+            assert_eq!(
+                weight.reducible_message_bytes,
+                measure_messages(&request.messages()[..boundary])
+            );
+            assert_eq!(
+                weight.irreducible_message_bytes,
+                measure_messages(&request.messages()[boundary..])
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn direct_run_rejects_a_known_context_overflow_before_provider_work() {
         struct CountingProvider(Arc<AtomicUsize>);
 

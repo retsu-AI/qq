@@ -1585,6 +1585,44 @@ async fn manual_compaction_folds_all_portions_and_commits_only_the_final_summary
 }
 
 #[tokio::test]
+async fn a_single_inherited_summary_recovers_at_the_same_cutoff() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Text(valid_summary("old summary")),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("replacement summary")),
+            AutoCompactScript::Text("recovered".to_owned()),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "continue".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests[2].messages().len(), 2);
+    assert_eq!(requests.len(), 5);
+    assert!(request_texts(&requests[4])[0].contains("replacement summary"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let cutoffs = connection
+        .prepare("SELECT cutoff_ordinal FROM session_compactions ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, u64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(cutoffs.len(), 2);
+    assert_eq!(cutoffs[0], cutoffs[1]);
+}
+
+#[tokio::test]
 async fn inherited_context_overflow_recovers_the_same_prompt_without_manual_compaction() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text("evidence ".repeat(12_000)),
@@ -4380,14 +4418,13 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
         ),
         "{outcome:?}"
     );
-    // Two seeds; step one; prompt three's rejected send; step two; the
-    // summary-only retry. The known-overflowing shape was never resent, and
-    // the downgraded request carried the summary in place of "b".
+    // The summary-only retry can now recover its single inherited message.
+    // Its provider also rejects summarization; bounded recovery commits nothing.
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 7);
+    assert_eq!(requests.len(), 9);
     let steps = summarizer_requests(&requests);
-    assert_eq!(steps.len(), 3, "{steps:?}");
-    let downgraded = request_texts(requests.last().unwrap());
+    assert_eq!(steps.len(), 5, "{steps:?}");
+    let downgraded = request_texts(&requests[6]);
     assert!(downgraded[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
     assert!(downgraded[0].contains("step one"));
     assert!(

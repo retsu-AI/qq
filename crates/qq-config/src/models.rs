@@ -430,6 +430,7 @@ pub(crate) fn gateway_context_window(model: &str) -> Option<u32> {
         .or_else(|| model.strip_prefix("eu."))
         .or_else(|| model.strip_prefix("apac."))
         .or_else(|| model.strip_prefix("global."))
+        .filter(|alias| alias.starts_with("anthropic."))
         .unwrap_or(model);
     let anthropic = model.strip_prefix("anthropic.");
     MODELS
@@ -504,7 +505,16 @@ mod tests {
             assert_eq!(gateway_context_window(id), Some(1_000_000), "{id}");
         }
         assert_eq!(gateway_context_window("gpt-6.1-sol"), Some(272_000));
-        for id in ["unknown", "my-claude-opus-5-5", "claude-opus-5-5-custom"] {
+        for id in [
+            "unknown",
+            "my-claude-opus-5-5",
+            "claude-opus-5-5-custom",
+            "us.gpt-4o",
+            "eu.gpt-4o",
+            "apac.gpt-4o",
+            "global.gpt-4o",
+            "us.claude-opus-5-5",
+        ] {
             assert_eq!(gateway_context_window(id), None, "{id}");
         }
     }
