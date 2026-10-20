@@ -432,49 +432,34 @@ fn credential_check(
                     reference(secret, Some(access.endpoint()))
                 }
             },
-            config::HttpCredential::ApiKey {
-                explicit,
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                audience,
-            } => match explicit {
-                Some(secret) => reference(secret, Some(audience)),
-                None => {
-                    let mut variables = Vec::with_capacity(1 + alternate_variables.len());
-                    variables.push(*environment_variable);
-                    variables.extend_from_slice(alternate_variables);
-                    stored_then_env(stored_name, &variables, Some(audience))
-                }
-            },
-            config::HttpCredential::OpenAiCodex { profile } => {
-                let stored_name =
-                    format!("openai-codex/{}", profile.as_deref().unwrap_or("default"));
-                match store.status(&stored_name) {
-                    Ok(Some(item)) => Check::ok(
-                        NAME,
-                        format!("{provider_id}: stored {stored_name} ({})", item.backend),
-                    ),
-                    Ok(None) => Check::fail(
-                        NAME,
-                        format!("{provider_id}: none found"),
-                        "run `qq auth login openai-codex`",
-                    ),
-                    Err(error) => Check::fail(
-                        NAME,
-                        format!("{provider_id}: {error}"),
-                        "the credential store could not be read; see the credential store check",
-                    ),
+            config::HttpCredential::Builtin {
+                provider,
+                api_key,
+                profile,
+            } => {
+                let audience = crate::runtime::builtin_audience(provider);
+                let stored_name = provider.stored_name(profile.as_deref());
+                match (api_key, provider.variables) {
+                    (Some(secret), _) => reference(secret, Some(audience)),
+                    (None, []) => match store.status(&stored_name) {
+                        Ok(Some(item)) => Check::ok(
+                            NAME,
+                            format!("{provider_id}: stored {stored_name} ({})", item.backend),
+                        ),
+                        Ok(None) => Check::fail(
+                            NAME,
+                            format!("{provider_id}: none found"),
+                            format!("run `qq auth login {}`", provider.id),
+                        ),
+                        Err(error) => Check::fail(
+                            NAME,
+                            format!("{provider_id}: {error}"),
+                            "the credential store could not be read; see the credential store check",
+                        ),
+                    },
+                    (None, variables) => stored_then_env(&stored_name, variables, Some(audience)),
                 }
             }
-            config::HttpCredential::XAi { api_key, profile } => match api_key {
-                Some(secret) => reference(secret, Some(auth::XAI_CREDENTIAL_ENDPOINT)),
-                None => stored_then_env(
-                    &format!("xai/{}", profile.as_deref().unwrap_or("default")),
-                    &["XAI_API_KEY"],
-                    Some(auth::XAI_CREDENTIAL_ENDPOINT),
-                ),
-            },
         },
         Some(
             config::ProviderAccess::AmazonBedrock { auth, .. }

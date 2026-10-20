@@ -75,7 +75,8 @@ pub use document::{
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
 };
 pub use providers::{
-    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_providers, provider_credential_variables,
+    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_provider, builtin_providers,
+    provider_credential_variables,
 };
 
 /// All process-dependent inputs captured before a configuration load begins.
@@ -1028,37 +1029,16 @@ pub enum UsageType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HttpCredential {
     Configured(ProviderAuth),
-    ApiKey {
-        explicit: Option<SecretRef>,
-        stored_name: &'static str,
-        environment_variable: &'static str,
-        /// Further variables accepted after `environment_variable`, in
-        /// precedence order, for providers whose SDKs read more than one.
-        alternate_variables: &'static [&'static str],
-        audience: &'static str,
-    },
-    OpenAiCodex {
-        profile: Option<String>,
-    },
-    XAi {
+    /// A built-in provider's credential (ADR-0064 §4): an explicit API-key
+    /// reference, else the stored `<id>/<profile>` credential, else the
+    /// row's environment variables. `provider.audience` names who owns the
+    /// credential and so which resolver reads it. The configuration patch
+    /// sets only the fields its provider accepts.
+    Builtin {
+        provider: BuiltinProvider,
         api_key: Option<SecretRef>,
         profile: Option<String>,
     },
-}
-
-impl HttpCredential {
-    /// The patchable credential slots of a built-in HTTP preset: its explicit
-    /// API key and its profile, where the credential has them.
-    pub(crate) fn builtin_slots(
-        &mut self,
-    ) -> (Option<&mut Option<SecretRef>>, Option<&mut Option<String>>) {
-        match self {
-            Self::ApiKey { explicit, .. } => (Some(explicit), None),
-            Self::OpenAiCodex { profile } => (None, Some(profile)),
-            Self::XAi { api_key, profile } => (Some(api_key), Some(profile)),
-            Self::Configured(_) => (None, None),
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1205,11 +1185,9 @@ impl ProviderConfig {
             Some(ProviderAccess::Http(access)) => {
                 (match &access.auth {
                     HttpCredential::Configured(auth) => auth.contains_literal_secret(),
-                    HttpCredential::ApiKey { explicit, .. }
-                    | HttpCredential::XAi {
-                        api_key: explicit, ..
-                    } => explicit.as_ref().is_some_and(SecretRef::is_literal),
-                    HttpCredential::OpenAiCodex { .. } => false,
+                    HttpCredential::Builtin { api_key, .. } => {
+                        api_key.as_ref().is_some_and(SecretRef::is_literal)
+                    }
                 }) || !access.headers.is_empty()
             }
             Some(

@@ -5031,16 +5031,28 @@ fn builtin_provider_patches_layer_over_their_presets() {
     assert_eq!((kind, usage), (ProviderKind::OpenAi, UsageType::Metered));
     assert_eq!(access.endpoint(), "https://api.openai.com/v1/responses");
     assert_eq!(access.api(), ProviderApi::OpenAiResponses);
+    let builtin = |access: &HttpAccess| match access.auth() {
+        HttpCredential::Builtin {
+            provider,
+            api_key,
+            profile,
+        } => (
+            *provider,
+            provider.stored_name(profile.as_deref()),
+            api_key.clone(),
+            profile.clone(),
+        ),
+        HttpCredential::Configured(auth) => panic!("configured {auth:?}"),
+    };
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "openai/default");
+    assert_eq!(provider.variables, ["OPENAI_API_KEY"]);
     assert_eq!(
-        access.auth(),
-        &HttpCredential::ApiKey {
-            explicit: Some(SecretRef::Env("MY_OPENAI_KEY".to_owned())),
-            stored_name: "openai/default",
-            environment_variable: "OPENAI_API_KEY",
-            alternate_variables: &[],
-            audience: "https://api.openai.com",
-        }
+        provider.audience,
+        BuiltinAudience::Table("https://api.openai.com")
     );
+    assert_eq!(api_key, Some(SecretRef::Env("MY_OPENAI_KEY".to_owned())));
+    assert_eq!(profile, None);
 
     let (kind, usage, access) = http("openai-codex");
     assert_eq!(
@@ -5051,37 +5063,35 @@ fn builtin_provider_patches_layer_over_their_presets() {
         access.endpoint(),
         "https://chatgpt.com/backend-api/codex/responses"
     );
-    assert_eq!(
-        access.auth(),
-        &HttpCredential::OpenAiCodex {
-            profile: Some("work".to_owned())
-        }
-    );
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "openai-codex/work");
+    assert_eq!(provider.variables, [] as [&str; 0]);
+    assert_eq!(provider.audience, BuiltinAudience::OpenAiCodex);
+    assert_eq!((api_key, profile), (None, Some("work".to_owned())));
 
     let (kind, _, access) = http("anthropic");
     assert_eq!(kind, ProviderKind::Anthropic);
     assert_eq!(access.api(), ProviderApi::AnthropicMessages);
-    assert!(matches!(
-        access.auth(),
-        HttpCredential::ApiKey {
-            stored_name: "anthropic/default",
-            environment_variable: "ANTHROPIC_API_KEY",
-            ..
-        }
-    ));
+    let (provider, stored, api_key, _) = builtin(&access);
+    assert_eq!(stored, "anthropic/default");
+    assert_eq!(provider.variables, ["ANTHROPIC_API_KEY"]);
+    assert_eq!(
+        provider.audience,
+        BuiltinAudience::Table("https://api.anthropic.com")
+    );
+    assert_eq!(api_key, Some(SecretRef::Env("A_KEY".to_owned())));
 
     let (kind, _, access) = http("google");
     assert_eq!(kind, ProviderKind::Google);
     assert_eq!(access.endpoint_mode(), EndpointMode::Base);
-    assert!(matches!(
-        access.auth(),
-        HttpCredential::ApiKey {
-            explicit: Some(SecretRef::Stored(name)),
-            environment_variable: "GEMINI_API_KEY",
-            alternate_variables,
-            ..
-        } if name == "google/work" && *alternate_variables == ["GOOGLE_API_KEY"]
-    ));
+    let (provider, stored, api_key, _) = builtin(&access);
+    assert_eq!(stored, "google/default");
+    assert_eq!(provider.variables, ["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+    assert_eq!(
+        provider.audience,
+        BuiltinAudience::Table("https://generativelanguage.googleapis.com")
+    );
+    assert_eq!(api_key, Some(SecretRef::Stored("google/work".to_owned())));
 
     let (kind, usage, access) = http("xai");
     assert_eq!(
@@ -5089,11 +5099,15 @@ fn builtin_provider_patches_layer_over_their_presets() {
         (ProviderKind::XAi, UsageType::CredentialDependent)
     );
     assert_eq!(access.api(), ProviderApi::OpenAiChatCompletions);
+    let (provider, stored, api_key, profile) = builtin(&access);
+    assert_eq!(stored, "xai/work");
+    assert_eq!(provider.variables, ["XAI_API_KEY"]);
+    assert_eq!(provider.audience, BuiltinAudience::XAi);
     assert_eq!(
-        access.auth(),
-        &HttpCredential::XAi {
-            api_key: Some(SecretRef::Env("X_KEY".to_owned())),
-            profile: Some("work".to_owned()),
-        }
+        (api_key, profile),
+        (
+            Some(SecretRef::Env("X_KEY".to_owned())),
+            Some("work".to_owned())
+        )
     );
 }

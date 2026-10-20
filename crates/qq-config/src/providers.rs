@@ -17,11 +17,6 @@ pub(crate) const GOOGLE_CREDENTIAL_ENDPOINT: &str = "https://generativelanguage.
 pub(crate) const XAI_ENDPOINT: &str = "https://api.x.ai/v1";
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
-/// The API-key variable xAI reads when nothing is stored. xAI's credential is
-/// a `HttpCredential::XAi` (OAuth or key) whose resolver reads this variable;
-/// its table row names it so the published list stays complete.
-pub const XAI_API_KEY_VARIABLE: &str = "XAI_API_KEY";
-
 /// One built-in HTTP provider: everything that differs between them, as
 /// data. Adding a preset adds a row here (ADR-0064); `builtin()`, the
 /// credential-variable list and patch application read the table.
@@ -34,7 +29,10 @@ pub(crate) struct BuiltinHttpProvider {
     api: ProviderApi,
     usage: UsageType,
     catalog: BuiltinCatalog,
-    pub(crate) credential: BuiltinCredential,
+    /// Who defines the credential's audience, and so which resolver reads it.
+    audience: BuiltinAudience,
+    /// The variables read when nothing is stored, in precedence order.
+    variables: &'static [&'static str],
     /// How `qq auth login <id>` may obtain this provider's credential, in
     /// the order the CLI documents them; the first is the default.
     login: &'static [LoginMethod],
@@ -61,15 +59,31 @@ pub enum LoginMethod {
 /// The public view of one built-in HTTP provider's row: what the CLI, `qq
 /// init`, the doctor and credential resolution need, with no
 /// configuration types.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuiltinProvider {
     pub id: &'static str,
     /// Where this provider's credential audience comes from.
     pub audience: BuiltinAudience,
-    /// The variable read when nothing is stored, if any.
-    pub environment_variable: Option<&'static str>,
+    /// The variables read when nothing is stored, in precedence order: the
+    /// canonical name first, then any aliases the vendor's SDKs also read.
+    pub variables: &'static [&'static str],
     pub login: &'static [LoginMethod],
     pub init_model: &'static str,
+}
+
+impl BuiltinProvider {
+    /// The canonical variable read when nothing is stored, if any.
+    #[must_use]
+    pub fn environment_variable(&self) -> Option<&'static str> {
+        self.variables.first().copied()
+    }
+
+    /// The stored credential name for `profile`: `<id>/<profile>`, with
+    /// `default` when none is configured. `qq auth login <id>` writes it.
+    #[must_use]
+    pub fn stored_name(&self, profile: Option<&str>) -> String {
+        format!("{}/{}", self.id, profile.unwrap_or("default"))
+    }
 }
 
 /// Where a built-in provider's credential audience is defined. API-key
@@ -90,74 +104,27 @@ pub enum BuiltinAudience {
 pub fn builtin_providers() -> impl Iterator<Item = BuiltinProvider> {
     let mut rows: Vec<&'static BuiltinHttpProvider> = BUILTIN_HTTP_PROVIDERS.iter().collect();
     rows.sort_by_key(|row| row.display_order);
-    rows.into_iter().map(|row| BuiltinProvider {
-        id: row.id,
-        audience: match row.credential {
-            BuiltinCredential::ApiKey { audience, .. } => BuiltinAudience::Table(audience),
-            BuiltinCredential::OpenAiCodex => BuiltinAudience::OpenAiCodex,
-            BuiltinCredential::XAi { .. } => BuiltinAudience::XAi,
-        },
-        environment_variable: row.credential.variables().next(),
-        login: row.login,
-        init_model: row.init_model,
-    })
+    rows.into_iter().map(BuiltinHttpProvider::public)
 }
 
-/// How a built-in HTTP provider is authenticated.
-#[derive(Clone, Copy)]
-pub(crate) enum BuiltinCredential {
-    /// An API key: an explicit reference, else the stored `stored_name`,
-    /// else the first set variable, bound to `audience`.
-    ApiKey {
-        stored_name: &'static str,
-        environment_variable: &'static str,
-        alternate_variables: &'static [&'static str],
-        audience: &'static str,
-    },
-    /// The OpenAI Codex subscription credential for a profile.
-    OpenAiCodex,
-    /// An xAI API key or OAuth credential for a profile, with
-    /// `environment_variable` as the API-key fallback.
-    XAi { environment_variable: &'static str },
+/// The built-in HTTP provider `id` names, if any.
+#[must_use]
+pub fn builtin_provider(id: &str) -> Option<BuiltinProvider> {
+    BUILTIN_HTTP_PROVIDERS
+        .iter()
+        .find(|row| row.id == id)
+        .map(BuiltinHttpProvider::public)
 }
 
-impl BuiltinCredential {
-    fn preset(self) -> HttpCredential {
-        match self {
-            Self::ApiKey {
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                audience,
-            } => HttpCredential::ApiKey {
-                explicit: None,
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                audience,
-            },
-            Self::OpenAiCodex => HttpCredential::OpenAiCodex { profile: None },
-            Self::XAi { .. } => HttpCredential::XAi {
-                api_key: None,
-                profile: None,
-            },
+impl BuiltinHttpProvider {
+    const fn public(&self) -> BuiltinProvider {
+        BuiltinProvider {
+            id: self.id,
+            audience: self.audience,
+            variables: self.variables,
+            login: self.login,
+            init_model: self.init_model,
         }
-    }
-
-    /// The environment variables this credential falls back to, in order.
-    fn variables(self) -> impl Iterator<Item = &'static str> {
-        let (first, rest): (Option<&'static str>, &'static [&'static str]) = match self {
-            Self::ApiKey {
-                environment_variable,
-                alternate_variables,
-                ..
-            } => (Some(environment_variable), alternate_variables),
-            Self::XAi {
-                environment_variable,
-            } => (Some(environment_variable), &[]),
-            Self::OpenAiCodex => (None, &[]),
-        };
-        first.into_iter().chain(rest.iter().copied())
     }
 }
 
@@ -172,12 +139,8 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         api: ProviderApi::OpenAiResponses,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::OpenAiApi,
-        credential: BuiltinCredential::ApiKey {
-            stored_name: "openai/default",
-            environment_variable: "OPENAI_API_KEY",
-            alternate_variables: &[],
-            audience: OPENAI_CREDENTIAL_ENDPOINT,
-        },
+        audience: BuiltinAudience::Table(OPENAI_CREDENTIAL_ENDPOINT),
+        variables: &["OPENAI_API_KEY"],
         login: &[LoginMethod::ApiKey],
         init_model: "gpt-5.6",
         display_order: 0,
@@ -190,7 +153,8 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         api: ProviderApi::OpenAiResponses,
         usage: UsageType::Subscription,
         catalog: BuiltinCatalog::OpenAiCodex,
-        credential: BuiltinCredential::OpenAiCodex,
+        audience: BuiltinAudience::OpenAiCodex,
+        variables: &[],
         login: &[
             LoginMethod::OpenAiCodexBrowser,
             LoginMethod::OpenAiCodexDevice,
@@ -206,12 +170,8 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         api: ProviderApi::AnthropicMessages,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::AnthropicApi,
-        credential: BuiltinCredential::ApiKey {
-            stored_name: "anthropic/default",
-            environment_variable: "ANTHROPIC_API_KEY",
-            alternate_variables: &[],
-            audience: ANTHROPIC_CREDENTIAL_ENDPOINT,
-        },
+        audience: BuiltinAudience::Table(ANTHROPIC_CREDENTIAL_ENDPOINT),
+        variables: &["ANTHROPIC_API_KEY"],
         login: &[LoginMethod::ApiKey],
         init_model: "claude-sonnet-5",
         display_order: 1,
@@ -224,12 +184,8 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         api: ProviderApi::GoogleGenerateContent,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::GoogleApi,
-        credential: BuiltinCredential::ApiKey {
-            stored_name: "google/default",
-            environment_variable: "GEMINI_API_KEY",
-            alternate_variables: &["GOOGLE_API_KEY"],
-            audience: GOOGLE_CREDENTIAL_ENDPOINT,
-        },
+        audience: BuiltinAudience::Table(GOOGLE_CREDENTIAL_ENDPOINT),
+        variables: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         login: &[LoginMethod::ApiKey],
         init_model: "gemini-2.5-flash",
         display_order: 2,
@@ -242,9 +198,8 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         api: ProviderApi::OpenAiChatCompletions,
         usage: UsageType::CredentialDependent,
         catalog: BuiltinCatalog::XAiApi,
-        credential: BuiltinCredential::XAi {
-            environment_variable: XAI_API_KEY_VARIABLE,
-        },
+        audience: BuiltinAudience::XAi,
+        variables: &["XAI_API_KEY"],
         login: &[LoginMethod::ApiKey, LoginMethod::XAiOAuth],
         init_model: "grok-4.6",
         display_order: 3,
@@ -263,7 +218,7 @@ pub(crate) fn builtin_http(kind: ProviderKind) -> Option<&'static BuiltinHttpPro
 pub fn provider_credential_variables() -> Vec<&'static str> {
     BUILTIN_HTTP_PROVIDERS
         .iter()
-        .flat_map(|row| row.credential.variables())
+        .flat_map(|row| row.variables.iter().copied())
         .collect()
 }
 
@@ -307,7 +262,11 @@ fn build_http(row: &BuiltinHttpProvider) -> ProviderConfig {
             row.endpoint,
             row.endpoint_mode,
             row.api,
-            row.credential.preset(),
+            HttpCredential::Builtin {
+                provider: row.public(),
+                api_key: None,
+                profile: None,
+            },
         )),
         row.usage,
         builtin_models(row.catalog),
@@ -390,5 +349,19 @@ mod tests {
             listed,
             ["openai", "anthropic", "google", "xai", "openai-codex"]
         );
+    }
+
+    /// An API-key row resolves its key from a variable when nothing is
+    /// stored, and the plan descriptor names that variable, so every row
+    /// whose audience the table owns lists at least one.
+    #[test]
+    fn every_api_key_row_names_a_variable() {
+        for row in &BUILTIN_HTTP_PROVIDERS {
+            if matches!(row.audience, BuiltinAudience::Table(_)) {
+                assert!(!row.variables.is_empty(), "{} has no variable", row.id);
+            }
+            assert_eq!(builtin_provider(row.id).map(|p| p.id), Some(row.id));
+        }
+        assert_eq!(builtin_provider("bedrock"), None);
     }
 }

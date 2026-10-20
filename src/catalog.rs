@@ -9,11 +9,13 @@ use std::{
 };
 
 use hmac::{Hmac, Mac};
-use qq_auth::{CredentialStore, Secret, resolve_provider_credential_with_aliases};
+use qq_auth::{CredentialStore, Secret};
 use qq_config::{
-    EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth, ProviderConfig,
-    ProviderKind, SecretRef,
+    BuiltinAudience, EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth,
+    ProviderConfig, ProviderKind, SecretRef,
 };
+
+use crate::runtime::resolve_builtin_api_key;
 use reqwest::{Url, blocking::RequestBuilder, header::AUTHORIZATION};
 use sha2::Sha256;
 use thiserror::Error;
@@ -360,10 +362,14 @@ fn cache_probe_requires_secure_store(auth: &HttpCredential) -> bool {
             | ProviderAuth::Bearer(reference)
             | ProviderAuth::Header(_, reference),
         ) => matches!(reference, SecretRef::Stored(_)),
-        HttpCredential::ApiKey { explicit, .. } => {
-            explicit.is_none() || matches!(explicit, Some(SecretRef::Stored(_)))
-        }
-        HttpCredential::OpenAiCodex { .. } | HttpCredential::XAi { .. } => true,
+        HttpCredential::Builtin {
+            provider, api_key, ..
+        } => match provider.audience {
+            BuiltinAudience::Table(_) => {
+                api_key.is_none() || matches!(api_key, Some(SecretRef::Stored(_)))
+            }
+            BuiltinAudience::OpenAiCodex | BuiltinAudience::XAi => true,
+        },
     }
 }
 
@@ -388,38 +394,34 @@ fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<Di
                     .ok()?,
             ))
         }
-        HttpCredential::ApiKey {
-            explicit,
-            stored_name,
-            environment_variable,
-            alternate_variables,
-            audience,
-        } => Some(DiscoveryAuth::ApiKey(
-            resolve_provider_credential_with_aliases(
-                credentials,
-                explicit.as_ref(),
-                stored_name,
-                environment_variable,
-                alternate_variables,
-                Some(audience),
-            )
-            .ok()?,
-        )),
-        HttpCredential::OpenAiCodex { profile } => {
-            let credential = credentials
-                .resolve_codex(profile.as_deref().unwrap_or("default"))
-                .ok()?;
-            Some(DiscoveryAuth::Codex {
-                access_token: credential.access_token().clone(),
-                account_id: credential.account_id().to_owned(),
-                is_fedramp: credential.is_fedramp(),
-            })
+        HttpCredential::Builtin {
+            provider,
+            api_key,
+            profile,
+        } => {
+            let profile = profile.as_deref();
+            match provider.audience {
+                BuiltinAudience::Table(_) => Some(DiscoveryAuth::ApiKey(
+                    resolve_builtin_api_key(credentials, provider, api_key.as_ref(), profile)
+                        .ok()?,
+                )),
+                BuiltinAudience::OpenAiCodex => {
+                    let credential = credentials
+                        .resolve_codex(profile.unwrap_or("default"))
+                        .ok()?;
+                    Some(DiscoveryAuth::Codex {
+                        access_token: credential.access_token().clone(),
+                        account_id: credential.account_id().to_owned(),
+                        is_fedramp: credential.is_fedramp(),
+                    })
+                }
+                BuiltinAudience::XAi => Some(DiscoveryAuth::Bearer(
+                    credentials
+                        .resolve_xai(profile.unwrap_or("default"), api_key.as_ref())
+                        .ok()?,
+                )),
+            }
         }
-        HttpCredential::XAi { api_key, profile } => Some(DiscoveryAuth::Bearer(
-            credentials
-                .resolve_xai(profile.as_deref().unwrap_or("default"), api_key.as_ref())
-                .ok()?,
-        )),
     }
 }
 
@@ -664,6 +666,15 @@ mod tests {
         }
     }
 
+    /// The unpatched credential of built-in provider `id`.
+    fn builtin(id: &str) -> HttpCredential {
+        HttpCredential::Builtin {
+            provider: qq_config::builtin_provider(id).unwrap(),
+            api_key: None,
+            profile: None,
+        }
+    }
+
     fn test_provider(kind: ProviderKind, endpoint: String, auth: HttpCredential) -> ProviderConfig {
         ProviderConfig::new(
             kind,
@@ -762,7 +773,7 @@ mod tests {
             format!("http://{address}/v1/responses"),
             EndpointMode::Exact,
             ProviderApi::OpenAiResponses,
-            HttpCredential::OpenAiCodex { profile: None },
+            builtin("openai-codex"),
             BTreeMap::new(),
         );
         let discovery = ModelDiscovery::new().unwrap();
@@ -936,7 +947,7 @@ mod tests {
         let provider = test_provider(
             ProviderKind::OpenAiCodex,
             endpoint.clone(),
-            HttpCredential::OpenAiCodex { profile: None },
+            builtin("openai-codex"),
         );
         let discovery = ModelDiscovery::new().unwrap();
 
@@ -1017,25 +1028,11 @@ mod tests {
                 "custom/stored".to_owned(),
             ))),
         );
-        let xai = test_provider(
-            ProviderKind::XAi,
-            endpoint.clone(),
-            HttpCredential::XAi {
-                api_key: None,
-                profile: None,
-            },
-        );
-        let builtin_fallback = test_provider(
-            ProviderKind::OpenAi,
-            endpoint.clone(),
-            HttpCredential::ApiKey {
-                explicit: None,
-                stored_name: "custom/stored",
-                environment_variable: "QQ_TEST_UNUSED_API_KEY",
-                alternate_variables: &[],
-                audience: "custom",
-            },
-        );
+        let xai = test_provider(ProviderKind::XAi, endpoint.clone(), builtin("xai"));
+        // A built-in API key with no explicit reference probes the store
+        // (`openai/default`), so cache-only discovery must not use it.
+        let builtin_fallback =
+            test_provider(ProviderKind::OpenAi, endpoint.clone(), builtin("openai"));
         let safe = test_provider(
             ProviderKind::Custom,
             endpoint.clone(),
