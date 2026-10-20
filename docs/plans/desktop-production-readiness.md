@@ -2,7 +2,7 @@
 
 Status: implemented and verified locally, including installed release and recovered-store end-to-end qualification (2026-10-17). Signing and hosted CI remain external release gates.
 Ledger: [receipts](progress/desktop-production-readiness.md).
-Constraints: ADR-0062, the shared native reducer and local server, separate
+Constraints: ADR-0065, the shared native reducer and local server, separate
 desktop Cargo workspace, no push or PR mutations. Preserve the pre-existing
 AGENTS.md and capabilities/default.json edits. No reference code is copied.
 

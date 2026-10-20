@@ -1,9 +1,9 @@
-# ADR-0062 — The desktop app is a Tauri client of the local server: a native Rust client core and a TypeScript UI
+# ADR-0065 — The desktop app is a Tauri client of the local server: a native Rust client core and a TypeScript UI
 
 **Status:** Proposed
 **Date:** 2026-10-09
 **Deciders:** desktop contributor; multi-surface maintainers
-**Implements:** [`multi-surface-clients.md`](../plans/multi-surface-clients.md) Phase 4 (D1–D3) for the local-server case, ahead of Phase 3; relates to ADR-0017 and ADR-0018 (both reserved)
+**Implements:** [historical multi-surface-clients.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/multi-surface-clients.md) Phase 4 (D1–D3) for the local-server case, ahead of Phase 3; relates to ADR-0017 and ADR-0018 (both reserved)
 
 ## Context
 
