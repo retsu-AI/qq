@@ -1043,7 +1043,9 @@ Deferred).
 ## Shell Execution
 
 Session execution persists the native process receipt as soon as spawn is
-observed, before forwarding live output. The receipt is private recovery
+observed, before forwarding live output. The execution task owns this write;
+cancellation drains it even when the event observer has been discarded. A
+failed write prevents settlement. The receipt is private recovery
 evidence bound to the tool call and its arguments; it is not authorization or
 proof of completion. Completion must retain the same process identity, and
 an interrupted result cannot erase it. A receipt alone does not support

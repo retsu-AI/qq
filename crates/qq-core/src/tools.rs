@@ -17,14 +17,6 @@ mod tree;
 pub(crate) mod walk;
 mod write;
 
-/// Ordered observations from an owned tool execution. Process identity must
-/// reach persistence before any following output is published.
-#[derive(Debug)]
-pub(crate) enum ToolUpdate {
-    ProcessStarted(Box<process_context::ExecutionContextReceipt>),
-    Output(String),
-}
-
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
 #[cfg(unix)]
 pub(crate) use shell::ProcessGroupGuard;
@@ -133,6 +125,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
+#[cfg(all(test, unix))]
+pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
 pub(crate) use shell::observe_shell_spawn;
 
@@ -4357,7 +4351,7 @@ mod tests {
         workspace: Workspace,
         arguments: &'static str,
         cancelled: RunCancellation,
-        output: Option<mpsc::Sender<ToolUpdate>>,
+        output: Option<mpsc::Sender<String>>,
     ) -> ToolOutput {
         execute(
             workspace,
@@ -4423,7 +4417,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let tasks = ToolTasks::default();
         let cancelled = RunCancellation::new();
-        let (output, mut chunks) = mpsc::channel::<ToolUpdate>(1);
+        let (output, mut chunks) = mpsc::channel::<String>(1);
         let mut execution = Box::pin(execute(
             workspace,
             Arc::new(FileState::default()),
@@ -4440,9 +4434,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let ToolUpdate::Output(first) = first else {
-            panic!("expected live output")
-        };
         let pid = parse_marked_pid(&first);
         // Do not spend the live-output budget before the PID chunk is consumed.
         fs::write(directory.path().join("start-output"), "go").unwrap();
@@ -4461,6 +4452,53 @@ mod tests {
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process(pid).is_err());
         assert!(!cancelled.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_process_receipt_write_reaps_child_and_blocks_settlement() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tasks = ToolTasks::default();
+        let (sender, spawned) = tokio::sync::oneshot::channel();
+        let sender = std::sync::Mutex::new(Some(sender));
+        tasks
+            .set_process_recorder(move |_, receipt| {
+                sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(receipt.facts().pid)
+                    .unwrap();
+                async { Err(crate::sessions::SessionRuntimeError::Unavailable) }
+            })
+            .unwrap();
+        let result = dispatch::execute_with_images(
+            workspace,
+            Arc::new(FileState::default()),
+            "shell".to_owned(),
+            PANIC_SHELL_ARGUMENTS.to_owned(),
+            RunCancellation::new(),
+            None,
+            tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Some(qq_protocol::ToolCallId::generate().unwrap()),
+        )
+        .await;
+        assert_eq!(result.disposition, ResultDisposition::Unobserved);
+        assert!(
+            result
+                .model_text
+                .contains("could not persist the command process")
+        );
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedProcess));
+        let pid =
+            rustix::process::Pid::from_raw(i32::try_from(spawned.await.unwrap()).unwrap()).unwrap();
+        assert!(rustix::process::test_kill_process(pid).is_err());
     }
 
     #[cfg(any(unix, windows))]
@@ -4499,7 +4537,7 @@ mod tests {
         let workspace = Workspace::open(directory.path()).unwrap();
         let spawned = shell::observe_shell_spawn(workspace.path(), false);
         let tasks = ToolTasks::default();
-        let (output, chunks) = mpsc::channel::<ToolUpdate>(1);
+        let (output, chunks) = mpsc::channel::<String>(1);
         let mut execution = Box::pin(execute(
             workspace,
             Arc::new(FileState::default()),
@@ -4598,7 +4636,7 @@ mod tests {
     async fn shell_runs_commands_streams_output_and_reports_the_exit_code() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let (sender, mut receiver) = mpsc::channel::<ToolUpdate>(16);
+        let (sender, mut receiver) = mpsc::channel::<String>(16);
 
         let result = run_shell_tool(
             workspace.clone(),
@@ -4615,7 +4653,7 @@ mod tests {
         assert!(header.starts_with("shell exit=0 elapsed="), "{header}");
         assert!(header.ends_with(" bytes=8"), "{header}");
         let mut streamed = String::new();
-        while let Ok(ToolUpdate::Output(chunk)) = receiver.try_recv() {
+        while let Ok(chunk) = receiver.try_recv() {
             streamed.push_str(&chunk);
         }
         assert!(streamed.contains("out"), "streamed: {streamed}");
@@ -4732,12 +4770,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             let mut observed = String::new();
             while !observed.contains("ready") {
-                let ToolUpdate::Output(chunk) =
-                    chunks.recv().await.expect("command reached its gate")
-                else {
-                    panic!("expected live output")
-                };
-                observed.push_str(&chunk);
+                observed.push_str(&chunks.recv().await.expect("command reached its gate"));
             }
         })
         .await
@@ -5033,7 +5066,7 @@ mod tests {
     async fn saturated_live_output_never_masks_the_shell_timeout() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
-        let (sender, _receiver) = mpsc::channel::<ToolUpdate>(1);
+        let (sender, _receiver) = mpsc::channel::<String>(1);
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -5061,7 +5094,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let cancelled = RunCancellation::new();
-        let (sender, receiver) = mpsc::channel::<ToolUpdate>(1);
+        let (sender, receiver) = mpsc::channel::<String>(1);
         let execution = tokio::spawn(run_shell_tool(
             workspace,
             r#"{"command":"while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done"}"#,
@@ -5092,7 +5125,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let cancelled = RunCancellation::new();
-        let (sender, mut receiver) = mpsc::channel::<ToolUpdate>(16);
+        let (sender, mut receiver) = mpsc::channel::<String>(16);
 
         let execution = tokio::spawn(run_shell_tool(
             workspace.clone(),
@@ -5118,9 +5151,6 @@ mod tests {
             "{}",
             result.model_text
         );
-        let ToolUpdate::Output(chunk) = chunk else {
-            panic!("expected live output")
-        };
         assert_process_exits(parse_marked_pid(&chunk)).await;
     }
 

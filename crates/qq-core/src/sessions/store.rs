@@ -1828,11 +1828,10 @@ impl Store {
 
     pub(super) async fn record_tool_process(
         &self,
-        claimed: &ClaimedRun,
+        identity: RunIdentity,
         id: ToolCallId,
         receipt: Box<crate::tools::process_context::ExecutionContextReceipt>,
     ) -> Result<(), SessionRuntimeError> {
-        let identity = claimed.identity;
         self.call(Priority::Control, move |connection| {
             record_tool_process(connection, identity, id, &receipt)
         })

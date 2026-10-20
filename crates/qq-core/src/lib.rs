@@ -1852,7 +1852,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::ContextPruned { .. }
                 | RuntimeEvent::ProviderOverflow { .. }
                 | RuntimeEvent::ToolCallStarted { .. }
-                | RuntimeEvent::ToolProcessStarted { .. }
                 | RuntimeEvent::ToolCallDenied { .. }
                 | RuntimeEvent::GoalRequestAdmitted { .. }
                 | RuntimeEvent::GoalPaidCancelled

@@ -93,6 +93,55 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cancellation_at_spawn_preserves_the_process_receipt() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![("shell", r#"{"command":"sleep 300"}"#.to_owned())]],
+    )
+    .await;
+    let (spawned, release) = crate::tools::hold_shell_receipt(&harness.workspace_path);
+    let run = submit_prompt(&harness, "run the command").await;
+    let stopped = execution::observe_execution_stop(run);
+    tokio::time::timeout(Duration::from_secs(5), spawned)
+        .await
+        .unwrap()
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: run },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), stopped)
+        .await
+        .unwrap()
+        .unwrap();
+    // Teardown has discarded the observer, but must still drain the owned write.
+    release.send(()).unwrap();
+    collect_until(&mut harness.events, finished_for(run)).await;
+    let context: Option<String> = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT execution_context_json FROM tool_calls WHERE run_id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    harness.runtime.shutdown().await.unwrap();
+    let context = context.expect("cancellation must retain the spawned command's process receipt");
+    let receipt: ExecutionContextReceipt = serde_json::from_str(&context).unwrap();
+    assert_ne!(receipt.facts().pid, 0);
+}
+
 #[tokio::test]
 async fn completion_cannot_replace_a_recorded_process_identity() {
     let directory = tempfile::tempdir().unwrap();
@@ -101,7 +150,7 @@ async fn completion_cannot_replace_a_recorded_process_identity() {
         .unwrap();
     let (claimed, id, receipt) = process_call_fixture(&store, directory.path()).await;
     store
-        .record_tool_process(&claimed, id, Box::new(receipt.clone()))
+        .record_tool_process(claimed.identity, id, Box::new(receipt.clone()))
         .await
         .unwrap();
     let mut other = receipt.clone();
@@ -159,7 +208,7 @@ async fn restart_recovery_retains_the_interrupted_command_receipt() {
     let store = Store::open(path.clone()).await.unwrap();
     let (claimed, id, receipt) = process_call_fixture(&store, directory.path()).await;
     store
-        .record_tool_process(&claimed, id, Box::new(receipt.clone()))
+        .record_tool_process(claimed.identity, id, Box::new(receipt.clone()))
         .await
         .unwrap();
     store.close().await.unwrap();
