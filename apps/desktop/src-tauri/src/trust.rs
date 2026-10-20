@@ -49,9 +49,10 @@ fn request(workspace: &Path) -> Result<LoadRequest, TrustError> {
 fn describe(pending: &PendingTrust) -> PendingFileDto {
     let source = pending.source();
     PendingFileDto {
-        path: source
-            .path()
-            .map_or_else(|| source.label().to_owned(), crate::view::display_path),
+        path: source.path().map_or_else(
+            || source.label().to_owned(),
+            crate::desktop::view::display_path,
+        ),
         sections: pending.sections().to_vec(),
         declarations: pending
             .declarations()

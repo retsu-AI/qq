@@ -196,7 +196,7 @@ pub async fn status(root: &Path, with_pr: bool) -> Result<GitStatusDto, GitError
         return Ok(GitStatusDto::default());
     }
     let mut status = parse_status(&output.stdout);
-    status.gh = crate::editor::on_path(&["gh.exe", "gh"]);
+    status.gh = crate::desktop::editor::on_path(&["gh.exe", "gh"]);
     if with_pr && status.gh && status.branch.is_some() {
         // No pull request, no network or no `gh` login all mean "no badge".
         let view = run(
@@ -334,14 +334,14 @@ pub fn worktree_of(path: &Path) -> Option<WorktreeDto> {
     let gitdir = gitdir.trim().replace('\\', "/");
     let (main, _) = gitdir.rsplit_once("/.git/worktrees/")?;
     let head = std::fs::read_to_string(Path::new(&gitdir).join("HEAD")).unwrap_or_default();
-    let main_path =
-        crate::view::display_path(Path::new(main)).replace('/', std::path::MAIN_SEPARATOR_STR);
+    let main_path = crate::desktop::view::display_path(Path::new(main))
+        .replace('/', std::path::MAIN_SEPARATOR_STR);
     Some(WorktreeDto {
         branch: head
             .trim()
             .strip_prefix("ref: refs/heads/")
             .map(str::to_owned),
-        main_name: crate::view::display_name(Path::new(&main_path)),
+        main_name: crate::desktop::view::display_name(Path::new(&main_path)),
         main_path,
     })
 }
@@ -404,10 +404,10 @@ pub async fn add_worktree(
     if folder.exists() {
         return Err(GitError::Failed(format!(
             "{} already exists; choose another branch name",
-            crate::view::display_path(&folder)
+            crate::desktop::view::display_path(&folder)
         )));
     }
-    let folder_arg = crate::view::display_path(&folder);
+    let folder_arg = crate::desktop::view::display_path(&folder);
     let exists = run(
         "git",
         "rev-parse",
@@ -447,7 +447,7 @@ pub async fn remove_worktree(path: &Path, force: bool) -> Result<(), GitError> {
     let worktree =
         worktree_of(path).ok_or(GitError::Invalid("this project is not a linked worktree"))?;
     let main = std::path::PathBuf::from(&worktree.main_path);
-    let target = crate::view::display_path(path);
+    let target = crate::desktop::view::display_path(path);
     let mut args = vec!["worktree", "remove"];
     if force {
         args.push("--force");

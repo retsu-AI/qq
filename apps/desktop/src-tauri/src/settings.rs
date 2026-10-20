@@ -59,7 +59,7 @@ impl Settings {
 /// One folder's identity in the recent list: the verbatim prefix removed,
 /// separators unified and, on Windows, case folded.
 fn recent_key(path: &Path) -> String {
-    let text = crate::view::display_path(path).replace('/', "\\");
+    let text = crate::desktop::view::display_path(path).replace('/', "\\");
     let text = text.trim_end_matches('\\').to_owned();
     if cfg!(windows) {
         text.to_lowercase()

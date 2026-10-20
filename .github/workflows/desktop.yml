@@ -7,12 +7,19 @@ on:
     branches: [main]
     paths: ['apps/desktop/**', 'crates/**', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/desktop.yml']
   workflow_dispatch:
+    inputs:
+      task:
+        description: 'Desktop package, or generate unsigned mobile projects only'
+        type: choice
+        default: desktop
+        options: [desktop, mobile-scaffold]
 
 permissions:
   contents: read
 
 jobs:
   windows:
+    if: ${{ inputs.task != 'mobile-scaffold' }}
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -56,4 +63,95 @@ jobs:
         with:
           name: qq-desktop-nsis
           path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:version
+      - name: Verify mobile dependency boundary
+        run: |
+          cargo tree --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --edges normal --prefix none > /tmp/qq-mobile-dependencies.txt
+          if grep -Eq '^qq-(auth|config|core|server) ' /tmp/qq-mobile-dependencies.txt; then
+            echo 'The mobile build must not link host engine, auth or configuration crates.'
+            exit 1
+          fi
+      - name: Initialize Android project
+        run: |
+          if [ ! -d src-tauri/gen/android ]; then
+            pnpm tauri android init --ci --skip-targets-install
+          fi
+      - name: Build debug APK (no engine sidecar or distribution keys)
+        if: ${{ inputs.task != 'mobile-scaffold' }}
+        run: pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.task != 'mobile-scaffold' }}
+        with:
+          name: qq-android-debug
+          path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: ${{ inputs.task == 'mobile-scaffold' }}
+        with:
+          name: qq-android-project
+          path: apps/desktop/src-tauri/gen/android
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # Project generation only. No iOS build/sign/upload job is enabled until
+  # maintainers provide their runner and Apple developer account.
+  ios-scaffold:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'mobile-scaffold' }}
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - name: Generate unsigned iOS project without building
+        run: pnpm tauri ios init --ci --skip-targets-install
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qq-ios-project
+          path: apps/desktop/src-tauri/gen/apple
+          include-hidden-files: true
           if-no-files-found: error
