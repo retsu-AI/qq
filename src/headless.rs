@@ -34,8 +34,8 @@ use tokio::time::Instant;
 /// before the invocation gives up and reports a harness failure.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// How long an `auto` headless run holds an escalated approval open for the
-/// configured delegate before denying it. Covers the delegate chain's own
-/// bound (Jev 5 s, then the reviewer model 10 s) with margin. A delegate's
+/// configured delegate before denying it. Covers the reviewer model's own
+/// 10 s bound with margin. A delegate's
 /// `approve` and `deny` both settle the call themselves; this deny is the
 /// unattended answer to an `escalate`, a delegate timeout, or an outage, so
 /// the run never stalls. Without a delegate configured the deny is immediate.
@@ -65,7 +65,7 @@ pub struct HeadlessOptions {
     pub pricing_provenance: Option<String>,
     pub approval: HeadlessApproval,
     /// Whether a held call has an approval delegate that exists: a
-    /// `reviewer_model`, or Jev when the run's resolved `jev_approval` is on.
+    /// configured `reviewer_model`.
     /// Whether one is *consulted* also depends on `approval_delegate`, which
     /// the run applies with the session's own override (see
     /// `configured_delegate`). With a consulted delegate, `auto` holds an
@@ -1536,8 +1536,8 @@ async fn stream_run(
                         }
                     }
                     // A delegate settled a held call: say which one, so the
-                    // operator reading the log can tell Jev's decision from
-                    // the reviewer model's and from their own allowlist.
+                    // operator reading the log can tell the reviewer model's
+                    // decision from their own allowlist.
                     SessionEvent::ToolApprovalResolved {
                         tool_call,
                         resolution:
@@ -1599,38 +1599,6 @@ async fn stream_run(
                                 _ => "failed",
                             };
                             let _ = writeln!(stderr, "[tool] {} {verdict}", tool_call.name);
-                        }
-                    }
-                    SessionEvent::RoutingStarted { .. } if ours => {
-                        if text { let _ = writeln!(stderr, "[jev] routing pending"); }
-                    }
-                    SessionEvent::RoutingCompleted { decision, .. } if ours => {
-                        if text {
-                            let _ = writeln!(stderr, "[jev] routing {:?}: {}; {}", decision.outcome,
-                                decision.model.model.as_deref().unwrap_or("configured model"), concise(&decision.reason));
-                        }
-                    }
-                    SessionEvent::CheckpointReviewed {
-                        correlation,
-                        phase,
-                        outcome,
-                        confidence_basis_points,
-                        feedback,
-                        ..
-                    } if ours => {
-                        if text {
-                            let color = if matches!(outcome, qq_protocol::CheckpointOutcome::Supported) {
-                                "GREEN"
-                            } else {
-                                "RED"
-                            };
-                            let confidence = confidence_basis_points
-                                .map(|value| format!(" confidence={:.2}%", f64::from(value) / 100.0))
-                                .unwrap_or_default();
-                            let _ = writeln!(
-                                stderr,
-                                "[jev] {color} {phase:?} {correlation} outcome={outcome:?}{confidence}: {feedback}"
-                            );
                         }
                     }
                     SessionEvent::ToolApprovalRequested { tool_call, question: Some(question), .. }
@@ -6687,25 +6655,23 @@ mod tests {
         assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
     }
 
-    /// A reviewer that approves everything and says Jev decided.
-    /// A fake Jev that approves after 100 ms: slower than the event that
+    /// A reviewer that approves after 100 ms: slower than the event that
     /// publishes the hold, so a headless client that denied on the spot
     /// would win the race and the test would see `denied`.
-    struct JevApproves;
+    struct ReviewerApproves;
 
-    impl qq_core::ApprovalReviewer for JevApproves {
+    impl qq_core::ApprovalReviewer for ReviewerApproves {
         fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
             Box::pin(async {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Approve)
-                    .by(qq_core::DelegateIdentity::Jev)
             })
         }
     }
 
-    /// A loaded configuration with `jev_approval: true` and no
-    /// `reviewer_model`, read by the real loader from an explicit document.
-    fn jev_only_snapshot(workspace: &Path) -> qq_config::ConfigSnapshot {
+    /// A loaded configuration with a `reviewer_model`, read by the real
+    /// loader from an explicit document.
+    fn reviewer_snapshot(workspace: &Path) -> qq_config::ConfigSnapshot {
         let root = workspace.parent().unwrap();
         let loader = qq_config::ConfigLoader::new(qq_config::ConfigPaths::new(
             root.join("cfg-global"),
@@ -6714,7 +6680,7 @@ mod tests {
         ));
         loader
             .load(&qq_config::LoadRequest::new(workspace).with_explicit_content(
-                r#"(version: 1, model: "test/model", jev_approval: true,
+                r#"(version: 1, model: "test/model", reviewer_model: "test/model",
                     providers: { "test": Custom(connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth), models: { "model": (name: "m") }) })"#,
             ))
             .unwrap()
@@ -6722,10 +6688,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_delegated_approval_names_the_delegate_in_jsonl_and_text() {
-        // DA6: a supervisor reading the stream can tell Jev's decision from
-        // the reviewer model's and from the operator's allowlist without the
-        // store: the resolution record carries `delegate`, and text mode says
-        // `approved by jev`.
+        // DA6: a supervisor reading the stream can tell the reviewer's
+        // decision from the operator's allowlist without the store: the
+        // resolution record carries `delegate`, and text mode says
+        // `approved by reviewer`.
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
         let workspace = root.join("work");
@@ -6735,7 +6701,7 @@ mod tests {
             std::fs::create_dir_all(workspace.join(name)).unwrap();
         }
         let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(JevApproves));
+        runtime_options.approval_reviewer = Some(Arc::new(ReviewerApproves));
         let sessions = SessionRuntime::open(
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {
@@ -6752,17 +6718,15 @@ mod tests {
 
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
-        // Jev plan A2: the delegate options come from a real Jev-only
-        // configuration (no `reviewer_model`), resolved exactly as
-        // `prepare_headless` resolves them, not from a hand-set flag.
-        let snapshot = jev_only_snapshot(&fixture.workspace);
+        // The delegate options come from a real configuration, resolved
+        // exactly as `prepare_headless` resolves them, not a hand-set flag.
+        let snapshot = reviewer_snapshot(&fixture.workspace);
         let (reviewer_configured, configured_delegate) = crate::headless_delegate_options(
             &snapshot,
             &qq_protocol::AgentProfileId::default(),
             None,
-            None,
         );
-        assert!(snapshot.reviewer_model().is_none());
+        assert!(reviewer_configured);
         options.reviewer_configured = reviewer_configured;
         options.configured_delegate = configured_delegate;
         let (status, stdout, _) =
@@ -6776,7 +6740,7 @@ mod tests {
             .collect();
         assert!(!resolutions.is_empty(), "{stdout}");
         assert!(resolutions.iter().all(|event| {
-            event["resolution"] == "approved_by_reviewer" && event["delegate"] == "jev"
+            event["resolution"] == "approved_by_reviewer" && event["delegate"] == "reviewer"
         }));
         assert!(
             finished_tool_calls(&records)
@@ -6787,20 +6751,21 @@ mod tests {
         options.format = HeadlessFormat::Text;
         let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
-        assert!(stderr.contains("[tool] shell approved by jev"), "{stderr}");
+        assert!(
+            stderr.contains("[tool] shell approved by reviewer"),
+            "{stderr}"
+        );
     }
 
-    /// A delegate that gives up on every held call (Jev abstaining, or no
-    /// key and no `reviewer_model`).
+    /// A delegate that gives up on every held call.
     struct DelegateEscalates;
 
     impl qq_core::ApprovalReviewer for DelegateEscalates {
         fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
             Box::pin(async {
                 qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Escalate {
-                    reason: "Jev abstained".to_owned(),
+                    reason: "reviewer abstained".to_owned(),
                 })
-                .by(qq_core::DelegateIdentity::Jev)
             })
         }
     }
@@ -6877,7 +6842,7 @@ mod tests {
             std::fs::create_dir_all(workspace.join(name)).unwrap();
         }
         let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(JevApproves));
+        runtime_options.approval_reviewer = Some(Arc::new(ReviewerApproves));
         let sessions = SessionRuntime::open(
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {

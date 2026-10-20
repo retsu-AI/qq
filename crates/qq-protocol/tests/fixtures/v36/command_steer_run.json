@@ -1,0 +1,13 @@
+{
+  "command_id": "13131313131313131313131313131313",
+  "command": {
+    "type": "steer_run",
+    "run_id": "04040404040404040404040404040404",
+    "input": [
+      {
+        "type": "text",
+        "text": "also check the tests"
+      }
+    ]
+  }
+}

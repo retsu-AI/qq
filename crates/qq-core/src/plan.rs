@@ -114,8 +114,6 @@ pub struct AgentProfile {
     spawn_model_routes: Vec<String>,
     delegation: DelegationRoster,
     audit: AuditPolicy,
-    checkpoint: Option<Arc<dyn crate::runtime::CheckpointReviewer>>,
-    task_router: Option<Arc<dyn crate::sessions::TaskRouter>>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     shell: ShellPolicy,
     approved_read_images: crate::runtime::ApprovedReadImages,
@@ -123,9 +121,6 @@ pub struct AgentProfile {
     network: crate::tools::network::NetworkPolicy,
     turn_recovery: crate::TurnRecoveryPolicy,
     approval_delegate: crate::approval::ApprovalDelegate,
-    /// Identity of the delegate consulted first for held calls (Jev), or
-    /// `None` when that delegate is off. In the descriptor (version 12).
-    approval_delegate_identity: Option<String>,
     output_ceiling: Option<crate::OutputCeiling>,
     adapter_build: String,
     provenance: Vec<String>,
@@ -164,8 +159,6 @@ impl AgentProfile {
             spawn_model_routes: Vec::new(),
             delegation: DelegationRoster::default(),
             audit: AuditPolicy::default(),
-            checkpoint: None,
-            task_router: None,
             reasoning_effort: None,
             shell: ShellPolicy::default(),
             approved_read_images: crate::runtime::ApprovedReadImages::default(),
@@ -173,7 +166,6 @@ impl AgentProfile {
             network: crate::tools::network::NetworkPolicy::default(),
             turn_recovery: crate::TurnRecoveryPolicy::default(),
             approval_delegate: crate::approval::ApprovalDelegate::default(),
-            approval_delegate_identity: None,
             output_ceiling: None,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -205,19 +197,6 @@ impl AgentProfile {
         self
     }
 
-    /// The identity of the delegate the effective configuration (profile and
-    /// overrides merged) opted in ahead of the reviewer model for held calls
-    /// (Jev approval), or `None`. Part of the descriptor, so durable run
-    /// identity records whether an external approval delegate was
-    /// authorized, and owned children and routed reloads inherit it
-    /// (ADR-0052). The installed reviewer consults that delegate only when
-    /// this is set.
-    #[must_use]
-    pub fn with_approval_delegate_identity(mut self, identity: Option<String>) -> Self {
-        self.approval_delegate_identity = identity;
-        self
-    }
-
     /// The model's catalog output limit, bounded by policy: how far a run may
     /// raise a turn's cap once when the whole cap went to hidden reasoning.
     /// Not part of the digest: the plan's request cap is, and this only
@@ -228,21 +207,6 @@ impl AgentProfile {
         output_ceiling: Option<crate::OutputCeiling>,
     ) -> Self {
         self.output_ceiling = output_ceiling;
-        self
-    }
-
-    #[must_use]
-    pub fn with_task_router(mut self, router: Arc<dyn crate::sessions::TaskRouter>) -> Self {
-        self.task_router = Some(router);
-        self
-    }
-
-    #[must_use]
-    pub fn with_checkpoint_reviewer(
-        mut self,
-        reviewer: Arc<dyn crate::runtime::CheckpointReviewer>,
-    ) -> Self {
-        self.checkpoint = Some(reviewer);
         self
     }
 
@@ -266,8 +230,6 @@ impl AgentProfile {
             spawn_model_routes: runtime.spawn_model_routes.to_vec(),
             delegation: runtime.delegation.as_ref().clone(),
             audit: runtime.audit,
-            checkpoint: runtime.checkpoint.clone(),
-            task_router: runtime.task_router.clone(),
             reasoning_effort: runtime.reasoning_effort,
             shell: runtime.shell.as_ref().clone(),
             approved_read_images: runtime.approved_read_images.as_ref().clone(),
@@ -275,10 +237,6 @@ impl AgentProfile {
             network: runtime.network.as_ref().clone(),
             turn_recovery: runtime.turn_recovery,
             approval_delegate: runtime.approval_delegate,
-            approval_delegate_identity: runtime
-                .approval_delegate_identity
-                .as_deref()
-                .map(str::to_owned),
             output_ceiling: runtime.output_ceiling,
             adapter_build: qq_provider::BUILD_IDENTITY.to_owned(),
             provenance: Vec::new(),
@@ -348,10 +306,7 @@ impl AgentProfile {
         self.delegation = DelegationRoster::default();
         self.audit = AuditPolicy::default();
         self.approval_delegate = crate::approval::ApprovalDelegate::default();
-        self.approval_delegate_identity = None;
         self.pack = None;
-        self.checkpoint = None;
-        self.task_router = None;
         self
     }
 
@@ -694,8 +649,6 @@ impl CompiledAgentPlan {
             spawn_model_routes,
             delegation,
             audit,
-            checkpoint,
-            task_router,
             reasoning_effort,
             shell,
             approved_read_images,
@@ -703,7 +656,6 @@ impl CompiledAgentPlan {
             network,
             turn_recovery,
             approval_delegate,
-            approval_delegate_identity,
             output_ceiling,
             adapter_build,
             provenance,
@@ -736,16 +688,9 @@ impl CompiledAgentPlan {
         .with_process_producer(process_producer)
         .with_network_policy(network)
         .with_turn_recovery(turn_recovery)
-        .with_approval_delegate(approval_delegate)
-        .with_approval_delegate_identity(approval_delegate_identity.as_deref().map(Arc::from));
+        .with_approval_delegate(approval_delegate);
         if let Some(effort) = reasoning_effort {
             runtime = runtime.with_reasoning_effort(effort);
-        }
-        if let Some(router) = task_router {
-            runtime = runtime.with_task_router(router);
-        }
-        if let Some(reviewer) = checkpoint {
-            runtime = runtime.with_checkpoint_reviewer(reviewer);
         }
         for source in context_sources {
             runtime = runtime.with_context_source(source);
@@ -1037,19 +982,10 @@ impl CompiledAgentPlan {
             approved_read_images: (!runtime.approved_read_images.entries().is_empty())
                 .then(|| runtime.approved_read_images.digest()),
             tool_output_projection: Some(ToolOutputProjection::StrictReservedV1),
-            checkpoint: runtime.checkpoint_identity.as_deref().map(str::to_owned),
-            approval_delegate: runtime
-                .approval_delegate_identity
-                .as_deref()
-                .map(str::to_owned),
-            routing_configuration: runtime
-                .task_router
-                .as_ref()
-                .map(|router| router.configuration_identity().to_owned()),
-            routing: runtime
-                .task_router
-                .as_ref()
-                .map(|router| router.identity().to_owned()),
+            checkpoint: None,
+            approval_delegate: None,
+            routing_configuration: None,
+            routing: None,
             reasoning_effort: runtime.reasoning_effort,
             skills: SkillIndexDescriptor {
                 digest: skills.digest(),
@@ -1182,13 +1118,6 @@ impl CompiledAgentPlan {
     #[must_use]
     pub const fn approval_delegate(&self) -> crate::approval::ApprovalDelegate {
         self.runtime.approval_delegate
-    }
-
-    /// Whether this plan's held calls go to its first approval delegate (Jev)
-    /// before the reviewer model: the descriptor's `approval_delegate`.
-    #[must_use]
-    pub fn jev_approval(&self) -> bool {
-        self.descriptor.approval_delegate.is_some()
     }
 
     /// The highest cap the empty-truncation recovery may raise a turn to.
@@ -1507,11 +1436,8 @@ mod tests {
             })
             .for_side_question();
         assert!(side.pack.is_none());
-        assert!(side.approval_delegate_identity.is_none());
         assert!(side.hosts.is_empty());
         assert!(side.context_sources.is_empty());
-        assert!(side.checkpoint.is_none());
-        assert!(side.task_router.is_none());
         let plan = CompiledAgentPlan::compile_blocking(side).unwrap();
         assert!(plan.descriptor().pack.is_none());
         assert_eq!(

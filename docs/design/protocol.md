@@ -47,8 +47,8 @@ Plan descriptor version 9 records optional `reasoning_effort`, routing policy
 and candidate-configuration fingerprint in its canonical identity; version 10
 adds each declared MCP server's configured tool-set `pin` (ADR-0046); version
 11 adds each delegation roster entry's `effort` (RR8.4); version 12 adds
-`approval_delegate`, the identity of the first delegate for held calls (Jev
-approval) when enabled (ADR-0052); version 13 changes the encoding for the
+`approval_delegate`, the identity of the first delegate for held calls (now
+decode-only and never set); version 13 changes the encoding for the
 `wait_agents` and `cancel_agent` tools that follow `spawn_agent` in the
 catalog (ADR-0054 § 4); version 14 records the public digest of explicitly
 approved self-contained read images (ADR-0060); version 15 records the strict
@@ -60,8 +60,15 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 35
+PROTOCOL_VERSION = 36
 ```
+
+Version 36 removes Jev routing and checkpoints. The `routing_started`,
+`routing_completed`, `checkpoint_started` and `checkpoint_reviewed` events are
+no longer written; recorded ones decode as `retired`, which clients ignore, so
+old stores and streams still replay. `delegate: "jev"` on recorded
+`tool_approval_resolved` events still decodes but is never written. A
+version-35 client receives nothing new.
 
 Store schema58 adds private goal policy and specification-time fields, without
 a wire, descriptor or prompt change. New specifications persist their workspace
@@ -121,7 +128,7 @@ waiting or answering without loading its body or having seen the request
 event.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v35/`; the `v17`–`v34` directories are
+`crates/qq-protocol/tests/fixtures/v36/`; the `v17`–`v35` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -227,7 +234,7 @@ added the network tool (ADR-0021): the `host` grant shape and an optional
 `shell` preview is boxed in memory, which is wire-identical.
 
 Version 23 adds the durable `checkpoint_reviewed` session event. It correlates
-the pinned JEV outcome to a tool result or final candidate and carries bounded
+a checkpoint review outcome to a tool result or final candidate and carries bounded
 feedback plus basis-point confidence. Headless JSONL emits the event and text
 mode renders an explicit GREEN/RED notice.
 
@@ -246,7 +253,8 @@ request or a successful decision. Version 25 also adds optional
 true identifies a configured fallback eligible for independently opted-in
 routing; false preserves explicit and legacy choices as pins. Store schema 32
 persists the flag; model changes and reconnect snapshots retain it. A TUI model
-pick clears it. The field does not enable Jev or grant access to any model.
+pick clears it. The field does not grant access to any model. (Version 36
+retired these routing and checkpoint events; see above.)
 
 Version 26 adds turn recovery (ADR-0040): the `run_turn_retrying` event
 (`run_id`, `turn_ordinal`, `attempt`, `delay_ms`, `kind`, `message`) after a
@@ -268,7 +276,7 @@ non-empty ladder at plan time. Empty means "not advertised", not "unsupported".
 No fixture changes: every current golden has an empty ladder.
 
 Version 28 adds the approval-delegate surfaces (delegated-approval DA6,
-ADR-0041): optional `delegate` (`reviewer` | `jev`) on
+ADR-0041): optional `delegate` (`reviewer`; a historical `jev` still decodes) on
 `tool_approval_resolved` beside `approved_by_reviewer` /
 `denied_by_reviewer`, so a supervisor can tell which delegate settled a call
 from the stream alone; `set_approval_delegate` / `approval_delegate_set` on
@@ -1097,14 +1105,14 @@ Resolution values: `approved_once`, `approved_for_session`,
 `denied_by_reviewer`, `answered`. `answered` settles an `ask_user` hold: the
 call is `completed` and its `result` is the rendered questions and answers
 (or the decline text). The reviewer resolutions are written by the configured
-delegate without a human — Jev when `jev_approval` is on, otherwise
-`reviewer_model` (ADR-0041) — for the calls `auto` holds (dangerous-shaped
+delegate without a human — `reviewer_model` (ADR-0041) — for the calls `auto` holds (dangerous-shaped
 shell, ungranted hosts), for every held call of a `supervised` child, and
 under `ask` when `approval_delegate` is `on`: `approved_by_reviewer` executes
 the call; `denied_by_reviewer` is final under `auto` and `supervised` and the
 model receives the reviewer's reason as a tool error. The
 `tool_approval_resolved` *event* (not the command outcome) carries
-`delegate: "reviewer" | "jev"` beside these two resolutions (protocol 28) and
+`delegate: "reviewer"` beside these two resolutions (protocol 28; a recorded
+`"jev"` still decodes but is never written) and
 omits it for every other resolution. A reviewer `escalate` leaves the hold
 open for a client, whose wait starts at the escalation. The hold
 (`tool_approval_requested`) is always published before the reviewer is
