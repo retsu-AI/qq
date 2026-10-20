@@ -8,7 +8,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use reqwest::{Url, blocking::Response};
+use reqwest::Url;
+#[cfg(test)]
+use reqwest::blocking::Response;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -114,137 +116,90 @@ pub(super) struct RefreshedTokens {
     pub refresh_token: Option<String>,
 }
 
-pub(super) trait CodexTokenClient: Send + Sync {
-    fn exchange(
-        &self,
-        code: &str,
-        redirect_uri: &str,
-        code_verifier: &str,
-    ) -> Result<ExchangedTokens, CodexAuthError>;
-
-    fn exchange_with_timeout(
-        &self,
-        code: &str,
-        redirect_uri: &str,
-        code_verifier: &str,
-        timeout: Duration,
-    ) -> Result<ExchangedTokens, CodexAuthError> {
-        let _ = timeout;
-        self.exchange(code, redirect_uri, code_verifier)
+/// The token exchange of an authorization-code grant (loopback or device),
+/// bounded by `timeout` when the login has a deadline.
+pub(super) fn exchange(
+    store: &CredentialStore,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    timeout: Option<Duration>,
+) -> Result<ExchangedTokens, CodexAuthError> {
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        id_token: String,
+        access_token: String,
+        refresh_token: String,
     }
 
-    fn refresh(&self, refresh_token: &str) -> Result<RefreshedTokens, CodexAuthError>;
-}
-
-pub(super) struct SystemCodexTokenClient;
-
-impl SystemCodexTokenClient {
-    fn exchange_tokens(
-        &self,
-        code: &str,
-        redirect_uri: &str,
-        code_verifier: &str,
-        timeout: Option<Duration>,
-    ) -> Result<ExchangedTokens, CodexAuthError> {
-        #[derive(Deserialize)]
-        struct TokenResponse {
-            id_token: String,
-            access_token: String,
-            refresh_token: String,
-        }
-
-        let client = token_client("exchange")?;
-        let request = client.post(TOKEN_ENDPOINT).form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("redirect_uri", redirect_uri),
-            ("client_id", CLIENT_ID),
-            ("code_verifier", code_verifier),
-        ]);
-        let request = match timeout {
-            Some(timeout) => request.timeout(timeout),
-            None => request,
-        };
-        let response = request.send().map_err(|error| {
-            if timeout.is_some() && error.is_timeout() {
-                CodexAuthError::DeviceAuthorizationTimedOut
-            } else {
-                CodexAuthError::TokenRequestFailed {
-                    operation: "exchange",
-                }
-            }
+    let response = store
+        .oauth
+        .post(oauth::OAuthRequest {
+            url: TOKEN_ENDPOINT,
+            body: oauth::OAuthBody::Form(vec![
+                ("grant_type", "authorization_code".to_owned()),
+                ("code", code.to_owned()),
+                ("redirect_uri", redirect_uri.to_owned()),
+                ("client_id", CLIENT_ID.to_owned()),
+                ("code_verifier", code_verifier.to_owned()),
+            ]),
+            headers: &[],
+            timeout,
+            max_body: MAX_TOKEN_RESPONSE_BYTES,
+        })
+        .map_err(|error| match error {
+            oauth::TransportError::TimedOut => CodexAuthError::DeviceAuthorizationTimedOut,
+            oauth::TransportError::Failed => CodexAuthError::TokenRequestFailed {
+                operation: "exchange",
+            },
         })?;
-        let tokens: TokenResponse = decode_token_response(response, "exchange")?;
-        Ok(ExchangedTokens {
-            id_token: tokens.id_token,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-        })
-    }
+    let tokens: TokenResponse = decode_token_response(&response, "exchange")?;
+    Ok(ExchangedTokens {
+        id_token: tokens.id_token,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    })
 }
 
-impl CodexTokenClient for SystemCodexTokenClient {
-    fn exchange(
-        &self,
-        code: &str,
-        redirect_uri: &str,
-        code_verifier: &str,
-    ) -> Result<ExchangedTokens, CodexAuthError> {
-        self.exchange_tokens(code, redirect_uri, code_verifier, None)
+pub(super) fn refresh(
+    store: &CredentialStore,
+    refresh_token: &str,
+) -> Result<RefreshedTokens, CodexAuthError> {
+    #[derive(Deserialize)]
+    struct RefreshResponse {
+        id_token: Option<String>,
+        access_token: Option<String>,
+        refresh_token: Option<String>,
     }
 
-    fn exchange_with_timeout(
-        &self,
-        code: &str,
-        redirect_uri: &str,
-        code_verifier: &str,
-        timeout: Duration,
-    ) -> Result<ExchangedTokens, CodexAuthError> {
-        self.exchange_tokens(code, redirect_uri, code_verifier, Some(timeout))
-    }
-
-    fn refresh(&self, refresh_token: &str) -> Result<RefreshedTokens, CodexAuthError> {
-        #[derive(Serialize)]
-        struct RefreshRequest<'a> {
-            client_id: &'static str,
-            grant_type: &'static str,
-            refresh_token: &'a str,
-        }
-
-        #[derive(Deserialize)]
-        struct RefreshResponse {
-            id_token: Option<String>,
-            access_token: Option<String>,
-            refresh_token: Option<String>,
-        }
-
-        let client = token_client("refresh")?;
-        let response = client
-            .post(TOKEN_ENDPOINT)
-            .json(&RefreshRequest {
-                client_id: CLIENT_ID,
-                grant_type: "refresh_token",
-                refresh_token,
-            })
-            .send()
-            .map_err(|_| CodexAuthError::TokenRequestFailed {
-                operation: "refresh",
-            })?;
-        let tokens: RefreshResponse = decode_token_response(response, "refresh")?;
-        if tokens.id_token.is_none()
-            && tokens.access_token.is_none()
-            && tokens.refresh_token.is_none()
-        {
-            return Err(CodexAuthError::TokenResponseInvalid {
-                operation: "refresh",
-            });
-        }
-        Ok(RefreshedTokens {
-            id_token: tokens.id_token,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
+    let response = store
+        .oauth
+        .post(oauth::OAuthRequest {
+            url: TOKEN_ENDPOINT,
+            body: oauth::OAuthBody::Json(serde_json::json!({
+                "client_id": CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            })),
+            headers: &[],
+            timeout: None,
+            max_body: MAX_TOKEN_RESPONSE_BYTES,
         })
+        .map_err(|_| CodexAuthError::TokenRequestFailed {
+            operation: "refresh",
+        })?;
+    let tokens: RefreshResponse = decode_token_response(&response, "refresh")?;
+    if tokens.id_token.is_none() && tokens.access_token.is_none() && tokens.refresh_token.is_none()
+    {
+        return Err(CodexAuthError::TokenResponseInvalid {
+            operation: "refresh",
+        });
     }
+    Ok(RefreshedTokens {
+        id_token: tokens.id_token,
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token,
+    })
 }
 
 #[derive(Clone)]
@@ -266,96 +221,59 @@ pub(super) enum DevicePoll {
     Complete(DeviceGrant),
 }
 
-pub(super) trait CodexDeviceClient: Send + Sync {
-    fn start_device(&self) -> Result<DeviceAuthorization, CodexAuthError>;
-
-    fn poll_device(
-        &self,
-        device_auth_id: &str,
-        user_code: &str,
-        timeout: Duration,
-    ) -> Result<DevicePoll, CodexAuthError>;
-}
-
-pub(super) struct SystemCodexDeviceClient;
-
-impl CodexDeviceClient for SystemCodexDeviceClient {
-    fn start_device(&self) -> Result<DeviceAuthorization, CodexAuthError> {
-        request_device_authorization(&device_client()?, DEVICE_CODE_ENDPOINT)
-    }
-
-    fn poll_device(
-        &self,
-        device_auth_id: &str,
-        user_code: &str,
-        timeout: Duration,
-    ) -> Result<DevicePoll, CodexAuthError> {
-        request_device_poll(
-            &device_client()?,
-            DEVICE_TOKEN_ENDPOINT,
-            device_auth_id,
-            user_code,
-            timeout,
-        )
-    }
-}
-
 pub(super) fn request_device_authorization(
-    client: &reqwest::blocking::Client,
+    transport: &dyn oauth::OAuthTransport,
     endpoint: &str,
 ) -> Result<DeviceAuthorization, CodexAuthError> {
-    #[derive(Serialize)]
-    struct StartRequest {
-        client_id: &'static str,
-    }
-
-    let response = client
-        .post(endpoint)
-        .json(&StartRequest {
-            client_id: CLIENT_ID,
+    let response = transport
+        .post(oauth::OAuthRequest {
+            url: endpoint,
+            body: oauth::OAuthBody::Json(serde_json::json!({"client_id": CLIENT_ID})),
+            headers: &[],
+            timeout: None,
+            max_body: MAX_DEVICE_RESPONSE_BYTES,
         })
-        .send()
         .map_err(|_| CodexAuthError::DeviceRequestFailed)?;
-    decode_device_authorization(response)
+    decode_device_start(&response)
 }
 
 pub(super) fn request_device_poll(
-    client: &reqwest::blocking::Client,
+    transport: &dyn oauth::OAuthTransport,
     endpoint: &str,
     device_auth_id: &str,
     user_code: &str,
     timeout: Duration,
 ) -> Result<DevicePoll, CodexAuthError> {
-    #[derive(Serialize)]
-    struct PollRequest<'a> {
-        device_auth_id: &'a str,
-        user_code: &'a str,
-    }
-
-    let response = client
-        .post(endpoint)
-        .json(&PollRequest {
-            device_auth_id,
-            user_code,
+    let response = transport
+        .post(oauth::OAuthRequest {
+            url: endpoint,
+            body: oauth::OAuthBody::Json(serde_json::json!({
+                "device_auth_id": device_auth_id,
+                "user_code": user_code,
+            })),
+            headers: &[],
+            timeout: Some(timeout),
+            max_body: MAX_DEVICE_RESPONSE_BYTES,
         })
-        .timeout(timeout)
-        .send()
-        .map_err(|error| {
-            if error.is_timeout() {
-                CodexAuthError::DeviceAuthorizationTimedOut
-            } else {
-                CodexAuthError::DeviceRequestFailed
-            }
+        .map_err(|error| match error {
+            oauth::TransportError::TimedOut => CodexAuthError::DeviceAuthorizationTimedOut,
+            oauth::TransportError::Failed => CodexAuthError::DeviceRequestFailed,
         })?;
-    decode_device_poll(response)
+    decode_poll(&response)
 }
 
-fn device_client() -> Result<reqwest::blocking::Client, CodexAuthError> {
-    oauth::http_client().map_err(|_| CodexAuthError::DeviceRequestFailed)
-}
-
+#[cfg(test)]
 pub(super) fn decode_device_authorization(
-    mut response: Response,
+    response: Response,
+) -> Result<DeviceAuthorization, CodexAuthError> {
+    decode_device_start(&oauth::OAuthResponse::read(
+        response,
+        MAX_DEVICE_RESPONSE_BYTES,
+    ))
+}
+
+fn decode_device_start(
+    response: &oauth::OAuthResponse,
 ) -> Result<DeviceAuthorization, CodexAuthError> {
     #[derive(Deserialize)]
     struct StartResponse {
@@ -365,12 +283,14 @@ pub(super) fn decode_device_authorization(
         interval: String,
     }
 
-    if !response.status().is_success() {
+    if !response.is_success() {
         return Err(CodexAuthError::DeviceRequestRejected {
-            status: response.status().as_u16(),
+            status: response.status,
         });
     }
-    let body: StartResponse = decode_device_body(&mut response)?;
+    let body: StartResponse = response
+        .json()
+        .ok_or(CodexAuthError::DeviceResponseInvalid)?;
     let interval = body
         .interval
         .parse::<u64>()
@@ -395,7 +315,15 @@ pub(super) fn decode_device_authorization(
     })
 }
 
-pub(super) fn decode_device_poll(mut response: Response) -> Result<DevicePoll, CodexAuthError> {
+#[cfg(test)]
+pub(super) fn decode_device_poll(response: Response) -> Result<DevicePoll, CodexAuthError> {
+    decode_poll(&oauth::OAuthResponse::read(
+        response,
+        MAX_DEVICE_RESPONSE_BYTES,
+    ))
+}
+
+fn decode_poll(response: &oauth::OAuthResponse) -> Result<DevicePoll, CodexAuthError> {
     #[derive(Deserialize)]
     struct PollResponse {
         authorization_code: String,
@@ -403,15 +331,17 @@ pub(super) fn decode_device_poll(mut response: Response) -> Result<DevicePoll, C
         code_verifier: String,
     }
 
-    if matches!(response.status().as_u16(), 403 | 404) {
+    if matches!(response.status, 403 | 404) {
         return Ok(DevicePoll::Pending);
     }
-    if !response.status().is_success() {
+    if !response.is_success() {
         return Err(CodexAuthError::DeviceRequestRejected {
-            status: response.status().as_u16(),
+            status: response.status,
         });
     }
-    let body: PollResponse = decode_device_body(&mut response)?;
+    let body: PollResponse = response
+        .json()
+        .ok_or(CodexAuthError::DeviceResponseInvalid)?;
     let grant = DeviceGrant {
         authorization_code: body.authorization_code,
         code_challenge: body.code_challenge,
@@ -438,28 +368,18 @@ fn validate_device_grant(grant: &DeviceGrant) -> Result<(), CodexAuthError> {
     Ok(())
 }
 
-fn decode_device_body<T: DeserializeOwned>(response: &mut Response) -> Result<T, CodexAuthError> {
-    oauth::read_json(response, MAX_DEVICE_RESPONSE_BYTES)
-        .ok_or(CodexAuthError::DeviceResponseInvalid)
-}
-
-fn token_client(operation: &'static str) -> Result<reqwest::blocking::Client, CodexAuthError> {
-    oauth::http_client().map_err(|_| CodexAuthError::TokenRequestFailed { operation })
-}
-
 fn decode_token_response<T: DeserializeOwned>(
-    mut response: Response,
+    response: &oauth::OAuthResponse,
     operation: &'static str,
 ) -> Result<T, CodexAuthError> {
-    let status = response.status();
-    if !status.is_success() {
+    if !response.is_success() {
         return Err(CodexAuthError::TokenRequestRejected {
             operation,
-            status: status.as_u16(),
+            status: response.status,
         });
     }
-
-    oauth::read_json(&mut response, MAX_TOKEN_RESPONSE_BYTES)
+    response
+        .json()
         .ok_or(CodexAuthError::TokenResponseInvalid { operation })
 }
 
@@ -619,9 +539,7 @@ impl CodexLogin {
         code: &str,
         allow_file_fallback: bool,
     ) -> Result<CredentialBackend, AuthError> {
-        let tokens = store
-            .codex_client
-            .exchange(code, &self.redirect_uri, &self.code_verifier)?;
+        let tokens = exchange(store, code, &self.redirect_uri, &self.code_verifier, None)?;
         let credential = StoredCodexCredential::from_exchange(tokens, unix_time()?)?;
         let encoded = credential.encode()?;
         store.set_with_metadata(
@@ -642,7 +560,10 @@ pub struct CodexDeviceLogin {
 impl CodexDeviceLogin {
     pub fn start(store: &CredentialStore) -> Result<Self, AuthError> {
         Ok(Self {
-            authorization: store.codex_device_client.start_device()?,
+            authorization: request_device_authorization(
+                store.oauth.as_ref(),
+                DEVICE_CODE_ENDPOINT,
+            )?,
         })
     }
 
@@ -724,79 +645,79 @@ impl CodexDeviceLogin {
         C: FnMut() -> bool,
         S: FnMut(Duration),
     {
-        let (mut now, mut cancelled, mut sleep) = runtime;
+        let (now, cancelled, sleep) = runtime;
+        let mut runtime = oauth::DevicePollRuntime {
+            now,
+            cancelled,
+            sleep,
+        };
         let name = credential_name(profile)?;
-        let deadline = now()
+        let deadline = (runtime.now)()
             .checked_add(timeout)
             .ok_or(CodexAuthError::DeviceResponseInvalid)?;
-        loop {
-            if cancelled() {
-                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
-            }
-            let current = now();
-            if current >= deadline {
-                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-            }
-            sleep(
-                self.authorization
-                    .interval
-                    .min(deadline.saturating_duration_since(current)),
-            );
-            if cancelled() {
-                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
-            }
-            let current = now();
-            if current >= deadline {
-                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-            }
-            let polled = store.codex_device_client.poll_device(
-                &self.authorization.device_auth_id,
-                &self.authorization.user_code,
-                deadline.saturating_duration_since(current),
-            )?;
-            if cancelled() {
-                return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
-            }
-            if now() >= deadline {
-                return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-            }
-            match polled {
-                DevicePoll::Pending => {}
-                DevicePoll::Complete(grant) => {
-                    validate_device_grant(&grant)?;
-                    let current = now();
-                    if current >= deadline {
-                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-                    }
-                    let tokens = store.codex_client.exchange_with_timeout(
-                        &grant.authorization_code,
-                        DEVICE_REDIRECT_URI,
-                        &grant.code_verifier,
-                        deadline.saturating_duration_since(current),
-                    )?;
-                    if cancelled() {
-                        return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
-                    }
-                    if now() >= deadline {
-                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-                    }
-                    let credential = StoredCodexCredential::from_exchange(tokens, unix_time()?)?;
-                    if cancelled() {
-                        return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
-                    }
-                    if now() >= deadline {
-                        return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
-                    }
-                    return store.set_with_metadata(
-                        &name,
-                        credential.encode()?,
-                        allow_file_fallback,
-                        Some("openai-codex"),
-                        Some(CREDENTIAL_ENDPOINT),
-                    );
-                }
-            }
+        let errors = oauth::DevicePollErrors {
+            timed_out: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
+            cancelled: || CodexAuthError::DeviceAuthorizationCancelled.into(),
+            // Codex's device endpoint has no denial or expiry status: it
+            // answers 403 or 404 until the user approves.
+            denied: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
+            expired: || CodexAuthError::DeviceAuthorizationTimedOut.into(),
+        };
+        let interval = self.authorization.interval;
+        let grant = oauth::poll_device(
+            deadline,
+            interval,
+            interval,
+            &mut runtime,
+            &errors,
+            |remaining| {
+                Ok::<_, AuthError>(
+                    match request_device_poll(
+                        store.oauth.as_ref(),
+                        DEVICE_TOKEN_ENDPOINT,
+                        &self.authorization.device_auth_id,
+                        &self.authorization.user_code,
+                        remaining,
+                    )? {
+                        DevicePoll::Pending => oauth::DeviceStep::Pending,
+                        DevicePoll::Complete(grant) => oauth::DeviceStep::Complete(grant),
+                    },
+                )
+            },
+        )?;
+        let (mut now, mut cancelled) = (runtime.now, runtime.cancelled);
+        validate_device_grant(&grant)?;
+        let current = now();
+        if current >= deadline {
+            return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
         }
+        let tokens = exchange(
+            store,
+            &grant.authorization_code,
+            DEVICE_REDIRECT_URI,
+            &grant.code_verifier,
+            Some(deadline.saturating_duration_since(current)),
+        )?;
+        if cancelled() {
+            return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+        }
+        if now() >= deadline {
+            return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+        }
+        let credential = StoredCodexCredential::from_exchange(tokens, unix_time()?)?;
+        if cancelled() {
+            return Err(CodexAuthError::DeviceAuthorizationCancelled.into());
+        }
+        if now() >= deadline {
+            return Err(CodexAuthError::DeviceAuthorizationTimedOut.into());
+        }
+        store.set_with_metadata(
+            &name,
+            credential.encode()?,
+            allow_file_fallback,
+            Some("openai-codex"),
+            Some(CREDENTIAL_ENDPOINT),
+        )
     }
 }
 
@@ -1199,7 +1120,7 @@ impl CredentialStore {
             return Ok((credential.runtime_credential(), epoch));
         }
 
-        let refreshed = self.codex_client.refresh(&credential.refresh_token)?;
+        let refreshed = refresh(self, &credential.refresh_token)?;
         if let Some(id_token) = refreshed.id_token {
             let claims = id_token_claims(&id_token)?;
             if claims.account_id.as_deref() != Some(&credential.account_id) {

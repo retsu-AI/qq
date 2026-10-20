@@ -218,6 +218,222 @@ impl WindowsProtectedBackend for FakeWindowsProtected {
     }
 }
 
+/// The three per-provider client shapes the fakes below were written
+/// against, now test-only. [`FakeOAuth`] adapts any of them to the one
+/// [`oauth::OAuthTransport`] contract a store holds, by decoding the request
+/// it receives and encoding the answer each provider's endpoint would send.
+mod fake_clients {
+    use super::*;
+
+    pub(super) trait CodexTokenClient: Send + Sync {
+        fn exchange(
+            &self,
+            code: &str,
+            redirect_uri: &str,
+            code_verifier: &str,
+        ) -> Result<codex::ExchangedTokens, codex::CodexAuthError>;
+
+        fn exchange_with_timeout(
+            &self,
+            code: &str,
+            redirect_uri: &str,
+            code_verifier: &str,
+            timeout: Duration,
+        ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+            let _ = timeout;
+            self.exchange(code, redirect_uri, code_verifier)
+        }
+
+        fn refresh(
+            &self,
+            refresh_token: &str,
+        ) -> Result<codex::RefreshedTokens, codex::CodexAuthError>;
+    }
+
+    pub(super) trait CodexDeviceClient: Send + Sync {
+        fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError>;
+
+        fn poll_device(
+            &self,
+            device_auth_id: &str,
+            user_code: &str,
+            timeout: Duration,
+        ) -> Result<codex::DevicePoll, codex::CodexAuthError>;
+    }
+
+    pub(super) trait XaiTokenClient: Send + Sync {
+        fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError>;
+        fn poll_device(&self, device_code: &str) -> Result<xai::DevicePoll, xai::XaiAuthError>;
+        fn refresh(&self, refresh_token: &str) -> Result<xai::TokenSet, xai::XaiAuthError>;
+    }
+}
+
+use fake_clients::{CodexDeviceClient, CodexTokenClient, XaiTokenClient};
+
+/// Routes each OAuth request a store makes to the fake for its endpoint.
+#[derive(Clone, Default)]
+pub(super) struct FakeOAuth {
+    codex_tokens: Option<Arc<dyn CodexTokenClient>>,
+    codex_device: Option<Arc<dyn CodexDeviceClient>>,
+    xai: Option<Arc<dyn XaiTokenClient>>,
+}
+
+fn response(status: u16, body: serde_json::Value) -> oauth::OAuthResponse {
+    oauth::OAuthResponse {
+        status,
+        body: Some(serde_json::to_vec(&body).unwrap()),
+    }
+}
+
+/// The answer a failed fake call becomes: the transport error or HTTP
+/// status the real endpoint returns for it, so the provider's response
+/// mapping produces the same error the fake named.
+fn codex_failure(
+    error: codex::CodexAuthError,
+) -> Result<oauth::OAuthResponse, oauth::TransportError> {
+    use codex::CodexAuthError as E;
+    match error {
+        E::TokenRequestFailed { .. } | E::DeviceRequestFailed => Err(oauth::TransportError::Failed),
+        E::DeviceAuthorizationTimedOut => Err(oauth::TransportError::TimedOut),
+        E::TokenRequestRejected { status, .. } | E::DeviceRequestRejected { status } => {
+            Ok(response(status, serde_json::json!({})))
+        }
+        other => panic!("no transport encoding for {other:?}"),
+    }
+}
+
+impl oauth::OAuthTransport for FakeOAuth {
+    fn post(
+        &self,
+        request: oauth::OAuthRequest<'_>,
+    ) -> Result<oauth::OAuthResponse, oauth::TransportError> {
+        let field = |name: &str| request.body.field(name).unwrap_or_default();
+        match request.url {
+            "https://auth.openai.com/oauth/token" => {
+                let client = self.codex_tokens.as_ref().expect("a Codex token fake");
+                if field("grant_type") == "refresh_token" {
+                    return match client.refresh(&field("refresh_token")) {
+                        Ok(tokens) => Ok(response(
+                            200,
+                            serde_json::json!({
+                                "id_token": tokens.id_token,
+                                "access_token": tokens.access_token,
+                                "refresh_token": tokens.refresh_token,
+                            }),
+                        )),
+                        Err(error) => codex_failure(error),
+                    };
+                }
+                let exchanged = match request.timeout {
+                    Some(timeout) => client.exchange_with_timeout(
+                        &field("code"),
+                        &field("redirect_uri"),
+                        &field("code_verifier"),
+                        timeout,
+                    ),
+                    None => client.exchange(
+                        &field("code"),
+                        &field("redirect_uri"),
+                        &field("code_verifier"),
+                    ),
+                };
+                match exchanged {
+                    Ok(tokens) => Ok(response(
+                        200,
+                        serde_json::json!({
+                            "id_token": tokens.id_token,
+                            "access_token": tokens.access_token,
+                            "refresh_token": tokens.refresh_token,
+                        }),
+                    )),
+                    Err(error) => codex_failure(error),
+                }
+            }
+            "https://auth.openai.com/api/accounts/deviceauth/usercode" => {
+                let client = self.codex_device.as_ref().expect("a Codex device fake");
+                match client.start_device() {
+                    Ok(authorization) => Ok(response(
+                        200,
+                        serde_json::json!({
+                            "device_auth_id": authorization.device_auth_id,
+                            "user_code": authorization.user_code,
+                            "interval": authorization.interval.as_secs().max(1).to_string(),
+                        }),
+                    )),
+                    Err(error) => codex_failure(error),
+                }
+            }
+            "https://auth.openai.com/api/accounts/deviceauth/token" => {
+                let client = self.codex_device.as_ref().expect("a Codex device fake");
+                let timeout = request.timeout.expect("device polls are bounded");
+                match client.poll_device(&field("device_auth_id"), &field("user_code"), timeout) {
+                    Ok(codex::DevicePoll::Pending) => Ok(response(404, serde_json::json!({}))),
+                    Ok(codex::DevicePoll::Complete(grant)) => Ok(response(
+                        200,
+                        serde_json::json!({
+                            "authorization_code": grant.authorization_code,
+                            "code_challenge": grant.code_challenge,
+                            "code_verifier": grant.code_verifier,
+                        }),
+                    )),
+                    Err(error) => codex_failure(error),
+                }
+            }
+            "https://auth.x.ai/oauth2/device/code" => {
+                let client = self.xai.as_ref().expect("an xAI fake");
+                match client.start_device() {
+                    Ok(_) => panic!("no xAI fake starts a real device login"),
+                    Err(_) => Err(oauth::TransportError::Failed),
+                }
+            }
+            "https://auth.x.ai/oauth2/token" => {
+                let client = self.xai.as_ref().expect("an xAI fake");
+                if field("grant_type") == "refresh_token" {
+                    return match client.refresh(&field("refresh_token")) {
+                        Ok(tokens) => Ok(response(
+                            200,
+                            serde_json::json!({
+                                "access_token": tokens.access_token,
+                                "refresh_token": tokens.refresh_token,
+                                "expires_in": tokens.expires_in,
+                            }),
+                        )),
+                        Err(xai::XaiAuthError::RefreshRejected) => {
+                            Ok(response(400, serde_json::json!({})))
+                        }
+                        Err(_) => Err(oauth::TransportError::Failed),
+                    };
+                }
+                match client.poll_device(&field("device_code")) {
+                    Ok(_) => panic!("no xAI fake completes a real device poll"),
+                    Err(_) => Err(oauth::TransportError::Failed),
+                }
+            }
+            other => panic!("unexpected OAuth endpoint {other}"),
+        }
+    }
+}
+
+/// Installs `fake`'s clients on `store`, keeping any it already has.
+fn install(store: &mut CredentialStore, update: impl FnOnce(&mut FakeOAuth)) {
+    let mut fake = store.test_oauth.lock().unwrap().clone();
+    update(&mut fake);
+    *store.test_oauth.lock().unwrap() = fake.clone();
+    store.oauth = Arc::new(fake);
+}
+
+fn set_codex_tokens(store: &mut CredentialStore, client: Arc<dyn CodexTokenClient>) {
+    install(store, |fake| fake.codex_tokens = Some(client));
+}
+
+fn set_codex_device(store: &mut CredentialStore, client: Arc<dyn CodexDeviceClient>) {
+    install(store, |fake| fake.codex_device = Some(client));
+}
+
+fn set_xai(store: &mut CredentialStore, client: Arc<dyn XaiTokenClient>) {
+    install(store, |fake| fake.xai = Some(client));
+}
+
 struct FakeCodexTokenClient {
     exchanges: Mutex<Vec<(String, String, String)>>,
     refreshes: Mutex<Vec<String>>,
@@ -231,7 +447,7 @@ struct FakeCodexDeviceClient {
     poll_requests: Mutex<Vec<(String, String, Duration)>>,
 }
 
-impl codex::CodexDeviceClient for FakeCodexDeviceClient {
+impl CodexDeviceClient for FakeCodexDeviceClient {
     fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
         Ok(self.authorization.clone())
     }
@@ -262,7 +478,7 @@ struct DeadlineCrossingDeviceClient {
     poll_timeouts: Mutex<Vec<Duration>>,
 }
 
-impl codex::CodexDeviceClient for DeadlineCrossingDeviceClient {
+impl CodexDeviceClient for DeadlineCrossingDeviceClient {
     fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
         Ok(self.authorization.clone())
     }
@@ -293,7 +509,7 @@ struct FailingCodexExchangeClient {
     exchanges: AtomicU64,
 }
 
-impl codex::CodexTokenClient for FailingCodexExchangeClient {
+impl CodexTokenClient for FailingCodexExchangeClient {
     fn exchange(
         &self,
         _code: &str,
@@ -314,7 +530,7 @@ impl codex::CodexTokenClient for FailingCodexExchangeClient {
     }
 }
 
-impl codex::CodexTokenClient for FailingCodexTokenClient {
+impl CodexTokenClient for FailingCodexTokenClient {
     fn exchange(
         &self,
         _code: &str,
@@ -368,7 +584,7 @@ struct DeadlineCrossingExchangeClient {
     exchanged: codex::ExchangedTokens,
 }
 
-impl codex::CodexTokenClient for DeadlineCrossingExchangeClient {
+impl CodexTokenClient for DeadlineCrossingExchangeClient {
     fn exchange(
         &self,
         _code: &str,
@@ -398,7 +614,7 @@ impl codex::CodexTokenClient for DeadlineCrossingExchangeClient {
     }
 }
 
-impl codex::CodexTokenClient for CoordinatedCodexRefreshClient {
+impl CodexTokenClient for CoordinatedCodexRefreshClient {
     fn exchange(
         &self,
         _code: &str,
@@ -420,7 +636,7 @@ impl codex::CodexTokenClient for CoordinatedCodexRefreshClient {
     }
 }
 
-impl codex::CodexTokenClient for FakeCodexTokenClient {
+impl CodexTokenClient for FakeCodexTokenClient {
     fn exchange(
         &self,
         code: &str,
@@ -452,7 +668,7 @@ struct FakeXaiTokenClient {
     refreshed: xai::TokenSet,
 }
 
-impl xai::XaiTokenClient for FakeXaiTokenClient {
+impl XaiTokenClient for FakeXaiTokenClient {
     fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
         Err(xai::XaiAuthError::DeviceRequestFailed)
     }
@@ -1330,7 +1546,7 @@ fn codex_login_uses_pkce_rejects_wrong_state_and_stores_tokens() {
         },
         codex::RefreshedTokens::default(),
     ));
-    store.codex_client = client.clone();
+    set_codex_tokens(&mut store, client.clone());
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let login =
         CodexLogin::start_for_test(0, "known-state", verifier, Duration::from_secs(5)).unwrap();
@@ -1427,8 +1643,8 @@ fn codex_device_login_honors_poll_interval_and_exchanges_once() {
         },
         codex::RefreshedTokens::default(),
     ));
-    store.codex_device_client = device.clone();
-    store.codex_client = tokens.clone();
+    set_codex_device(&mut store, device.clone());
+    set_codex_tokens(&mut store, tokens.clone());
 
     let login = codex::CodexDeviceLogin::start(&store).unwrap();
     assert_eq!(
@@ -1503,7 +1719,11 @@ fn codex_device_http_sends_bounded_json_requests_with_the_published_client_id() 
         200,
         br#"{"device_auth_id":"device-id","user_code":"ABCD-EFGH","interval":"5"}"#.to_vec(),
     );
-    codex::request_device_authorization(&client, &start_url).unwrap();
+    codex::request_device_authorization(
+        &oauth::SystemTransport::with_client(client.clone()),
+        &start_url,
+    )
+    .unwrap();
     let start_request = String::from_utf8(start_server.join().unwrap()).unwrap();
     assert!(start_request.starts_with("POST /fixture HTTP/1.1\r\n"));
     let start_body = start_request.split("\r\n\r\n").nth(1).unwrap();
@@ -1525,7 +1745,7 @@ fn codex_device_http_sends_bounded_json_requests_with_the_published_client_id() 
     );
     assert!(matches!(
         codex::request_device_poll(
-            &client,
+            &oauth::SystemTransport::with_client(client.clone()),
             &poll_url,
             "device-id",
             "ABCD-EFGH",
@@ -1624,7 +1844,7 @@ fn codex_device_login_stops_at_deadline_or_cancellation_without_polling() {
         polls: Mutex::new(VecDeque::new()),
         poll_requests: Mutex::new(Vec::new()),
     });
-    store.codex_device_client = device.clone();
+    set_codex_device(&mut store, device.clone());
 
     let deadline_error = codex::CodexDeviceLogin::start(&store)
         .unwrap()
@@ -1687,8 +1907,8 @@ fn codex_device_login_rejects_a_complete_poll_that_crosses_the_deadline() {
         },
         codex::RefreshedTokens::default(),
     ));
-    store.codex_device_client = device.clone();
-    store.codex_client = tokens.clone();
+    set_codex_device(&mut store, device.clone());
+    set_codex_tokens(&mut store, tokens.clone());
 
     let clock = {
         let now = Arc::clone(&now);
@@ -1726,21 +1946,25 @@ fn codex_device_login_does_not_store_an_exchange_that_crosses_the_deadline() {
     let (mut store, _keyring, _directory) = test_store();
     let verifier = "device-verifier";
     let now = Arc::new(Mutex::new(Instant::now()));
-    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
-        authorization: codex::DeviceAuthorization {
-            device_auth_id: "device-id".to_owned(),
-            user_code: "ABCD-EFGH".to_owned(),
-            interval: Duration::from_secs(2),
-        },
-        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
-            codex::DeviceGrant {
-                authorization_code: "authorization-code".to_owned(),
-                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
-                code_verifier: verifier.to_owned(),
+    set_codex_device(
+        &mut store,
+        Arc::new(FakeCodexDeviceClient {
+            authorization: codex::DeviceAuthorization {
+                device_auth_id: "device-id".to_owned(),
+                user_code: "ABCD-EFGH".to_owned(),
+                interval: Duration::from_secs(2),
             },
-        ))])),
-        poll_requests: Mutex::new(Vec::new()),
-    });
+            polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+                codex::DeviceGrant {
+                    authorization_code: "authorization-code".to_owned(),
+                    code_challenge: URL_SAFE_NO_PAD
+                        .encode(sha2::Sha256::digest(verifier.as_bytes())),
+                    code_verifier: verifier.to_owned(),
+                },
+            ))])),
+            poll_requests: Mutex::new(Vec::new()),
+        }),
+    );
     let exchange = Arc::new(DeadlineCrossingExchangeClient {
         now: Arc::clone(&now),
         timeouts: Mutex::new(Vec::new()),
@@ -1755,7 +1979,7 @@ fn codex_device_login_does_not_store_an_exchange_that_crosses_the_deadline() {
             refresh_token: "refresh-token".to_owned(),
         },
     });
-    store.codex_client = exchange.clone();
+    set_codex_tokens(&mut store, exchange.clone());
 
     let clock = {
         let now = Arc::clone(&now);
@@ -1814,8 +2038,8 @@ fn codex_device_login_does_not_store_tokens_with_missing_identity() {
         },
         codex::RefreshedTokens::default(),
     ));
-    store.codex_device_client = device;
-    store.codex_client = tokens.clone();
+    set_codex_device(&mut store, device);
+    set_codex_tokens(&mut store, tokens.clone());
 
     let error = codex::CodexDeviceLogin::start(&store)
         .unwrap()
@@ -1840,21 +2064,25 @@ fn codex_device_login_does_not_store_tokens_with_missing_identity() {
 fn codex_device_login_reports_storage_failure_after_one_exchange() {
     let (mut store, keyring, _directory) = test_store();
     let verifier = "device-verifier";
-    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
-        authorization: codex::DeviceAuthorization {
-            device_auth_id: "device-id".to_owned(),
-            user_code: "ABCD-EFGH".to_owned(),
-            interval: Duration::from_nanos(1),
-        },
-        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
-            codex::DeviceGrant {
-                authorization_code: "authorization-code".to_owned(),
-                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
-                code_verifier: verifier.to_owned(),
+    set_codex_device(
+        &mut store,
+        Arc::new(FakeCodexDeviceClient {
+            authorization: codex::DeviceAuthorization {
+                device_auth_id: "device-id".to_owned(),
+                user_code: "ABCD-EFGH".to_owned(),
+                interval: Duration::from_nanos(1),
             },
-        ))])),
-        poll_requests: Mutex::new(Vec::new()),
-    });
+            polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+                codex::DeviceGrant {
+                    authorization_code: "authorization-code".to_owned(),
+                    code_challenge: URL_SAFE_NO_PAD
+                        .encode(sha2::Sha256::digest(verifier.as_bytes())),
+                    code_verifier: verifier.to_owned(),
+                },
+            ))])),
+            poll_requests: Mutex::new(Vec::new()),
+        }),
+    );
     let tokens = Arc::new(FakeCodexTokenClient::new(
         codex::ExchangedTokens {
             id_token: jwt(serde_json::json!({
@@ -1868,7 +2096,7 @@ fn codex_device_login_reports_storage_failure_after_one_exchange() {
         },
         codex::RefreshedTokens::default(),
     ));
-    store.codex_client = tokens.clone();
+    set_codex_tokens(&mut store, tokens.clone());
     keyring.set_mode(FakeMode::Failure);
 
     let error = codex::CodexDeviceLogin::start(&store)
@@ -1890,23 +2118,27 @@ fn codex_device_login_reports_storage_failure_after_one_exchange() {
 fn codex_device_login_does_not_retry_an_ambiguous_exchange_failure() {
     let (mut store, _keyring, _directory) = test_store();
     let verifier = "device-verifier";
-    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
-        authorization: codex::DeviceAuthorization {
-            device_auth_id: "device-id".to_owned(),
-            user_code: "ABCD-EFGH".to_owned(),
-            interval: Duration::from_nanos(1),
-        },
-        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
-            codex::DeviceGrant {
-                authorization_code: "authorization-code".to_owned(),
-                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
-                code_verifier: verifier.to_owned(),
+    set_codex_device(
+        &mut store,
+        Arc::new(FakeCodexDeviceClient {
+            authorization: codex::DeviceAuthorization {
+                device_auth_id: "device-id".to_owned(),
+                user_code: "ABCD-EFGH".to_owned(),
+                interval: Duration::from_nanos(1),
             },
-        ))])),
-        poll_requests: Mutex::new(Vec::new()),
-    });
+            polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+                codex::DeviceGrant {
+                    authorization_code: "authorization-code".to_owned(),
+                    code_challenge: URL_SAFE_NO_PAD
+                        .encode(sha2::Sha256::digest(verifier.as_bytes())),
+                    code_verifier: verifier.to_owned(),
+                },
+            ))])),
+            poll_requests: Mutex::new(Vec::new()),
+        }),
+    );
     let tokens = Arc::new(FailingCodexExchangeClient::default());
-    store.codex_client = tokens.clone();
+    set_codex_tokens(&mut store, tokens.clone());
 
     let error = codex::CodexDeviceLogin::start(&store)
         .unwrap()
@@ -1933,34 +2165,41 @@ fn codex_device_login_does_not_retry_an_ambiguous_exchange_failure() {
 fn codex_device_credential_reopens_through_the_existing_store() {
     let (mut store, keyring, directory) = test_store();
     let verifier = "device-verifier";
-    store.codex_device_client = Arc::new(FakeCodexDeviceClient {
-        authorization: codex::DeviceAuthorization {
-            device_auth_id: "device-id".to_owned(),
-            user_code: "ABCD-EFGH".to_owned(),
-            interval: Duration::from_nanos(1),
-        },
-        polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
-            codex::DeviceGrant {
-                authorization_code: "authorization-code".to_owned(),
-                code_challenge: URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes())),
-                code_verifier: verifier.to_owned(),
+    set_codex_device(
+        &mut store,
+        Arc::new(FakeCodexDeviceClient {
+            authorization: codex::DeviceAuthorization {
+                device_auth_id: "device-id".to_owned(),
+                user_code: "ABCD-EFGH".to_owned(),
+                interval: Duration::from_nanos(1),
             },
-        ))])),
-        poll_requests: Mutex::new(Vec::new()),
-    });
-    store.codex_client = Arc::new(FakeCodexTokenClient::new(
-        codex::ExchangedTokens {
-            id_token: jwt(serde_json::json!({
-                "https://api.openai.com/auth": {
-                    "chatgpt_account_id": "workspace-test-id",
-                    "chatgpt_account_is_fedramp": false
-                }
-            })),
-            access_token: "access-token".to_owned(),
-            refresh_token: "refresh-token".to_owned(),
-        },
-        codex::RefreshedTokens::default(),
-    ));
+            polls: Mutex::new(VecDeque::from([Ok(codex::DevicePoll::Complete(
+                codex::DeviceGrant {
+                    authorization_code: "authorization-code".to_owned(),
+                    code_challenge: URL_SAFE_NO_PAD
+                        .encode(sha2::Sha256::digest(verifier.as_bytes())),
+                    code_verifier: verifier.to_owned(),
+                },
+            ))])),
+            poll_requests: Mutex::new(Vec::new()),
+        }),
+    );
+    set_codex_tokens(
+        &mut store,
+        Arc::new(FakeCodexTokenClient::new(
+            codex::ExchangedTokens {
+                id_token: jwt(serde_json::json!({
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": "workspace-test-id",
+                        "chatgpt_account_is_fedramp": false
+                    }
+                })),
+                access_token: "access-token".to_owned(),
+                refresh_token: "refresh-token".to_owned(),
+            },
+            codex::RefreshedTokens::default(),
+        )),
+    );
     codex::CodexDeviceLogin::start(&store)
         .unwrap()
         .complete_for_test(
@@ -1997,14 +2236,17 @@ fn codex_login_routes_a_realistic_oversized_bundle_to_windows_protection() {
     }));
     let access_token = "a".repeat(1_750);
     let refresh_token = "r".repeat(200);
-    store.codex_client = Arc::new(FakeCodexTokenClient::new(
-        codex::ExchangedTokens {
-            id_token,
-            access_token: access_token.clone(),
-            refresh_token,
-        },
-        codex::RefreshedTokens::default(),
-    ));
+    set_codex_tokens(
+        &mut store,
+        Arc::new(FakeCodexTokenClient::new(
+            codex::ExchangedTokens {
+                id_token,
+                access_token: access_token.clone(),
+                refresh_token,
+            },
+            codex::RefreshedTokens::default(),
+        )),
+    );
     let login = CodexLogin::start_for_test(
         0,
         "known-state",
@@ -2096,7 +2338,7 @@ fn codex_resolution_refreshes_an_expired_access_token_once() {
             refresh_token: Some("rotated-refresh-token".to_owned()),
         },
     ));
-    store.codex_client = client.clone();
+    set_codex_tokens(&mut store, client.clone());
     let expired_access_token = jwt(serde_json::json!({"exp": 1}));
     let stored = serde_json::json!({
         "version": 1,
@@ -2412,7 +2654,7 @@ async fn codex_request_cache_coalesces_expired_refresh() {
             refresh_token: Some("rotated-refresh".to_owned()),
         },
     ));
-    store.codex_client = client.clone();
+    set_codex_tokens(&mut store, client.clone());
     store
         .set_with_metadata(
             "openai-codex/work",
@@ -2470,8 +2712,8 @@ async fn independent_codex_stores_share_one_refresh_owner_and_newest_epoch() {
             refresh_token: Some("rotated-refresh".to_owned()),
         },
     });
-    first_store.codex_client = client.clone();
-    second_store.codex_client = client.clone();
+    set_codex_tokens(&mut first_store, client.clone());
+    set_codex_tokens(&mut second_store, client.clone());
     first_store
         .set_with_metadata(
             "openai-codex/work",
@@ -2636,7 +2878,7 @@ async fn codex_request_cache_does_not_mask_refresh_failures_after_rotation() {
         ),
     ] {
         let (mut store, _keyring, _directory) = test_store();
-        store.codex_client = Arc::new(FailingCodexTokenClient(failure));
+        set_codex_tokens(&mut store, Arc::new(FailingCodexTokenClient(failure)));
         let expires_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2741,7 +2983,7 @@ fn xai_resolution_refreshes_once_and_persists_the_rotated_token() {
             expires_in: Some(3_600),
         },
     });
-    store.xai_client = client.clone();
+    set_xai(&mut store, client.clone());
     store
         .set_with_metadata(
             "xai/work",
@@ -2784,7 +3026,7 @@ struct CoordinatedXaiRefreshClient {
     refreshed: xai::TokenSet,
 }
 
-impl xai::XaiTokenClient for CoordinatedXaiRefreshClient {
+impl XaiTokenClient for CoordinatedXaiRefreshClient {
     fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
         unreachable!("the refresh-coordination fixture never starts a login")
     }
@@ -2816,11 +3058,11 @@ fn oauth_operations_lock_the_published_per_provider_files() {
     let paths = CredentialPaths::new(directory.path());
     // Concurrently running QQ versions coordinate through these exact names.
     assert_eq!(
-        paths.oauth_lock_file(OAuthProvider::OpenAiCodex),
+        paths.provider_lock_file(OAuthProvider::OpenAiCodex.name()),
         directory.path().join("openai-codex.lock")
     );
     assert_eq!(
-        paths.oauth_lock_file(OAuthProvider::XAi),
+        paths.provider_lock_file(OAuthProvider::XAi.name()),
         directory.path().join("xai.lock")
     );
 }
@@ -2836,15 +3078,18 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
     let rotating = CredentialStore::with_backends(paths.clone(), keyring.clone(), protected);
     let entered = Arc::new(Barrier::new(2));
     let release = Arc::new(Barrier::new(2));
-    refreshing.xai_client = Arc::new(CoordinatedXaiRefreshClient {
-        entered: Arc::clone(&entered),
-        release: Arc::clone(&release),
-        refreshed: xai::TokenSet {
-            access_token: "refreshed-access-token".to_owned(),
-            refresh_token: Some("rotated-refresh-token".to_owned()),
-            expires_in: Some(3_600),
-        },
-    });
+    set_xai(
+        &mut refreshing,
+        Arc::new(CoordinatedXaiRefreshClient {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            refreshed: xai::TokenSet {
+                access_token: "refreshed-access-token".to_owned(),
+                refresh_token: Some("rotated-refresh-token".to_owned()),
+                expires_in: Some(3_600),
+            },
+        }),
+    );
     let stored = |access_token: &str| {
         serde_json::to_vec(&serde_json::json!({
             "version": 1,
@@ -2918,6 +3163,47 @@ fn an_xai_refresh_holds_xai_lock_against_a_second_store_rotation() {
     xai_lock.try_lock().unwrap();
 }
 
+/// A provider with no lock file of its own gets interprocess exclusion
+/// through its derived `{provider}.lock`: while one store holds it, a second
+/// store over the same directory waits, and the legacy locks stay free.
+#[test]
+fn a_new_provider_serialises_independent_stores_through_its_derived_lock() {
+    let directory = TestDirectory::new();
+    let paths = CredentialPaths::new(directory.path());
+    let keyring = Arc::new(FakeKeyring::default());
+    let protected = Arc::new(FakeWindowsProtected::default());
+    let first = CredentialStore::with_backends(paths.clone(), keyring.clone(), protected.clone());
+    let second = CredentialStore::with_backends(paths.clone(), keyring, protected);
+    assert!(!directory.path().join("fixture-oauth.lock").exists());
+
+    let held = first.lock_provider_file("fixture-oauth").unwrap();
+    assert_eq!(
+        paths.provider_lock_file("fixture-oauth"),
+        directory.path().join("fixture-oauth.lock")
+    );
+    for legacy in ["openai-codex.lock", "xai.lock"] {
+        let file = File::create(directory.path().join(legacy)).unwrap();
+        file.try_lock().unwrap();
+    }
+
+    let (acquired, acquisition) = std::sync::mpsc::sync_channel(1);
+    let waiter = thread::spawn(move || {
+        let lock = second.lock_provider_file("fixture-oauth");
+        acquired.send(()).unwrap();
+        lock.map(drop)
+    });
+    // This can only pass spuriously, never fail spuriously: correct code
+    // never acquires the lock while the first store holds it.
+    assert_eq!(
+        acquisition.recv_timeout(Duration::from_millis(200)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+        "a second store took fixture-oauth.lock while the first held it"
+    );
+    drop(held);
+    acquisition.recv().unwrap();
+    waiter.join().unwrap().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn codex_refresh_preserves_an_explicit_private_file_backend() {
@@ -2943,7 +3229,7 @@ fn codex_refresh_preserves_an_explicit_private_file_backend() {
             refresh_token: Some("rotated-refresh-token".to_owned()),
         },
     ));
-    store.codex_client = client;
+    set_codex_tokens(&mut store, client);
     let stored = serde_json::json!({
         "version": 1,
         "id_token": jwt(serde_json::json!({
@@ -2979,10 +3265,14 @@ fn codex_refresh_preserves_an_explicit_private_file_backend() {
         CredentialBackend::File
     );
     assert_eq!(
-        fs::metadata(store.paths().oauth_lock_file(OAuthProvider::OpenAiCodex))
-            .unwrap()
-            .permissions()
-            .mode()
+        fs::metadata(
+            store
+                .paths()
+                .provider_lock_file(OAuthProvider::OpenAiCodex.name())
+        )
+        .unwrap()
+        .permissions()
+        .mode()
             & 0o777,
         0o600
     );
@@ -3768,7 +4058,7 @@ async fn xai_request_cache_rechecks_at_its_refresh_deadline_and_refreshes_once()
             expires_in: Some(3_600),
         },
     });
-    store.xai_client = client.clone();
+    set_xai(&mut store, client.clone());
     set_xai_oauth(&store, "valid-access-token", hour_from_now());
     let provider = Arc::new(xai::request_credentials_for_test(&store, "work"));
     qq_provider::RequestCredentialProvider::credential(provider.as_ref())
