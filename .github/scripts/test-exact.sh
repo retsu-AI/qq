@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# != 1 || ! $1 =~ ^[a-zA-Z0-9_:]+$ ]]; then
-  echo 'usage: bash .github/scripts/test-exact.sh <fully-qualified-test>' >&2
+if [[ $# -lt 1 || $# -gt 2 || ! $1 =~ ^[a-zA-Z0-9_:]+$ || ! ${2:-qq-core} =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo 'usage: bash .github/scripts/test-exact.sh <fully-qualified-test> [package]' >&2
   exit 2
 fi
 selector=$1
+package=${2:-qq-core}
 test_log=$(mktemp)
 trap 'rm -f -- "$test_log"' EXIT
 
 # pipefail preserves Cargo failures; normalize Windows line endings for receipts.
-cargo test --locked -p qq-core --lib "$selector" -- --exact --color never 2>&1 |
+cargo test --locked -p "$package" --lib "$selector" -- --exact --color never 2>&1 |
   tr -d '\r' | tee "$test_log"
 
 if ! grep -Fxq -- "test $selector ... ok" "$test_log" ||

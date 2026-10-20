@@ -29,6 +29,8 @@ use directories::ProjectDirs;
 use futures_util::StreamExt;
 use qq_core::PublishedEventStream;
 
+#[doc(hidden)]
+pub mod command_owner;
 mod cors;
 
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
@@ -486,6 +488,16 @@ impl ServerReservation {
         handler: Arc<dyn ServerHandler>,
         identity: ServerIdentity,
     ) -> Result<ServerHandle, ServerError> {
+        self.start_with(identity, |connection, allowed_origins| {
+            router(handler, connection, allowed_origins)
+        })
+    }
+
+    fn start_with(
+        self,
+        identity: ServerIdentity,
+        build: impl FnOnce(ServerConnection, AllowedOrigins) -> Router,
+    ) -> Result<ServerHandle, ServerError> {
         let Self {
             listener,
             address,
@@ -508,7 +520,7 @@ impl ServerReservation {
         .map_err(map_connection_error)?;
         write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
         guard.connection = Some(connection.clone());
-        let app = router(handler, connection.clone(), allowed_origins);
+        let app = build(connection.clone(), allowed_origins);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, app)
@@ -546,6 +558,18 @@ impl ServerHandle {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
+    }
+
+    /// Waits for the listener to stop. Cancelling this wait retains the task
+    /// handle, so the caller can still request and await graceful shutdown.
+    pub async fn finished(&mut self) -> Result<(), ServerError> {
+        let result = self
+            .task
+            .as_mut()
+            .ok_or(ServerError::ServerTaskStopped)?
+            .await;
+        self.task.take();
+        result.map_err(|_| ServerError::ServerTaskStopped)?
     }
 
     /// Requests graceful shutdown and waits for bounded metadata and lock cleanup.

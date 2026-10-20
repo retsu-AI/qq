@@ -109,6 +109,13 @@ pub enum Command {
         allow_origins: Vec<String>,
     },
 
+    /// Private native command worker, launched by the trusted host.
+    #[command(name = "_command-owner", hide = true)]
+    NativeWorker {
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+
     /// Inspect and validate effective configuration.
     Config {
         #[command(subcommand)]
