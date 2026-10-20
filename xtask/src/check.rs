@@ -387,9 +387,9 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
     Ok(changed.into_iter().collect())
 }
 
-/// Files whose committed content on HEAD equals their content just before the
-/// base's most recent change to them: the branch silently undoes work that
-/// landed on the base, typically by committing an old tree onto a newer base.
+/// Files whose committed entries on HEAD equal an older base-side entry:
+/// the branch silently undoes work that landed on the base, typically by
+/// committing an old tree onto a newer base.
 fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
     let git = |args: &[&str]| {
         capture(
@@ -416,17 +416,25 @@ fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckEr
     };
     let mut reverted = Vec::new();
     for path in files.split('\0').filter(|path| !path.is_empty()) {
-        let last = git(&["log", "-1", "--format=%H", merge_base, "--", path])?;
-        let last = last.trim();
-        if last.is_empty() {
+        let history = git(&[
+            "--literal-pathspecs",
+            "log",
+            "--format=%H",
+            merge_base,
+            "--",
+            path,
+        ])?;
+        let head = entry("HEAD", path);
+        let base_entry = entry(merge_base, path);
+        if head.is_empty() || head == base_entry {
             continue;
         }
-        let before = entry(&format!("{last}^"), path);
-        // Only restoring an existing old entry is evidence of a stale tree.
-        // Absence on both sides also describes a legitimate file deletion.
-        if !before.is_empty() && entry("HEAD", path) == before && entry(merge_base, path) != before
-        {
-            reverted.push(format!("{path} (undoes {})", short(last)));
+        for changed in history.lines() {
+            let before = entry(&format!("{changed}^"), path);
+            if !before.is_empty() && head == before {
+                reverted.push(format!("{path} (undoes {})", short(changed)));
+                break;
+            }
         }
     }
     Ok(reverted)
@@ -1305,6 +1313,13 @@ mod tests {
         // Someone else's work lands on main.
         write("auth.rs", "new auth");
         git(&["commit", "-qam", "auth refactor"]);
+
+        write("auth.rs", "third auth");
+        write("[id].tsx", "old literal");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "second auth refactor"]);
+        write("[id].tsx", "new literal");
+        git(&["commit", "-qam", "literal file refactor"]);
         // A clean branch from the new main touching only its own file passes.
         git(&["checkout", "-qb", "good"]);
         write("mine.rs", "new mine");
@@ -1331,6 +1346,13 @@ mod tests {
         let reverted = super::reverted_base_changes(root, "main").unwrap();
         assert_eq!(reverted.len(), 1, "{reverted:?}");
         assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
+
+        git(&["checkout", "-qb", "literal", "main"]);
+        write("[id].tsx", "old literal");
+        git(&["commit", "-qam", "restore literal file"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("[id].tsx (undoes "), "{reverted:?}");
 
         // Deleting a file created on main is subtraction, not a stale blob.
         git(&["checkout", "-qb", "delete", "main"]);

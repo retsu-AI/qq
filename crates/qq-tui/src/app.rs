@@ -1031,8 +1031,16 @@ impl App {
             {
                 form.refresh = crate::input::GoalFormRefresh::Ready;
             }
-            self.sessions
-                .install_session_snapshot(focused, &self.models, snapshot_sequence);
+            if may_refetch_focused {
+                self.sessions
+                    .install_session_snapshot(focused, &self.models, snapshot_sequence);
+            } else {
+                self.sessions.install_isolated_session_snapshot(
+                    focused,
+                    &self.models,
+                    snapshot_sequence,
+                );
+            }
             // The body may have been fetched for a non-focused pane (the
             // user moved on before it arrived); only the initial snapshot
             // and a still-focused pane move focus.

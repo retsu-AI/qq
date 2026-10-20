@@ -2538,8 +2538,11 @@ fn a_tool_starved_focused_snapshot_requests_its_own_body_once() {
         })] if *id == session_id && include_sessions.is_empty()
     ));
     // Even an oversized single-body response must not trigger a fetch loop.
+    let expected_messages = retry.focused.as_ref().unwrap().messages.clone();
     let (_, requests) = app.apply_snapshot(retry).split();
     assert!(requests.is_empty());
+    assert!(app.sessions[&session_id].is_warm());
+    assert_eq!(app.sessions[&session_id].messages, Some(expected_messages));
 }
 
 #[test]

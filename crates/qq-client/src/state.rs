@@ -403,11 +403,33 @@ impl SessionStore {
         models: &[ModelOption],
         loaded_through: u64,
     ) {
+        self.install_body(snapshot, models, loaded_through, false);
+    }
+
+    /// An isolated fetch has the whole budget; preserve its usable rows even
+    /// if one row class still cannot fit, rather than retrying forever.
+    pub fn install_isolated_session_snapshot(
+        &mut self,
+        snapshot: SessionSnapshot,
+        models: &[ModelOption],
+        loaded_through: u64,
+    ) {
+        self.install_body(snapshot, models, loaded_through, true);
+    }
+
+    fn install_body(
+        &mut self,
+        snapshot: SessionSnapshot,
+        models: &[ModelOption],
+        loaded_through: u64,
+        isolated: bool,
+    ) {
         let session_id = snapshot.summary.id;
         // The shared budget can starve either transcript messages or tool
-        // rows. Keep an incomplete body cold so focus fetches its own body.
-        if (snapshot.messages.is_empty() && snapshot.has_older_messages)
-            || (snapshot.tool_calls.is_empty() && snapshot.has_older_tool_calls)
+        // rows. Keep an incomplete shared body cold for an isolated fetch.
+        if !isolated
+            && ((snapshot.messages.is_empty() && snapshot.has_older_messages)
+                || (snapshot.tool_calls.is_empty() && snapshot.has_older_tool_calls))
         {
             self.upsert_summary(snapshot.summary, models, loaded_through);
             return;

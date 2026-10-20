@@ -1484,6 +1484,10 @@ out the body keeps a contiguous newest tail and sets `has_older_messages` /
 and tool-result recall. The TUI keeps bodies with no messages but older
 messages, or no tool calls but older tool calls, cold for a single-body
 fetch; a rejected focused multi-body snapshot triggers that fetch immediately.
+
+An isolated response installs its available rows even if one row class still
+cannot fit, so unavoidable truncation neither hides usable history nor
+causes an endless retry.
 Session summaries and run rows are never cut by transcript size.
 
 ### `POST /v1/models`
