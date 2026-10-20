@@ -56,6 +56,9 @@ pub(super) fn write_file(
         Ok(resolved) => resolved,
         Err(error) => return ToolOutput::error(error),
     };
+    if let Err(error) = workspace.check_write_path(&arguments.path, &path) {
+        return ToolOutput::refused(error.to_string());
+    }
     let key = path.to_string_lossy().into_owned();
 
     let guard = workspace
@@ -121,7 +124,7 @@ pub(super) fn write_file(
         Ok(_) => return ToolOutput::error("not_a_file: path is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = &missing_parents
-                && let Err(error) = workspace.root().create_dir_all(parent)
+                && let Err(error) = workspace.write_directory(parent, true)
             {
                 return ToolOutput::error(format!("could not create parent directories: {error}"));
             }

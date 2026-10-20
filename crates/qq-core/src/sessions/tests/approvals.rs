@@ -1,6 +1,85 @@
 use super::*;
 
 #[tokio::test]
+async fn strict_requires_human_approval_for_each_call_even_with_grants_and_delegate_on() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Strict,
+        vec![vec![
+            ("__test_mutate", "{}".to_owned()),
+            ("__test_mutate", "{}".to_owned()),
+        ]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalDelegate {
+                session_id: harness.session_id,
+                delegate: Some(qq_protocol::ApprovalDelegate::On),
+            },
+        )
+        .await
+        .unwrap();
+    let session_id = harness.session_id;
+    harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        connection.execute("INSERT INTO session_grants(session_id, kind, value, created_at_ms, source) VALUES (?1, 'tool', '__test_mutate', 0, 'human')", [session_id.to_string()])?;
+        Ok(())
+    }).await.unwrap();
+    let run_id = submit_prompt(&harness, "mutate twice").await;
+    let (_, first) = collect_until_approval_requested(&mut harness.events).await;
+    let receipt = respond_approval(
+        &harness.runtime,
+        run_id,
+        first.id,
+        ApprovalDecision::ApproveForWorkspace {
+            grant: ApprovalGrant::Tool {
+                name: "__test_mutate".to_owned(),
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        receipt.outcome,
+        CommandOutcome::ToolApprovalResolved {
+            resolution: ApprovalResolution::ApprovedOnce,
+            ..
+        }
+    ));
+    let (_, second) = collect_until_approval_requested(&mut harness.events).await;
+    assert_ne!(first.id, second.id);
+    respond_approval(&harness.runtime, run_id, second.id, ApprovalDecision::Deny)
+        .await
+        .unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(observed.iter().any(|event| matches!(
+        &event.event,
+        SessionEvent::ToolApprovalResolved {
+            resolution: ApprovalResolution::Denied,
+            ..
+        }
+    )));
+    assert!(consulted.lock().unwrap().is_empty());
+    let (_, grants, _) = harness
+        .runtime
+        .inner
+        .store
+        .approval_policy(harness.session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        grants.tools,
+        ["__test_mutate".to_owned()].into_iter().collect()
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn immediate_approval_response_cannot_race_past_registered_waiter() {
     let mut harness = approval_harness(
         ApprovalMode::Ask,
@@ -4233,5 +4312,118 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         );
         assert_eq!(parent_requests.lock().unwrap().len(), 1);
         assert_eq!(child_requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn changing_auto_to_strict_revokes_an_inflight_reviewer_approval() {
+    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Auto,
+        vec![vec![(
+            "__test_shell",
+            r#"{"command":"git push origin main"}"#.to_owned(),
+        )]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let run_id = submit_prompt(&harness, "publish").await;
+    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SetApprovalMode {
+                session_id: harness.session_id,
+                mode: ApprovalMode::Strict,
+            },
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let observed = collect_through_finished(&mut harness.events).await;
+    assert!(
+        !observed.iter().any(|event| matches!(
+            &event.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id
+        )),
+        "a stale reviewer approval must not execute after Strict is selected"
+    );
+    assert!(observed.iter().any(|event| matches!(
+        &event.event, SessionEvent::ToolApprovalResolved { tool_call, resolution: ApprovalResolution::Denied, .. }
+            if tool_call.id == call.id && tool_call.state == ToolCallState::Denied
+    )), "authority revocation must persist a denied receipt: {observed:?}");
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Completed)
+    ));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn readonly_revocation_denies_a_late_human_approval_without_recording_grants() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::Strict] {
+        for decision in [
+            ApprovalDecision::ApproveOnce,
+            ApprovalDecision::ApproveForSession {
+                grant: ApprovalGrant::Tool {
+                    name: "__test_mutate".to_owned(),
+                },
+            },
+            ApprovalDecision::ApproveForWorkspace {
+                grant: ApprovalGrant::Tool {
+                    name: "__test_mutate".to_owned(),
+                },
+            },
+        ] {
+            let mut harness = scripted_runs_harness_with(
+                mode,
+                vec![vec![("__test_mutate", "{}".to_owned())]],
+                None,
+                None,
+            )
+            .await;
+            let run_id = submit_prompt(&harness, "mutate").await;
+            let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SetApprovalMode {
+                        session_id: harness.session_id,
+                        mode: ApprovalMode::ReadOnly,
+                    },
+                )
+                .await
+                .unwrap();
+            let receipt = respond_approval(&harness.runtime, run_id, call.id, decision)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    receipt.outcome,
+                    CommandOutcome::ToolApprovalResolved {
+                        resolution: ApprovalResolution::Denied,
+                        ..
+                    }
+                ),
+                "revocation must override a late approval: {receipt:?}"
+            );
+            let observed = collect_through_finished(&mut harness.events).await;
+            assert!(!observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
+            assert!(observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolApprovalResolved { tool_call, .. }
+                    if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text.contains("permission_denied: authority_changed")))));
+            let (_, grants, _) = harness
+                .runtime
+                .inner
+                .store
+                .approval_policy(harness.session_id)
+                .await
+                .unwrap();
+            assert!(grants.tools.is_empty());
+            harness.runtime.shutdown().await.unwrap();
+        }
     }
 }

@@ -2223,6 +2223,7 @@ impl std::str::FromStr for ApprovalDelegateSetting {
 #[serde(rename_all = "snake_case")]
 pub enum ProfileApprovalMode {
     ReadOnly,
+    Strict,
     Ask,
     Auto,
     Full,

@@ -5042,3 +5042,15 @@ fn builtin_provider_patches_layer_over_their_presets() {
         )
     );
 }
+
+#[test]
+fn strict_profile_approval_decodes_alongside_legacy_ask() {
+    assert_eq!(
+        ron::from_str::<ProfileApprovalMode>("strict").unwrap(),
+        ProfileApprovalMode::Strict
+    );
+    assert_eq!(
+        ron::from_str::<ProfileApprovalMode>("ask").unwrap(),
+        ProfileApprovalMode::Ask
+    );
+}

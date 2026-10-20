@@ -97,6 +97,78 @@ impl Workspace {
         &self.apply_lock
     }
 
+    /// Pin each resolved directory without following replacement symlinks.
+    /// The returned capability remains the same directory even if its name
+    /// is exchanged while a tool is writing its temporary file.
+    pub(crate) fn write_directory(&self, path: &Path, create: bool) -> Result<Dir, std::io::Error> {
+        let mut directory = self.root.try_clone()?.into_std_file();
+        for component in path.components() {
+            let name = match component {
+                std::path::Component::CurDir => continue,
+                std::path::Component::Normal(name) => Path::new(name),
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "write directory must be workspace-relative",
+                    ));
+                }
+            };
+            directory = match cap_primitives::fs::open_dir_nofollow(&directory, name) {
+                Ok(next) => next,
+                Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+                    let parent = Dir::from_std_file(directory.try_clone()?);
+                    match parent.create_dir(name) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(error) => return Err(error),
+                    }
+                    cap_primitives::fs::open_dir_nofollow(&directory, name)?
+                }
+                Err(error) => return Err(error),
+            };
+        }
+        Ok(Dir::from_std_file(directory))
+    }
+
+    /// Mutation tools may change task files, never the policy or Git trust
+    /// configuration that determines the authority of subsequent work.
+    pub(crate) fn check_write_path(
+        &self,
+        requested: &str,
+        resolved: &Path,
+    ) -> Result<(), WorkspacePathError> {
+        fn protected(path: &Path) -> bool {
+            let mut components = path.components().peekable();
+            while let Some(component) = components.next() {
+                let std::path::Component::Normal(name) = component else {
+                    continue;
+                };
+                let name = name.to_string_lossy();
+                if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case("qq.ron") {
+                    return true;
+                }
+                if name.eq_ignore_ascii_case(".qq") {
+                    match components.peek() {
+                        None => return true,
+                        Some(std::path::Component::Normal(next))
+                            if ["config.ron", "config.d", "packs"].iter().any(|protected| {
+                                next.to_string_lossy().eq_ignore_ascii_case(protected)
+                            }) =>
+                        {
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            false
+        }
+        if protected(Path::new(requested)) || protected(resolved) {
+            return Err(WorkspacePathError::ProtectedMutation);
+        }
+        Ok(())
+    }
+
     pub(crate) fn contained_path(&self, requested: &str) -> Result<PathBuf, WorkspacePathError> {
         if requested.is_empty() {
             return Err(WorkspacePathError::Empty);
@@ -138,6 +210,10 @@ pub(crate) fn blocking_permits() -> Arc<Semaphore> {
 
 #[derive(Debug, Error)]
 pub enum WorkspacePathError {
+    #[error(
+        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron) or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
+    )]
+    ProtectedMutation,
     #[error("path must not be empty")]
     Empty,
     #[error("path must be relative to the workspace")]

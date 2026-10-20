@@ -396,10 +396,49 @@ pub(super) fn insert_seed_grants(
     Ok(())
 }
 
-/// The session's mode, its grants, and its delegate override (`None` when
-/// the configured `approval_delegate` applies).
+/// Effective local policy plus the ancestor ceilings applied before review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ToolApprovalPolicy {
+    pub mode: ApprovalMode,
+    pub grants: approval::SessionGrants,
+    pub delegate: Option<approval::ApprovalDelegate>,
+    pub ancestors: Vec<(ApprovalMode, approval::SessionGrants)>,
+}
+
+pub(super) fn load_tool_approval_policy(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<ToolApprovalPolicy, SessionRuntimeError> {
+    let (mode, grants, delegate) = load_approval_policy(connection, session_id)?;
+    let ancestors = load_ancestor_approval_policies(connection, session_id)?;
+    Ok(ToolApprovalPolicy {
+        mode,
+        grants,
+        delegate,
+        ancestors,
+    })
+}
+
+pub(super) fn load_ancestor_approval_policies(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<Vec<(ApprovalMode, approval::SessionGrants)>, SessionRuntimeError> {
+    let mut policies = Vec::new();
+    let mut current = session_id;
+    for _ in 0..=MAX_CHILD_DEPTH {
+        let Some(parent) = session_parent(connection, current)? else {
+            return Ok(policies);
+        };
+        let (mode, grants, _) = load_approval_policy(connection, parent)?;
+        policies.push((mode, grants));
+        current = parent;
+    }
+    Err(SessionRuntimeError::CONSTRAINT)
+}
+
+/// The session's mode, grants, and optional override of the configured delegate.
 pub(super) fn load_approval_policy(
-    connection: &mut Connection,
+    connection: &Connection,
     session_id: SessionId,
 ) -> Result<
     (
@@ -607,16 +646,31 @@ pub(crate) const MAX_DELEGATE_GRANTS_PER_RUN: u32 = 64;
 /// the storage rule never fails an approval. The row's `source` names the
 /// delegate (`delegate` for the reviewer model, `jev` for Jev), so the gate
 /// reads it as an exact match only, the workspace promotion path never sees
-/// it, and an audit can tell the two delegates apart.
+/// it, and an audit can tell the two delegates apart. If task or ancestor
+/// authority changed during review, settle as a policy denial instead of
+/// applying the stale verdict or recording a grant. A client resolution that
+/// already won remains authoritative.
 pub(super) fn resolve_approval_by_reviewer(
     connection: &mut Connection,
     store_id: StoreId,
     identity: RunIdentity,
     tool_call_id: ToolCallId,
     grant: Option<DelegateGrant>,
-    delegate: DelegateIdentity,
+    expected_policy: &ToolApprovalPolicy,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    if load_tool_approval_policy(&transaction, identity.session_id)? != *expected_policy {
+        let event = deny_pending_approval(
+            &transaction,
+            store_id,
+            identity,
+            tool_call_id,
+            "permission_denied: authority_changed: task or parent permissions changed while the reviewer was deciding; request the action again under the current permissions",
+            (ApprovalResolution::Denied, None),
+        )?;
+        transaction.commit()?;
+        return Ok(event);
+    }
     let now = now_ms();
     let updated = transaction.execute(
         "UPDATE tool_calls
@@ -676,7 +730,7 @@ pub(super) fn resolve_approval_by_reviewer(
                     kind,
                     value,
                     now,
-                    super::runtime::delegate_grant_source(delegate),
+                    super::runtime::delegate_grant_source(DelegateIdentity::Reviewer),
                     run
                 ],
             )?;
@@ -689,7 +743,7 @@ pub(super) fn resolve_approval_by_reviewer(
         SessionEvent::ToolApprovalResolved {
             tool_call,
             resolution: ApprovalResolution::ApprovedByReviewer,
-            delegate: Some(delegate),
+            delegate: Some(DelegateIdentity::Reviewer),
         },
     )?;
     transaction.commit()?;
@@ -708,6 +762,26 @@ pub(super) fn deny_approval_by_reviewer(
     delegate: DelegateIdentity,
 ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let event = deny_pending_approval(
+        &transaction,
+        store_id,
+        identity,
+        tool_call_id,
+        message,
+        (ApprovalResolution::DeniedByReviewer, Some(delegate)),
+    )?;
+    transaction.commit()?;
+    Ok(event)
+}
+
+fn deny_pending_approval(
+    transaction: &Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    message: &str,
+    settlement: (ApprovalResolution, Option<DelegateIdentity>),
+) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
     let now = now_ms();
     let Some((state, resolution, provider_call_id, first_result_in_turn)) = transaction
         .query_row(
@@ -737,7 +811,7 @@ pub(super) fn deny_approval_by_reviewer(
         return Ok(None);
     }
     reserve_tool_result_capacity(
-        &transaction,
+        transaction,
         identity.run_id,
         &provider_call_id,
         message,
@@ -751,21 +825,20 @@ pub(super) fn deny_approval_by_reviewer(
         params![
             tool_call_id.to_string(),
             message,
-            approval_resolution_str(ApprovalResolution::DeniedByReviewer),
+            approval_resolution_str(settlement.0),
             now,
         ],
     )?;
-    let tool_call = load_tool_call(&transaction, tool_call_id)?;
+    let tool_call = load_tool_call(transaction, tool_call_id)?;
     let event = append_event(
-        &transaction,
+        transaction,
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolApprovalResolved {
             tool_call,
-            resolution: ApprovalResolution::DeniedByReviewer,
-            delegate: Some(delegate),
+            resolution: settlement.0,
+            delegate: settlement.1,
         },
     )?;
-    transaction.commit()?;
     Ok(Some(event))
 }
 

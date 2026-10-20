@@ -1052,6 +1052,7 @@ impl RuntimeFactory {
                     .approval_mode()
                     .map_or(ApprovalMode::default(), |mode| match mode {
                         qq_config::ProfileApprovalMode::ReadOnly => ApprovalMode::ReadOnly,
+                        qq_config::ProfileApprovalMode::Strict => ApprovalMode::Strict,
                         qq_config::ProfileApprovalMode::Ask => ApprovalMode::Ask,
                         qq_config::ProfileApprovalMode::Auto => ApprovalMode::Auto,
                         qq_config::ProfileApprovalMode::Full => ApprovalMode::Full,
@@ -2768,6 +2769,8 @@ async fn collect_reviewer_verdict(
                 "ask root session: every ungranted mutation is held; the operator opted you in, \
                  and your deny is advice here (the human is still asked)"
             }
+            qq_protocol::ApprovalMode::Strict =>
+                "strict session: only the human can approve this action",
             qq_protocol::ApprovalMode::ReadOnly | qq_protocol::ApprovalMode::Full => "root session",
         }
     );

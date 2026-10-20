@@ -247,6 +247,9 @@ pub(super) fn edit_file(
                 ));
             }
         };
+        if let Err(error) = workspace.check_write_path(&edit.path, &path) {
+            return ToolOutput::refused(format!("edit {index}: {error}"));
+        }
         let key = path.to_string_lossy().into_owned();
         if !planned.contains_key(&key) {
             if !workspace.root().is_file(&path) {
@@ -889,20 +892,25 @@ pub(super) fn apply_atomically(
         std::process::id(),
         TEMP_FILE_ORDINAL.fetch_add(1, Ordering::Relaxed),
     );
-    let temp_path = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(&temp_name),
-        _ => PathBuf::from(&temp_name),
-    };
+    let directory = workspace
+        .write_directory(path.parent().unwrap_or(Path::new("")), false)
+        .map_err(|error| format!("could not open the write directory without symlinks: {error}"))?;
+    let target_name = path.file_name().ok_or("write target has no filename")?;
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    let mut temp = workspace
-        .root()
-        .open_with(&temp_path, &options)
+    let mut temp = directory
+        .open_with(&temp_name, &options)
         .map_err(|error| format!("could not create a temporary file: {error}"))?;
     let written = temp
         .write_all(bytes)
         .and_then(|()| temp.sync_all())
-        .map_err(|error| format!("could not write the temporary file: {error}"));
+        .and_then(|()| match permissions {
+            Some(permissions) => temp.set_permissions(permissions),
+            None => Ok(()),
+        })
+        .map_err(|error| {
+            format!("could not write the temporary file or preserve its permissions: {error}")
+        });
     drop(temp);
     #[cfg(test)]
     {
@@ -918,22 +926,13 @@ pub(super) fn apply_atomically(
             let _ = hook.release.recv();
         }
     }
-    let applied = written
-        .and_then(|()| match permissions {
-            Some(permissions) => workspace
-                .root()
-                .set_permissions(&temp_path, permissions)
-                .map_err(|error| format!("could not preserve file permissions: {error}")),
-            None => Ok(()),
-        })
-        .and_then(|()| {
-            workspace
-                .root()
-                .rename(&temp_path, workspace.root(), path)
-                .map_err(|error| format!("could not apply the change: {error}"))
-        });
+    let applied = written.and_then(|()| {
+        directory
+            .rename(&temp_name, &directory, target_name)
+            .map_err(|error| format!("could not apply the change: {error}"))
+    });
     if applied.is_err() {
-        let _ = workspace.root().remove_file(&temp_path);
+        let _ = directory.remove_file(&temp_name);
     }
     applied
 }

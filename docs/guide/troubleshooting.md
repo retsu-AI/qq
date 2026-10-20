@@ -8,7 +8,7 @@ puts the fix next to whatever failed. Its header reports the build and
 compatibility versions, also available from `qq version`:
 
 ```
-qq <version> (<commit> <build date>) · protocol 36 · capabilities 1 · descriptor 15 · store schema 58
+qq <version> (<commit> <build date>) · protocol 37 · capabilities 1 · descriptor 15 · store schema 58
 ok    configuration    2 sources; qq config sources lists them
 ok    project trust    nothing pending
 ok    model            anthropic/claude-sonnet-5
@@ -214,9 +214,11 @@ start it again after adding one.
 
 ### `qq run` denied everything
 
-The default `--approval read-only` denies every edit, shell, MCP, and
-network call. Use `--approval auto` (workspace edits and safe commands) and
-grant specific extras with `--allow-shell` / `--allow-tool` / `--allow-host`.
+`--approval read-only` denies every edit, shell, MCP, and network call.
+`--approval strict` denies calls needing explicit human approval, including
+allowlisted calls. The default `--approval auto` permits workspace edits and
+safe commands; grant specific extras with `--allow-shell` / `--allow-tool` /
+`--allow-host`.
 [Headless › Approval without a human](headless.md#approval-without-a-human).
 
 ### The agent says a command was `forbidden`

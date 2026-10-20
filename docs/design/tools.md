@@ -1568,16 +1568,20 @@ can tell a delegate resolution from the stream alone. Recorded `source =
 are never written. Human, timeout, and answer resolutions carry no
 `delegate`.
 
+`strict` holds every non-read action for fresh explicit human approval,
+regardless of grants or reviewer settings. An unattended strict run denies
+held calls immediately.
+
 Decision by effect class before grants (ADR-0021):
 
-| class | read-only | ask | auto | supervised | full |
-| --- | --- | --- | --- | --- | --- |
-| `ReadOnly` | Execute | Execute | Execute | Execute | Execute |
-| `Mutating` | Deny | Ask | Execute | Ask | Execute |
-| `Shell` | Deny | Ask | Execute unless `Prompt`/`Forbidden` | Ask | Execute (`Forbidden` still denied) |
-| `External` | Deny | Ask | Execute | Ask | Execute |
-| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold | Hold |
-| `Network` (`fetch`) | Deny | Ask | Execute if a grant covers the host | Ask | Execute |
+| class | read-only | strict | ask | auto | supervised | full |
+| --- | --- | --- | --- | --- | --- | --- |
+| `ReadOnly` | Execute | Execute | Execute | Execute | Execute | Execute |
+| `Mutating` | Deny | Human each call | Ask | Execute | Ask | Execute |
+| `Shell` | Deny | Human each call | Ask | Execute unless `Prompt`/`Forbidden` | Ask | Execute (`Forbidden` still denied) |
+| `External` | Deny | Human each call | Ask | Execute | Ask | Execute |
+| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold | Hold | Hold |
+| `Network` (`fetch`) | Deny | Human each call | Ask | Execute if a grant covers the host | Ask | Execute |
 
 Blocked hosts (private, link-local, metadata, managed `deny_hosts`) are
 refused before the mode, like a shell `Forbidden` (§ Network Tools).

@@ -1907,6 +1907,7 @@ impl Store {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn approval_policy(
         &self,
         session_id: SessionId,
@@ -1920,6 +1921,17 @@ impl Store {
     > {
         self.call(Priority::Output, move |connection| {
             load_approval_policy(connection, session_id)
+        })
+        .await
+    }
+
+    /// Read local and inherited authority together on the serialized worker.
+    pub(super) async fn tool_approval_policy(
+        &self,
+        session_id: SessionId,
+    ) -> Result<ToolApprovalPolicy, SessionRuntimeError> {
+        self.call(Priority::Output, move |connection| {
+            load_tool_approval_policy(connection, session_id)
         })
         .await
     }
@@ -1995,7 +2007,7 @@ impl Store {
         claimed: &ClaimedRun,
         tool_call_id: ToolCallId,
         grant: Option<DelegateGrant>,
-        delegate: DelegateIdentity,
+        expected_policy: ToolApprovalPolicy,
     ) -> Result<Option<SessionEventEnvelope>, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
@@ -2006,7 +2018,7 @@ impl Store {
                 identity,
                 tool_call_id,
                 grant,
-                delegate,
+                &expected_policy,
             )
         })
         .await

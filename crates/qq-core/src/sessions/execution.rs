@@ -94,7 +94,8 @@ fn session_prompt_prefix_key(
         subagent: (!user && claimed.purpose == SessionPurpose::Task).then_some(
             match claimed.approval_mode {
                 ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
-                ApprovalMode::Supervised
+                ApprovalMode::Strict
+                | ApprovalMode::Supervised
                 | ApprovalMode::Ask
                 | ApprovalMode::Auto
                 | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,
@@ -417,7 +418,8 @@ async fn prepare_execution(
             // client may only lower a child's mode, never raise it.
             base.for_subagent(match claimed.approval_mode {
                 ApprovalMode::ReadOnly => crate::runtime::SubagentAuthority::Read,
-                ApprovalMode::Supervised
+                ApprovalMode::Strict
+                | ApprovalMode::Supervised
                 | ApprovalMode::Ask
                 | ApprovalMode::Auto
                 | ApprovalMode::Full => crate::runtime::SubagentAuthority::Write,

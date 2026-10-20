@@ -1,0 +1,8 @@
+{
+  "command_id": "28282828282828282828282828282828",
+  "command": {
+    "type": "set_approval_delegate",
+    "session_id": "03030303030303030303030303030303",
+    "delegate": "off"
+  }
+}

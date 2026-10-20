@@ -242,7 +242,7 @@ profiles: {
 ```
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
-(`read_only` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
+(`read_only` `strict` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
 `reasoning_effort`. Pack
 profiles (below) add prompts, skills, and tool filters.
 

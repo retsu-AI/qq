@@ -60,8 +60,11 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 36
+PROTOCOL_VERSION = 37
 ```
+
+Version 37 adds `strict` approval mode for explicit per-call human consent.
+Stored grants and reviewer delegation cannot authorize a strict call.
 
 Version 36 removes Jev routing and checkpoints. The `routing_started`,
 `routing_completed`, `checkpoint_started` and `checkpoint_reviewed` events are
@@ -128,7 +131,7 @@ waiting or answering without loading its body or having seen the request
 event.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v36/`; the `v17`–`v35` directories are
+`crates/qq-protocol/tests/fixtures/v37/`; the `v17`–`v36` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -662,7 +665,7 @@ Response `ServerCapabilities` (abridged; see
     "max_descendants": 24
   },
   "approvals": ["approve_once", "approve_for_session", "approve_for_workspace", "deny", "answer"],
-  "approval_modes": ["read_only", "ask", "auto", "full"],
+  "approval_modes": ["read_only", "strict", "ask", "auto", "full"],
   "profiles": [
     { "id": "default", "model": "openai/gpt-5.6", "approval_mode": "auto" },
     { "id": "review", "model": "anthropic/claude-x", "approval_mode": "read_only",
@@ -1121,8 +1124,11 @@ wins. It carries `delegated: true` when the reviewer is consulted (protocol
 32): a client then knows the human is asked only after
 `tool_approval_escalated`. Reviewer spend is charged to the reviewed run.
 
-Approval modes are `read_only`, `supervised`, `ask`, `auto` (default), and
-`full`. `supervised` is never advertised for root sessions and cannot be set by
+Approval modes are `read_only`, `supervised`, `strict`, `ask`, `auto` (default),
+and `full`. `strict` requires fresh explicit human approval for each non-read
+action, ignoring stored grants and reviewer delegation. Session/workspace
+approval choices are treated as approval once without persisting grants.
+`supervised` is never advertised for root sessions and cannot be set by
 `set_approval_mode`: it is the mode a `spawn_agent` call with
 `authority: "write"` gives its child, and a spawned child's mode may only be
 lowered by a client, never raised (`child_authority_escalation`).

@@ -66,8 +66,9 @@ answer schema; those flags apply to ordinary prompt runs.
 
 | `--approval` | Meaning |
 | --- | --- |
-| `read-only` (default) | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
-| `auto` | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
+| `read-only` | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
+| `strict` | reads run; calls requiring human approval are denied immediately, even with matching allowlists |
+| `auto` (default) | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
 | `full` | everything except `forbidden` shell shapes |
 
 Under `read-only`, when at least one held call was denied, a text-mode run

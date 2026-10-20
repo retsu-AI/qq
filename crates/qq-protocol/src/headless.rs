@@ -207,6 +207,8 @@ impl HeadlessStatus {
 #[serde(rename_all = "kebab-case")]
 pub enum HeadlessApproval {
     ReadOnly,
+    /// Read tools run; calls needing explicit human approval are denied.
+    Strict,
     Auto,
     Full,
 }
@@ -217,6 +219,7 @@ impl HeadlessApproval {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
+            Self::Strict => "strict",
             Self::Auto => "auto",
             Self::Full => "full",
         }

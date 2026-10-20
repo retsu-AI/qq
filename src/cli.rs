@@ -233,7 +233,7 @@ pub struct RunArgs {
 
     /// Unattended approval policy. Interactive `ask` approval is not
     /// available in headless mode.
-    #[arg(long, value_enum, default_value_t = RunApproval::ReadOnly)]
+    #[arg(long, value_enum, default_value_t = RunApproval::Auto)]
     pub approval: RunApproval,
 
     /// Agent profile to run as: a name under `profiles` in the configuration
@@ -464,6 +464,9 @@ pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
 /// a headless run must never wait for a human approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunApproval {
+    /// Require explicit approval for every non-read call; unattended calls
+    /// are denied even when an allowlist matches.
+    Strict,
     /// Deny every mutating, shell, and MCP tool call without prompting.
     ReadOnly,
     /// Approve tool calls unattended except dangerous shell commands
@@ -868,14 +871,14 @@ mod tests {
     }
 
     #[test]
-    fn run_defaults_to_read_only_text_in_the_current_workspace() {
+    fn run_defaults_to_auto_text_in_the_current_workspace() {
         let cli = Cli::try_parse_from(["qq", "run", "summarize this repository"]).unwrap();
 
         let Some(Command::Run(args)) = cli.command else {
             panic!("expected a run command");
         };
         assert_eq!(args.workspace, None);
-        assert_eq!(args.approval, RunApproval::ReadOnly);
+        assert_eq!(args.approval, RunApproval::Auto);
         assert_eq!(args.timeout_seconds, None);
         assert_eq!(args.max_turns, None);
         assert_eq!(args.max_cost_usd, None);
@@ -920,6 +923,15 @@ mod tests {
             panic!("expected a run command");
         };
         assert_eq!(args.session, Some(id));
+    }
+
+    #[test]
+    fn run_accepts_strict_approval() {
+        let cli = Cli::try_parse_from(["qq", "run", "task", "--approval", "strict"]).unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected run")
+        };
+        assert_eq!(args.approval, RunApproval::Strict);
     }
 
     #[test]

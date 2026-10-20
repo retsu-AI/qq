@@ -77,7 +77,7 @@ pub use sessions::{
     WorkspaceGrantOutcome, WorkspaceSnapshot, WorkspaceSummary,
 };
 
-pub const PROTOCOL_VERSION: u16 = 36;
+pub const PROTOCOL_VERSION: u16 = 37;
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles

@@ -121,6 +121,7 @@ pub struct GoalInvocation {
 const fn approval_mode(approval: HeadlessApproval) -> ApprovalMode {
     match approval {
         HeadlessApproval::ReadOnly => ApprovalMode::ReadOnly,
+        HeadlessApproval::Strict => ApprovalMode::Strict,
         HeadlessApproval::Auto => ApprovalMode::Auto,
         HeadlessApproval::Full => ApprovalMode::Full,
     }
@@ -1366,7 +1367,8 @@ async fn prepare_session(
     let effective_delegate = session_delegate.unwrap_or(options.configured_delegate);
     let wait_for_delegate = options.reviewer_configured
         && effective_delegate.consults_reviewer(approval_mode(options.approval));
-    let child_waits_for_delegate = options.reviewer_configured
+    let child_waits_for_delegate = options.approval != HeadlessApproval::Strict
+        && options.reviewer_configured
         && effective_delegate.consults_reviewer(qq_protocol::ApprovalMode::Supervised);
 
     Ok(SessionHandle {
@@ -1576,7 +1578,8 @@ async fn stream_run(
                                 None => writeln!(stderr, "[tool] {}", concise(reason)),
                             };
                         }
-                        let unattended = !ours || options.approval == HeadlessApproval::Auto;
+                        let unattended = !ours
+                            || matches!(options.approval, HeadlessApproval::Auto | HeadlessApproval::Strict);
                         if unattended && let Some(run_id) = envelope.run_id {
                             respond_approval(
                                 sessions,
@@ -1963,12 +1966,15 @@ async fn unattended_approval(
     // (a deferred deny), never a blanket approve. The
     // allowlist still applies: the human declared it.
     let granted = allowlisted_grant(options, &tool_call.name, shell.as_deref(), fetch.as_deref());
-    let approval = if envelope.session_id == handle.session_id {
+    let approval = if options.approval == HeadlessApproval::Strict
+        || envelope.session_id == handle.session_id
+    {
         options.approval
     } else {
         HeadlessApproval::Auto
     };
     let decision = match (granted, approval) {
+        (_, HeadlessApproval::Strict) => Some(ApprovalDecision::Deny),
         (Some(grant), _) => {
             if text {
                 let _ = writeln!(
@@ -5447,6 +5453,33 @@ mod tests {
         assert_eq!(*profiles.lock().unwrap(), ["reviewer"]);
         let records = parse_records(&stdout);
         assert_eq!(records[0]["profile"], "reviewer");
+    }
+
+    #[tokio::test]
+    async fn strict_mode_denies_mutations_even_with_explicit_allowlists() {
+        let fixture = fixture(MutatingProvider::new).await;
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Strict;
+        options.allow_tools = vec!["write_file".to_owned(), "shell".to_owned()];
+        options.allow_shell_prefixes = vec!["cp".to_owned()];
+        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        assert!(!fixture.workspace.join("note.txt").exists());
+        assert!(!fixture.workspace.join("shelled.txt").exists());
+        let records = parse_records(&stdout);
+        let calls: Vec<_> = event_records(&records)
+            .into_iter()
+            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
+            .map(|record| &record["envelope"]["event"]["tool_call"])
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|call| call["state"] == "denied"));
+        assert!(
+            event_records(&records)
+                .iter()
+                .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_requested")
+                .all(|record| record["envelope"]["event"]["delegated"] != true)
+        );
     }
 
     #[tokio::test]

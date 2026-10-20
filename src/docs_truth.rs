@@ -1824,6 +1824,7 @@ mod tests {
         let modes = [
             ApprovalMode::ReadOnly,
             ApprovalMode::Supervised,
+            ApprovalMode::Strict,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
             ApprovalMode::Full,
@@ -1832,9 +1833,10 @@ mod tests {
             let listed = match mode {
                 ApprovalMode::ReadOnly => 0,
                 ApprovalMode::Supervised => 1,
-                ApprovalMode::Ask => 2,
-                ApprovalMode::Auto => 3,
-                ApprovalMode::Full => 4,
+                ApprovalMode::Strict => 2,
+                ApprovalMode::Ask => 3,
+                ApprovalMode::Auto => 4,
+                ApprovalMode::Full => 5,
             };
             assert_eq!(modes[listed], mode);
         }

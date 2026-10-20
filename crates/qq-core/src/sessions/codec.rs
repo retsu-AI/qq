@@ -222,6 +222,7 @@ pub(super) const fn approval_mode_str(mode: ApprovalMode) -> &'static str {
     match mode {
         ApprovalMode::ReadOnly => "read_only",
         ApprovalMode::Supervised => "supervised",
+        ApprovalMode::Strict => "strict",
         ApprovalMode::Ask => "ask",
         ApprovalMode::Auto => "auto",
         ApprovalMode::Full => "full",
@@ -232,6 +233,7 @@ pub(super) fn parse_approval_mode(value: &str) -> Result<ApprovalMode, SessionRu
     match value {
         "read_only" => Ok(ApprovalMode::ReadOnly),
         "supervised" => Ok(ApprovalMode::Supervised),
+        "strict" => Ok(ApprovalMode::Strict),
         "ask" => Ok(ApprovalMode::Ask),
         "auto" => Ok(ApprovalMode::Auto),
         "full" => Ok(ApprovalMode::Full),
@@ -289,12 +291,13 @@ pub(super) fn reasoning_effort_column(
 pub(super) const fn approval_rank(mode: ApprovalMode) -> u8 {
     match mode {
         ApprovalMode::ReadOnly => 0,
-        // Supervised executes nothing non-read without adjudication; Ask lets
-        // grants through, so it ranks above.
-        ApprovalMode::Supervised => 1,
-        ApprovalMode::Ask => 2,
-        ApprovalMode::Auto => 3,
-        ApprovalMode::Full => 4,
+        // Strict requires a human for each action. Supervised may use a
+        // reviewer, and Ask also honors reusable grants.
+        ApprovalMode::Strict => 1,
+        ApprovalMode::Supervised => 2,
+        ApprovalMode::Ask => 3,
+        ApprovalMode::Auto => 4,
+        ApprovalMode::Full => 5,
     }
 }
 

@@ -224,6 +224,7 @@ pub fn capabilities(steering: SteeringCapabilities) -> ServerCapabilities {
         .to_vec(),
         approval_modes: vec![
             ApprovalMode::ReadOnly,
+            ApprovalMode::Strict,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
             ApprovalMode::Full,

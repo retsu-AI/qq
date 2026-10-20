@@ -71,6 +71,7 @@ pub enum SmokeError {
 enum Reply {
     Text(&'static str),
     ReadFile(&'static str),
+    WriteFile(&'static str, &'static str),
     Status(u16, &'static str),
 }
 
@@ -86,18 +87,24 @@ impl Reply {
                     COMPLETED
                 ),
             ),
-            Self::ReadFile(path) => {
-                let arguments = serde_json::json!({ "path": path }).to_string();
+            Self::ReadFile(path) | Self::WriteFile(path, _) => {
+                let (name, arguments) = match self {
+                    Self::WriteFile(_, content) => (
+                        "write_file",
+                        serde_json::json!({ "path": path, "content": content }).to_string(),
+                    ),
+                    _ => ("read_file", serde_json::json!({ "path": path }).to_string()),
+                };
                 let item = serde_json::json!({
                     "type": "function_call", "id": "fc_1", "call_id": "call_1",
-                    "name": "read_file", "arguments": arguments,
+                    "name": name, "arguments": arguments,
                 });
                 (
                     200,
                     "text/event-stream",
                     format!(
                         "data: {}\n\ndata: {}\n\ndata: {}\n\n",
-                        serde_json::json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "read_file", "arguments": ""}}),
+                        serde_json::json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": name, "arguments": ""}}),
                         serde_json::json!({"type": "response.output_item.done", "output_index": 0, "item": item}),
                         COMPLETED
                     ),
@@ -412,6 +419,11 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "permission-dispatch",
+        proves: "auto is default, strict denies unattended writes, and built-ins protect policy/Git files",
+        run: |home| Box::pin(permission_dispatch(home)),
+    },
+    Scenario {
         name: "structured-tracing",
         proves: "QQ_LOG is opt-in; JSON spans cover run/turn/provider/tool/store without content",
         run: |home| Box::pin(structured_tracing(home)),
@@ -457,6 +469,61 @@ const SCENARIOS: &[Scenario] = &[
         run: |home| Box::pin(doctor_and_config(home)),
     },
 ];
+
+async fn permission_dispatch(home: &Home) -> Result<(), String> {
+    for (path, strict, allowed) in [
+        ("auto-created.txt", false, true),
+        ("strict-denied.txt", true, false),
+        (".qq/config.ron", false, false),
+        (".git/hooks/pre-commit", false, false),
+    ] {
+        let provider = home
+            .provider(vec![
+                Reply::WriteFile(path, "written"),
+                Reply::Text("finished"),
+            ])
+            .await
+            .map_err(|error| error.to_string())?;
+        let mut args = vec!["run", "--format", "jsonl"];
+        if strict {
+            args.extend(["--approval", "strict", "--allow-tool", "write_file"]);
+        }
+        args.push("write the requested file");
+        let output = home.run(&provider.base_url, &args).await?;
+        ensure!(
+            output.status == Some(0),
+            "{path}: exit {:?}: {}",
+            output.status,
+            output.stderr
+        );
+        let records = jsonl(&output.stdout)?;
+        let call = records
+            .iter()
+            .find(|record| {
+                matches!(
+                    record["envelope"]["event"]["type"].as_str(),
+                    Some("tool_call_finished" | "tool_approval_resolved")
+                )
+            })
+            .map(|record| &record["envelope"]["event"]["tool_call"]);
+        ensure!(
+            call.is_some_and(|call| call["is_error"] == !allowed),
+            "{path}: tool outcome {call:?}"
+        );
+        ensure!(
+            home.workspace.join(path).exists() == allowed,
+            "{path}: unexpected file effect"
+        );
+        if allowed {
+            ensure!(
+                fs::read_to_string(home.workspace.join(path)).map_err(|error| error.to_string())?
+                    == "written",
+                "missing write"
+            );
+        }
+    }
+    Ok(())
+}
 
 async fn ask_streams_text(home: &Home) -> Result<(), String> {
     let provider = home

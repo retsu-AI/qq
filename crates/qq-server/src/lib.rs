@@ -918,6 +918,7 @@ fn server_capabilities(
         ],
         approval_modes: vec![
             ApprovalMode::ReadOnly,
+            ApprovalMode::Strict,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
             ApprovalMode::Full,

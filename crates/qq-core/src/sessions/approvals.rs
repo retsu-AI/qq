@@ -39,19 +39,50 @@ impl ToolGate for SessionToolGate {
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
         Box::pin(async move {
-            let (mode, grants, session_delegate) = match inner
+            let policy = match inner
                 .store
-                .approval_policy(claimed.identity.session_id)
+                .tool_approval_policy(claimed.identity.session_id)
                 .await
             {
                 Ok(policy) => policy,
                 Err(error) => return approval_persistence_failure(error),
             };
+            let ToolApprovalPolicy {
+                mode,
+                grants,
+                delegate: session_delegate,
+                ancestors,
+            } = policy.clone();
             // The session's own choice (`set_approval_delegate`) wins over the
             // configured one for the rest of the session; read here, at the
             // hold, so it applies to the next held call without a restart.
             let delegate = session_delegate.unwrap_or(delegate);
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
+            let mut mode = mode;
+            for (parent_mode, parent_grants) in ancestors {
+                let message = match approval::evaluate(parent_mode, &call.name, &class, &parent_grants) {
+                    approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
+                    approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Strict => {
+                        // Strict applies to each child action too: only the human
+                        // may approve it, even if the child normally has a reviewer.
+                        if mode != ApprovalMode::ReadOnly {
+                            mode = ApprovalMode::Strict;
+                        }
+                        continue;
+                    }
+                    approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned(),
+                    approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
+                    approval::PolicyDecision::Forbidden { rules } => approval::forbidden_result(&rules),
+                };
+                return match inner
+                    .store
+                    .deny_tool_call(&claimed, call.id, message.clone())
+                    .await
+                {
+                    Ok(_) => GateDecision::Deny { message },
+                    Err(error) => approval_persistence_failure(error),
+                };
+            }
             match approval::evaluate(mode, &call.name, &class, &grants) {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
                 approval::PolicyDecision::Deny { reason } => {
@@ -300,13 +331,13 @@ impl ToolGate for SessionToolGate {
                                                     &claimed,
                                                     call.id,
                                                     delegate_grant.take(),
-                                                    DelegateIdentity::Reviewer,
+                                                    policy.clone(),
                                                 )
                                                 .await
                                             {
                                                 Ok(Some(_)) => {
                                                     inner.remove_approval(call.id);
-                                                    return reviewed(GateDecision::Execute, review_spend);
+                                                    return conclude(&inner, &claimed, call.id, false, review_spend).await;
                                                 }
                                                 // A client resolution won the
                                                 // race or the write failed:

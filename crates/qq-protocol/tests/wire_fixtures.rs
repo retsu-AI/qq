@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 36);
+    assert_eq!(PROTOCOL_VERSION, 37);
     check(
         "outcome_paused_no_progress",
         &RunOutcome::Paused {
@@ -325,6 +325,16 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 profile: AgentProfileId::new("review").unwrap(),
                 reasoning_effort: None,
                 correlation: correlation(&[("channel", "c-9"), ("thread", "t-1")]),
+            },
+        ),
+    );
+    check(
+        "command_set_approval_strict",
+        &command(
+            0x7c,
+            SessionCommand::SetApprovalMode {
+                session_id,
+                mode: ApprovalMode::Strict,
             },
         ),
     );
@@ -1160,6 +1170,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             ],
             approval_modes: vec![
                 ApprovalMode::ReadOnly,
+                ApprovalMode::Strict,
                 ApprovalMode::Ask,
                 ApprovalMode::Auto,
                 ApprovalMode::Full,

@@ -1475,6 +1475,44 @@ pub(super) fn execute_command(
                 // produced "approval grant is empty or exceeds the session
                 // limit" and left the call waiting after the user had already
                 // approved it. The grant is dropped; the call runs once.
+                // A pending prompt is not a lasting grant: ReadOnly selected
+                // since admission revokes every approval path, including a
+                // parent's ceiling. Questions still accept their answers.
+                let own_mode = load_approval_policy(&transaction, session_id)?.0;
+                let ancestors = load_ancestor_approval_policies(&transaction, session_id)?;
+                let readonly = own_mode == ApprovalMode::ReadOnly
+                    || ancestors
+                        .iter()
+                        .any(|(mode, _)| *mode == ApprovalMode::ReadOnly);
+                let revoked = readonly
+                    && matches!(
+                        decision,
+                        ApprovalDecision::ApproveOnce
+                            | ApprovalDecision::ApproveForSession { .. }
+                            | ApprovalDecision::ApproveForWorkspace { .. }
+                    );
+                let denial_message = if revoked {
+                    "permission_denied: authority_changed: task or parent permissions are now read-only; a pending approval cannot restore revoked authority"
+                } else {
+                    approval::USER_DENIED_RESULT
+                };
+                let strict = own_mode == ApprovalMode::Strict
+                    || ancestors
+                        .iter()
+                        .any(|(mode, _)| *mode == ApprovalMode::Strict);
+                let decision = if revoked {
+                    ApprovalDecision::Deny
+                } else if strict
+                    && matches!(
+                        decision,
+                        ApprovalDecision::ApproveForSession { .. }
+                            | ApprovalDecision::ApproveForWorkspace { .. }
+                    )
+                {
+                    ApprovalDecision::ApproveOnce
+                } else {
+                    decision
+                };
                 let mut grant_not_recorded = false;
                 let resolution = match &decision {
                     ApprovalDecision::ApproveOnce => ApprovalResolution::ApprovedOnce,
@@ -1515,7 +1553,7 @@ pub(super) fn execute_command(
                             &transaction,
                             run_id,
                             &provider_call_id,
-                            approval::USER_DENIED_RESULT,
+                            denial_message,
                             first_result_in_turn,
                         )?;
                         transaction.execute(
@@ -1526,7 +1564,7 @@ pub(super) fn execute_command(
                                  WHERE id = ?1 AND state = 'awaiting_approval'",
                             params![
                                 tool_call_id.to_string(),
-                                approval::USER_DENIED_RESULT,
+                                denial_message,
                                 approval_resolution_str(resolution),
                                 now,
                             ],

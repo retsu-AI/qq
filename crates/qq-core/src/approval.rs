@@ -90,9 +90,11 @@ pub(crate) fn reviewer_denied_result(mode: ApprovalMode) -> &'static str {
         ApprovalMode::Supervised => {
             "The approval reviewer denied this tool call for the supervised sub-agent:"
         }
-        ApprovalMode::Auto | ApprovalMode::Ask | ApprovalMode::ReadOnly | ApprovalMode::Full => {
-            "The approval reviewer denied this tool call:"
-        }
+        ApprovalMode::Auto
+        | ApprovalMode::Ask
+        | ApprovalMode::Strict
+        | ApprovalMode::ReadOnly
+        | ApprovalMode::Full => "The approval reviewer denied this tool call:",
     }
 }
 
@@ -1016,7 +1018,7 @@ pub(crate) fn evaluate(
             },
             // Supervised holds everything, grants included: the whole point is
             // that a reviewer sees every action a write child takes.
-            ApprovalMode::Supervised => PolicyDecision::RequireApproval,
+            ApprovalMode::Supervised | ApprovalMode::Strict => PolicyDecision::RequireApproval,
             ApprovalMode::Ask => {
                 if grants.covers(name, class) {
                     PolicyDecision::Execute
