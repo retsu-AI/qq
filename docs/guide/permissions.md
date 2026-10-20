@@ -94,10 +94,13 @@ is not selected for the current run. Unconfigured vendor directories remain
 ordinary task files.
 This applies in every approval mode; approving a file tool cannot grant it
 permission to rewrite its own policy. Ordinary task files, `.github/`, and
-`.qq/skills/` remain writable when the mode permits writes. A refused edit
-batch changes no files. Atomic writes pin the resolved parent directory and
-do not follow replacement symlinks when creating directories or applying changes. These built-in checks do not sandbox shell commands
-or externally trusted MCP servers.
+`.qq/skills/` remain writable when the mode permits writes. A batch rejected
+during planning changes no files; apply failures report any completed files.
+Atomic writes pin the resolved parent directory and refuse a changed directory
+namespace at apply-time validation. They do not follow replacement symlinks.
+These checks do not lock out outside processes: another process can still
+rename a directory after the final validation. They provide no OS isolation
+for concurrent namespace changes, shell commands, or trusted MCP servers.
 
 ## Approval modes
 

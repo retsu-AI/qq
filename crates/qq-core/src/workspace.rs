@@ -8,7 +8,7 @@ mod prepare;
 pub mod skills;
 
 pub use access::WorkspacePathError;
-pub(crate) use access::{Workspace, blocking_permits};
+pub(crate) use access::{Workspace, WriteTarget, blocking_permits};
 pub(crate) use bounded_read::{BoundedReadError, read_bounded};
 pub(crate) use file_state::{FileState, FileStateUpdate, content_hash};
 #[cfg(test)]

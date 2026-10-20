@@ -74,7 +74,7 @@ pub(super) fn write_file(
             return ToolOutput::refused(format!("could not validate write directory: {error}"));
         }
     };
-    let (created, before) = match target.0.symlink_metadata(&target.1) {
+    let (created, before) = match target.directory.symlink_metadata(&target.name) {
         Ok(metadata) if metadata.is_file() => {
             if arguments.create_only {
                 return ToolOutput::error(format!("exists: {} already exists", arguments.path));

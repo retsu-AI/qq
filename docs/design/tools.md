@@ -880,16 +880,13 @@ leaves `@` as literal text.
 
 ### Containment
 
-Containment is a capability, not a path check. The workspace root is
-canonicalized once and opened as a `cap-std` directory handle — the anchor
-via `open_ambient_dir`, each component below it opened without following
-symlinks. That handle is the only filesystem authority tools hold, and
-every tool path resolves through it, so escape prevention is enforced by
-the kernel at resolution time rather than by comparing strings before
-opening. This is strictly stronger than canonicalize-and-prefix-check:
-there is no TOCTOU window between a check and an open, and a symlink
-inside the workspace that points outside it fails when the capability
-resolves it, not after a race.
+The workspace root is canonicalized once and opened as a `cap-std`
+directory handle: the anchor through `open_ambient_dir`, each component
+below it without following symlinks. Tools resolve paths through that
+capability rather than trusting an earlier canonicalize-and-prefix check.
+A symlink targeting outside the workspace is refused during capability
+resolution. Directory handles retain authority over admitted objects;
+they do not freeze those objects' pathnames against outside processes.
 
 Tool paths must be relative to the workspace root; absolute paths are
 rejected outright rather than re-rooted, so the model learns the real
@@ -901,6 +898,16 @@ names search resolves only matching file links within the capability and never
 traverses directory links. Paths outside the workspace remain not an error class the agent
 can approve its way through by default — wider access is an explicit
 per-session grant, off by default.
+
+Mutation tools retain the admitted parent directory for reads, stale checks,
+temporary-file creation and rename. They revalidate that the workspace path
+still names that directory before writing and immediately before rename;
+completed directory moves or replacements are refused rather than redirected.
+Protected directory identities are refreshed during this validation. This is
+not namespace isolation: another process can rename a directory after the
+final validation, and the in-process apply lock cannot prevent it. Immutable
+pathnames across arbitrary outside filesystem mutations require an execution
+boundary beyond these built-in checks.
 
 ### Edit Semantics
 

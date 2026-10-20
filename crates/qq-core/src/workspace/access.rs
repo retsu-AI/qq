@@ -24,6 +24,13 @@ pub(crate) struct Workspace {
     apply_lock: Arc<Mutex<()>>,
 }
 
+/// The admitted directory capability and its workspace-relative pathname.
+pub(crate) struct WriteTarget {
+    pub directory: Dir,
+    pub name: std::ffi::OsString,
+    pub path: PathBuf,
+}
+
 // Retain the handle as well as its identity: an unlinked directory's ID must
 // not be recycled while it remains part of the workspace authority boundary.
 struct ProtectedDirectory {
@@ -264,11 +271,7 @@ impl Workspace {
     /// Validate the opened identities, then retain the parent capability for
     /// every read, stale check and rename in this mutation. No pathname reopen
     /// after admission may redirect the operation to a replacement directory.
-    pub(crate) fn write_target(
-        &self,
-        path: &Path,
-        create: bool,
-    ) -> std::io::Result<(Dir, std::ffi::OsString)> {
+    pub(crate) fn write_target(&self, path: &Path, create: bool) -> std::io::Result<WriteTarget> {
         let name = path
             .file_name()
             .ok_or_else(|| std::io::Error::other("write target has no filename"))?
@@ -299,7 +302,26 @@ impl Workspace {
             relative.push(name);
             self.check_directory_identity(&directory, &relative)?;
         }
-        Ok((directory, name))
+        Ok(WriteTarget {
+            directory,
+            name,
+            path: path.to_owned(),
+        })
+    }
+
+    /// Revalidate the namespace without replacing the admitted capability.
+    /// This rejects completed directory moves, but is not an OS lock against
+    /// another process renaming a directory after this check returns.
+    pub(crate) fn revalidate_write_target(&self, target: &WriteTarget) -> std::io::Result<()> {
+        self.capture_protected_directories()?;
+        let current = self.write_target(&target.path, false)?;
+        if !same_directory(&target.directory, &current.directory)? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "write_namespace_changed: write directory changed; read the target again before retrying",
+            ));
+        }
+        Ok(())
     }
 
     /// Mutation tools may change task files, never the policy or Git trust
