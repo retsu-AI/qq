@@ -7816,6 +7816,45 @@ fn fifteenth_review_round_on_the_rail() {
     );
     assert!(app.overlay.is_none(), "the goal form closed");
 
+    // 4b. The same reveal by a snapshot whose focused body is that session
+    // (the body a goal form waits on) closes the form too.
+    let mut app = App::new(TuiOptions::default());
+    app.apply_client_update(ClientUpdate::Snapshot(fixtures::workspace_snapshot()));
+    let focused = app.focused().unwrap();
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&focused).unwrap().summary.parent_id = Some(missing);
+    app.composer.replace("/goal ship it".to_owned());
+    app.handle_terminal_event(Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    assert!(matches!(
+        app.overlay,
+        Some(crate::input::Overlay::GoalForm(_))
+    ));
+    let mut body = fixtures::session_snapshot(app.sessions[&focused].summary.clone());
+    body.summary.parent_id = Some(missing);
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        ..fixtures::session_summary(missing)
+    };
+    let other = fixtures::session_summary(SessionId::from_bytes([0x11; 16]));
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit, body.summary.clone(), other],
+        focused: Some(body),
+        cursor: fixtures::cursor(5),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(
+        app.sessions.contains_key(&missing),
+        "fixture: snapshot applied"
+    );
+    assert!(
+        app.overlay.is_none(),
+        "the goal form closed on a snapshot reveal"
+    );
+
     // 5. A picker over the focused pane: its session is not drawn, so a
     // child's stream behind it schedules no redraw.
     let (mut app, root, ids) = app_with_fanout(1);

@@ -1085,10 +1085,14 @@ impl App {
             // The snapshot carried no body: fetch the one now shown.
             fallback_fetch = Some(self.focus_session(first));
         }
-        // The summaries may have revealed that the session on screen sits
-        // under an audit, whichever body this snapshot carried.
-        if fallback_fetch.is_none() {
-            fallback_fetch = Some(self.leave_hidden_focus());
+        // The summaries may have revealed that the session on screen, or one
+        // an overlay or picker confirmation targets, sits under an audit,
+        // whichever body this snapshot carried. Always run: after a
+        // fallback above it finds focus moved and only drops the rest.
+        let hidden = self.leave_hidden_focus();
+        match fallback_fetch.as_mut() {
+            Some(fetch) => fetch.extend(hidden),
+            None => fallback_fetch = Some(hidden),
         }
         self.evict_cold_bodies();
         if initial {
