@@ -72,8 +72,8 @@ pub use document::{
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
 };
 pub use providers::{
-    BuiltinAudience, BuiltinProvider, LoginMethod, builtin_provider, builtin_providers,
-    provider_credential_variables,
+    BuiltinAudience, BuiltinProvider, LoginMethod, ModelDiscoveryShape, builtin_provider,
+    builtin_providers, provider_credential_variables,
 };
 
 /// All process-dependent inputs captured before a configuration load begins.
@@ -935,15 +935,46 @@ impl ModelMetadata {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderKind {
-    OpenAi,
-    OpenAiCodex,
-    Anthropic,
-    Google,
-    XAi,
+    /// A built-in HTTP provider, by its table row (ADR-0064).
+    Builtin(BuiltinProvider),
     LiteLlm,
     AmazonBedrock,
     AmazonBedrockMantle,
     Custom,
+}
+
+impl ProviderKind {
+    /// The kind's configuration name, as `qq config` prints it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Builtin(provider) => provider.config_name,
+            Self::LiteLlm => "LiteLlm",
+            Self::AmazonBedrock => "AmazonBedrock",
+            Self::AmazonBedrockMantle => "AmazonBedrockMantle",
+            Self::Custom => "Custom",
+        }
+    }
+
+    /// The built-in provider row this kind names, if it is one.
+    #[must_use]
+    pub const fn builtin(self) -> Option<BuiltinProvider> {
+        match self {
+            Self::Builtin(provider) => Some(provider),
+            Self::LiteLlm | Self::AmazonBedrock | Self::AmazonBedrockMantle | Self::Custom => None,
+        }
+    }
+
+    /// How model discovery treats this kind's listing.
+    #[must_use]
+    pub const fn discovery(self) -> ModelDiscoveryShape {
+        match self {
+            Self::Builtin(provider) => provider.discovery,
+            Self::LiteLlm | Self::AmazonBedrock | Self::AmazonBedrockMantle | Self::Custom => {
+                ModelDiscoveryShape::Supplementary
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

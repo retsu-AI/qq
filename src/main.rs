@@ -1432,18 +1432,7 @@ fn print_snapshot(snapshot: &config::ConfigSnapshot) {
     println!("max_output_tokens: {}", snapshot.max_output_tokens());
     println!("providers:");
     for (name, provider) in snapshot.providers() {
-        let kind = match provider.kind() {
-            config::ProviderKind::OpenAi => "OpenAi",
-            config::ProviderKind::OpenAiCodex => "OpenAiCodex",
-            config::ProviderKind::Anthropic => "Anthropic",
-            config::ProviderKind::Google => "Google",
-            config::ProviderKind::XAi => "XAi",
-            config::ProviderKind::LiteLlm => "LiteLlm",
-            config::ProviderKind::AmazonBedrock => "AmazonBedrock",
-            config::ProviderKind::AmazonBedrockMantle => "AmazonBedrockMantle",
-            config::ProviderKind::Custom => "Custom",
-        };
-        println!("  {name}: {kind}");
+        println!("  {name}: {}", provider.kind().name());
     }
     // Grants are not secrets; they render unredacted.
     let grants = snapshot.grants();

@@ -358,7 +358,11 @@ const MAX_PROMPT_BYTES: usize = 128 * 1024;
 pub const MAX_REPLAY_EVENTS: u16 = 128;
 const MAX_SNAPSHOT_SESSIONS: u16 = 512;
 const MAX_SNAPSHOT_MESSAGES: u16 = 256;
-const MAX_SNAPSHOT_TOOL_CALLS: usize = 4_096;
+/// Tool calls per snapshot body. Matches the window a client keeps
+/// (`qq_client::state::MAX_RECENT_TOOL_CALLS`): shipping more spent the shared
+/// body budget on rows the client discards, starving later bodies of their
+/// messages. Older calls stay reachable as `has_older_tool_calls`.
+const MAX_SNAPSHOT_TOOL_CALLS: usize = 64;
 /// Bytes of body text one snapshot may carry across its focused and included
 /// session bodies. Below `qq_protocol::MAX_SNAPSHOT_BYTES` by enough to cover
 /// the fixed per-row envelope and the workspace's session summaries, so a

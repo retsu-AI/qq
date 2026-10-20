@@ -403,7 +403,38 @@ impl SessionStore {
         models: &[ModelOption],
         loaded_through: u64,
     ) {
+        self.install_body(snapshot, models, loaded_through, false);
+    }
+
+    /// An isolated fetch has the whole budget; preserve its usable rows even
+    /// if one row class still cannot fit, rather than retrying forever.
+    pub fn install_isolated_session_snapshot(
+        &mut self,
+        snapshot: SessionSnapshot,
+        models: &[ModelOption],
+        loaded_through: u64,
+    ) {
+        self.install_body(snapshot, models, loaded_through, true);
+    }
+
+    fn install_body(
+        &mut self,
+        snapshot: SessionSnapshot,
+        models: &[ModelOption],
+        loaded_through: u64,
+        isolated: bool,
+    ) {
         let session_id = snapshot.summary.id;
+        // Truncation flags do not distinguish count cuts from byte-budget
+        // cuts. Conservatively refetch every incomplete shared body alone.
+        if !isolated && (snapshot.has_older_messages || snapshot.has_older_tool_calls) {
+            self.upsert_summary(snapshot.summary, models, loaded_through);
+            if let Some(view) = self.body_mut(&session_id) {
+                view.evict_body();
+                view.loaded_through = loaded_through;
+            }
+            return;
+        }
         let mut messages = snapshot.messages;
         retain_recent_messages(&mut messages);
         let history = messages

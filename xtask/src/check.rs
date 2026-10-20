@@ -85,6 +85,10 @@ pub enum CheckError {
     },
     #[error("failed to read {0}")]
     Read(PathBuf, #[source] io::Error),
+    #[error(
+        "this branch restores a historical version of files {base} changed, undoing merged work:\n  {files}\nre-apply only your own diff onto {base} (`git diff <old-base> HEAD | git apply --3way` on a fresh branch), or acknowledge each intentional rollback with a committed `QQ-Allow-Revert: <exact path>` trailer"
+    )]
+    RevertsBase { base: String, files: String },
 }
 
 /// A workspace package as the selection needs it.
@@ -381,6 +385,69 @@ fn changed_files(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
         );
     }
     Ok(changed.into_iter().collect())
+}
+
+/// Files whose committed entries on HEAD equal an older base-side entry:
+/// the branch silently undoes work that landed on the base, typically by
+/// committing an old tree onto a newer base.
+fn reverted_base_changes(root: &Path, base: &str) -> Result<Vec<String>, CheckError> {
+    let git = |args: &[&str]| {
+        capture(
+            ProcessCommand::new("git").args(args).current_dir(root),
+            "git",
+        )
+    };
+    let Ok(merge_base) = git(&["merge-base", base, "HEAD"]) else {
+        return Ok(Vec::new());
+    };
+    let merge_base = merge_base.trim();
+    let files = git(&[
+        "diff",
+        "--name-only",
+        "--no-renames",
+        "-z",
+        merge_base,
+        "HEAD",
+    ])?;
+    // A tree entry includes permissions as well as object identity. The
+    // path is literal so metacharacters cannot select a different entry.
+    let entry = |revision: &str, path: &str| {
+        git(&["--literal-pathspecs", "ls-tree", revision, "--", path]).unwrap_or_default()
+    };
+    let mut reverted = Vec::new();
+
+    // An explicit committed trailer records a deliberate rollback per path.
+    let acknowledgements = git(&[
+        "log",
+        "--format=%(trailers:key=QQ-Allow-Revert,valueonly)",
+        &format!("{merge_base}..HEAD"),
+    ])?;
+    for path in files.split('\0').filter(|path| !path.is_empty()) {
+        if acknowledgements.lines().any(|allowed| allowed == path) {
+            continue;
+        }
+        let history = git(&[
+            "--literal-pathspecs",
+            "log",
+            "--format=%H",
+            merge_base,
+            "--",
+            path,
+        ])?;
+        let head = entry("HEAD", path);
+        let base_entry = entry(merge_base, path);
+        if head.is_empty() || head == base_entry {
+            continue;
+        }
+        for changed in history.lines() {
+            let before = entry(&format!("{changed}^"), path);
+            if !before.is_empty() && head == before {
+                reverted.push(format!("{path} (undoes {})", short(changed)));
+                break;
+            }
+        }
+    }
+    Ok(reverted)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -986,6 +1053,13 @@ pub fn run(args: CheckArgs) -> Result<(), CheckError> {
     } else {
         changed_files(&root, &args.base)?
     };
+    let reverted = reverted_base_changes(&root, &args.base)?;
+    if !reverted.is_empty() {
+        return Err(CheckError::RevertsBase {
+            base: args.base.clone(),
+            files: reverted.join("\n  "),
+        });
+    }
     let selection = if args.full {
         Selection {
             scope: Scope::Full,
@@ -1221,6 +1295,101 @@ mod tests {
         assert_ne!(new.2, super::git_head(root).unwrap().2);
         std::fs::remove_file(root.join("new")).unwrap();
         assert_eq!(staged.2, super::git_head(root).unwrap().2);
+    }
+
+    #[test]
+    fn a_branch_that_restores_files_the_base_changed_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=Test", "-c", "user.email=t@example.invalid"];
+            full.extend_from_slice(args);
+            assert!(
+                std::process::Command::new("git")
+                    .args(&full)
+                    .current_dir(root)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "{args:?}"
+            );
+        };
+        let write = |path: &str, text: &str| std::fs::write(root.join(path), text).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        write("auth.rs", "old auth");
+        write("mine.rs", "old mine");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "initial"]);
+        // Someone else's work lands on main.
+        write("auth.rs", "new auth");
+        git(&["commit", "-qam", "auth refactor"]);
+
+        write("auth.rs", "third auth");
+        write("[id].tsx", "old literal");
+        git(&["add", "."]);
+        git(&["commit", "-qm", "second auth refactor"]);
+        write("[id].tsx", "new literal");
+        git(&["commit", "-qam", "literal file refactor"]);
+        // A clean branch from the new main touching only its own file passes.
+        git(&["checkout", "-qb", "good"]);
+        write("mine.rs", "new mine");
+        git(&["commit", "-qam", "mine"]);
+        assert_eq!(
+            super::reverted_base_changes(root, "main").unwrap(),
+            Vec::<String>::new()
+        );
+        // Modes belong to tree entries, not blob IDs.
+        git(&["checkout", "main"]);
+        git(&["update-index", "--chmod=+x", "mine.rs"]);
+        git(&["commit", "-qm", "make auth executable"]);
+        git(&["checkout", "-qb", "stale-mode"]);
+        git(&["update-index", "--chmod=-x", "mine.rs"]);
+        git(&["commit", "-qm", "restore stale permissions"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("mine.rs (undoes "), "{reverted:?}");
+        // A branch that commits its stale tree on top of the new main reverts it.
+        git(&["checkout", "-qb", "bad", "main"]);
+        write("auth.rs", "old auth");
+        write("mine.rs", "new mine");
+        git(&["commit", "-qam", "mine on a stale tree"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
+
+        git(&["checkout", "-qb", "literal", "main"]);
+        write("[id].tsx", "old literal");
+        git(&["commit", "-qam", "restore literal file"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("[id].tsx (undoes "), "{reverted:?}");
+
+        git(&[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Intentional rollback\n\nQQ-Allow-Revert: [id].tsx",
+        ]);
+        assert!(
+            super::reverted_base_changes(root, "main")
+                .unwrap()
+                .is_empty()
+        );
+        // Acknowledgement is exact, not a wildcard or a blanket bypass.
+        write("auth.rs", "old auth");
+        git(&["commit", "-qam", "unacknowledged stale auth"]);
+        let reverted = super::reverted_base_changes(root, "main").unwrap();
+        assert_eq!(reverted.len(), 1, "{reverted:?}");
+        assert!(reverted[0].starts_with("auth.rs (undoes "), "{reverted:?}");
+
+        // Deleting a file created on main is subtraction, not a stale blob.
+        git(&["checkout", "-qb", "delete", "main"]);
+        git(&["rm", "mine.rs"]);
+        git(&["commit", "-qm", "remove obsolete auth"]);
+        assert_eq!(
+            super::reverted_base_changes(root, "main").unwrap(),
+            Vec::<String>::new()
+        );
     }
 
     use super::{Package, Scope, TestCounts, parse_nextest_counts, parse_nextest_failures, select};

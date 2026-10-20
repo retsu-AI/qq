@@ -18,17 +18,24 @@ pub(crate) const XAI_ENDPOINT: &str = "https://api.x.ai/v1";
 const CODEX_RESPONSES_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 /// One built-in HTTP provider: everything that differs between them, as
-/// data. Adding a preset adds a row here (ADR-0064); `builtin()`, the
-/// credential-variable list and patch application read the table.
+/// data. Adding a preset adds a row here (ADR-0064); `ProviderKind`, the
+/// configuration patch syntax, `builtin()`, the credential-variable list and
+/// patch application read the table.
 pub(crate) struct BuiltinHttpProvider {
-    pub(crate) kind: ProviderKind,
     /// The provider id configuration documents use (`providers: {"<id>": ..}`).
     pub(crate) id: &'static str,
+    /// The configuration patch variant (`OpenAi(api_key: ..)`) and the name
+    /// `qq config` prints for the kind.
+    config_name: &'static str,
+    /// The patch fields this provider accepts, in serialisation order. Any
+    /// other field is a parse error (ADR-0064 §2).
+    pub(crate) patch_fields: &'static [&'static str],
     endpoint: &'static str,
     endpoint_mode: EndpointMode,
     api: ProviderApi,
     usage: UsageType,
     catalog: BuiltinCatalog,
+    discovery: ModelDiscoveryShape,
     /// Who defines the credential's audience, and so which resolver reads it.
     audience: BuiltinAudience,
     /// The variables read when nothing is stored, in precedence order.
@@ -56,12 +63,36 @@ pub enum LoginMethod {
     XAiOAuth,
 }
 
+/// How model discovery treats a built-in provider's listing endpoint, beyond
+/// what its protocol already implies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelDiscoveryShape {
+    /// The listing supplements the bundled catalog.
+    Supplementary,
+    /// The listing is authoritative: bundled models it omits are hidden
+    /// unless configured explicitly, and a malformed listing is rejected.
+    Authoritative,
+    /// The OpenAI Codex listing: authoritative, under `models`, with a
+    /// client version and per-model visibility.
+    Codex,
+}
+
+impl ModelDiscoveryShape {
+    /// Whether the discovered list replaces the bundled one.
+    #[must_use]
+    pub const fn is_authoritative(self) -> bool {
+        matches!(self, Self::Authoritative | Self::Codex)
+    }
+}
+
 /// The public view of one built-in HTTP provider's row: what the CLI, `qq
 /// init`, the doctor and credential resolution need, with no
 /// configuration types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuiltinProvider {
     pub id: &'static str,
+    /// The configuration patch variant name, e.g. `OpenAi`.
+    pub config_name: &'static str,
     /// Where this provider's credential audience comes from.
     pub audience: BuiltinAudience,
     /// The variables read when nothing is stored, in precedence order: the
@@ -69,6 +100,7 @@ pub struct BuiltinProvider {
     pub variables: &'static [&'static str],
     pub login: &'static [LoginMethod],
     pub init_model: &'static str,
+    pub discovery: ModelDiscoveryShape,
 }
 
 impl BuiltinProvider {
@@ -117,28 +149,47 @@ pub fn builtin_provider(id: &str) -> Option<BuiltinProvider> {
 }
 
 impl BuiltinHttpProvider {
-    const fn public(&self) -> BuiltinProvider {
+    pub(crate) const fn public(&self) -> BuiltinProvider {
         BuiltinProvider {
             id: self.id,
+            config_name: self.config_name,
             audience: self.audience,
             variables: self.variables,
             login: self.login,
             init_model: self.init_model,
+            discovery: self.discovery,
         }
     }
+}
+
+/// The table row whose configuration patch variant is `config_name`.
+pub(crate) fn builtin_by_config_name(config_name: &str) -> Option<&'static BuiltinHttpProvider> {
+    BUILTIN_HTTP_PROVIDERS
+        .iter()
+        .find(|row| row.config_name == config_name)
+}
+
+/// The table row for built-in provider `id`.
+pub(crate) fn builtin_row(id: &str) -> &'static BuiltinHttpProvider {
+    BUILTIN_HTTP_PROVIDERS
+        .iter()
+        .find(|row| row.id == id)
+        .expect("a BuiltinProvider always names a table row")
 }
 
 /// The built-in HTTP providers, in the order credential variables are
 /// published.
 pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
     BuiltinHttpProvider {
-        kind: ProviderKind::OpenAi,
         id: "openai",
+        config_name: "OpenAi",
+        patch_fields: &["api_key", "models"],
         endpoint: OPENAI_ENDPOINT,
         endpoint_mode: EndpointMode::Exact,
         api: ProviderApi::OpenAiResponses,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::OpenAiApi,
+        discovery: ModelDiscoveryShape::Supplementary,
         audience: BuiltinAudience::Table(OPENAI_CREDENTIAL_ENDPOINT),
         variables: &["OPENAI_API_KEY"],
         login: &[LoginMethod::ApiKey],
@@ -146,13 +197,15 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         display_order: 0,
     },
     BuiltinHttpProvider {
-        kind: ProviderKind::OpenAiCodex,
         id: "openai-codex",
+        config_name: "OpenAiCodex",
+        patch_fields: &["profile", "models"],
         endpoint: CODEX_RESPONSES_ENDPOINT,
         endpoint_mode: EndpointMode::Exact,
         api: ProviderApi::OpenAiResponses,
         usage: UsageType::Subscription,
         catalog: BuiltinCatalog::OpenAiCodex,
+        discovery: ModelDiscoveryShape::Codex,
         audience: BuiltinAudience::OpenAiCodex,
         variables: &[],
         login: &[
@@ -163,13 +216,15 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         display_order: 4,
     },
     BuiltinHttpProvider {
-        kind: ProviderKind::Anthropic,
         id: "anthropic",
+        config_name: "Anthropic",
+        patch_fields: &["api_key", "models"],
         endpoint: ANTHROPIC_ENDPOINT,
         endpoint_mode: EndpointMode::Exact,
         api: ProviderApi::AnthropicMessages,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::AnthropicApi,
+        discovery: ModelDiscoveryShape::Authoritative,
         audience: BuiltinAudience::Table(ANTHROPIC_CREDENTIAL_ENDPOINT),
         variables: &["ANTHROPIC_API_KEY"],
         login: &[LoginMethod::ApiKey],
@@ -177,13 +232,15 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         display_order: 1,
     },
     BuiltinHttpProvider {
-        kind: ProviderKind::Google,
         id: "google",
+        config_name: "Google",
+        patch_fields: &["api_key", "models"],
         endpoint: GOOGLE_ENDPOINT,
         endpoint_mode: EndpointMode::Base,
         api: ProviderApi::GoogleGenerateContent,
         usage: UsageType::Metered,
         catalog: BuiltinCatalog::GoogleApi,
+        discovery: ModelDiscoveryShape::Supplementary,
         audience: BuiltinAudience::Table(GOOGLE_CREDENTIAL_ENDPOINT),
         variables: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         login: &[LoginMethod::ApiKey],
@@ -191,13 +248,15 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         display_order: 2,
     },
     BuiltinHttpProvider {
-        kind: ProviderKind::XAi,
         id: "xai",
+        config_name: "XAi",
+        patch_fields: &["api_key", "profile", "models"],
         endpoint: XAI_ENDPOINT,
         endpoint_mode: EndpointMode::Base,
         api: ProviderApi::OpenAiChatCompletions,
         usage: UsageType::CredentialDependent,
         catalog: BuiltinCatalog::XAiApi,
+        discovery: ModelDiscoveryShape::Supplementary,
         audience: BuiltinAudience::XAi,
         variables: &["XAI_API_KEY"],
         login: &[LoginMethod::ApiKey, LoginMethod::XAiOAuth],
@@ -205,11 +264,6 @@ pub(crate) const BUILTIN_HTTP_PROVIDERS: [BuiltinHttpProvider; 5] = [
         display_order: 3,
     },
 ];
-
-/// The table row for a built-in HTTP provider kind.
-pub(crate) fn builtin_http(kind: ProviderKind) -> Option<&'static BuiltinHttpProvider> {
-    BUILTIN_HTTP_PROVIDERS.iter().find(|row| row.kind == kind)
-}
 
 /// Every environment variable a built-in provider reads for its credential
 /// when no stored credential exists, in table order. The AWS default chain
@@ -236,15 +290,11 @@ pub(crate) fn builtin(kind: ProviderKind) -> ProviderConfig {
         ]
     });
     match kind {
-        ProviderKind::OpenAi
-        | ProviderKind::OpenAiCodex
-        | ProviderKind::Anthropic
-        | ProviderKind::Google
-        | ProviderKind::XAi => {
+        ProviderKind::Builtin(provider) => {
             let index = BUILTIN_HTTP_PROVIDERS
                 .iter()
-                .position(|row| row.kind == kind)
-                .expect("every HTTP provider kind has a table row");
+                .position(|row| row.id == provider.id)
+                .expect("every built-in provider kind has a table row");
             HTTP[index].clone()
         }
         ProviderKind::AmazonBedrock => BEDROCK[0].clone(),
@@ -257,7 +307,7 @@ pub(crate) fn builtin(kind: ProviderKind) -> ProviderConfig {
 
 fn build_http(row: &BuiltinHttpProvider) -> ProviderConfig {
     ProviderConfig::new(
-        row.kind,
+        ProviderKind::Builtin(row.public()),
         Some(http(
             row.endpoint,
             row.endpoint_mode,
@@ -290,13 +340,9 @@ fn build_bedrock(kind: ProviderKind) -> ProviderConfig {
             },
             BuiltinCatalog::BedrockMantle,
         ),
-        ProviderKind::OpenAi
-        | ProviderKind::OpenAiCodex
-        | ProviderKind::Anthropic
-        | ProviderKind::Google
-        | ProviderKind::XAi
-        | ProviderKind::LiteLlm
-        | ProviderKind::Custom => unreachable!("{kind:?} is not a Bedrock preset"),
+        ProviderKind::Builtin(_) | ProviderKind::LiteLlm | ProviderKind::Custom => {
+            unreachable!("{kind:?} is not a Bedrock preset")
+        }
     };
     ProviderConfig::new(
         kind,
@@ -363,5 +409,25 @@ mod tests {
             assert_eq!(builtin_provider(row.id).map(|p| p.id), Some(row.id));
         }
         assert_eq!(builtin_provider("bedrock"), None);
+    }
+
+    /// Configuration names are unique and every patch field is one the
+    /// built-in patch parser knows, ending in `models`.
+    #[test]
+    fn every_row_has_a_unique_config_name_and_known_patch_fields() {
+        for row in &BUILTIN_HTTP_PROVIDERS {
+            assert_eq!(
+                builtin_by_config_name(row.config_name).map(|found| found.id),
+                Some(row.id)
+            );
+            assert_eq!(row.patch_fields.last(), Some(&"models"), "{}", row.id);
+            for field in row.patch_fields {
+                assert!(
+                    ["api_key", "profile", "models"].contains(field),
+                    "{}: {field}",
+                    row.id
+                );
+            }
+        }
     }
 }
