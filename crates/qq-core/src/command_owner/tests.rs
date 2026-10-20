@@ -37,12 +37,7 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let gate_path = workspace.path().join("release");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &gate_path,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    crate::tools::create_test_fifo(&gate_path).await;
     let mut gate = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -324,6 +319,8 @@ async fn owner_enforces_the_task_deadline_without_a_live_observer() {
     );
     owner.submit(request).await.unwrap();
     assert_eq!(owner.snapshot(id).await.unwrap(), terminal);
+    // The native exit observer uses a real subprocess and real I/O time.
+    tokio::time::resume();
     #[cfg(unix)]
     {
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
@@ -517,12 +514,7 @@ async fn live_output_is_durable_before_command_completion() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let gate_path = workspace.path().join("release");
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        &gate_path,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-    )
-    .unwrap();
+    crate::tools::create_test_fifo(&gate_path).await;
     let gate = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

@@ -132,6 +132,29 @@ pub(crate) use shell::hold_shell_receipt;
 pub(crate) use shell::observe_shell_spawn;
 
 #[cfg(all(test, unix))]
+pub(crate) async fn create_test_fifo(path: &std::path::Path) {
+    let mut child = tokio::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the native FIFO fixture utility");
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status.expect("wait for the FIFO fixture utility"),
+        Err(_) => {
+            child
+                .kill()
+                .await
+                .expect("reap the timed-out FIFO fixture utility");
+            panic!("FIFO fixture creation timed out");
+        }
+    };
+    assert!(status.success(), "the native FIFO fixture utility failed");
+}
+
+#[cfg(all(test, unix))]
 pub(crate) const PANIC_SHELL_ARGUMENTS: &str = r#"{"command":"sleep 300"}"#;
 #[cfg(all(test, windows))]
 pub(crate) const PANIC_SHELL_ARGUMENTS: &str =
@@ -4747,12 +4770,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let release = directory.path().join("release");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &release,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        crate::tools::create_test_fifo(&release).await;
         // Keep both ends open until completion so an input written just
         // before the shell opens its reader cannot disappear with the writer.
         let gate = fs::OpenOptions::new()

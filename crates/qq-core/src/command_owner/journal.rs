@@ -35,7 +35,10 @@ impl Journal {
 
     fn open_blocking(directory: PathBuf) -> Result<Self, CommandOwnerError> {
         if !directory.exists() {
+            #[cfg(unix)]
             let mut builder = std::fs::DirBuilder::new();
+            #[cfg(not(unix))]
+            let builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt as _;
