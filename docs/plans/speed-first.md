@@ -42,6 +42,9 @@ verdict, not per tick. Do not optimize it without new evidence.
 
 ### H10 — OS process sandbox
 
+Now planned in [sandbox](sandbox.md) (S0–S6); the acceptance below is kept
+as its floor.
+
 Requires a platform threat model and a concrete process contract. Root's
 adopted lane decision makes H10 independent of T13 and full Windows
 qualification; it must still use evidence to choose any new terminal

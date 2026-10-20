@@ -22,9 +22,12 @@ outcomes and acceptance, not a second description of shipped behavior.
    experiments without recreating those evaluations. Paid runs need ENG-809
    approval and a spend cap. [Performance receipts](progress/performance-gates.md)
    retain failed/unqualified H0 results; release acceptance is not a pass.
-5. **Expand only behind demonstrated need.** TUI, Jev and remote clients
-   keep their specific gates below. Sandbox/compatibility adapters require
-   a threat model/real consumer, not speculative framework work.
+5. **Make unattended goals safe without prompts.** [Sandbox](sandbox.md)
+   replaces approval prompts with an OS sandbox, saved rules, and
+   refuse-on-escalation on Linux, macOS and Windows.
+6. **Expand only behind demonstrated need.** TUI and remote clients keep
+   their specific gates below. Compatibility adapters require a real
+   consumer, not speculative framework work.
 
 This is ordering by outcome, not a command to serialize independent work.
 A changed priority must name the acceptance it unlocks. No calendar date,
@@ -37,6 +40,7 @@ merged PR or closed tracker issue substitutes for a missing measurement.
 | [reliability](reliability.md) | AC/AP recovery and embedding residuals, AP5 productivity, AB6 action bias, CX5 compaction, integrated seven-day reliability |
 | [developer experience](developer-experience.md) | GE1–GE9 guide work; AF5 tracing, remaining AF6 audits, AF9 lessons, AF10 evaluation; merge-queue operator follow-up |
 | [goals](goals.md) | Durable goal/loop-guard/check-authority specification; G0/G2–G5 shipped; ADR-0049 acceptance and resource/performance qualification remain |
+| [sandbox](sandbox.md) | S0–S6 OS sandbox (bwrap/seccomp, Seatbelt, restricted token), egress proxy, policy rules and unattended escalation |
 | [tool layer](tool-layer.md) | T13 tool ablations, T14 selective index, T11 images; T10 terminal only on trajectory evidence |
 | [Terminal-Bench](terminal-bench.md) | R6 tool experiment method, R7/D6b delegation economics/defaults, remaining R8, TB-pilot and benchmark integrity |
 | [token efficiency](token-efficiency.md) | Remaining TE1 accounting and TE2–TE8 experiments; consumes D6b/T13/cache receipts |
