@@ -5729,6 +5729,73 @@ fn thirteenth_review_round_on_the_rail() {
         !app.sessions[&fallback].is_warm() && fetched(effects, fallback),
         "the cold fallback the main pane draws is fetched"
     );
+    // ...and its body arriving installs without closing `/attention`.
+    let body = fixtures::session_snapshot(app.sessions[&fallback].summary.clone());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: app
+            .sessions
+            .values()
+            .map(|view| view.summary.clone())
+            .collect(),
+        focused: Some(body),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(
+        app.view(),
+        crate::viewport::View::Attention,
+        "the view stays"
+    );
+    assert!(app.sessions[&fallback].is_warm(), "the body installed");
+
+    // 8. A stream into the transcript an inspector-held `/attention` left in
+    // the main pane redraws, though nothing is focused.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.layout.rail = PanePref::Shown;
+    app.handle_terminal_event(TerminalEvent::Resize(240, 60));
+    app.focus_session(ids[0]);
+    app.execute(Command::ShowAttention);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 240, 60);
+    assert!(app.drawn.contains(&ids[0]), "fixture: the agent is drawn");
+    let event = fixtures::envelope(
+        5,
+        ids[0],
+        SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([0x91; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "more".to_owned(),
+        },
+    );
+    assert!(
+        app.event_is_visible_for_test(&event),
+        "the drawn agent redraws"
+    );
+
+    // 9. An open picker drops rows revealed to sit under an audit (an
+    // agent's session turns out to be one), and Enter never opens one.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.execute(Command::OpenAgents);
+    assert!(app.filtered_sessions().contains(&ids[0]), "fixture: listed");
+    let mut audit = app.sessions[&ids[0]].summary.clone();
+    audit.purpose = qq_protocol::SessionPurpose::Audit;
+    let mut sessions: Vec<SessionSummary> = app
+        .sessions
+        .values()
+        .map(|view| view.summary.clone())
+        .filter(|summary| summary.id != ids[0])
+        .collect();
+    sessions.push(audit);
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions,
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(
+        !app.filtered_sessions().contains(&ids[0]),
+        "the row is gone"
+    );
 }
 
 #[test]

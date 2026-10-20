@@ -1064,7 +1064,7 @@ impl App {
             // An audit is never shown: a snapshot that names one (it was the
             // newest root) focuses the newest non-audit session instead.
             if self.under_audit(focused_id) {
-                if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
+                if initial || self.nothing_shown() || self.focused() == Some(focused_id) {
                     // `focus_session` fetches the fallback's body: it may be
                     // a summary only.
                     match self.first_listed_root() {
@@ -1073,13 +1073,13 @@ impl App {
                     }
                 }
             } else if !side_view
-                && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
+                && (initial || self.nothing_shown() || self.focused() == Some(focused_id))
             {
                 self.set_focus(focused_id);
             } else {
                 self.set_focus_clock(focused_id);
             }
-        } else if self.focused().is_none()
+        } else if self.nothing_shown()
             && let Some(first) = self.first_listed_root()
         {
             // The snapshot carried no body: fetch the one now shown.
@@ -1370,6 +1370,11 @@ impl App {
     /// and tool output for a session no pane shows only matter when the
     /// sidebar (which shows every session's live tail) is visible; every
     /// other event may move focus, attention, or chrome and always redraws.
+    #[cfg(test)]
+    pub(crate) fn event_is_visible_for_test(&self, event: &SessionEventEnvelope) -> bool {
+        self.event_is_visible(event)
+    }
+
     fn event_is_visible(&self, event: &SessionEventEnvelope) -> bool {
         let background_only = matches!(
             event.event,
@@ -1381,18 +1386,22 @@ impl App {
         if !background_only {
             return true;
         }
-        if self.focused() == Some(event.session_id) {
+        // The sessions the last frame's panes drew (a workspace view the
+        // inspector holds leaves its transcript in the main pane), and the
+        // view now followed.
+        let drawn = |id: SessionId| self.drawn.contains(&id) || self.focused() == Some(id);
+        if drawn(event.session_id) {
             return true;
         }
         // A child's live status renders under its spawn call in the parent.
         // An audit child has no card (its spawn is synthetic), so its
-        // stream changes nothing under the focused parent.
+        // stream changes nothing under the drawn parent.
         if self
             .sessions
             .get(&event.session_id)
             .filter(|session| session.summary.purpose != qq_protocol::SessionPurpose::Audit)
             .and_then(|session| session.summary.parent_id)
-            .is_some_and(|parent| self.focused() == Some(parent))
+            .is_some_and(drawn)
         {
             return true;
         }
@@ -1830,6 +1839,12 @@ impl App {
     /// surface (composer, approvals, footers, tree navigation) acts on.
     pub(crate) fn focused(&self) -> Option<SessionId> {
         self.view().session()
+    }
+
+    /// The focused pane shows no session at all: neither a transcript nor a
+    /// workspace view (`/attention`, `/changes`) the user opened over one.
+    fn nothing_shown(&self) -> bool {
+        self.view() == View::Transcript(None)
     }
 
     /// The focused transcript pane. `panes` always holds at least one and
@@ -3519,6 +3534,12 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // An open picker drops rows now known to sit under an audit.
+        if let Some(Overlay::Sessions { picker, .. }) = &self.overlay
+            && picker.items().iter().any(|row| self.under_audit(row.id))
+        {
+            self.refresh_session_picker();
+        }
         // A picker confirmation against a session now known to sit under an
         // audit is dropped before `y` can act on it.
         if let Some(Overlay::Sessions {
