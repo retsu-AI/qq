@@ -734,7 +734,7 @@ pub enum ClientError {
     EventTooLarge,
     #[error("session {0} does not exist in this workspace")]
     SessionNotInWorkspace(qq_protocol::SessionId),
-    #[error("session {0} is a spawned sub-agent session; open its root session instead")]
+    #[error("session {0} is a spawned sub-agent or audit session; open its root session instead")]
     SessionIsChild(qq_protocol::SessionId),
 }
 
