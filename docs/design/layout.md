@@ -156,8 +156,8 @@ The rail (`view/sidebar.rs`) lists **sessions** (root conversations), not
 every session in the tree. A session's **agents** (sub-agent sessions under
 it) roll up into its row. The one pass `rollup` walks `thread_order` once
 and yields, per session, the group it lists under, its unread count, its live
-flag, its spend including its agents (`accounting.inclusive`, which covers
-immediate children, plus the direct spend of deeper loaded agents), its agent
+flag, its spend including its agents (`accounting.inclusive`, the server's
+fold of the whole subtree), its agent
 count and working-agent count, plus every agent that needs the user. Audit
 agents (`SessionPurpose::Audit`) and anything under them are skipped by the
 rail, the strip, the layout's session count, tree navigation and the

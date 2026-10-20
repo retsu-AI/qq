@@ -5087,8 +5087,8 @@ fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
     let rail = rail_rows(&mut app, 200, 60).join("\n");
     assert!(rail.contains("$0.25"), "{rail}");
 
-    // Inclusive covers immediate children only: a grandchild's direct spend
-    // is added; a child's is already in the inclusive total.
+    // Inclusive is the server's fold of the whole subtree: a grandchild's
+    // direct spend is already in it, so the total is taken once.
     let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
         summary.estimated_cost_usd_nanos = Some(if index == 0 { 30_000_000 } else { 40_000_000 });
     });
@@ -5114,7 +5114,7 @@ fn a_session_row_carries_inclusive_cost_from_hidden_agents() {
         .into_iter()
         .find(|entry| entry.id == root)
         .unwrap();
-    assert_eq!(entry.cost, Some(140_000_000));
+    assert_eq!(entry.cost, Some(100_000_000));
 }
 
 #[test]
@@ -5678,14 +5678,22 @@ fn thirteenth_review_round_on_the_rail() {
     app.sessions.get_mut(&root).unwrap().summary.status = SessionStatus::Running;
     app.layout.rail = PanePref::Shown;
     app.handle_terminal_event(TerminalEvent::Resize(240, 60));
-    FrameRenderer::default().frame_and_commit(&mut app, 240, 60);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 240, 60);
     app.execute(Command::ShowAttention);
+    renderer.frame_and_commit(&mut app, 240, 60);
     app.rail_painted = Some(Vec::new());
     assert_eq!(app.view(), crate::viewport::View::Attention);
     assert!(
         app.has_activity(),
         "the drawn transcript's spinner animates"
     );
+    // With the inspector hidden, `/attention` replaces the transcript: the
+    // session it left is not drawn, so its run animates nothing.
+    app.layout.inspector = PanePref::Hidden;
+    renderer.frame_and_commit(&mut app, 240, 60);
+    app.rail_painted = Some(Vec::new());
+    assert!(!app.has_activity(), "an inline workspace view hides it");
 
     // 3. An orphan's grandchild is indented below its child.
     let (mut app, _, ids) = app_with_fanout(3);
@@ -5728,6 +5736,124 @@ fn thirteenth_review_round_on_the_rail() {
     app.sessions.get_mut(&done).unwrap().finished_unread = true;
     let rule = frame_rows(&[super::chrome::composer_rule(&app, 200)]).join("");
     assert!(rule.contains("needs approval +1 need you"), "{rule}");
+
+    // 5. A snapshot without a focused body whose only listed session is an
+    // orphan focuses it and fetches its body.
+    let mut app = App::new(TuiOptions::default());
+    let orphan = SessionSummary {
+        parent_id: Some(SessionId::from_bytes([0x77; 16])),
+        ..fixtures::session_summary(SessionId::from_bytes([0x61; 16]))
+    };
+    let effects = app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![orphan.clone()],
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(app.focused(), Some(orphan.id));
+    let fetched = |effects: crate::effect::Effects, id: SessionId| {
+        effects.into_requests().into_iter().any(|request| {
+            matches!(request, ClientRequest::Snapshot(snapshot) if snapshot.focused_session_id == Some(id))
+        })
+    };
+    assert!(fetched(effects, orphan.id), "the orphan's body is fetched");
+
+    // 6. `/attention` is open over an orphan whose audit parent arrives: the
+    // cold replacement the main pane will draw is fetched.
+    let (mut app, _, ids) = app_with_fanout(1);
+    let missing = SessionId::from_bytes([0x77; 16]);
+    app.sessions.get_mut(&ids[0]).unwrap().summary.parent_id = Some(missing);
+    app.focus_session(ids[0]);
+    app.execute(Command::ShowAttention);
+    for id in [
+        SessionId::from_bytes([0x10; 16]),
+        SessionId::from_bytes([0x11; 16]),
+    ] {
+        app.sessions.get_mut(&id).unwrap().messages = None;
+    }
+    let effects = app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    )));
+    let fallback = app.view_return().expect("a fallback to return to");
+    assert_ne!(fallback, ids[0]);
+    assert!(
+        !app.sessions[&fallback].is_warm() && fetched(effects, fallback),
+        "the cold fallback the main pane draws is fetched"
+    );
+    // ...and its body arriving installs without closing `/attention`.
+    let body = fixtures::session_snapshot(app.sessions[&fallback].summary.clone());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: app
+            .sessions
+            .values()
+            .map(|view| view.summary.clone())
+            .collect(),
+        focused: Some(body),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert_eq!(
+        app.view(),
+        crate::viewport::View::Attention,
+        "the view stays"
+    );
+    assert!(app.sessions[&fallback].is_warm(), "the body installed");
+
+    // 8. A stream into the transcript an inspector-held `/attention` left in
+    // the main pane redraws, though nothing is focused.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.layout.rail = PanePref::Shown;
+    app.handle_terminal_event(TerminalEvent::Resize(240, 60));
+    app.focus_session(ids[0]);
+    app.execute(Command::ShowAttention);
+    let mut renderer = FrameRenderer::default();
+    renderer.frame_and_commit(&mut app, 240, 60);
+    assert!(app.drawn.contains(&ids[0]), "fixture: the agent is drawn");
+    let event = fixtures::envelope(
+        5,
+        ids[0],
+        SessionEvent::TextAppended {
+            message_id: MessageId::from_bytes([0x91; 16]),
+            channel: qq_protocol::TextChannel::Output,
+            text: "more".to_owned(),
+        },
+    );
+    assert!(
+        app.event_is_visible_for_test(&event),
+        "the drawn agent redraws"
+    );
+
+    // 9. An open picker drops rows revealed to sit under an audit (an
+    // agent's session turns out to be one), and Enter never opens one.
+    let (mut app, _, ids) = app_with_fanout(1);
+    app.execute(Command::OpenAgents);
+    assert!(app.filtered_sessions().contains(&ids[0]), "fixture: listed");
+    let mut audit = app.sessions[&ids[0]].summary.clone();
+    audit.purpose = qq_protocol::SessionPurpose::Audit;
+    let mut sessions: Vec<SessionSummary> = app
+        .sessions
+        .values()
+        .map(|view| view.summary.clone())
+        .filter(|summary| summary.id != ids[0])
+        .collect();
+    sessions.push(audit);
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions,
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(
+        !app.filtered_sessions().contains(&ids[0]),
+        "the row is gone"
+    );
 }
 
 #[test]

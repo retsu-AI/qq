@@ -485,6 +485,12 @@ impl App {
                 let Some(id) = picker.current().map(|row| row.id) else {
                     return Effects::none();
                 };
+                // A row revealed to sit under an audit since it was listed
+                // is never opened.
+                if self.under_audit(id) {
+                    self.refresh_session_picker();
+                    return Effects::redraw(Redraw::Immediate);
+                }
                 self.overlay = None;
                 self.focus_session(id)
             }
