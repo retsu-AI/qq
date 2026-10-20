@@ -3316,10 +3316,16 @@ impl App {
             return true;
         }
         let mut id = session.summary.id;
+        // The session the main pane draws: a workspace view the inspector
+        // holds leaves the transcript it replaced on screen.
+        let drawn = match self.view() {
+            View::Attention | View::Changes => self.view_return,
+            view => view.session(),
+        };
         // Loaded parent links up to a missing parent: `depth` is zero outside
         // `thread_order`, so an orphan component is walked by its links.
         for _ in 0..=self.sessions.len() {
-            if self.view().session() == Some(id) || painted.contains(&id) {
+            if drawn == Some(id) || painted.contains(&id) {
                 return true;
             }
             match self
