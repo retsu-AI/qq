@@ -55,20 +55,25 @@ pub const MAX_MCP_MAX_CONCURRENT_CALLS: u32 = 64;
 /// is no deadline; this bounds what "a deadline" may mean.
 pub const MAX_APPROVAL_TIMEOUT_SECONDS: u64 = 24 * 60 * 60;
 
-/// Every environment variable [`LoadRequest::from_process_env`] reads, in
-/// the order it reads them. Provider credential variables are not here: they
-/// are resolved at request time and listed by
-/// [`provider_credential_variables`].
-pub const ENVIRONMENT_VARIABLES: [&str; 8] = [
+/// Every supported environment variable [`LoadRequest::from_process_env`]
+/// reads, in the order it reads them. It also checks
+/// [`REMOVED_ENVIRONMENT_VARIABLES`] and fails when one is set, so a caller
+/// that captures or clears process inputs must cover both lists. Provider
+/// credential variables are not here: they are resolved at request time and
+/// listed by [`provider_credential_variables`].
+pub const ENVIRONMENT_VARIABLES: [&str; 5] = [
     "QQ_CONFIG",
     "QQ_CONFIG_CONTENT",
     "QQ_MODEL",
     "QQ_ORGANIZATION",
-    "QQ_JEV_CHECKPOINTS",
-    "QQ_JEV_ROUTING",
-    "QQ_JEV_APPROVAL",
     "QQ_APPROVAL_DELEGATE",
 ];
+
+/// Environment variables of removed features. Setting one is an error naming
+/// it, so a deployment that asked for Jev review does not silently run
+/// without it.
+pub const REMOVED_ENVIRONMENT_VARIABLES: [&str; 3] =
+    ["QQ_JEV_CHECKPOINTS", "QQ_JEV_ROUTING", "QQ_JEV_APPROVAL"];
 
 pub use document::{
     DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
@@ -120,44 +125,19 @@ impl LoadRequest {
             config_content,
             model,
             organization,
-            jev_checkpoints,
-            jev_routing,
-            jev_approval,
             approval_delegate,
         ] = ENVIRONMENT_VARIABLES;
+        for name in REMOVED_ENVIRONMENT_VARIABLES {
+            if env::var_os(name).is_some() {
+                return Err(ConfigError::RemovedSetting(name));
+            }
+        }
         let mut request = Self::new(cwd);
         request.explicit_path = optional_environment(config)?.map(PathBuf::from);
         request.explicit_content = optional_environment(config_content)?;
         request.overrides.model = optional_environment(model)?;
         request.overrides.organization = optional_environment(organization)?;
         request.overrides.max_output_tokens = max_output_tokens;
-        if let Some(value) = optional_environment(jev_checkpoints)? {
-            request.overrides.jev_review = Some(value.parse()?);
-        }
-        if let Some(value) = optional_environment(jev_routing)? {
-            request.overrides.jev_routing = Some(match value.as_str() {
-                "on" => true,
-                "off" => false,
-                _ => {
-                    return Err(ConfigError::InvalidJevSetting {
-                        setting: jev_routing,
-                        value,
-                    });
-                }
-            });
-        }
-        if let Some(value) = optional_environment(jev_approval)? {
-            request.overrides.jev_approval = Some(match value.as_str() {
-                "on" => true,
-                "off" => false,
-                _ => {
-                    return Err(ConfigError::InvalidJevSetting {
-                        setting: jev_approval,
-                        value,
-                    });
-                }
-            });
-        }
         if let Some(value) = optional_environment(approval_delegate)? {
             request.overrides.approval_delegate = Some(value.parse()?);
         }
@@ -261,9 +241,6 @@ pub struct RuntimeOverrides {
     organization: Option<String>,
     model: Option<String>,
     max_output_tokens: Option<u32>,
-    jev_review: Option<JevReviewMode>,
-    jev_routing: Option<bool>,
-    jev_approval: Option<bool>,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
 }
@@ -319,39 +296,6 @@ impl RuntimeOverrides {
     }
 
     #[must_use]
-    pub const fn with_jev_review(mut self, mode: JevReviewMode) -> Self {
-        self.jev_review = Some(mode);
-        self
-    }
-
-    #[must_use]
-    pub const fn with_jev_routing(mut self, enabled: bool) -> Self {
-        self.jev_routing = Some(enabled);
-        self
-    }
-
-    #[must_use]
-    pub const fn jev_review(&self) -> Option<JevReviewMode> {
-        self.jev_review
-    }
-
-    #[must_use]
-    pub const fn jev_routing(&self) -> Option<bool> {
-        self.jev_routing
-    }
-
-    #[must_use]
-    pub const fn with_jev_approval(mut self, enabled: bool) -> Self {
-        self.jev_approval = Some(enabled);
-        self
-    }
-
-    #[must_use]
-    pub const fn jev_approval(&self) -> Option<bool> {
-        self.jev_approval
-    }
-
-    #[must_use]
     pub const fn with_approval_delegate(mut self, setting: ApprovalDelegateSetting) -> Self {
         self.approval_delegate = Some(setting);
         self
@@ -366,9 +310,6 @@ impl RuntimeOverrides {
         self.organization.is_none()
             && self.model.is_none()
             && self.max_output_tokens.is_none()
-            && self.jev_review.is_none()
-            && self.jev_routing.is_none()
-            && self.jev_approval.is_none()
             && self.approval_delegate.is_none()
             && self.reasoning_effort.is_none()
     }
@@ -1599,9 +1540,6 @@ pub enum ConfigKey {
     Delegation,
     Audit,
     Goals,
-    JevReview,
-    JevRouting,
-    JevApproval,
     ApprovalDelegate,
     ApprovalTimeout,
     ReasoningEffort,
@@ -1658,9 +1596,6 @@ pub struct ConfigProvenance {
     reviewer_model: Option<SourceIdentity>,
     delegation: Option<SourceIdentity>,
     audit: Option<SourceIdentity>,
-    jev_review: Option<SourceIdentity>,
-    jev_routing: Option<SourceIdentity>,
-    jev_approval: Option<SourceIdentity>,
     approval_delegate: Option<SourceIdentity>,
     approval_timeout: Option<SourceIdentity>,
     reasoning_effort: Option<SourceIdentity>,
@@ -1721,21 +1656,6 @@ impl ConfigProvenance {
     #[must_use]
     pub const fn delegation(&self) -> Option<&SourceIdentity> {
         self.delegation.as_ref()
-    }
-
-    #[must_use]
-    pub const fn jev_review(&self) -> Option<&SourceIdentity> {
-        self.jev_review.as_ref()
-    }
-
-    #[must_use]
-    pub const fn jev_routing(&self) -> Option<&SourceIdentity> {
-        self.jev_routing.as_ref()
-    }
-
-    #[must_use]
-    pub const fn jev_approval(&self) -> Option<&SourceIdentity> {
-        self.jev_approval.as_ref()
     }
 
     #[must_use]
@@ -1947,9 +1867,6 @@ pub struct ConfigSnapshot {
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
-    jev_review: JevReviewMode,
-    jev_routing: bool,
-    jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
@@ -1979,9 +1896,6 @@ pub struct ClientSnapshot {
     delegation: DelegationConfig,
     audit: AuditConfig,
     goals: GoalsConfig,
-    jev_review: JevReviewMode,
-    jev_routing: bool,
-    jev_approval: bool,
     approval_delegate: Option<ApprovalDelegateSetting>,
     approval_timeout: Option<std::time::Duration>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
@@ -2265,45 +2179,6 @@ impl Default for AuditConfig {
     }
 }
 
-/// Optional assessment boundaries. Credential storage never selects a mode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum JevReviewMode {
-    #[default]
-    Off,
-    /// Assess only final candidates, preserving ordinary tool batching.
-    Final,
-    /// Assess every tool boundary and final candidate.
-    Enforce,
-}
-
-impl JevReviewMode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Final => "final",
-            Self::Enforce => "enforce",
-        }
-    }
-}
-
-impl std::str::FromStr for JevReviewMode {
-    type Err = ConfigError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "off" => Ok(Self::Off),
-            "final" => Ok(Self::Final),
-            "enforce" => Ok(Self::Enforce),
-            _ => Err(ConfigError::InvalidJevSetting {
-                setting: "QQ_JEV_CHECKPOINTS (off, final, enforce)",
-                value: value.to_owned(),
-            }),
-        }
-    }
-}
-
 /// Who settles the approvals a session's mode holds. The mode stays the
 /// ceiling; this only chooses whether the configured `reviewer_model` is
 /// consulted before a human. Absent from configuration, `auto` and
@@ -2335,7 +2210,7 @@ impl std::str::FromStr for ApprovalDelegateSetting {
         match value {
             "on" => Ok(Self::On),
             "off" => Ok(Self::Off),
-            _ => Err(ConfigError::InvalidJevSetting {
+            _ => Err(ConfigError::InvalidSetting {
                 setting: "QQ_APPROVAL_DELEGATE (on, off)",
                 value: value.to_owned(),
             }),
@@ -2362,9 +2237,6 @@ pub struct AgentProfileConfig {
     organization: Option<String>,
     max_output_tokens: Option<u32>,
     approval_mode: Option<ProfileApprovalMode>,
-    jev_review: Option<JevReviewMode>,
-    jev_routing: Option<bool>,
-    jev_approval: Option<bool>,
     approval_delegate: Option<ApprovalDelegateSetting>,
     reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Set when this profile came from an agent pack rather than `profiles`.
@@ -2425,21 +2297,6 @@ impl AgentProfileConfig {
     }
 
     #[must_use]
-    pub const fn jev_review(&self) -> Option<JevReviewMode> {
-        self.jev_review
-    }
-
-    #[must_use]
-    pub const fn jev_routing(&self) -> Option<bool> {
-        self.jev_routing
-    }
-
-    #[must_use]
-    pub const fn jev_approval(&self) -> Option<bool> {
-        self.jev_approval
-    }
-
-    #[must_use]
     pub const fn approval_delegate(&self) -> Option<ApprovalDelegateSetting> {
         self.approval_delegate
     }
@@ -2482,23 +2339,6 @@ impl ConfigSnapshot {
     #[must_use]
     pub const fn reasoning_effort(&self) -> Option<qq_provider::ReasoningEffort> {
         self.reasoning_effort
-    }
-
-    #[must_use]
-    pub const fn jev_review(&self) -> JevReviewMode {
-        self.jev_review
-    }
-
-    #[must_use]
-    pub const fn jev_routing(&self) -> bool {
-        self.jev_routing
-    }
-
-    /// Whether Jev is the approval delegate. Off by default; a stored key
-    /// enables nothing by itself (ADR-0030, ADR-0041).
-    #[must_use]
-    pub const fn jev_approval(&self) -> bool {
-        self.jev_approval
     }
 
     /// The explicit delegate choice, or `None` when the mode's own default
@@ -2657,8 +2497,10 @@ pub enum ConfigError {
     },
     #[error("environment variable {0} is not valid Unicode")]
     NonUnicodeEnvironment(&'static str),
+    #[error("{0} was removed with Jev; unset it")]
+    RemovedSetting(&'static str),
     #[error("invalid {setting} value {value:?}")]
-    InvalidJevSetting {
+    InvalidSetting {
         setting: &'static str,
         value: String,
     },

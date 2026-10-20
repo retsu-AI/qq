@@ -2746,6 +2746,97 @@ fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
     let mut expected = vec![child.id, grandchild.id];
     expected.sort();
     assert_eq!(listed, expected);
+
+    // The missing parent arrives: the component's top moves up and the open
+    // picker keeps the tree rather than emptying.
+    let missing = SessionId::from_bytes([0x8f; 16]);
+    app.apply_live_event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(fixtures::session_summary(missing)),
+        },
+    ));
+    let mut listed = app.filtered_sessions();
+    listed.sort();
+    let mut expected = vec![missing, child.id, grandchild.id];
+    expected.sort();
+    assert_eq!(listed, expected);
+
+    // The scope's top is deleted: its agents become roots and `/agents`
+    // follows the highlighted agent to its new top instead of emptying.
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        3,
+        missing,
+        SessionEvent::SessionDeleted {
+            session_id: missing,
+        },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(listed.contains(&grandchild.id), "{listed:?}");
+    assert!(!listed.is_empty());
+}
+
+#[test]
+fn agents_picker_survives_its_highlighted_top_being_deleted() {
+    let (mut app, root, child, grandchild, _) = app_with_agent_tree();
+    app.execute(Command::OpenAgents);
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(root),
+        "cursor on the top"
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(
+        listed.contains(&child) && listed.contains(&grandchild),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn a_snapshot_that_adds_sessions_refreshes_an_open_picker() {
+    let (mut app, _, _, _, _) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    let added = summary_named(0x84, "arrived later");
+    let mut sessions: Vec<SessionSummary> = app
+        .sessions
+        .values()
+        .map(|view| view.summary.clone())
+        .collect();
+    sessions.push(added.clone());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions,
+        focused: None,
+        cursor: fixtures::cursor(9),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(app.filtered_sessions().contains(&added.id));
+}
+
+#[test]
+fn a_deleted_agent_row_hands_the_cursor_to_its_session() {
+    let (mut app, root, child, grandchild, other) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    app.handle_key(key(KeyCode::Tab));
+    while app.session_picker_selected() != Some(grandchild) {
+        app.handle_key(key(KeyCode::Down));
+    }
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        grandchild,
+        SessionEvent::SessionDeleted {
+            session_id: grandchild,
+        },
+    )));
+    assert!(!app.sessions.contains_key(&grandchild), "fixture: deleted");
+    assert_eq!(app.session_picker_selected(), Some(root), "not {other:?}");
+    let _ = child;
 }
 
 #[test]

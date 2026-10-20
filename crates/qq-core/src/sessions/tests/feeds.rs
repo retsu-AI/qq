@@ -161,6 +161,72 @@ async fn failed_initial_replay_releases_its_feed() {
     harness.runtime.close().await.unwrap();
 }
 
+/// A store written while Jev existed holds its routing and checkpoint events
+/// and `delegate: "jev"` resolutions. Protocol 36 removed those features, but
+/// the journal is gapless and permanent: replay must still decode every row
+/// instead of failing the subscriber with a codec error.
+#[tokio::test]
+async fn replay_decodes_events_from_removed_jev_features() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
+    submit_prompt(&harness, "hello").await;
+    collect_through_finished(&mut harness.events).await;
+    let legacy = [
+        r#"{"type":"routing_started","run_id":"r"}"#,
+        r#"{"type":"routing_completed","run_id":"r","decision":{"outcome":"selected"}}"#,
+        r#"{"type":"checkpoint_started","run_id":"r","phase":"tool_result"}"#,
+        r#"{"type":"checkpoint_reviewed","run_id":"r","outcome":"supported","feedback":"ok"}"#,
+    ];
+    let sequences = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let mut statement =
+                connection.prepare("SELECT sequence FROM events ORDER BY sequence LIMIT 4")?;
+            let sequences = statement
+                .query_map([], |row| row.get::<_, u64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(statement);
+            for (sequence, event) in sequences.iter().zip(legacy) {
+                connection.execute(
+                    "UPDATE events SET envelope_json=json_set(envelope_json,'$.event',json(?2))
+                     WHERE sequence=?1",
+                    params![sequence, event],
+                )?;
+            }
+            Ok(sequences)
+        })
+        .await
+        .unwrap();
+    assert_eq!(sequences.len(), 4, "the fixture needs four journal rows");
+    let mut events = harness
+        .runtime
+        .subscribe_published(SubscribeRequest {
+            workspace_id: harness.workspace_id,
+            after: EventCursor {
+                store_id: harness.runtime.inner.store.store_id(),
+                workspace_id: harness.workspace_id,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    for sequence in sequences {
+        let published = events.next().await.unwrap().unwrap();
+        assert_eq!(published.envelope.cursor.sequence, sequence);
+        assert_eq!(published.envelope.event, SessionEvent::Retired);
+        // The bytes a server forwards over SSE are the normalized form,
+        // which a protocol-36 client decodes; never the legacy row.
+        let forwarded: SessionEventEnvelope = serde_json::from_str(&published.json).unwrap();
+        assert_eq!(forwarded, published.envelope);
+        assert!(
+            published.json.contains(r#""type":"retired""#),
+            "{}",
+            published.json
+        );
+    }
+    harness.runtime.close().await.unwrap();
+}
+
 /// D1: a subscriber that keeps up performs one catch-up read when it
 /// attaches and no store read per event afterwards; the live and replayed
 /// deliveries are byte-identical and the sequence is contiguous.

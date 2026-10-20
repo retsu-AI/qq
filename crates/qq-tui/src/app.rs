@@ -496,6 +496,13 @@ pub(crate) struct App {
     /// rows and child cards). The rule names the first waiting approval not
     /// in it, and `Alt-A`/`Alt-D` answer that same one.
     pub(crate) frame_named: Vec<SessionId>,
+    /// Children whose live card's title row the last frame painted.
+    pub(crate) frame_carded: Vec<SessionId>,
+    /// Sessions whose transcript (or side view) the last frame's panes drew,
+    /// committed by the renderer. A workspace view the inspector holds
+    /// leaves the transcript it replaced in the main pane; one drawn inline
+    /// leaves none.
+    pub(crate) drawn: Vec<SessionId>,
     /// Terminal width from the last resize event, so update paths can decide
     /// whether a change to an unshown session is visible at all. Zero until
     /// the first resize, which reads as "assume visible".
@@ -571,6 +578,8 @@ impl App {
             geometry: crate::selection::FrameGeometry::default(),
             rail_painted: None,
             frame_named: Vec::new(),
+            frame_carded: Vec::new(),
+            drawn: Vec::new(),
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
             } else {
@@ -1071,7 +1080,7 @@ impl App {
             // An audit is never shown: a snapshot that names one (it was the
             // newest root) focuses the newest non-audit session instead.
             if self.under_audit(focused_id) {
-                if initial || self.focused().is_none() || self.focused() == Some(focused_id) {
+                if initial || self.nothing_shown() || self.focused() == Some(focused_id) {
                     // `focus_session` fetches the fallback's body: it may be
                     // a summary only.
                     match self.first_listed_root() {
@@ -1080,21 +1089,26 @@ impl App {
                     }
                 }
             } else if !side_view
-                && (initial || self.focused().is_none() || self.focused() == Some(focused_id))
+                && (initial || self.nothing_shown() || self.focused() == Some(focused_id))
             {
                 self.set_focus(focused_id);
             } else {
                 self.set_focus_clock(focused_id);
             }
-        } else if self.focused().is_none()
+        } else if self.nothing_shown()
             && let Some(first) = self.first_listed_root()
         {
-            self.set_focus(first);
+            // The snapshot carried no body: fetch the one now shown.
+            fallback_fetch = Some(self.focus_session(first));
         }
-        // The summaries may have revealed that the session on screen sits
-        // under an audit, whichever body this snapshot carried.
-        if fallback_fetch.is_none() {
-            fallback_fetch = Some(self.leave_hidden_focus());
+        // The summaries may have revealed that the session on screen, or one
+        // an overlay or picker confirmation targets, sits under an audit,
+        // whichever body this snapshot carried. Always run: after a
+        // fallback above it finds focus moved and only drops the rest.
+        let hidden = self.leave_hidden_focus();
+        match fallback_fetch.as_mut() {
+            Some(fetch) => fetch.extend(hidden),
+            None => fallback_fetch = Some(hidden),
         }
         self.evict_cold_bodies();
         if initial {
@@ -1158,10 +1172,10 @@ impl App {
                     }
                 }
             }
-            if matches!(event.event, SessionEvent::SessionDeleted { .. }) {
-                self.refresh_session_picker();
-            }
         }
+        // The snapshot (and its replay) may have changed the tree an open
+        // picker lists: rebuild it once.
+        self.refresh_session_picker();
         effects
     }
 
@@ -1376,6 +1390,11 @@ impl App {
     /// and tool output for a session no pane shows only matter when the
     /// sidebar (which shows every session's live tail) is visible; every
     /// other event may move focus, attention, or chrome and always redraws.
+    #[cfg(test)]
+    pub(crate) fn event_is_visible_for_test(&self, event: &SessionEventEnvelope) -> bool {
+        self.event_is_visible(event)
+    }
+
     fn event_is_visible(&self, event: &SessionEventEnvelope) -> bool {
         let background_only = matches!(
             event.event,
@@ -1387,18 +1406,22 @@ impl App {
         if !background_only {
             return true;
         }
-        if self.focused() == Some(event.session_id) {
+        // The sessions the last frame's panes drew (a workspace view the
+        // inspector holds leaves its transcript in the main pane), and the
+        // view now followed.
+        let drawn = |id: SessionId| self.is_drawn(id);
+        if drawn(event.session_id) {
             return true;
         }
         // A child's live status renders under its spawn call in the parent.
         // An audit child has no card (its spawn is synthetic), so its
-        // stream changes nothing under the focused parent.
+        // stream changes nothing under the drawn parent.
         if self
             .sessions
             .get(&event.session_id)
             .filter(|session| session.summary.purpose != qq_protocol::SessionPurpose::Audit)
             .and_then(|session| session.summary.parent_id)
-            .is_some_and(|parent| self.focused() == Some(parent))
+            .is_some_and(drawn)
         {
             return true;
         }
@@ -1961,6 +1984,21 @@ impl App {
     /// surface (composer, approvals, footers, tree navigation) acts on.
     pub(crate) fn focused(&self) -> Option<SessionId> {
         self.view().session()
+    }
+
+    /// Whether `id`'s transcript (or side view) is on screen: drawn by the
+    /// last frame's panes, or newly followed by the focused pane with no
+    /// overlay covering it (the next frame draws it).
+    fn is_drawn(&self, id: SessionId) -> bool {
+        self.drawn.contains(&id)
+            || (self.focused() == Some(id)
+                && matches!(self.mode(), Mode::Approval | Mode::Trust | Mode::Compose))
+    }
+
+    /// The focused pane shows no session at all: neither a transcript nor a
+    /// workspace view (`/attention`, `/changes`) the user opened over one.
+    fn nothing_shown(&self) -> bool {
+        self.view() == View::Transcript(None)
     }
 
     /// The focused transcript pane. `panes` always holds at least one and
@@ -2979,17 +3017,26 @@ impl App {
     /// one, without moving focus. The banner names that session; this is
     /// its inline answer.
     fn respond_to_background_approval(&mut self, approve: bool) -> Effects {
-        // The approval the rule names: the first one the last frame did not
-        // name elsewhere, else (all on the rail) the first in attention order.
+        // The approval the rule names: the first one the last frame neither
+        // named nor pointed at elsewhere; else the first whose own row or
+        // card the frame painted. A need folded into a `+N need you` row is
+        // never answered blind.
         let waiting: Vec<SessionId> = self
             .sessions_needing_attention()
             .into_iter()
             .filter(|id| Some(*id) != self.view().transcript() && self.human_waiting(*id))
             .collect();
+        let painted = |id: &SessionId| {
+            self.rail_painted
+                .as_ref()
+                .is_some_and(|painted| painted.contains(id))
+                || self.drawn.contains(id)
+                || self.frame_carded.contains(id)
+        };
         let Some(session_id) = waiting
             .iter()
             .find(|id| !self.frame_named.contains(id))
-            .or(waiting.first())
+            .or_else(|| waiting.iter().find(|id| painted(id)))
             .copied()
         else {
             self.set_info("no other session is waiting for approval".to_owned());
@@ -3457,16 +3504,14 @@ impl App {
             return true;
         }
         let mut id = session.summary.id;
-        // The session the main pane draws: a workspace view the inspector
-        // holds leaves the transcript it replaced on screen.
-        let drawn = match self.view() {
-            View::Attention | View::Changes => self.view_return,
-            view => view.session(),
-        };
+        // The sessions the last frame's panes drew (its own view, or the
+        // transcript an inspector-held workspace view left in the main pane),
+        // plus the view now followed, which the next frame draws.
+        let drawn = |id: SessionId| self.is_drawn(id);
         // Loaded parent links up to a missing parent: `depth` is zero outside
         // `thread_order`, so an orphan component is walked by its links.
         for _ in 0..=self.sessions.len() {
-            if drawn == Some(id) || painted.contains(&id) {
+            if drawn(id) || painted.contains(&id) {
                 return true;
             }
             match self
@@ -3564,7 +3609,7 @@ impl App {
     /// Sessions in components `thread_order` omits because their topmost
     /// session's parent is not loaded (a bounded snapshot can carry a child
     /// without its parent), depth-first. Empty in the common case.
-    fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
+    pub(super) fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
         let complete = self.sessions.thread_order().len() == self.sessions.len();
         let mut stack: Vec<SessionId> = if complete {
             Vec::new()
@@ -3660,6 +3705,22 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // A goal form or goal-check consent for a session now known to sit
+        // under an audit is closed: its accept would act on that session.
+        let goal_target = match &self.overlay {
+            Some(Overlay::GoalForm(form)) => Some(form.session),
+            Some(Overlay::GoalCheck { target, .. }) => Some(target.session_id),
+            _ => None,
+        };
+        if goal_target.is_some_and(|id| self.under_audit(id)) {
+            self.overlay = None;
+        }
+        // An open picker drops rows now known to sit under an audit.
+        if let Some(Overlay::Sessions { picker, .. }) = &self.overlay
+            && picker.items().iter().any(|row| self.under_audit(row.id))
+        {
+            self.refresh_session_picker();
+        }
         // A picker confirmation against a session now known to sit under an
         // audit is dropped before `y` can act on it.
         if let Some(Overlay::Sessions {
@@ -3671,17 +3732,31 @@ impl App {
             self.clear_session_picker_confirm();
         }
         // The session a workspace view returns to (and that `/goal`, `/btw`
-        // act on while it is open) is replaced too.
+        // act on while it is open) is replaced too; an inspector-held view
+        // draws it in the main pane, so a cold one is fetched.
+        let mut effects = Effects::none();
         if self.view_return.is_some_and(|id| self.under_audit(id)) {
             self.view_return = self.first_listed_root();
+            if let Some(fallback) = self.view_return
+                && let Some(workspace_id) = self.workspace_id
+                && self
+                    .sessions
+                    .get(&fallback)
+                    .is_some_and(|session| !session.is_warm())
+            {
+                effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                    workspace_id,
+                    fallback,
+                ))));
+            }
         }
         // The followed session, so a `/goal` or `/btw` view over a session
         // now known to sit under an audit moves too.
         let Some(focused) = self.view().session() else {
-            return Effects::none();
+            return effects;
         };
         if !self.under_audit(focused) {
-            return Effects::none();
+            return effects;
         }
         match self.first_listed_root() {
             Some(fallback) => self.focus_session(fallback),

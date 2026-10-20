@@ -14,8 +14,8 @@ Plan: [auth-providers](../auth-providers.md). Linear: ENG-1066.
 | AP6 | Header-set request credentials | Shipped (`a1c972f8`, `5f7d6117`) | #359, #361 | Header sets; explicit body shape (digested); Google request-time bearer and API key |
 | AP7a | Provider table, ADR-0064, CLI/init derivation | Shipped (`88e0607b`) | #368 | Table rows; RON variants, field rejection and trust digests pinned unchanged |
 | AP7b | `HttpCredential::Builtin` collapse; runtime/catalog/doctor/harness and root stored names from the table | Shipped (`321a245e`) | #372 | Request-shape identities pinned to the pre-collapse bytes per row (ADR-0064 §4) |
-| AP7c | `ProviderKind::Builtin` and one built-in `ProviderEntryPatch` (ADR-0064 §2); discovery behaviour from the row | In review | `refactor/eng-1066-ap7c-builtin-patch` | Trust digests of every patch shape pinned (13 documents); a new API-key preset is a row plus its catalog |
-| AP8 | Provider-neutral OAuth grants | Planned | | |
+| AP7c | `ProviderKind::Builtin` and one built-in `ProviderEntryPatch` (ADR-0064 §2); discovery behaviour from the row | Shipped (`3d8bd7a7`) | #373 | Trust digests of every patch shape pinned (13 documents); a new API-key preset is a row plus its catalog |
+| AP8 | Provider-neutral OAuth grants | In review | `refactor/eng-1066-ap8-oauth-grants` | One `OAuthTransport` for every exchange, refresh and device call; one device-poll loop; `{provider}.lock` derived |
 
 ## Log
 

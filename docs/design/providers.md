@@ -453,8 +453,8 @@ be established by the runtime capability/catalog layer before selection.
 Reference: [OpenAI Responses API reference](https://platform.openai.com/docs/api-reference/responses)
 (reasoning.effort) and [OpenAI Chat Completions API reference](https://platform.openai.com/docs/api-reference/chat)
 (reasoning_effort), consulted 2026-09-18. This is request encoding only; model
-selection, capability authorization, JEV routing, and durable receipts remain
-runtime work.
+selection, capability authorization, and durable receipts remain runtime
+work.
 
 Offline interface tests drive all six values through
 `ProviderCompiler::compile` and `Provider::stream` for standard Responses,
@@ -510,8 +510,3 @@ A provider feature is complete only when its matrix rows exist, offline tests
 pass, the required live check passes, and failures remain diagnosable without
 exposing credentials or private model traffic.
 
-Automatic Jev effort selection additionally requires explicit model metadata
-`reasoning_efforts: [low, medium, high]` (use only values the remote model accepts).
-An empty or absent declaration means unknown support and preserves omission.
-This declaration does not enable routing and does not claim remote validation;
-it constrains the bounded candidate list used after independent trusted opt-in.

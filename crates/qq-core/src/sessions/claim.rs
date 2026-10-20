@@ -146,11 +146,6 @@ pub(super) struct ClaimedRun {
     /// Explicit reasoning effort pin at claim time. `None` leaves the compiled
     /// plan's configured or profile choice.
     pub(super) reasoning_effort: Option<qq_provider::ReasoningEffort>,
-    pub(super) checkpoint: Option<CheckpointSelection>,
-    pub(super) routing: Option<RoutingSelection>,
-    /// The parent's first approval delegate, inherited by an owned child;
-    /// `None` for a root or user-initiated run, which resolves config.
-    pub(super) approval_delegate: Option<ApprovalDelegateSelection>,
     /// State the executor needs before its first provider request, read in
     /// the claim transaction so it needs no further store round trips: the
     /// cancellation flag as of the claim, the session's known file hashes,
@@ -200,9 +195,6 @@ impl ClaimedRun {
             resolved_input: None,
             profile: self.profile.clone(),
             reasoning_effort: self.reasoning_effort,
-            checkpoint: self.checkpoint.clone(),
-            routing: self.routing.clone(),
-            approval_delegate: self.approval_delegate.clone(),
             cancel_requested: false,
             file_state: Vec::new(),
             pending_steering: Vec::new(),
@@ -490,8 +482,7 @@ pub(super) fn reserve_next_run_recoverable(
                                   WHERE session_id = s.id
                                     AND role = 'user' AND steering = 0
                                     AND state IN ('complete', 'cancelled', 'failed', 'interrupted')), 0),
-                    (SELECT owner.plan_descriptor_json FROM runs owner WHERE owner.id = s.owner_run_id),
-                    s.owner_run_id IS NOT NULL, s.model_is_fallback,
+                    s.model_is_fallback,
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.goal_id ELSE r.goal_id END,
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.revision ELSE r.goal_revision END,
                     CASE WHEN r.goal_snapshot_json IS NULL THEN g.payload_json ELSE r.goal_snapshot_json END, r.origin_json,
@@ -559,16 +550,14 @@ pub(super) fn reserve_next_run_recoverable(
                     row.get::<_, Option<String>>(23)?,
                     row.get::<_, bool>(24)?,
                     row.get::<_, bool>(25)?,
-                    row.get::<_, Option<String>>(26)?,
-                    row.get::<_, bool>(27)?,
-                    row.get::<_, bool>(28)?,
+                    row.get::<_, bool>(26)?,
+                    row.get::<_, Option<String>>(27)?,
+                    row.get::<_, Option<u32>>(28)?,
                     row.get::<_, Option<String>>(29)?,
-                    row.get::<_, Option<u32>>(30)?,
-                    row.get::<_, Option<String>>(31)?,
-                    row.get::<_, Option<String>>(32)?,
-                    goals::read_notice(row, 33)?,
-                    row.get::<_, bool>(34)?,
-                    row.get::<_,Option<String>>(35)?,
+                    row.get::<_, Option<String>>(30)?,
+                    goals::read_notice(row, 31)?,
+                    row.get::<_, bool>(32)?,
+                    row.get::<_,Option<String>>(33)?,
                 ))
             },
         )
@@ -600,8 +589,6 @@ pub(super) fn reserve_next_run_recoverable(
         reasoning_effort,
         context_compaction_failed,
         context_compaction_remaining,
-        parent_descriptor,
-        has_owner,
         model_is_fallback,
         goal_id,
         goal_revision,
@@ -698,41 +685,6 @@ pub(super) fn reserve_next_run_recoverable(
         }
         None => (false, false),
     };
-    let (checkpoint, routing, approval_delegate) = if user_initiated || !has_owner {
-        (None, None, None)
-    } else {
-        #[derive(serde::Deserialize)]
-        struct ParentReview {
-            #[serde(default)]
-            checkpoint: Option<String>,
-            #[serde(default)]
-            routing: Option<String>,
-            #[serde(default)]
-            approval_delegate: Option<String>,
-        }
-        let identity = parent_descriptor
-            .as_deref()
-            .map(serde_json::from_str::<ParentReview>)
-            .transpose()?;
-        (
-            Some(CheckpointSelection::from_identity(
-                identity
-                    .as_ref()
-                    .and_then(|descriptor| descriptor.checkpoint.as_deref()),
-            )),
-            Some(RoutingSelection::from_identity(
-                identity
-                    .as_ref()
-                    .and_then(|descriptor| descriptor.routing.as_deref()),
-            )),
-            Some(ApprovalDelegateSelection::from_identity(
-                identity
-                    .as_ref()
-                    .and_then(|descriptor| descriptor.approval_delegate.as_deref()),
-            )),
-        )
-    };
-
     let kind = parse_run_kind(&kind)?;
     let workspace_id: WorkspaceId = parse_id(&workspace)?;
     let model = ModelSelection {
@@ -957,9 +909,6 @@ pub(super) fn reserve_next_run_recoverable(
         resolved_input: None,
         profile,
         reasoning_effort,
-        checkpoint,
-        routing,
-        approval_delegate,
         approval_mode,
         depth,
         root_run_id,
@@ -985,16 +934,8 @@ pub(super) fn prepared_context_bytes(
 }
 
 #[derive(Debug)]
-pub(super) enum RoutingCostRefusal {
-    Undeclared,
-    AboveAllowance,
-}
-
-#[derive(Debug)]
 pub(super) enum GoalStartRefusal {
     PerRunDuration,
-    RoutingCost(RoutingCostRefusal),
-    RoutingTokens,
     Reprepare {
         limits: Box<RunLimits>,
         final_slot: bool,

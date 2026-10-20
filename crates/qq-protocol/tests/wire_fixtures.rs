@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
     check(
         "outcome_paused_no_progress",
         &RunOutcome::Paused {
@@ -655,32 +655,6 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
             },
         ),
     );
-    check(
-        "event_routing_started",
-        &envelope(25, SessionEvent::RoutingStarted { run_id }),
-    );
-    check(
-        "event_routing_completed",
-        &envelope(
-            26,
-            SessionEvent::RoutingCompleted {
-                run_id,
-                decision: Box::new(qq_protocol::RoutingDecision {
-                    model: ModelSelection {
-                        model_is_fallback: false,
-                        model: Some("openai/gpt-5".to_owned()),
-                        max_output_tokens: Some(1024),
-                        organization: None,
-                    },
-                    reasoning_effort: Some(qq_reasoning::ReasoningEffort::Low),
-                    outcome: qq_protocol::RoutingOutcome::Selected,
-                    reason: "selected from authorized candidates".to_owned(),
-                    usage: Some(TokenUsage::default()),
-                    estimated_cost_usd_nanos: Some(0),
-                }),
-            },
-        ),
-    );
     // Version 20: the shell preview says why the gate is asking.
     check(
         "event_tool_approval_requested_shell",
@@ -773,7 +747,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
     );
     // Version 28: a reviewer resolution names the delegate that wrote it.
     check(
-        "event_tool_approval_resolved_by_jev",
+        "event_tool_approval_resolved_by_reviewer",
         &envelope(
             23,
             SessionEvent::ToolApprovalResolved {
@@ -792,7 +766,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                     display: None,
                 },
                 resolution: ApprovalResolution::ApprovedByReviewer,
-                delegate: Some(DelegateIdentity::Jev),
+                delegate: Some(DelegateIdentity::Reviewer),
             },
         ),
     );

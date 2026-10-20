@@ -235,20 +235,6 @@ pub(crate) enum RuntimeEvent {
         spill: Option<crate::tools::SpillRecord>,
         execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     },
-    CheckpointStarted {
-        correlation: String,
-        phase: qq_protocol::CheckpointPhase,
-        tool_call_id: Option<ToolCallId>,
-    },
-    CheckpointReviewed {
-        correlation: String,
-        phase: qq_protocol::CheckpointPhase,
-        tool_call_id: Option<ToolCallId>,
-        outcome: qq_protocol::CheckpointOutcome,
-        confidence: Option<f64>,
-        feedback: String,
-        spend: Option<qq_protocol::CheckpointSpend>,
-    },
     /// The final-answer auditor settled. Emitted before `Completed` (when the
     /// answer stands) or before the revision turn (when it does not); the
     /// store persists the record and charges the audit's spend to the run.
@@ -358,7 +344,6 @@ pub(crate) enum RuntimeEvent {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ProjectedToolTurn {
     pub(crate) message: Message,
-    pub(crate) correction_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

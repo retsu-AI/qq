@@ -153,9 +153,8 @@ or until you cancel. See
 
 ### Delegate
 
-Who answers a [held call](#held-call) before you are asked: [Jev](#jev) when
-`jev_approval` is on and its key is stored, then the [reviewer](#reviewer);
-if neither decides, you. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and
+Who answers a [held call](#held-call) before you are asked: the
+[reviewer](#reviewer); if it does not decide, you. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and
 `/delegate` choose whether a delegate is asked. See [Who decides a held call](permissions.md#who-decides-a-held-call).
 
 ### Reviewer
@@ -173,11 +172,3 @@ servers, packs, or grants) does not load until you accept its exact content:
 the TUI asks, and `qq ask`, `qq run`, and `qq serve` exit until you run
 `qq trust`. Editing a sensitive part asks again. See
 [Project trust](permissions.md#project-trust).
-
-### Jev
-
-TypeSafe's optional assessment model. QQ can ask it to review final answers
-(`jev_review`), pick the model and effort for a prompt (`jev_routing`), and
-answer held calls as a [delegate](#delegate) (`jev_approval`). All are off
-by default; `qq jev setup` stores the key and turns nothing on. See
-[`qq jev`](cli.md#qq-jev) and the [Jev runbook](../runbooks/jev.md).

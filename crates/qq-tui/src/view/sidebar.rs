@@ -266,12 +266,12 @@ fn own_cost(session: &SessionView) -> Option<u64> {
         .unwrap_or(session.summary.estimated_cost_usd_nanos)
 }
 
-/// Add a loaded agent's direct spend to its session's sum, `depth` levels
-/// below it. The server's inclusive accounting covers the session and its
-/// immediate children only, so deeper agents are added; a legacy session
-/// (no accounting) adds every agent. Audits count: hidden work still costs.
-fn add_agent_cost(pending: &mut Pending, agent: &SessionView, depth: usize) {
-    if !pending.legacy_cost && depth < 2 {
+/// Add a loaded agent's direct spend to a legacy session's sum (one with no
+/// accounting). A structured summary's inclusive total already covers its
+/// whole subtree (the server folds every descendant's runs), so it is taken
+/// once and nothing is added. Audits count: hidden work still costs.
+fn add_agent_cost(pending: &mut Pending, agent: &SessionView) {
+    if !pending.legacy_cost {
         return;
     }
     let direct = agent
@@ -371,7 +371,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
         if let Some(depth) = audit_depth {
             if !root && app.sessions.depth(id) > depth {
                 if let Some(pending) = current.as_mut() {
-                    add_agent_cost(pending, session, app.sessions.depth(id));
+                    add_agent_cost(pending, session);
                 }
                 continue;
             }
@@ -384,7 +384,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             if root && let Some(pending) = current.take() {
                 finish(pending, &mut rollup);
             } else if let Some(pending) = current.as_mut() {
-                add_agent_cost(pending, session, app.sessions.depth(id));
+                add_agent_cost(pending, session);
             }
             audit_depth = Some(app.sessions.depth(id));
             continue;
@@ -400,8 +400,13 @@ pub(super) fn rollup(app: &App) -> Rollup {
         let Some(pending) = current.as_mut() else {
             continue;
         };
-        add_agent_cost(pending, session, app.sessions.depth(id));
+        add_agent_cost(pending, session);
         pending.entry.agents += 1;
+        // An unfocused agent's new output is the session's new output: its
+        // agents have no rows of their own.
+        if focused != Some(id) {
+            pending.entry.unread = pending.entry.unread.saturating_add(session.unread);
+        }
         if is_working(session) {
             pending.entry.agents_working += 1;
         }
@@ -435,7 +440,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             let Some(session) = app.sessions.get(&agent) else {
                 continue;
             };
-            add_agent_cost(&mut pending, session, depth);
+            add_agent_cost(&mut pending, session);
             let hidden = hidden || is_audit(session);
             stack.extend(
                 app.sessions
@@ -448,6 +453,9 @@ pub(super) fn rollup(app: &App) -> Rollup {
                 continue;
             }
             pending.entry.agents += 1;
+            if focused != Some(agent) {
+                pending.entry.unread = pending.entry.unread.saturating_add(session.unread);
+            }
             if is_working(session) {
                 pending.entry.agents_working += 1;
             }
@@ -918,7 +926,9 @@ fn sidebar_inner(
             }
         }
         // The collapsed needs are pointed at by this row, but only while the
-        // session's own titled row is on screen to say whose they are.
+        // session's own titled row is on screen to say whose they are. They
+        // are "named" for the rule (nothing names them again) but not
+        // painted: the answer chords never act on one blind.
         if let RailRow::MoreWaiting(session, _, index) = row
             && painted.contains(&session)
         {

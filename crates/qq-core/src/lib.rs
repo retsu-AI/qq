@@ -84,27 +84,25 @@ pub use hosts::{
 };
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
-    AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, CheckpointFuture,
-    CheckpointOutcome, CheckpointPhase, CheckpointRequest, CheckpointReviewer, CheckpointVerdict,
-    MAX_AUDIT_ACTION_BYTES, MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS,
-    MAX_AUDIT_CHILD_TURNS, MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING,
-    MAX_SHELL_ENV_ALLOWLIST, MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract,
-    ReadImageFamily, ShellPolicy, valid_env_name,
+    AuditRequest, AuditVerdict, AuditedAction, BASE_ENV, BuiltinPreference, MAX_AUDIT_ACTION_BYTES,
+    MAX_AUDIT_ANSWER_BYTES, MAX_AUDIT_CHILD_DURATION_MS, MAX_AUDIT_CHILD_TURNS,
+    MAX_AUDIT_FINDING_BYTES, MAX_AUDIT_FINDINGS, MAX_PENDING_STEERING, MAX_SHELL_ENV_ALLOWLIST,
+    MAX_SHELL_ENV_NAMES, ReadImageApprovalError, ReadImageContract, ReadImageFamily, ShellPolicy,
+    valid_env_name,
 };
 pub use sessions::{
-    ApprovalDelegateSelection, ApprovalReviewer, CheckpointSelection, DelegateIdentity,
-    GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy, GoalPolicyError, GoalPolicyFuture,
-    GoalValidationError, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, MAX_CHILD_DEPTH,
-    MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN, MAX_DELEGATION_ROSTER,
-    MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS, MAX_REPLAY_EVENTS,
-    MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES, MAX_REVIEW_RECENT_ACTIONS,
-    MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent, PublishedEventStream,
-    RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
-    ReviewVerdict, RoutingSelection, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
+    ApprovalReviewer, DelegateIdentity, GoalCheckPolicyError, GoalCheckPolicyFuture, GoalPolicy,
+    GoalPolicyError, GoalPolicyFuture, GoalValidationError, GrantPromotionFuture, GrantSeedFuture,
+    LoadedRuntime, MAX_CHILD_DEPTH, MAX_CHILD_DEPTH_CEILING, MAX_CONCURRENT_CHILDREN_PER_RUN,
+    MAX_DELEGATION_ROSTER, MAX_DESCENDANTS_PER_ROOT, MAX_GRANT_BYTES, MAX_PENDING_PROMPTS,
+    MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
+    MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
+    PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
+    ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
     SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
-    SlashCommandError, SpawnModelValidationFuture, TaskRouter, TaskRoutingFuture,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
+    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see: the change-detection
 /// primitive for run-snapshot checkpoints (`docs/plans/run-snapshots.md`).
@@ -349,12 +347,10 @@ async fn deliver_children(
     irreducible_message_bytes: &mut u64,
     budget: &mut BudgetMeter,
     stall: &mut runtime::StallScope,
-    checkpoint: Option<&mut runtime::CheckpointContext>,
 ) -> Result<Delivered, runtime::DeliveryError> {
     let delivered = spawner
         .deliver(boundary.turn_ordinal, boundary.reports)
         .await?;
-    let mut checkpoint = checkpoint;
     let mut count = Delivered::default();
     for child in &delivered {
         if child.interim {
@@ -369,11 +365,6 @@ async fn deliver_children(
         budget.charge_tool_output(child.notice.len());
         if child.answered {
             stall.progress();
-        }
-        // A delivered answer is evidence the final review weighs, exactly
-        // as a blocking spawn's result was.
-        if let Some(context) = checkpoint.as_deref_mut() {
-            context.record(child.notice.clone());
         }
         let notice = Message::user(child.notice.clone());
         *irreducible_message_bytes =
@@ -419,7 +410,6 @@ async fn apply_steering(
     steering: &mut Option<runtime::SteeringReceiver>,
     messages: &mut Vec<Message>,
     irreducible_message_bytes: &mut u64,
-    mut checkpoint: Option<&mut runtime::CheckpointContext>,
     workspace: &workspace::Workspace,
     file_state: &Arc<workspace::FileState>,
 ) -> Option<Vec<AppliedSteering>> {
@@ -466,9 +456,6 @@ async fn apply_steering(
                 Vec::new(),
             )
         };
-        if let Some(context) = checkpoint.as_deref_mut() {
-            context.steer(&text);
-        }
         let user = Message::user(text);
         *irreducible_message_bytes =
             irreducible_message_bytes.saturating_add(measure_message(&user));
@@ -754,7 +741,6 @@ pub(crate) struct RunCapabilities {
     /// measurable. Admission rejects a cost cap without pricing before this
     /// struct is built.
     limits: RunLimits,
-    routing_spend: Option<qq_protocol::CheckpointSpend>,
     execution_started: Option<tokio::time::Instant>,
     pricing: Option<ModelPricing>,
     /// Full-transcript recall for `search_history`. Session runs install one;
@@ -811,7 +797,6 @@ impl RunCapabilities {
             unattended: false,
             max_output_tokens: None,
             limits: RunLimits::default(),
-            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -976,7 +961,6 @@ impl RunCapabilities {
                 max_children: None,
                 max_concurrent_children: None,
             },
-            routing_spend: None,
             execution_started: None,
             pricing: None,
             history: None,
@@ -1051,10 +1035,6 @@ pub struct Runtime {
     pub(crate) delegation: Arc<DelegationRoster>,
     /// When a root run's final answer is audited before completion.
     pub(crate) audit: runtime::AuditPolicy,
-    /// Mandatory, non-recursive post-result and final-candidate reviewer.
-    pub(crate) checkpoint: Option<Arc<dyn runtime::CheckpointReviewer>>,
-    pub(crate) checkpoint_identity: Option<Arc<str>>,
-    pub(crate) task_router: Option<Arc<dyn sessions::TaskRouter>>,
     /// Environment allowlist and built-in preference for `shell` calls.
     pub(crate) shell: Arc<runtime::ShellPolicy>,
     pub(crate) approved_read_images: Arc<runtime::ApprovedReadImages>,
@@ -1063,9 +1043,6 @@ pub struct Runtime {
     pub(crate) turn_recovery: TurnRecoveryPolicy,
     /// Who settles the calls the session's approval mode holds.
     pub(crate) approval_delegate: approval::ApprovalDelegate,
-    /// Identity of the first approval delegate (Jev) for this runtime's held
-    /// calls; `None` means it is off.
-    pub(crate) approval_delegate_identity: Option<Arc<str>>,
 }
 
 impl Runtime {
@@ -1110,9 +1087,6 @@ impl Runtime {
             spawn_model_routes: Arc::from([]),
             delegation: Arc::new(DelegationRoster::default()),
             audit: runtime::AuditPolicy::default(),
-            checkpoint: None,
-            checkpoint_identity: None,
-            task_router: None,
             reasoning_effort: None,
             shell: Arc::new(runtime::ShellPolicy::default()),
             approved_read_images: Arc::new(runtime::ApprovedReadImages::default()),
@@ -1120,7 +1094,6 @@ impl Runtime {
             network: Arc::new(tools::network::NetworkPolicy::default()),
             turn_recovery: TurnRecoveryPolicy::default(),
             approval_delegate: approval::ApprovalDelegate::default(),
-            approval_delegate_identity: None,
         })
     }
 
@@ -1138,15 +1111,6 @@ impl Runtime {
     #[must_use]
     pub const fn with_approval_delegate(mut self, delegate: approval::ApprovalDelegate) -> Self {
         self.approval_delegate = delegate;
-        self
-    }
-
-    /// Names the first approval delegate for held calls (Jev), recorded in
-    /// the plan descriptor; `ReviewRequest::jev_approval` is set when it is
-    /// present. Inert unless the installed reviewer composes that delegate.
-    #[must_use]
-    pub fn with_approval_delegate_identity(mut self, identity: Option<Arc<str>>) -> Self {
-        self.approval_delegate_identity = identity;
         self
     }
 
@@ -1436,22 +1400,6 @@ impl Runtime {
             messages.push(Message::user(OUTPUT_TRUNCATED_CONTINUE_NOTICE));
         }
         }
-    }
-
-    pub fn with_task_router(mut self, router: Arc<dyn sessions::TaskRouter>) -> Self {
-        self.task_router = Some(router);
-        self
-    }
-
-    /// Installs the typed reviewer for its selected tool/final boundaries.
-    #[must_use]
-    pub fn with_checkpoint_reviewer(
-        mut self,
-        reviewer: Arc<dyn runtime::CheckpointReviewer>,
-    ) -> Self {
-        self.checkpoint_identity = Some(Arc::from(reviewer.identity()));
-        self.checkpoint = Some(reviewer);
-        self
     }
 
     /// Supplies the effective model context window for provider-neutral
@@ -1824,22 +1772,6 @@ impl plan::CompiledAgentPlan {
     }
 }
 
-fn checkpoint_protocol_outcome(
-    outcome: runtime::CheckpointOutcome,
-) -> qq_protocol::CheckpointOutcome {
-    match outcome {
-        runtime::CheckpointOutcome::Supported => qq_protocol::CheckpointOutcome::Supported,
-        runtime::CheckpointOutcome::PartiallySupported => {
-            qq_protocol::CheckpointOutcome::PartiallySupported
-        }
-        runtime::CheckpointOutcome::Contradicted => qq_protocol::CheckpointOutcome::Contradicted,
-        runtime::CheckpointOutcome::InsufficientEvidence => {
-            qq_protocol::CheckpointOutcome::InsufficientEvidence
-        }
-        runtime::CheckpointOutcome::Unavailable => qq_protocol::CheckpointOutcome::Unavailable,
-    }
-}
-
 /// Translates the richer internal runtime stream into the direct public API.
 /// Session execution consumes the internal preparation and tool events
 /// separately so it can persist them before publishing visible state.
@@ -1921,30 +1853,6 @@ fn public_run_stream(mut events: RuntimeStream, context_window: Option<u32>) -> 
                 | RuntimeEvent::TurnRetrying { .. }
                 // Direct runs carry no output contract.
                 | RuntimeEvent::OutputRepairRequested { .. } => {}
-                RuntimeEvent::CheckpointStarted { correlation, phase, tool_call_id } => {
-                    yield RunEvent::CheckpointStarted { correlation, phase, tool_call_id };
-                }
-                RuntimeEvent::CheckpointReviewed {
-                    correlation,
-                    phase,
-                    tool_call_id,
-                    outcome,
-                    confidence,
-                    feedback,
-                    spend,
-                } => {
-                    yield RunEvent::CheckpointReviewed {
-                        correlation,
-                        phase,
-                        tool_call_id,
-                        outcome,
-                        confidence_basis_points: confidence.map(|value| {
-                            (value.clamp(0.0, 1.0) * 10_000.0).round() as u16
-                        }),
-                        feedback,
-                        spend,
-                    };
-                }
                 RuntimeEvent::Completed { .. } => {
                     drop(events);
                     yield RunEvent::Completed;
@@ -3747,220 +3655,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_regression_final_checkpoint_preserves_steering() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".into(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct SteeringReviewer {
-            sender: runtime::SteeringSender,
-            sent: std::sync::atomic::AtomicBool,
-            message_id: qq_protocol::MessageId,
-        }
-        impl CheckpointReviewer for SteeringReviewer {
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                let send = !self.sent.swap(true, std::sync::atomic::Ordering::SeqCst);
-                if !send {
-                    assert!(
-                        request.task.contains("Also explain the result"),
-                        "review must use the steered task"
-                    );
-                }
-                let sender = self.sender.clone();
-                let message_id = self.message_id;
-                Box::pin(async move {
-                    // Deliver steering after the final checkpoint has started,
-                    // before its successful result is returned to the run loop.
-                    if send {
-                        sender
-                            .messages
-                            .send(runtime::SteeringMessage::text(
-                                message_id,
-                                "Also explain the result",
-                            ))
-                            .await
-                            .unwrap();
-                    }
-                    CheckpointVerdict {
-                        spend: qq_protocol::CheckpointSpend::default(),
-                        outcome: CheckpointOutcome::Supported,
-                        confidence: Some(1.0),
-                        feedback: "supported".into(),
-                    }
-                })
-            }
-        }
-        let (sender, receiver) = runtime::steering_channel();
-        let message_id = qq_protocol::MessageId::from_bytes([42; 16]);
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(SteeringReviewer {
-                sender,
-                sent: std::sync::atomic::AtomicBool::new(false),
-                message_id,
-            }));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_loop_with_spawner(
-                vec![Message::user("answer directly")],
-                directory.path().to_owned(),
-                RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
-                    network: Arc::default(),
-                }),
-                Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None).with_steering(receiver),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            events.iter().any(|event| matches!(event,
-                RuntimeEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
-            )),
-            "steering accepted during final review must be applied before completion: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn interrupting_steering_stops_final_checkpoint_review() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".into(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct SteeringReviewer {
-            sender: runtime::SteeringSender,
-            sent: std::sync::atomic::AtomicBool,
-            message_id: qq_protocol::MessageId,
-        }
-        impl CheckpointReviewer for SteeringReviewer {
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-                let send = !self.sent.swap(true, std::sync::atomic::Ordering::SeqCst);
-                let sender = self.sender.clone();
-                let message_id = self.message_id;
-                Box::pin(async move {
-                    // Deliver steering after the final checkpoint has started,
-                    // before its successful result is returned to the run loop.
-                    if send {
-                        sender
-                            .messages
-                            .send(runtime::SteeringMessage::text(
-                                message_id,
-                                "Also explain the result",
-                            ))
-                            .await
-                            .unwrap();
-                    }
-                    if send {
-                        sender.interrupt();
-                        std::future::pending::<()>().await;
-                    }
-                    CheckpointVerdict {
-                        spend: qq_protocol::CheckpointSpend::default(),
-                        outcome: CheckpointOutcome::Supported,
-                        confidence: Some(1.0),
-                        feedback: "supported".into(),
-                    }
-                })
-            }
-        }
-        let (sender, receiver) = runtime::steering_channel();
-        let message_id = qq_protocol::MessageId::from_bytes([42; 16]);
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(SteeringReviewer {
-                sender,
-                sent: std::sync::atomic::AtomicBool::new(false),
-                message_id,
-            }));
-        let directory = tempfile::tempdir().unwrap();
-        let running = runtime
-            .run_loop_with_spawner(
-                vec![Message::user("answer directly")],
-                directory.path().to_owned(),
-                RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
-                    network: Arc::default(),
-                }),
-                Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None).with_steering(receiver),
-            )
-            .collect::<Vec<_>>();
-        let events = tokio::time::timeout(std::time::Duration::from_millis(100), running)
-            .await
-            .expect("interrupting steering must stop the held final reviewer");
-        assert!(
-            events.iter().any(|event| matches!(event,
-                RuntimeEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
-            )),
-            "steering accepted during final review must be applied before completion: {events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn direct_run_exposes_checkpoint_review_events() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _request: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct Supports;
-        impl CheckpointReviewer for Supports {
-            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(0.99),
-                    feedback: "final evidence is supported".to_owned(),
-                }))
-            }
-        }
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Supports));
-
-        let events = runtime
-            .run(RunCommand::new("answer directly"))
-            .collect::<Vec<_>>()
-            .await;
-
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RunEvent::CheckpointReviewed {
-                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                outcome: qq_protocol::CheckpointOutcome::Supported,
-                confidence_basis_points: Some(9_900),
-                feedback,
-                ..
-            } if feedback == "final evidence is supported"
-        )));
-        assert!(matches!(events.last(), Some(RunEvent::Completed)));
-    }
-
-    #[tokio::test]
     async fn maps_reasoning_lifecycle_without_joining_answer_text() {
         struct ReasoningProvider;
 
@@ -4480,7 +4174,7 @@ mod tests {
             }
             let admitted = (tools::output::MAX_TURN_TOOL_OUTPUT_BYTES
                 - count * tools::output::result_reserve_bytes("search"))
-                / tools::output::search_reservation_bytes(false);
+                / tools::output::SEARCH_RESERVATION_BYTES;
             // Admitted slots use distinct arguments. Deferred slots retry query zero
             // unchanged, so no deferral spends a repeated-read allowance.
             let arguments = (0..count)
@@ -4968,903 +4662,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn enforced_checkpoint_rejects_multi_call_turn_before_any_tool_executes() {
-        struct TwoCalls {
-            turn: Mutex<u8>,
-        }
-        impl Provider for TwoCalls {
-            fn stream(&self, _request: ModelRequest) -> ProviderStream {
-                let mut turn = self.turn.lock().unwrap();
-                let current = *turn;
-                *turn += 1;
-                drop(turn);
-                if current == 0 {
-                    Box::pin(stream::iter([
-                        Ok(ProviderEvent::ToolCallStarted {
-                            id: "a".into(),
-                            name: "__test_read".into(),
-                        }),
-                        Ok(ProviderEvent::ToolCallArgumentsDelta {
-                            id: "a".into(),
-                            json: r#"{"delay_ms":0,"result":"a"}"#.into(),
-                        }),
-                        Ok(ProviderEvent::ToolCallCompleted { id: "a".into() }),
-                        Ok(ProviderEvent::ToolCallStarted {
-                            id: "b".into(),
-                            name: "__test_read".into(),
-                        }),
-                        Ok(ProviderEvent::ToolCallArgumentsDelta {
-                            id: "b".into(),
-                            json: r#"{"delay_ms":0,"result":"b"}"#.into(),
-                        }),
-                        Ok(ProviderEvent::ToolCallCompleted { id: "b".into() }),
-                        Ok(ProviderEvent::Completed { usage: None }),
-                    ]))
-                } else {
-                    Box::pin(stream::iter([
-                        Ok(ProviderEvent::OutputTextDelta {
-                            text: "done".into(),
-                        }),
-                        Ok(ProviderEvent::Completed { usage: None }),
-                    ]))
-                }
-            }
-        }
-        struct Supports;
-        impl CheckpointReviewer for Supports {
-            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "supported".into(),
-                }))
-            }
-        }
-        let before = tools::test_executions_started();
-        let runtime = Runtime::new(
-            TwoCalls {
-                turn: Mutex::new(0),
-            },
-            "test",
-            256,
-        )
-        .unwrap()
-        .with_checkpoint_reviewer(Arc::new(Supports));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(vec![Message::user("two reads")], directory.path().into())
-            .collect::<Vec<_>>()
-            .await;
-        assert_eq!(tools::test_executions_started(), before);
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    RuntimeEvent::CheckpointReviewed {
-                        phase: qq_protocol::CheckpointPhase::ToolResult,
-                        ..
-                    }
-                ))
-                .count(),
-            2
-        );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::AssistantTurnCompleted { calls, .. } if calls.len() == 2
-        )));
-        assert!(matches!(
-            events.last(),
-            Some(RuntimeEvent::Completed { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn final_checkpoint_uses_continued_history_all_task_blocks_and_masks_secrets() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "API_KEY=abcdefgh12345".into(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct Reviewer(Arc<Mutex<Vec<CheckpointRequest>>>);
-        impl CheckpointReviewer for Reviewer {
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                self.0.lock().unwrap().push(request);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "supported".into(),
-                }))
-            }
-        }
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Reviewer(Arc::clone(&requests))));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(
-                vec![
-                    Message::user("Earlier requirement: retain attribution"),
-                    Message::tool_results(vec![ContentBlock::ToolResult {
-                        call_id: "prior-call".into(),
-                        content: "Prior source API_KEY=abcdefgh12345".into(),
-                        is_error: false,
-                    }]),
-                    Message::new(
-                        Role::User,
-                        vec![
-                            ContentBlock::Text {
-                                text: "Summarize API_KEY=abcdefgh12345".into(),
-                            },
-                            ContentBlock::Text {
-                                text: "Include uncertainties".into(),
-                            },
-                        ],
-                    ),
-                ],
-                directory.path().into(),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(matches!(
-            events.last(),
-            Some(RuntimeEvent::Completed { .. })
-        ));
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert!(requests[0].task.contains("Include uncertainties"));
-        assert!(requests[0].evidence.contains("Earlier requirement"));
-        assert!(requests[0].evidence.contains("prior-call"));
-        assert!(!requests[0].task.contains("abcdefgh12345"));
-        assert!(!requests[0].evidence.contains("abcdefgh12345"));
-    }
-
-    #[tokio::test]
-    async fn final_checkpoint_spend_exhausts_the_shared_run_budget() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".into(),
-                    }),
-                    Ok(ProviderEvent::Completed {
-                        usage: Some(qq_provider::ProviderUsage {
-                            input_tokens: 1,
-                            cache_read_input_tokens: 0,
-                            cache_write_input_tokens: 0,
-                            output_tokens: 0,
-                            reasoning_tokens: None,
-                        }),
-                    }),
-                ]))
-            }
-        }
-        struct Reviewer;
-        impl CheckpointReviewer for Reviewer {
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "supported".into(),
-                    spend: qq_protocol::CheckpointSpend {
-                        usage: Some(TokenUsage {
-                            input_tokens: 20,
-                            output_tokens: 2,
-                            ..TokenUsage::default()
-                        }),
-                        estimated_cost_usd_nanos: Some(840),
-                    },
-                }))
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Reviewer));
-        let events = runtime
-            .run_loop_with_spawner(
-                vec![Message::user("finish")],
-                directory.path().into(),
-                RunCancellation::new(),
-                Arc::new(StaticPolicyGate {
-                    mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
-                    network: Arc::default(),
-                }),
-                Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None).with_limits(
-                    RunLimits {
-                        max_total_tokens: Some(10),
-                        ..RunLimits::default()
-                    },
-                    None,
-                ),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { spend: Some(spend), .. } if spend.usage.unwrap().input_tokens == 20)));
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::BudgetExhausted { .. })),
-            "{events:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn checkpoint_request_and_repair_limits_stop_repeated_tool_loops() {
-        struct RepeatingProvider;
-        impl Provider for RepeatingProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::ToolCallStarted {
-                        id: "read".into(),
-                        name: "read_file".into(),
-                    }),
-                    Ok(ProviderEvent::ToolCallArgumentsDelta {
-                        id: "read".into(),
-                        json: r#"{"path":"note"}"#.into(),
-                    }),
-                    Ok(ProviderEvent::ToolCallCompleted { id: "read".into() }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct Reviewer(CheckpointOutcome, Arc<AtomicUsize>);
-        impl CheckpointReviewer for Reviewer {
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-                self.1.fetch_add(1, Ordering::SeqCst);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    outcome: self.0,
-                    confidence: Some(1.0),
-                    feedback: "criterion: test evidence".into(),
-                    spend: qq_protocol::CheckpointSpend::default(),
-                }))
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        std::fs::write(directory.path().join("note"), "evidence").unwrap();
-        // A GREEN reviewer is asked 32 times and then the per-run review
-        // limit fails the run: that is a harness bound, not a verdict.
-        {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let runtime = Runtime::new(RepeatingProvider, "test", 256)
-                .unwrap()
-                .with_checkpoint_reviewer(Arc::new(Reviewer(
-                    CheckpointOutcome::Supported,
-                    Arc::clone(&calls),
-                )));
-            let events = runtime
-                .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(calls.load(Ordering::SeqCst), 32);
-            assert!(
-                matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
-                "{events:?}"
-            );
-        }
-        // A RED reviewer redirects the run twice. After that its verdicts
-        // are recorded on each result and the model proceeds; the run is not
-        // failed for disagreeing with the reviewer (RR3). The provider here
-        // never stops calling tools, so the review limit is what ends it,
-        // with every one of the 32 verdicts durable in the event stream.
-        {
-            let calls = Arc::new(AtomicUsize::new(0));
-            let runtime = Runtime::new(RepeatingProvider, "test", 256)
-                .unwrap()
-                .with_checkpoint_reviewer(Arc::new(Reviewer(
-                    CheckpointOutcome::Contradicted,
-                    Arc::clone(&calls),
-                )));
-            let events = runtime
-                .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
-                .collect::<Vec<_>>()
-                .await;
-            assert_eq!(calls.load(Ordering::SeqCst), 32);
-            let red = events
-                .iter()
-                .filter(|event| {
-                    matches!(
-                        event,
-                        RuntimeEvent::CheckpointReviewed {
-                            outcome: qq_protocol::CheckpointOutcome::Contradicted,
-                            ..
-                        }
-                    )
-                })
-                .count();
-            assert_eq!(red, 32);
-            assert!(
-                !events.iter().any(|event| matches!(event, RuntimeEvent::Failed { message, .. } if message.contains("correction attempts"))),
-                "{events:?}"
-            );
-            assert!(
-                matches!(events.last(), Some(RuntimeEvent::Failed { message, .. }) if message.contains("32 review requests")),
-                "{events:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn ab2_checkpoint_feedback_and_combined_correction_notice_are_bounded() {
-        struct Oversized;
-        impl CheckpointReviewer for Oversized {
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: if request.phase == runtime::CheckpointPhase::ToolResult {
-                        CheckpointOutcome::Contradicted
-                    } else {
-                        CheckpointOutcome::Supported
-                    },
-                    confidence: Some(1.0),
-                    feedback: "界".repeat(12 * 1024),
-                }))
-            }
-        }
-        for count in [1, 3] {
-            let directory = tempfile::tempdir().unwrap();
-            std::fs::write(directory.path().join("note"), "evidence").unwrap();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let runtime = Runtime::new(
-                TurnScript {
-                    turns: vec![vec![("read_file", r#"{"path":"note"}"#.to_owned()); count]],
-                    requests: Arc::clone(&requests),
-                },
-                "test",
-                256,
-            )
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Oversized));
-            let events = runtime
-                .run_messages_in_workspace(
-                    vec![Message::user("inspect")],
-                    directory.path().to_owned(),
-                )
-                .collect::<Vec<_>>()
-                .await;
-            assert!(matches!(
-                events.last(),
-                Some(RuntimeEvent::Completed { .. })
-            ));
-            let notice = events
-                .iter()
-                .find_map(|event| match event {
-                    RuntimeEvent::ToolResultsProjected { projection, .. } => {
-                        projection.correction_notice.as_deref()
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            assert!(
-                notice.len() <= 32 * 1024,
-                "{count} results: {} notice bytes",
-                notice.len()
-            );
-            assert!(notice.starts_with("JEV RED"));
-            let requests = requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
-            assert!(requests[1].messages().contains(&Message::user(notice)));
-        }
-    }
-
-    #[tokio::test]
-    async fn ab2_final_candidate_correction_feedback_is_bounded() {
-        struct FinalRed;
-        impl CheckpointReviewer for FinalRed {
-            fn reviews_tools(&self) -> bool {
-                false
-            }
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Contradicted,
-                    confidence: Some(1.0),
-                    feedback: "界".repeat(12 * 1024),
-                }))
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::new(
-            TurnScript {
-                turns: Vec::new(),
-                requests: Arc::clone(&requests),
-            },
-            "test",
-            256,
-        )
-        .unwrap()
-        .with_checkpoint_reviewer(Arc::new(FinalRed));
-        let events = runtime
-            .run_messages_in_workspace(vec![Message::user("finish")], directory.path().to_owned())
-            .collect::<Vec<_>>()
-            .await;
-        assert!(matches!(
-            events.last(),
-            Some(RuntimeEvent::Completed { .. })
-        ));
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        for request in &requests[1..] {
-            let notice = request
-                .messages()
-                .iter()
-                .flat_map(Message::content)
-                .filter_map(|block| match block {
-                    ContentBlock::Text { text } if text.starts_with("JEV RED") => Some(text),
-                    _ => None,
-                })
-                .next_back()
-                .unwrap();
-            assert!(notice.len() <= 32 * 1024);
-            assert!(notice.ends_with("…[truncated]"));
-        }
-    }
-
-    #[tokio::test]
-    async fn a_final_candidate_rejected_twice_completes_with_the_verdicts_on_record() {
-        // Regression (RR3): 9 real runs on 2026-09-19/20 ended as `Failed`
-        // with "Jev exhausted its two correction attempts" after the model
-        // had produced an answer. The reviewer's disagreement is now evidence
-        // in the transcript: two RED verdicts redirect, the third completes.
-        struct AnswerProvider(AtomicUsize);
-        impl Provider for AnswerProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                let attempt = self.0.fetch_add(1, Ordering::SeqCst);
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: format!("answer {attempt}"),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct RedReviewer(Arc<AtomicUsize>);
-        impl CheckpointReviewer for RedReviewer {
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                assert_eq!(request.phase, runtime::CheckpointPhase::FinalCandidate);
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    outcome: CheckpointOutcome::InsufficientEvidence,
-                    confidence: Some(0.9),
-                    feedback: "C1: no direct evidence".into(),
-                    spend: qq_protocol::CheckpointSpend::default(),
-                }))
-            }
-        }
-        let reviews = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(AnswerProvider(AtomicUsize::new(0)), "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(RedReviewer(Arc::clone(&reviews))));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
-            .collect::<Vec<_>>()
-            .await;
-        assert_eq!(reviews.load(Ordering::SeqCst), 3);
-        let verdicts = events
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event,
-                    RuntimeEvent::CheckpointReviewed {
-                        outcome: qq_protocol::CheckpointOutcome::InsufficientEvidence,
-                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(verdicts, 3);
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{:?}",
-            events.last()
-        );
-        // The third candidate is the one that stands.
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::OutputTextDelta { text } if text == "answer 2"
-        )));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn final_checkpoint_timeout_records_unknown_spend_and_completes() {
-        struct Reviewer;
-        impl CheckpointReviewer for Reviewer {
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-                Box::pin(std::future::pending())
-            }
-        }
-        let runtime = Runtime::new(
-            ScriptedProvider {
-                request: Arc::new(Mutex::new(None)),
-                fails: false,
-            },
-            "test",
-            256,
-        )
-        .unwrap()
-        .with_checkpoint_reviewer(Arc::new(Reviewer));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(vec![Message::user("answer")], directory.path().into())
-            .collect::<Vec<_>>()
-            .await;
-        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::CheckpointReviewed { outcome: qq_protocol::CheckpointOutcome::Unavailable, spend: Some(spend), feedback, .. } if spend.usage.is_none() && feedback.contains("five seconds"))));
-        // A reviewer outage is recorded, not turned into a failed run (RR3).
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{:?}",
-            events.last()
-        );
-    }
-
-    #[tokio::test]
-    async fn checkpoint_cost_admission_refuses_unknown_or_unaffordable_charge_before_dispatch() {
-        struct Reviewer(Option<u64>);
-        impl CheckpointReviewer for Reviewer {
-            fn max_cost_usd_nanos(&self) -> Option<u64> {
-                self.0
-            }
-            fn review(&self, _: CheckpointRequest) -> CheckpointFuture {
-                panic!("over-budget reviewer must not dispatch");
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        for (maximum, expected) in [
-            (None, qq_protocol::BudgetLimitKind::CostUnknown),
-            (Some(2), qq_protocol::BudgetLimitKind::Cost),
-        ] {
-            let runtime = Runtime::new(
-                ScriptedProvider {
-                    request: Arc::new(Mutex::new(None)),
-                    fails: false,
-                },
-                "test",
-                256,
-            )
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Reviewer(maximum)));
-            let events = runtime
-                .run_loop_with_spawner(
-                    vec![Message::user("finish")],
-                    directory.path().into(),
-                    RunCancellation::new(),
-                    Arc::new(StaticPolicyGate {
-                        mode: ApprovalMode::ReadOnly,
-                        grants: approval::SessionGrants::default(),
-                        network: Arc::default(),
-                    }),
-                    Arc::new(workspace::FileState::default()),
-                    RunCapabilities::user(None).with_limits(
-                        RunLimits {
-                            max_cost_usd_nanos: Some(1),
-                            ..RunLimits::default()
-                        },
-                        Some(qq_protocol::ModelPricing {
-                            input_usd_nanos_per_token: 0,
-                            output_usd_nanos_per_token: 0,
-                            cache_read_usd_nanos_per_token: Some(0),
-                            cache_write_usd_nanos_per_token: Some(0),
-                            context_tier: None,
-                            provenance: "fixture".into(),
-                        }),
-                    ),
-                )
-                .collect::<Vec<_>>()
-                .await;
-            assert!(
-                matches!(events.last(), Some(RuntimeEvent::BudgetExhausted { exhaustion }) if exhaustion.limit == expected),
-                "{events:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn final_checkpoint_can_correct_a_claim_without_an_extra_tool_call() {
-        struct ProviderWithCorrection(AtomicUsize);
-        impl Provider for ProviderWithCorrection {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                let text = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                    "deployed"
-                } else {
-                    "built locally; deployment unverified"
-                };
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta { text: text.into() }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct Reviewer(AtomicUsize);
-        impl CheckpointReviewer for Reviewer {
-            fn reviews_tools(&self) -> bool {
-                false
-            }
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
-                if !first {
-                    assert!(request.evidence.contains("deployment unverified"));
-                }
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    outcome: if first {
-                        CheckpointOutcome::Contradicted
-                    } else {
-                        CheckpointOutcome::Supported
-                    },
-                    confidence: Some(1.0),
-                    feedback: "consistency: do not infer deployment from a local build".into(),
-                    spend: qq_protocol::CheckpointSpend::default(),
-                }))
-            }
-        }
-        let runtime = Runtime::new(ProviderWithCorrection(AtomicUsize::new(0)), "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(Reviewer(AtomicUsize::new(0))));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(
-                vec![Message::user(
-                    "Summarize: a local build passed; deployment was not performed",
-                )],
-                directory.path().into(),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{events:?}"
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(event, RuntimeEvent::CheckpointReviewed { .. }))
-                .count(),
-            2
-        );
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, RuntimeEvent::ToolCallStarted { .. }))
-        );
-    }
-
-    #[tokio::test]
-    async fn selective_checkpoint_preserves_batching_and_finishes_large_evidence_run() {
-        struct BatchProvider(AtomicUsize);
-        impl Provider for BatchProvider {
-            fn stream(&self, _: ModelRequest) -> ProviderStream {
-                let mut events = Vec::new();
-                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                    for i in 0..8 {
-                        let id = format!("read-{i}");
-                        events.extend([
-                            Ok(ProviderEvent::ToolCallStarted {
-                                id: id.clone(),
-                                name: "read_file".into(),
-                            }),
-                            Ok(ProviderEvent::ToolCallArgumentsDelta {
-                                id: id.clone(),
-                                json: format!(r#"{{"path":"file-{i}"}}"#),
-                            }),
-                            Ok(ProviderEvent::ToolCallCompleted { id }),
-                        ]);
-                    }
-                } else {
-                    events.push(Ok(ProviderEvent::OutputTextDelta {
-                        text: "Read all eight files.".into(),
-                    }));
-                }
-                events.push(Ok(ProviderEvent::Completed { usage: None }));
-                Box::pin(stream::iter(events))
-            }
-        }
-        struct FinalReviewer(Arc<Mutex<Vec<CheckpointRequest>>>);
-        impl CheckpointReviewer for FinalReviewer {
-            fn reviews_tools(&self) -> bool {
-                false
-            }
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                self.0.lock().unwrap().push(request);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "supported".into(),
-                }))
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        for i in 0..8 {
-            std::fs::write(
-                directory.path().join(format!("file-{i}")),
-                "evidence line\n".repeat(400),
-            )
-            .unwrap();
-        }
-        let reviews = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::new(BatchProvider(AtomicUsize::new(0)), "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(FinalReviewer(Arc::clone(&reviews))));
-        let events = runtime
-            .run_messages_in_workspace(
-                vec![Message::user("Read all eight files")],
-                directory.path().into(),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    RuntimeEvent::ToolCallFinished {
-                        is_error: false,
-                        ..
-                    }
-                ))
-                .count(),
-            8
-        );
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{events:?}"
-        );
-        let requests = reviews.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].phase, CheckpointPhase::FinalCandidate);
-        assert!(requests[0].evidence.len() <= runtime::MAX_CHECKPOINT_TEXT_BYTES);
-        assert!(requests[0].evidence.contains("file-7"));
-        assert!(requests[0].evidence.contains("omitted"));
-    }
-
-    #[tokio::test]
-    async fn enforced_checkpoint_does_not_assess_an_oversized_original_task() {
-        struct FinalProvider;
-        impl Provider for FinalProvider {
-            fn stream(&self, _request: ModelRequest) -> ProviderStream {
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::OutputTextDelta {
-                        text: "done".into(),
-                    }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct CountingReviewer(Arc<AtomicUsize>);
-        impl CheckpointReviewer for CountingReviewer {
-            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "must not be used".into(),
-                }))
-            }
-        }
-
-        let reviews = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(FinalProvider, "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(CountingReviewer(Arc::clone(&reviews))));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(
-                vec![Message::user(
-                    "x".repeat(runtime::MAX_CHECKPOINT_TEXT_BYTES + 1),
-                )],
-                directory.path().into(),
-            )
-            .collect::<Vec<_>>()
-            .await;
-
-        assert_eq!(reviews.load(Ordering::SeqCst), 0);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::CheckpointReviewed {
-                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                feedback,
-                ..
-            } if feedback.contains("original task exceeded")
-        )));
-        // Unreviewable is recorded, not fatal (RR3): the answer stands.
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{:?}",
-            events.last()
-        );
-    }
-
-    #[tokio::test]
-    async fn enforced_checkpoint_does_not_assess_oversized_tool_evidence() {
-        struct ToolProvider(AtomicUsize);
-        impl Provider for ToolProvider {
-            fn stream(&self, _request: ModelRequest) -> ProviderStream {
-                if self.0.fetch_add(1, Ordering::SeqCst) > 0 {
-                    return Box::pin(stream::iter([
-                        Ok(ProviderEvent::OutputTextDelta {
-                            text: "done".into(),
-                        }),
-                        Ok(ProviderEvent::Completed { usage: None }),
-                    ]));
-                }
-                let arguments = serde_json::json!({
-                    "delay_ms": 0,
-                    "result": "x".repeat(runtime::MAX_CHECKPOINT_TEXT_BYTES)
-                })
-                .to_string();
-                Box::pin(stream::iter([
-                    Ok(ProviderEvent::ToolCallStarted {
-                        id: "large".into(),
-                        name: "__test_read".into(),
-                    }),
-                    Ok(ProviderEvent::ToolCallArgumentsDelta {
-                        id: "large".into(),
-                        json: arguments,
-                    }),
-                    Ok(ProviderEvent::ToolCallCompleted { id: "large".into() }),
-                    Ok(ProviderEvent::Completed { usage: None }),
-                ]))
-            }
-        }
-        struct CountingReviewer(Arc<AtomicUsize>);
-        impl CheckpointReviewer for CountingReviewer {
-            fn review(&self, _request: CheckpointRequest) -> CheckpointFuture {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome: CheckpointOutcome::Supported,
-                    confidence: Some(1.0),
-                    feedback: "must not be used".into(),
-                }))
-            }
-        }
-
-        let reviews = Arc::new(AtomicUsize::new(0));
-        let runtime = Runtime::new(ToolProvider(AtomicUsize::new(0)), "test", 256)
-            .unwrap()
-            .with_checkpoint_reviewer(Arc::new(CountingReviewer(Arc::clone(&reviews))));
-        let directory = tempfile::tempdir().unwrap();
-        let events = runtime
-            .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().into())
-            .collect::<Vec<_>>()
-            .await;
-
-        // The final candidate is reviewed as usual; only the oversized tool
-        // result was skipped.
-        assert_eq!(reviews.load(Ordering::SeqCst), 1);
-        assert!(events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::CheckpointReviewed {
-                phase: qq_protocol::CheckpointPhase::ToolResult,
-                outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                feedback,
-                ..
-            } if feedback.contains("tool arguments and result exceeded")
-        )));
-        // Unreviewed is recorded, not fatal (RR3): the run completes.
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{:?}",
-            events.last()
-        );
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn shell_calls_stream_output_deltas_before_their_result() {
@@ -5963,25 +4760,6 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_tool_argument_json_yields_a_tool_error_and_continues_the_run() {
-        struct RecordingReviewer {
-            requests: Arc<Mutex<Vec<CheckpointRequest>>>,
-            outcome: CheckpointOutcome,
-        }
-        impl CheckpointReviewer for RecordingReviewer {
-            fn identity(&self) -> &'static str {
-                "test/checkpoint/enforce"
-            }
-            fn review(&self, request: CheckpointRequest) -> CheckpointFuture {
-                self.requests.lock().unwrap().push(request);
-                let outcome = self.outcome;
-                Box::pin(std::future::ready(CheckpointVerdict {
-                    spend: qq_protocol::CheckpointSpend::default(),
-                    outcome,
-                    confidence: Some(1.0),
-                    feedback: outcome.label().to_owned(),
-                }))
-            }
-        }
         struct MalformedArgumentsProvider {
             requests: Arc<Mutex<Vec<ModelRequest>>>,
         }
@@ -6020,7 +4798,6 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let reviews = Arc::new(Mutex::new(Vec::new()));
         let runtime = Runtime::new(
             MalformedArgumentsProvider {
                 requests: Arc::clone(&requests),
@@ -6028,11 +4805,7 @@ mod tests {
             "gpt-test",
             256,
         )
-        .unwrap()
-        .with_checkpoint_reviewer(Arc::new(RecordingReviewer {
-            requests: Arc::clone(&reviews),
-            outcome: CheckpointOutcome::Supported,
-        }));
+        .unwrap();
 
         let events = runtime
             .run_messages_in_workspace(vec![Message::user("inspect")], directory.path().to_owned())
@@ -6056,19 +4829,8 @@ mod tests {
                 call_id,
                 content,
                 is_error: true,
-            }] if call_id == "bad" && content.contains("not valid JSON") && content.contains("JEV GREEN supported")
+            }] if call_id == "bad" && content.contains("not valid JSON")
         ));
-        drop(requests);
-        let recorded = reviews.lock().unwrap();
-        assert_eq!(
-            recorded.len(),
-            2,
-            "malformed result and final candidate are reviewed"
-        );
-        assert_eq!(recorded[0].phase, CheckpointPhase::ToolResult);
-        assert!(recorded[0].evidence.contains("not valid JSON"));
-        assert_eq!(recorded[1].phase, CheckpointPhase::FinalCandidate);
-        assert!(recorded[1].evidence.contains("not valid JSON"));
     }
 
     #[tokio::test]
@@ -8458,20 +7220,6 @@ mod tests {
         assert!(notices.contains(&Some(runtime::TurnNotice::Report)));
     }
 
-    /// A run under Jev review can never reach a slice report: Jev admits one
-    /// tool call per turn and at most 32 reviews per run, both far below the
-    /// 241 executed calls that trigger a checkpoint, so the report turn can
-    /// never become a Jev final candidate. If either bound is raised past the
-    /// slice, report turns need an explicit Jev rule (ADR-0054 § 2).
-    #[test]
-    fn a_jev_run_cannot_reach_a_slice_report() {
-        let reviews = usize::from(runtime::MAX_CHECKPOINT_REVIEWS_PER_RUN);
-        assert!(
-            reviews < MAX_TOOL_CALLS_PER_SLICE - MAX_TOOL_CALLS_PER_TURN,
-            "Jev's review cap now reaches the slice checkpoint"
-        );
-    }
-
     /// A checkpoint reply with no content *and no usage* after fresh tool
     /// results is a gateway that swallowed a failure, not a missed report:
     /// it is retried like any transient fault. The report notice is placed
@@ -9780,7 +8528,6 @@ mod tests {
                 &mut bytes,
                 &mut budget,
                 &mut stall,
-                None,
             )
             .await
             .unwrap();

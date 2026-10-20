@@ -1,6 +1,6 @@
 # ADR-0032 — Routing spend belongs to the reserved run
 
-**Status:** Accepted
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-18
 
 An optional task-routing decision happens before normal provider preparation.

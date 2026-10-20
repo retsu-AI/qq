@@ -142,7 +142,6 @@ pub struct CredentialPaths {
     index_file: PathBuf,
     fallback_file: PathBuf,
     lock_file: PathBuf,
-    oauth_lock_files: [PathBuf; OAuthProvider::ALL.len()],
     windows_credential_dir: PathBuf,
 }
 
@@ -154,8 +153,6 @@ impl CredentialPaths {
             index_file: data_dir.join(INDEX_FILE_NAME),
             fallback_file: data_dir.join(FALLBACK_FILE_NAME),
             lock_file: data_dir.join(LOCK_FILE_NAME),
-            oauth_lock_files: OAuthProvider::ALL
-                .map(|provider| data_dir.join(provider.lock_file_name())),
             windows_credential_dir: data_dir.join(WINDOWS_CREDENTIAL_DIRECTORY_NAME),
             data_dir,
         }
@@ -181,8 +178,12 @@ impl CredentialPaths {
         &self.lock_file
     }
 
-    pub(crate) fn oauth_lock_file(&self, provider: OAuthProvider) -> &Path {
-        &self.oauth_lock_files[provider.index()]
+    /// The operation lock file of the OAuth provider named `provider`,
+    /// derived as `{provider}.lock`. That reproduces the published
+    /// `openai-codex.lock` and `xai.lock`, and gives a new provider
+    /// interprocess exclusion without a lock definition of its own.
+    pub(crate) fn provider_lock_file(&self, provider: &str) -> PathBuf {
+        self.data_dir.join(oauth::lock_file_name(provider))
     }
 
     #[must_use]
@@ -336,15 +337,17 @@ pub struct CredentialStore {
     paths: CredentialPaths,
     keyring: Arc<dyn KeyringBackend>,
     windows_protected: Arc<dyn WindowsProtectedBackend>,
-    codex_device_client: Arc<dyn codex::CodexDeviceClient>,
-    codex_client: Arc<dyn codex::CodexTokenClient>,
-    xai_client: Arc<dyn xai::XaiTokenClient>,
-    oauth_operations: Arc<[Mutex<()>; OAuthProvider::ALL.len()]>,
+    /// Every OAuth token, refresh and device call, for every provider.
+    oauth: Arc<dyn oauth::OAuthTransport>,
+    oauth_operations: Arc<[Mutex<()>]>,
     request_credential_permits: Arc<tokio::sync::Semaphore>,
     stored_resolution: Arc<(Mutex<StoredResolutionCoordinator>, std::sync::Condvar)>,
 
     #[cfg(test)]
     resolution_time: Arc<Mutex<std::time::Instant>>,
+    /// The fake clients `oauth` routes to, so tests can add one at a time.
+    #[cfg(test)]
+    test_oauth: Arc<Mutex<tests::FakeOAuth>>,
 }
 
 #[derive(Default)]
@@ -875,16 +878,14 @@ impl CredentialStore {
         Self::with_backends(paths, keyring, windows_protected)
     }
 
-    /// Replaces every OAuth token client with one that fails before any
-    /// network I/O and counts the attempt, for benchmarks and tests that
-    /// must never reach a real authorization server.
+    /// Replaces the OAuth transport with one that fails before any network
+    /// I/O and counts the attempt, for benchmarks and tests that must never
+    /// reach a real authorization server.
     #[doc(hidden)]
     #[must_use]
     pub fn offline(mut self) -> (Self, OfflineTokenCalls) {
         let calls = OfflineTokenCalls::default();
-        self.codex_device_client = Arc::new(calls.clone());
-        self.codex_client = Arc::new(calls.clone());
-        self.xai_client = Arc::new(calls.clone());
+        self.oauth = Arc::new(calls.clone());
         (self, calls)
     }
 
@@ -897,10 +898,8 @@ impl CredentialStore {
             paths,
             keyring,
             windows_protected,
-            codex_device_client: Arc::new(codex::SystemCodexDeviceClient),
-            codex_client: Arc::new(codex::SystemCodexTokenClient),
-            xai_client: Arc::new(xai::SystemXaiTokenClient),
-            oauth_operations: Arc::new(OAuthProvider::ALL.map(|_| Mutex::new(()))),
+            oauth: Arc::new(oauth::SystemTransport::new()),
+            oauth_operations: OAuthProvider::ALL.iter().map(|_| Mutex::new(())).collect(),
             request_credential_permits: Arc::new(tokio::sync::Semaphore::new(
                 REQUEST_CREDENTIAL_CONCURRENCY,
             )),
@@ -910,6 +909,8 @@ impl CredentialStore {
             )),
             #[cfg(test)]
             resolution_time: Arc::new(Mutex::new(std::time::Instant::now())),
+            #[cfg(test)]
+            test_oauth: Arc::default(),
         }
     }
 
@@ -1497,19 +1498,26 @@ impl CredentialStore {
         let process = self.oauth_operations[provider.index()]
             .lock()
             .map_err(|_| provider.lock_unavailable())?;
-        let path = self.paths.oauth_lock_file(provider);
-        ensure_data_directory(self.paths.data_dir())?;
-        let file = open_lock_file(path)?;
-        file.lock().map_err(|source| AuthError::Io {
-            operation: "lock",
-            path: path.to_owned(),
-            source,
-        })?;
-        verify_open_regular_file(path, &file, true)?;
+        let file = self.lock_provider_file(provider.name())?;
         Ok(OAuthOperationLock {
             _process: process,
             _file: file,
         })
+    }
+
+    /// Takes the interprocess operation lock of the OAuth provider named
+    /// `provider` through its derived `{provider}.lock` file.
+    pub(crate) fn lock_provider_file(&self, provider: &str) -> Result<std::fs::File, AuthError> {
+        let path = self.paths.provider_lock_file(provider);
+        ensure_data_directory(self.paths.data_dir())?;
+        let file = open_lock_file(&path)?;
+        file.lock().map_err(|source| AuthError::Io {
+            operation: "lock",
+            path: path.clone(),
+            source,
+        })?;
+        verify_open_regular_file(&path, &file, true)?;
+        Ok(file)
     }
 
     fn load_index(&self) -> Result<IndexState, AuthError> {
@@ -1931,61 +1939,13 @@ impl OfflineTokenCalls {
     }
 }
 
-impl codex::CodexTokenClient for OfflineTokenCalls {
-    fn exchange(
+impl oauth::OAuthTransport for OfflineTokenCalls {
+    fn post(
         &self,
-        _code: &str,
-        _redirect_uri: &str,
-        _code_verifier: &str,
-    ) -> Result<codex::ExchangedTokens, codex::CodexAuthError> {
+        _request: oauth::OAuthRequest<'_>,
+    ) -> Result<oauth::OAuthResponse, oauth::TransportError> {
         self.record();
-        Err(codex::CodexAuthError::TokenRequestFailed {
-            operation: "exchange",
-        })
-    }
-
-    fn refresh(
-        &self,
-        _refresh_token: &str,
-    ) -> Result<codex::RefreshedTokens, codex::CodexAuthError> {
-        self.record();
-        Err(codex::CodexAuthError::TokenRequestFailed {
-            operation: "refresh",
-        })
-    }
-}
-
-impl codex::CodexDeviceClient for OfflineTokenCalls {
-    fn start_device(&self) -> Result<codex::DeviceAuthorization, codex::CodexAuthError> {
-        self.record();
-        Err(codex::CodexAuthError::DeviceRequestFailed)
-    }
-
-    fn poll_device(
-        &self,
-        _device_auth_id: &str,
-        _user_code: &str,
-        _timeout: Duration,
-    ) -> Result<codex::DevicePoll, codex::CodexAuthError> {
-        self.record();
-        Err(codex::CodexAuthError::DeviceRequestFailed)
-    }
-}
-
-impl xai::XaiTokenClient for OfflineTokenCalls {
-    fn start_device(&self) -> Result<xai::DeviceAuthorization, xai::XaiAuthError> {
-        self.record();
-        Err(xai::XaiAuthError::DeviceRequestFailed)
-    }
-
-    fn poll_device(&self, _device_code: &str) -> Result<xai::DevicePoll, xai::XaiAuthError> {
-        self.record();
-        Err(xai::XaiAuthError::DeviceRequestFailed)
-    }
-
-    fn refresh(&self, _refresh_token: &str) -> Result<xai::TokenSet, xai::XaiAuthError> {
-        self.record();
-        Err(xai::XaiAuthError::RefreshRequestFailed)
+        Err(oauth::TransportError::Failed)
     }
 }
 
