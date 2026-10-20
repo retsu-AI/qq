@@ -1688,8 +1688,8 @@ mod tests {
             .1;
         assert_eq!(
             RENDERED[0].0,
-            crate::LOGIN_PROVIDERS.join(", "),
-            "RENDERED quotes the login provider list; keep it equal to LOGIN_PROVIDERS"
+            crate::login_providers().join(", "),
+            "RENDERED quotes the login provider list; keep it equal to the provider table"
         );
         assert_eq!(
             RENDERED[1].0,

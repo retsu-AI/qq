@@ -87,6 +87,7 @@ may append a **request** row; only root changes a request's status.
 | 0061 | Persist the exact model-facing tool-turn projection before the next request | action-bias AB2 (ENG-1039) | Proposed; implemented in #302 (`8b799771`), schema49 and descriptor15; `docs/adr/0061-durable-tool-turn-projection.md` |
 | 0062 | Use full LTO and balanced release size optimization | ENG-834 performance-gate repair | Accepted 2026-10-15 in #315: `docs/adr/0062-full-lto-executable-size-profile.md` |
 | 0063 | Opt-in metadata-only structured tracing with bounded asynchronous JSON output | developer-experience AF5 (ENG-1028) | Proposed; implemented in #329 (`46769b9d`): `docs/adr/0063-opt-in-structured-tracing.md` |
+| 0064 | Built-in providers are rows in one table; per-provider config, CLI and credential branches derive from it | auth-providers AP7 (ENG-1066) | Proposed 2026-10-19: `docs/adr/0064-builtin-provider-table.md` |
 
 Stacked Jev scope request (2026-09-18): the user authorizes implementing the
 review recommendations on top of #72, with quick focused delivery and current
@@ -158,7 +159,7 @@ This is a deterministic TUI fixture only; no real provider, JEV, credential,
 or customer acceptance is claimed. Exact final commit and artifact evidence
 will be appended after gates and independent review.
 
-Next free number: 0064. Reserve here before opening a PR that adds an ADR.
+Next free number: 0065. Reserve here before opening a PR that adds an ADR.
 
 ## Shared-file change requests
 
