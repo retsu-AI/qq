@@ -2778,6 +2778,48 @@ fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
 }
 
 #[test]
+fn agents_picker_survives_its_highlighted_top_being_deleted() {
+    let (mut app, root, child, grandchild, _) = app_with_agent_tree();
+    app.execute(Command::OpenAgents);
+    assert_eq!(
+        app.session_picker_selected(),
+        Some(root),
+        "cursor on the top"
+    );
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        root,
+        SessionEvent::SessionDeleted { session_id: root },
+    )));
+    let listed = app.filtered_sessions();
+    assert!(
+        listed.contains(&child) && listed.contains(&grandchild),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn a_snapshot_that_adds_sessions_refreshes_an_open_picker() {
+    let (mut app, _, _, _, _) = app_with_agent_tree();
+    app.execute(Command::OpenSessions);
+    let added = summary_named(0x84, "arrived later");
+    let mut sessions: Vec<SessionSummary> = app
+        .sessions
+        .values()
+        .map(|view| view.summary.clone())
+        .collect();
+    sessions.push(added.clone());
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions,
+        focused: None,
+        cursor: fixtures::cursor(9),
+        ..fixtures::workspace_snapshot()
+    }));
+    assert!(app.filtered_sessions().contains(&added.id));
+}
+
+#[test]
 fn a_deleted_agent_row_hands_the_cursor_to_its_session() {
     let (mut app, root, child, grandchild, other) = app_with_agent_tree();
     app.execute(Command::OpenSessions);

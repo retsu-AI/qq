@@ -1246,12 +1246,18 @@ impl App {
         // `/agents` scopes to a component's top; when the missing parent of
         // an orphan top arrives, the component's top moves up with it, and
         // when the top itself is deleted (its agents become roots) the scope
-        // follows the highlighted row to its new top.
-        let highlighted = match &self.overlay {
-            Some(Overlay::Sessions { picker, .. }) => {
-                picker.current().map(|row| (row.id, row.root))
-            }
-            _ => None,
+        // follows the highlighted row, or else the first old row still
+        // loaded, to its new top.
+        let (highlighted, survivor) = match &self.overlay {
+            Some(Overlay::Sessions { picker, .. }) => (
+                picker.current().map(|row| (row.id, row.root)),
+                picker
+                    .items()
+                    .iter()
+                    .map(|row| row.id)
+                    .find(|id| self.sessions.contains_key(id)),
+            ),
+            _ => (None, None),
         };
         let scope = scope.map(|scope| {
             if self.sessions.contains_key(&scope) {
@@ -1260,6 +1266,7 @@ impl App {
                 highlighted
                     .map(|(id, _)| id)
                     .filter(|id| self.sessions.contains_key(id))
+                    .or(survivor)
                     .map_or(scope, |id| self.loaded_top(id))
             }
         });
