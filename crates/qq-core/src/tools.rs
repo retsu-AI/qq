@@ -4545,7 +4545,8 @@ mod tests {
     async fn stalled_process_receipt_cannot_delay_cancellation_or_timeout() {
         for expire in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let workspace = Workspace::open(directory.path()).unwrap();
+            let workspace =
+                Workspace::open(&std::fs::canonicalize(directory.path()).unwrap()).unwrap();
             let tasks = ToolTasks::default();
             let cancelled = RunCancellation::new();
             let (sender, spawned) = tokio::sync::oneshot::channel();
