@@ -16,16 +16,17 @@ use crate::goals::GoalsPatch;
 
 use super::{
     AgentProfileConfig, ApprovalDelegateSetting, AuditConfig, AuditMode, AwsAuth, BedrockAuth,
-    BuiltinPreference, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance, ConfigSnapshot,
-    ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MCP_CALL_TIMEOUT_SECONDS,
-    DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig, DelegationEntry, DelegationRole,
-    EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess, InputModality, JevReviewMode,
-    MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS, MAX_DELEGATION_DEPTH,
-    MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER, MAX_MCP_CALL_TIMEOUT_SECONDS,
-    MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES, McpServerConfig, McpTransport,
-    ModelMetadata, ModelPricing, ModelRoute, PolicyGrants, ProfileApprovalMode, ProviderAccess,
-    ProviderApi, ProviderConfig, ProviderKind, RuntimeOverrides, SecretRef, SourceIdentity,
-    SourceKind, SourceReport, TrustDeclaration, WorkspaceGrant,
+    BuiltinPreference, BuiltinProvider, ClientSnapshot, ConfigError, ConfigKey, ConfigProvenance,
+    ConfigSnapshot, ConfigSources, Connection, DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_MCP_CALL_TIMEOUT_SECONDS, DEFAULT_MCP_MAX_CONCURRENT_CALLS, DelegationConfig,
+    DelegationEntry, DelegationRole, EffectivePolicy, GoalCeilings, GoalsConfig, HttpAccess,
+    InputModality, JevReviewMode, MAX_APPROVAL_TIMEOUT_SECONDS, MAX_AUDIT_REVISIONS,
+    MAX_DELEGATION_DEPTH, MAX_DELEGATION_NOTE_BYTES, MAX_DELEGATION_ROSTER,
+    MAX_MCP_CALL_TIMEOUT_SECONDS, MAX_MCP_MAX_CONCURRENT_CALLS, MAX_PROFILE_NAME_BYTES,
+    McpServerConfig, McpTransport, ModelMetadata, ModelPricing, ModelRoute, PolicyGrants,
+    ProfileApprovalMode, ProviderAccess, ProviderApi, ProviderConfig, ProviderKind,
+    RuntimeOverrides, SecretRef, SourceIdentity, SourceKind, SourceReport, TrustDeclaration,
+    WorkspaceGrant,
 };
 
 pub(super) fn deserialize_unique_btree_map<'de, D, K, V>(
@@ -261,41 +262,30 @@ struct ModelPatch {
     pricing: Field<ModelPricing>,
 }
 
+/// One provider entry in a configuration document. A built-in HTTP provider
+/// is written as its table row's variant (`OpenAi(api_key: ..)`) and accepts
+/// only that row's fields (ADR-0064 §2); every other kind keeps its own
+/// derived variant. The serialised form, which trust digests hash, is the
+/// externally tagged enum it has always been.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ProviderEntryPatch {
+    Builtin(BuiltinEntryPatch),
+    Other(OtherProviderPatch),
+}
+
+/// A built-in HTTP provider patch: the fields its row does not accept stay
+/// `Missing`, because parsing rejects them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BuiltinEntryPatch {
+    provider: BuiltinProvider,
+    api_key: Field<SecretRef>,
+    profile: StringField,
+    models: Field<UniqueMap<String, ModelEntryPatch>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-enum ProviderEntryPatch {
-    OpenAi {
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        api_key: Field<SecretRef>,
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        models: Field<UniqueMap<String, ModelEntryPatch>>,
-    },
-    OpenAiCodex {
-        #[serde(default, skip_serializing_if = "StringField::is_missing")]
-        profile: StringField,
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        models: Field<UniqueMap<String, ModelEntryPatch>>,
-    },
-    Anthropic {
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        api_key: Field<SecretRef>,
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        models: Field<UniqueMap<String, ModelEntryPatch>>,
-    },
-    Google {
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        api_key: Field<SecretRef>,
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        models: Field<UniqueMap<String, ModelEntryPatch>>,
-    },
-    XAi {
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        api_key: Field<SecretRef>,
-        #[serde(default, skip_serializing_if = "StringField::is_missing")]
-        profile: StringField,
-        #[serde(default, skip_serializing_if = "Field::is_missing")]
-        models: Field<UniqueMap<String, ModelEntryPatch>>,
-    },
+enum OtherProviderPatch {
     LiteLlm {
         #[serde(default, skip_serializing_if = "Field::is_missing")]
         connection: Field<Connection>,
@@ -329,90 +319,241 @@ enum ProviderEntryPatch {
     Remove,
 }
 
-/// The credential fields of one built-in HTTP provider patch. The RON form
-/// keeps one variant per provider (each accepting only its own fields under
-/// `deny_unknown_fields`, and hashing into trust digests as it always has);
-/// everything downstream treats them uniformly through this view and the
-/// provider's table row (ADR-0064).
-struct BuiltinPatch<'a> {
-    kind: ProviderKind,
-    api_key: Option<&'a Field<SecretRef>>,
-    profile: Option<&'a StringField>,
-    models: &'a Field<UniqueMap<String, ModelEntryPatch>>,
-}
-
 impl ProviderEntryPatch {
-    fn builtin(&self) -> Option<BuiltinPatch<'_>> {
-        let (kind, api_key, profile, models) = match self {
-            Self::OpenAi { api_key, models } => (ProviderKind::OpenAi, Some(api_key), None, models),
-            Self::OpenAiCodex { profile, models } => {
-                (ProviderKind::OpenAiCodex, None, Some(profile), models)
-            }
-            Self::Anthropic { api_key, models } => {
-                (ProviderKind::Anthropic, Some(api_key), None, models)
-            }
-            Self::Google { api_key, models } => (ProviderKind::Google, Some(api_key), None, models),
-            Self::XAi {
-                api_key,
-                profile,
-                models,
-            } => (ProviderKind::XAi, Some(api_key), Some(profile), models),
-            Self::LiteLlm { .. }
-            | Self::AmazonBedrock { .. }
-            | Self::AmazonBedrockMantle { .. }
-            | Self::Custom { .. }
-            | Self::Remove => return None,
-        };
-        Some(BuiltinPatch {
-            kind,
-            api_key,
-            profile,
-            models,
-        })
-    }
-
     pub(super) fn contains_literal_secret(&self) -> bool {
-        if let Some(patch) = self.builtin() {
-            return matches!(patch.api_key, Some(Field::Set(SecretRef::Value(_))));
-        }
         match self {
-            Self::LiteLlm { connection, .. } | Self::Custom { connection, .. } => {
-                matches!(connection, Field::Set(value) if value.contains_literal_secret())
-            }
-            Self::AmazonBedrock { auth, .. } | Self::AmazonBedrockMantle { auth, .. } => {
-                matches!(auth, Field::Set(value) if value.contains_literal_secret())
-            }
-            Self::OpenAi { .. }
-            | Self::OpenAiCodex { .. }
-            | Self::Anthropic { .. }
-            | Self::Google { .. }
-            | Self::XAi { .. }
-            | Self::Remove => false,
+            Self::Builtin(patch) => matches!(patch.api_key, Field::Set(SecretRef::Value(_))),
+            Self::Other(
+                OtherProviderPatch::LiteLlm { connection, .. }
+                | OtherProviderPatch::Custom { connection, .. },
+            ) => matches!(connection, Field::Set(value) if value.contains_literal_secret()),
+            Self::Other(
+                OtherProviderPatch::AmazonBedrock { auth, .. }
+                | OtherProviderPatch::AmazonBedrockMantle { auth, .. },
+            ) => matches!(auth, Field::Set(value) if value.contains_literal_secret()),
+            Self::Other(OtherProviderPatch::Remove) => false,
         }
     }
 
     fn references_local_credential(&self) -> bool {
-        if let Some(patch) = self.builtin() {
-            return matches!(patch.api_key, Some(Field::Set(_)))
-                || matches!(patch.profile, Some(StringField::Set(_)));
-        }
         match self {
-            Self::LiteLlm { connection, .. } | Self::Custom { connection, .. } => {
-                matches!(
-                    connection,
-                    Field::Set(value) if value.references_local_credential()
-                )
+            Self::Builtin(patch) => {
+                matches!(patch.api_key, Field::Set(_))
+                    || matches!(patch.profile, StringField::Set(_))
             }
-            Self::AmazonBedrock { auth, .. } | Self::AmazonBedrockMantle { auth, .. } => {
-                matches!(auth, Field::Set(value) if value.references_local_credential())
-            }
-            Self::OpenAi { .. }
-            | Self::OpenAiCodex { .. }
-            | Self::Anthropic { .. }
-            | Self::Google { .. }
-            | Self::XAi { .. }
-            | Self::Remove => false,
+            Self::Other(
+                OtherProviderPatch::LiteLlm { connection, .. }
+                | OtherProviderPatch::Custom { connection, .. },
+            ) => matches!(
+                connection,
+                Field::Set(value) if value.references_local_credential()
+            ),
+            Self::Other(
+                OtherProviderPatch::AmazonBedrock { auth, .. }
+                | OtherProviderPatch::AmazonBedrockMantle { auth, .. },
+            ) => matches!(auth, Field::Set(value) if value.references_local_credential()),
+            Self::Other(OtherProviderPatch::Remove) => false,
         }
+    }
+}
+
+/// Every variant name a provider entry accepts: each table row's, then the
+/// derived kinds'.
+static PROVIDER_PATCH_VARIANTS: std::sync::LazyLock<Vec<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        crate::providers::BUILTIN_HTTP_PROVIDERS
+            .iter()
+            .map(|row| row.public().config_name)
+            .chain(OTHER_PROVIDER_PATCH_VARIANTS.iter().copied())
+            .collect()
+    });
+
+const OTHER_PROVIDER_PATCH_VARIANTS: &[&str] = &[
+    "LiteLlm",
+    "AmazonBedrock",
+    "AmazonBedrockMantle",
+    "Custom",
+    "Remove",
+];
+
+impl Serialize for ProviderEntryPatch {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStructVariant;
+
+        let patch = match self {
+            Self::Other(other) => return other.serialize(serializer),
+            Self::Builtin(patch) => patch,
+        };
+        let row = crate::providers::builtin_row(patch.provider.id);
+        let index = crate::providers::BUILTIN_HTTP_PROVIDERS
+            .iter()
+            .position(|candidate| candidate.id == row.id)
+            .and_then(|index| u32::try_from(index).ok())
+            .expect("a table row has a small index");
+        let present = |field: &str| match field {
+            "api_key" => patch.api_key.is_present(),
+            "profile" => patch.profile.is_present(),
+            _ => patch.models.is_present(),
+        };
+        let len = row
+            .patch_fields
+            .iter()
+            .filter(|field| present(field))
+            .count();
+        let mut variant = serializer.serialize_struct_variant(
+            "ProviderEntryPatch",
+            index,
+            patch.provider.config_name,
+            len,
+        )?;
+        for &field in row.patch_fields {
+            if !present(field) {
+                variant.skip_field(field)?;
+                continue;
+            }
+            match field {
+                "api_key" => variant.serialize_field(field, &patch.api_key)?,
+                "profile" => variant.serialize_field(field, &patch.profile)?,
+                _ => variant.serialize_field(field, &patch.models)?,
+            }
+        }
+        variant.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ProviderEntryPatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = ProviderEntryPatch;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a provider entry")
+            }
+
+            fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+            where
+                A: EnumAccess<'de>,
+            {
+                let (name, access) = data.variant::<String>()?;
+                if let Some(row) = crate::providers::builtin_by_config_name(&name) {
+                    let provider = row.public();
+                    return access
+                        .struct_variant(row.patch_fields, BuiltinFieldsVisitor { provider })
+                        .map(ProviderEntryPatch::Builtin);
+                }
+                if !OTHER_PROVIDER_PATCH_VARIANTS.contains(&name.as_str()) {
+                    return Err(de::Error::unknown_variant(&name, &PROVIDER_PATCH_VARIANTS));
+                }
+                OtherProviderPatch::deserialize(de::value::EnumAccessDeserializer::new(
+                    NamedVariant { name, access },
+                ))
+                .map(ProviderEntryPatch::Other)
+            }
+        }
+
+        deserializer.deserialize_enum("ProviderEntryPatch", &PROVIDER_PATCH_VARIANTS, EntryVisitor)
+    }
+}
+
+/// An enum variant whose name has already been read, replayed so a derived
+/// enum can deserialise the rest.
+struct NamedVariant<A> {
+    name: String,
+    access: A,
+}
+
+impl<'de, A> EnumAccess<'de> for NamedVariant<A>
+where
+    A: VariantAccess<'de>,
+{
+    type Error = A::Error;
+    type Variant = A;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, A), A::Error>
+    where
+        V: de::DeserializeSeed<'de>,
+    {
+        let name = de::IntoDeserializer::<A::Error>::into_deserializer(self.name);
+        Ok((seed.deserialize(name)?, self.access))
+    }
+}
+
+/// The fields of one built-in patch, accepting only its row's.
+struct BuiltinFieldsVisitor {
+    provider: BuiltinProvider,
+}
+
+impl<'de> Visitor<'de> for BuiltinFieldsVisitor {
+    type Value = BuiltinEntryPatch;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} provider fields", self.provider.config_name)
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let fields = crate::providers::builtin_row(self.provider.id).patch_fields;
+        let mut patch = BuiltinEntryPatch {
+            provider: self.provider,
+            api_key: Field::Missing,
+            profile: StringField::Missing,
+            models: Field::Missing,
+        };
+        let mut seen = Vec::with_capacity(fields.len());
+        while let Some(FieldName(key)) = map.next_key()? {
+            let Some(&field) = fields.iter().find(|field| **field == key) else {
+                return Err(de::Error::unknown_field(&key, fields));
+            };
+            if seen.contains(&field) {
+                return Err(de::Error::duplicate_field(field));
+            }
+            seen.push(field);
+            match field {
+                "api_key" => patch.api_key = map.next_value()?,
+                "profile" => patch.profile = map.next_value()?,
+                _ => patch.models = map.next_value()?,
+            }
+        }
+        Ok(patch)
+    }
+}
+
+/// A struct field name, read as an identifier.
+struct FieldName(String);
+
+impl<'de> Deserialize<'de> for FieldName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct NameVisitor;
+
+        impl Visitor<'_> for NameVisitor {
+            type Value = FieldName;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a field name")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(FieldName(value.to_owned()))
+            }
+        }
+
+        deserializer.deserialize_identifier(NameVisitor)
     }
 }
 
@@ -970,22 +1111,14 @@ impl Document {
             Field::Set(providers) => {
                 for (name, patch) in &providers.0 {
                     let kind = match patch {
-                        ProviderEntryPatch::OpenAi { .. }
-                        | ProviderEntryPatch::OpenAiCodex { .. }
-                        | ProviderEntryPatch::Anthropic { .. }
-                        | ProviderEntryPatch::Google { .. }
-                        | ProviderEntryPatch::XAi { .. } => {
-                            patch
-                                .builtin()
-                                .and_then(|builtin| crate::providers::builtin_http(builtin.kind))
-                                .expect("every built-in patch has a table row")
-                                .id
-                        }
-                        ProviderEntryPatch::LiteLlm { .. } => "litellm",
-                        ProviderEntryPatch::AmazonBedrock { .. } => "bedrock",
-                        ProviderEntryPatch::AmazonBedrockMantle { .. } => "bedrock-mantle",
-                        ProviderEntryPatch::Custom { .. } => "custom",
-                        ProviderEntryPatch::Remove => "removed",
+                        ProviderEntryPatch::Builtin(patch) => patch.provider.id,
+                        ProviderEntryPatch::Other(other) => match other {
+                            OtherProviderPatch::LiteLlm { .. } => "litellm",
+                            OtherProviderPatch::AmazonBedrock { .. } => "bedrock",
+                            OtherProviderPatch::AmazonBedrockMantle { .. } => "bedrock-mantle",
+                            OtherProviderPatch::Custom { .. } => "custom",
+                            OtherProviderPatch::Remove => "removed",
+                        },
                     };
                     declarations.push(TrustDeclaration::Provider {
                         name: name.clone(),
@@ -1769,36 +1902,25 @@ pub(super) struct MergeState {
 impl MergeState {
     pub(super) fn compiled() -> (Self, SourceReport) {
         let source = SourceIdentity::virtual_source(SourceKind::Compiled, "compiled defaults");
-        let providers = BTreeMap::from([
-            (
-                "anthropic".to_owned(),
-                crate::providers::builtin(ProviderKind::Anthropic),
-            ),
-            (
-                "bedrock".to_owned(),
-                crate::providers::builtin(ProviderKind::AmazonBedrock),
-            ),
-            (
-                "bedrock-mantle".to_owned(),
-                crate::providers::builtin(ProviderKind::AmazonBedrockMantle),
-            ),
-            (
-                "google".to_owned(),
-                crate::providers::builtin(ProviderKind::Google),
-            ),
-            (
-                "openai".to_owned(),
-                crate::providers::builtin(ProviderKind::OpenAi),
-            ),
-            (
-                "openai-codex".to_owned(),
-                crate::providers::builtin(ProviderKind::OpenAiCodex),
-            ),
-            (
-                "xai".to_owned(),
-                crate::providers::builtin(ProviderKind::XAi),
-            ),
-        ]);
+        let providers = crate::providers::BUILTIN_HTTP_PROVIDERS
+            .iter()
+            .map(|row| {
+                (
+                    row.id.to_owned(),
+                    crate::providers::builtin(ProviderKind::Builtin(row.public())),
+                )
+            })
+            .chain([
+                (
+                    "bedrock".to_owned(),
+                    crate::providers::builtin(ProviderKind::AmazonBedrock),
+                ),
+                (
+                    "bedrock-mantle".to_owned(),
+                    crate::providers::builtin(ProviderKind::AmazonBedrockMantle),
+                ),
+            ])
+            .collect::<BTreeMap<_, _>>();
         let provenance = ConfigProvenance {
             max_output_tokens: Some(source.clone()),
             providers: providers
@@ -2140,17 +2262,10 @@ impl MergeState {
     }
 
     fn apply_provider(&mut self, name: &str, patch: &ProviderEntryPatch) {
-        match patch {
-            ProviderEntryPatch::Remove => {
-                self.providers.remove(name);
-            }
-            ProviderEntryPatch::OpenAi { .. }
-            | ProviderEntryPatch::OpenAiCodex { .. }
-            | ProviderEntryPatch::Anthropic { .. }
-            | ProviderEntryPatch::Google { .. }
-            | ProviderEntryPatch::XAi { .. } => {
-                let patch = patch.builtin().expect("matched a built-in patch");
-                let provider = self.provider_for_patch(name, patch.kind);
+        let patch = match patch {
+            ProviderEntryPatch::Other(other) => other,
+            ProviderEntryPatch::Builtin(patch) => {
+                let provider = self.provider_for_patch(name, ProviderKind::Builtin(patch.provider));
                 let Some(ProviderAccess::Http(access)) = provider.access_mut().as_mut() else {
                     unreachable!("built-in HTTP presets are HTTP")
                 };
@@ -2160,20 +2275,24 @@ impl MergeState {
                 else {
                     unreachable!("built-in HTTP presets use a built-in credential")
                 };
-                if let Some(field) = patch.api_key {
-                    apply_optional(field, api_key);
-                }
-                if let Some(field) = patch.profile {
-                    apply_optional_string(field, profile);
-                }
-                apply_models(patch.models, provider.models_mut());
+                // Fields the row does not accept were rejected at parse time,
+                // so they are `Missing` here and change nothing.
+                apply_optional(&patch.api_key, api_key);
+                apply_optional_string(&patch.profile, profile);
+                apply_models(&patch.models, provider.models_mut());
+                return;
             }
-            ProviderEntryPatch::LiteLlm { connection, models } => {
+        };
+        match patch {
+            OtherProviderPatch::Remove => {
+                self.providers.remove(name);
+            }
+            OtherProviderPatch::LiteLlm { connection, models } => {
                 let provider = self.provider_for_patch(name, ProviderKind::LiteLlm);
                 apply_connection(connection, provider);
                 apply_models(models, provider.models_mut());
             }
-            ProviderEntryPatch::AmazonBedrock {
+            OtherProviderPatch::AmazonBedrock {
                 region,
                 auth,
                 models,
@@ -2190,7 +2309,7 @@ impl MergeState {
                 apply_default(auth, current_auth, BedrockAuth::Aws(AwsAuth::DefaultChain));
                 apply_models(models, provider.models_mut());
             }
-            ProviderEntryPatch::AmazonBedrockMantle {
+            OtherProviderPatch::AmazonBedrockMantle {
                 region,
                 api,
                 auth,
@@ -2210,7 +2329,7 @@ impl MergeState {
                 apply_default(auth, current_auth, BedrockAuth::Aws(AwsAuth::DefaultChain));
                 apply_models(models, provider.models_mut());
             }
-            ProviderEntryPatch::Custom { connection, models } => {
+            OtherProviderPatch::Custom { connection, models } => {
                 let provider = self.provider_for_patch(name, ProviderKind::Custom);
                 apply_connection(connection, provider);
                 apply_models(models, provider.models_mut());

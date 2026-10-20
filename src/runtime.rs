@@ -787,10 +787,8 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
-                if matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                ) && !metadata.explicitly_configured()
+                if provider.kind().discovery().is_authoritative()
+                    && !metadata.explicitly_configured()
                     && discovered
                         .get(provider_id)
                         .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
@@ -1305,11 +1303,7 @@ impl RuntimeFactory {
             ));
         }
         if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured()
-                || !matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                )
+            metadata.explicitly_configured() || !provider.kind().discovery().is_authoritative()
         }) {
             return Ok(());
         }
@@ -1319,10 +1313,7 @@ impl RuntimeFactory {
                 .discover(provider_id, provider, &self.inner.credentials);
         if provider.models().get(model_id).is_some_and(|metadata| {
             metadata.explicitly_configured()
-                || !matches!(
-                    provider.kind(),
-                    qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-                )
+                || !provider.kind().discovery().is_authoritative()
                 || discovered.is_none()
         }) || discovered
             .as_ref()
@@ -1378,10 +1369,7 @@ impl RuntimeFactory {
                 .discovery
                 .discover(provider_id, provider, &self.inner.credentials)
         {
-            if matches!(
-                provider.kind(),
-                qq_config::ProviderKind::OpenAiCodex | qq_config::ProviderKind::Anthropic
-            ) {
+            if provider.kind().discovery().is_authoritative() {
                 ids.retain(|id| {
                     provider
                         .models()
@@ -6006,7 +5994,7 @@ mod tests {
     #[test]
     fn request_shape_identity_is_canonical_and_tracks_every_safe_wire_input() {
         let trusted_http = ProviderConfig::new(
-            ProviderKind::OpenAi,
+            ProviderKind::Builtin(qq_config::builtin_provider("openai").unwrap()),
             None,
             UsageType::Metered,
             BTreeMap::new(),
