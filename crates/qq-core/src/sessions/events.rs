@@ -49,11 +49,15 @@ pub(super) fn read_published_event_page(
         })?
         .map(|row| {
             let encoded = row?;
-            let envelope = serde_json::from_str(&encoded)?;
-            Ok(Arc::new(feed::PublishedEvent {
-                envelope,
-                json: Arc::from(encoded),
-            }))
+            let envelope: SessionEventEnvelope = serde_json::from_str(&encoded)?;
+            // A row from a removed feature decodes as `retired`; forward the
+            // normalized form, never the legacy bytes clients cannot parse.
+            let json = if matches!(envelope.event, SessionEvent::Retired) {
+                Arc::from(serde_json::to_string(&envelope)?)
+            } else {
+                Arc::from(encoded)
+            };
+            Ok(Arc::new(feed::PublishedEvent { envelope, json }))
         })
         .collect()
 }

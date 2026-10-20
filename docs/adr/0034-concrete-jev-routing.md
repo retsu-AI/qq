@@ -1,6 +1,6 @@
 # ADR-0034 — Route only among declared, authorized choices
 
-**Status:** Accepted
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-18
 
 Jev task routing uses one concrete TypeSafe adapter on the existing compiled

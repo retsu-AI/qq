@@ -55,9 +55,6 @@ pub struct PlanKey {
     pub profile: AgentProfileId,
     pub explicit_config_path: Option<PathBuf>,
     pub explicit_config_content: Option<String>,
-    pub jev_review: Option<qq_config::JevReviewMode>,
-    pub jev_routing: Option<bool>,
-    pub jev_approval: Option<bool>,
     pub approval_delegate: Option<qq_config::ApprovalDelegateSetting>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     /// Fingerprint of the request's process-scoped trust grants, so a plan
@@ -139,8 +136,7 @@ pub struct LiveBindings {
     /// Behavior the compiled plan carries but deliberately keeps out of its
     /// digest. A configuration edit that changes only one of these must
     /// still replace the cached generation rather than be revalidated into
-    /// it. (`jev_approval` is in the digest itself as the descriptor's
-    /// `approval_delegate`, so an edit to it already yields a new digest.)
+    /// it.
     pub runtime: RuntimeSwitches,
 }
 
@@ -651,9 +647,6 @@ mod tests {
             profile: AgentProfileId::default(),
             explicit_config_path: None,
             explicit_config_content: None,
-            jev_review: None,
-            jev_routing: None,
-            jev_approval: None,
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,

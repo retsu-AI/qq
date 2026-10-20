@@ -127,12 +127,6 @@ pub enum Command {
         command: McpCommand,
     },
 
-    /// Store credentials for optional TypeSafe Jev review.
-    Jev {
-        #[command(subcommand)]
-        command: JevCommand,
-    },
-
     /// Enroll and manage organization configuration manifests.
     Org {
         #[command(subcommand)]
@@ -540,8 +534,7 @@ pub enum ConfigCommand {
     /// Explain the source of one effective field.
     Explain {
         /// Field name: model, worker_model, organization, delegation, audit,
-        /// jev_review, jev_routing, jev_approval, approval_delegate,
-        /// approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
+        /// approval_delegate, approval_timeout, reasoning_effort, max_output_tokens, pack.ID,
         /// profile.NAME, provider.NAME, grant.tool.NAME, grant.shell.PREFIX,
         /// tui.theme, or tui.bindings.ACTION.
         field: String,
@@ -560,42 +553,6 @@ pub enum AuthCommand {
     Status { name: String },
     /// Remove a stored credential.
     Logout { name: String },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum JevCommand {
-    /// Assess future completed runs without gating or changing their outcomes.
-    Observe(JevObserveArgs),
-    /// Prompt for and securely store the TypeSafe API key.
-    Setup {
-        /// Allow an explicit user-only plaintext file if the OS keyring is unavailable.
-        #[arg(long)]
-        allow_file: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-pub struct JevObserveArgs {
-    /// Workspace UUID from a session/run event. Uses the running local server.
-    #[arg(long)]
-    pub workspace_id: qq_protocol::WorkspaceId,
-    /// Restrict observation to one session.
-    #[arg(long)]
-    pub session_id: Option<qq_protocol::SessionId>,
-    /// Durable JSONL journal; reuse the same file and limits to resume safely.
-    #[arg(long)]
-    pub receipts: PathBuf,
-    /// Maximum estimated external-advisory spend in USD, across journal restarts.
-    #[arg(long)]
-    pub max_cost_usd: f64,
-    #[arg(long, default_value_t = 32, value_parser = clap::value_parser!(u16).range(1..=32))]
-    pub max_requests: u16,
-    /// Includes input/cache/output tokens; conservatively reserves 131072 per request.
-    #[arg(long, default_value_t = 4_194_304)]
-    pub max_total_tokens: u64,
-    /// Maximum time this invocation follows events.
-    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=86400))]
-    pub duration_seconds: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -772,32 +729,6 @@ mod tests {
                 .filter(|(_, _, key)| !UNDOCUMENTED_FLAGS.contains(&key.as_str()))
                 .map(|(category, name, _)| (*category, name.as_str())),
         );
-    }
-
-    #[test]
-    fn advisory_cli_requires_scope_receipts_and_explicit_budget() {
-        assert!(Cli::try_parse_from(["qq", "jev", "observe"]).is_err());
-        let workspace = qq_protocol::WorkspaceId::from_bytes([1; 16]).to_string();
-        let base = [
-            "qq",
-            "jev",
-            "observe",
-            "--workspace-id",
-            &workspace,
-            "--receipts",
-            "advisory.jsonl",
-            "--max-cost-usd",
-            "0.01",
-        ];
-        assert!(matches!(
-            Cli::try_parse_from(base).unwrap().command,
-            Some(Command::Jev {
-                command: JevCommand::Observe(_)
-            })
-        ));
-        let mut oversized = base.to_vec();
-        oversized.extend(["--max-requests", "33"]);
-        assert!(Cli::try_parse_from(oversized).is_err());
     }
 
     #[test]
@@ -1143,15 +1074,7 @@ mod tests {
                 command: ConfigCommand::Explain { field }
             }) if field == "model"
         ));
-        assert!(matches!(
-            Cli::try_parse_from(["qq", "jev", "setup", "--allow-file"])
-                .unwrap()
-                .command,
-            Some(Command::Jev {
-                command: JevCommand::Setup { allow_file: true }
-            })
-        ));
-        assert!(Cli::try_parse_from(["qq", "jev", "setup", "secret-in-argv"]).is_err());
+        assert!(Cli::try_parse_from(["qq", "jev", "setup"]).is_err());
         assert!(matches!(
             Cli::try_parse_from(["qq", "mcp", "inspect", "linear"])
                 .unwrap()

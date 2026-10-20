@@ -4,7 +4,9 @@ use super::*;
 use serde::{Deserialize, Serialize};
 
 pub(super) const MAX_PROJECTION_JSON_BYTES: usize = 2 * 1024 * 1024;
-use crate::runtime::MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES;
+/// Bound on a stored correction notice. Only rows written while Jev
+/// checkpoints existed carry one; new rows always store `null`.
+const MAX_CORRECTION_NOTICE_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +21,7 @@ pub(super) struct SavedReply {
 pub(super) struct SavedProjection {
     pub(super) version: u8,
     pub(super) results: Vec<SavedReply>,
+    /// Historical: the Jev correction notice replayed after these replies.
     pub(super) correction_notice: Option<String>,
 }
 
@@ -67,9 +70,7 @@ fn validate_limits<'a>(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
-    if ids.is_empty()
-        || notice.is_some_and(|text| text.len() > MAX_CHECKPOINT_CORRECTION_NOTICE_BYTES)
-    {
+    if ids.is_empty() || notice.is_some_and(|text| text.len() > MAX_CORRECTION_NOTICE_BYTES) {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())
@@ -115,12 +116,12 @@ pub(super) fn persist_tool_projection(
         .collect::<Result<Vec<_>, _>>()?;
     validate_limits(
         results.iter().map(|reply| (reply.call_id, reply.content)),
-        projected.correction_notice.as_deref(),
+        None,
     )?;
     let payload = BorrowedProjection {
         version: 1,
         results,
-        correction_notice: projected.correction_notice.as_deref(),
+        correction_notice: None,
     };
     let encoded = serde_json::to_string(&payload).map_err(|_| SessionRuntimeError::CODEC)?;
     if encoded.len() > MAX_PROJECTION_JSON_BYTES {

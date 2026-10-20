@@ -38,7 +38,7 @@ restores compiled defaults under managed ceilings.
 | 5 | project layers, repository root first, current directory last | per directory: `.qq/packs/<id>/pack.ron` (each manifest trusted on its own), `qq.ron`, `.qq/config.ron`, `.qq/config.d/*.ron` |
 | 6 | explicit file | `QQ_CONFIG=/path/to/file.ron` |
 | 7 | inline document | `QQ_CONFIG_CONTENT='(version: 1, …)'` |
-| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_JEV_CHECKPOINTS`, `QQ_JEV_ROUTING`, `QQ_JEV_APPROVAL`, `QQ_APPROVAL_DELEGATE` |
+| 8 | overrides | `--model` / `QQ_MODEL`, `--organization` / `QQ_ORGANIZATION`, `--max-output-tokens`, `QQ_APPROVAL_DELEGATE` |
 | 9 | managed | `/etc/qq/managed.ron` + `managed.d/` (Linux), `/Library/Application Support/qq/` (macOS), `%ProgramData%\qq\` (Windows); must be root-owned |
 | 10 | MDM | macOS forced preference `dev.qq` / `ManagedConfig`; Windows policy `HKLM\Software\Policies\dev.qq\ManagedConfig` (`REG_SZ`); none on Linux |
 
@@ -50,7 +50,7 @@ and the data, managed, and organization paths, each marked `(exists)` or
 project files may not.
 
 Project layers that declare anything sensitive — `model`, `providers`,
-`mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`, Jev settings,
+`mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`,
 `reasoning_effort`, or any policy grant — are loaded only after `qq trust`
 has accepted that exact file content. See
 [Permissions and trust](permissions.md#project-trust).
@@ -70,9 +70,6 @@ repository should not commit; this repository's `.gitignore` excludes
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
-| `jev_review` | `off` `final` `enforce` | `off` | optional TypeSafe Jev checkpoints; see [`../runbooks/jev.md`](../runbooks/jev.md) |
-| `jev_routing` | bool | `false` | optional Jev model routing |
-| `jev_approval` | bool | `false` | Jev decides held approvals before `reviewer_model` and you; see [`../runbooks/jev.md`](../runbooks/jev.md#approval-delegate--jev_approval) |
 | `approval_delegate` | `on` `off` | absent | who settles held approvals: `on` lets the delegate decide `ask` holds too, `off` sends every hold to you; absent keeps each mode's default (delegate under `auto`, you under `ask`). See [permissions](permissions.md#who-decides-a-held-call) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
@@ -246,7 +243,7 @@ profiles: {
 
 Keys: `model`, `organization`, `max_output_tokens`, `approval_mode`
 (`read_only` `ask` `auto` `full`), `approval_delegate` (`on` `off`),
-`jev_review`, `jev_routing`, `jev_approval`, `reasoning_effort`. Pack
+`reasoning_effort`. Pack
 profiles (below) add prompts, skills, and tool filters.
 
 ## `packs`
@@ -423,13 +420,9 @@ Themes are `.ron` files in `<global>/themes/` or `.qq/themes/`; shape in
 | `QQ_ORGANIZATION` | override `organization` |
 | `QQ_CONFIG` | an extra config file applied after project layers |
 | `QQ_CONFIG_CONTENT` | an inline RON document applied after `QQ_CONFIG` |
-| `QQ_JEV_CHECKPOINTS` | `off` `final` `enforce` |
-| `QQ_JEV_ROUTING` | `on` `off` |
-| `QQ_JEV_APPROVAL` | `on` `off`; overrides `jev_approval` for this process |
 | `QQ_APPROVAL_DELEGATE` | `on` `off`; overrides `approval_delegate` for this process |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `XAI_API_KEY` | built-in provider credentials when nothing is stored (`GEMINI_API_KEY` wins over `GOOGLE_API_KEY`) |
 | `AWS_PROFILE`, `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, `AWS_CONTAINER_CREDENTIALS_*` | Bedrock default credential chain |
-| `TYPESAFE_API_KEY` | Jev, when not stored |
 | `COLORTERM` | `truecolor` / `24bit` selects the `ink` default theme |
 | `EDITOR` | `/editor` in the TUI |
 

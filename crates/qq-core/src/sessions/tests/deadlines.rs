@@ -61,62 +61,6 @@ impl DeadlineSession {
 }
 
 #[tokio::test]
-async fn duration_after_durable_tool_result_records_unavailable_checkpoint_before_settlement() {
-    let requests = Arc::new(StdMutex::new(Vec::new()));
-    let mut harness = DeadlineSession::open(
-        Arc::new(BlockingCheckpointLoader { requests }),
-        ApprovalMode::Auto,
-    )
-    .await;
-    std::fs::write(harness._directory.path().join("note.txt"), "tool result\n").unwrap();
-    let run_id = harness.submit("inspect the note", 500).await;
-
-    let mut observed = collect_until(&mut harness.events, |event| {
-        matches!(event, SessionEvent::ToolCallFinished { .. })
-    })
-    .await;
-    observed.extend(collect_until(&mut harness.events, finished_for(run_id)).await);
-
-    let tool_finished = observed
-        .iter()
-        .position(|event| matches!(event.event, SessionEvent::ToolCallFinished { .. }))
-        .expect("tool result is durable");
-    let checkpoint = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                &event.event,
-                SessionEvent::CheckpointReviewed {
-                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                    feedback,
-                    ..
-                } if feedback.contains("verdict was durably recorded")
-                    && feedback.contains("budget")
-            )
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "budgeted unreviewed result has durable checkpoint status; observed={observed:#?}"
-            )
-        });
-    let terminal = observed
-        .iter()
-        .position(|event| {
-            matches!(
-                event.event,
-                SessionEvent::RunFinished {
-                    run_id: finished,
-                    outcome: RunOutcome::BudgetExhausted { ref exhaustion },
-                    ..
-                } if finished == run_id && exhaustion.limit == BudgetLimitKind::Duration
-            )
-        })
-        .expect("duration budget settles the run");
-    assert!(tool_finished < checkpoint && checkpoint < terminal);
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn duration_withdraws_pending_approval_without_executing_the_tool() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut harness = DeadlineSession::open(
@@ -681,38 +625,7 @@ async fn duration_cancels_automatic_compaction_and_settles_the_original_prompt()
     );
 }
 
-struct PreparationRouter;
-
-impl TaskRouter for PreparationRouter {
-    fn identity(&self) -> &'static str {
-        "fixture/preparation"
-    }
-    fn configuration_identity(&self) -> &str {
-        "fixture/preparation"
-    }
-    fn max_cost_usd_nanos(&self) -> Option<u64> {
-        Some(0)
-    }
-    fn route(&self, _task: String) -> TaskRoutingFuture {
-        Box::pin(async {
-            qq_protocol::RoutingDecision {
-                model: ModelSelection {
-                    model: Some("test/selected".to_owned()),
-                    ..ModelSelection::default()
-                },
-                reasoning_effort: None,
-                outcome: qq_protocol::RoutingOutcome::Selected,
-                reason: "fixture selection".to_owned(),
-                usage: Some(TokenUsage::default()),
-                estimated_cost_usd_nanos: Some(0),
-            }
-        })
-    }
-}
-
 struct CooperativePreparationLoader {
-    routing: bool,
-    requests: Arc<AtomicUsize>,
     entered: tokio::sync::mpsc::Sender<bool>,
     drained: Arc<tokio::sync::Notify>,
     signalled: Arc<AtomicUsize>,
@@ -725,25 +638,14 @@ impl RuntimeLoader for CooperativePreparationLoader {
 
     fn load_with_progress(
         &self,
-        request: RuntimeLoadRequest,
+        _request: RuntimeLoadRequest,
         progress: RuntimeLoadProgress,
     ) -> RuntimeLoadFuture {
-        if self.routing && request.model.model.as_deref() != Some("test/selected") {
-            let load = CountingTextLoader {
-                provider_calls: Arc::clone(&self.requests),
-            }
-            .load(request);
-            return Box::pin(async move {
-                let mut loaded = load.await?;
-                loaded.router = Some(Arc::new(PreparationRouter));
-                Ok(loaded)
-            });
-        }
         let entered = self.entered.clone();
         let drained = Arc::clone(&self.drained);
         let signalled = Arc::clone(&self.signalled);
         Box::pin(async move {
-            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            progress.set(RuntimeLoadStage::LoadingTools);
             entered.send(!progress.is_cancelled()).await.unwrap();
             progress.cancelled().await;
             signalled.fetch_add(1, Ordering::SeqCst);
@@ -759,15 +661,12 @@ impl RuntimeLoader for CooperativePreparationLoader {
 
 #[tokio::test]
 async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
-    for (cancel, routing) in [(false, false), (true, false), (false, true), (true, true)] {
-        let requests = Arc::new(AtomicUsize::new(0));
+    for cancel in [false, true] {
         let (entered, mut entered_rx) = tokio::sync::mpsc::channel(1);
         let drained = Arc::new(tokio::sync::Notify::new());
         let signalled = Arc::new(AtomicUsize::new(0));
         let mut harness = DeadlineSession::open(
             Arc::new(CooperativePreparationLoader {
-                routing,
-                requests: Arc::clone(&requests),
                 entered,
                 drained: Arc::clone(&drained),
                 signalled: Arc::clone(&signalled),
@@ -775,23 +674,6 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
             ApprovalMode::Full,
         )
         .await;
-        if routing {
-            harness
-                .runtime
-                .command(
-                    CommandId::generate().unwrap(),
-                    SessionCommand::SetSessionModel {
-                        session_id: harness.session_id,
-                        model: ModelSelection {
-                            model_is_fallback: true,
-                            model: Some("test/model".to_owned()),
-                            ..ModelSelection::default()
-                        },
-                    },
-                )
-                .await
-                .unwrap();
-        }
         // Let real Store I/O establish the stage before crossing the deadline.
         let duration_ms = if cancel { 10_000 } else { 3_600_000 };
         let run_id = harness.submit("prepare", duration_ms).await;
@@ -822,11 +704,6 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
         let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
         harness.runtime.shutdown().await.unwrap();
         assert_eq!(
-            requests.load(Ordering::SeqCst),
-            0,
-            "cancelled preparation must not send provider requests"
-        );
-        assert_eq!(
             signalled.load(Ordering::SeqCst),
             1,
             "loader must receive cooperative cancellation"
@@ -839,8 +716,8 @@ async fn preparation_cooperates_with_deadline_and_explicit_cancel() {
         } else {
             assert!(
                 matches!(finished_outcome(&observed, run_id), Some(RunOutcome::BudgetExhausted { exhaustion })
-                if exhaustion.message.contains("resolving checkpoint reviewer credentials")),
-                "cancel={cancel}, routing={routing}, outcome={:?}",
+                if exhaustion.message.contains("loading tool integrations")),
+                "cancel={cancel}, outcome={:?}",
                 finished_outcome(&observed, run_id)
             );
         }
@@ -862,7 +739,7 @@ impl RuntimeLoader for HeldDeadlineLoader {
         let requests = Arc::clone(&self.requests);
         let observed_progress = Arc::clone(&self.progress);
         Box::pin(async move {
-            progress.set(RuntimeLoadStage::ResolvingCheckpointCredential);
+            progress.set(RuntimeLoadStage::LoadingTools);
             *observed_progress.lock().unwrap() = Some(progress.clone());
             entered.notify_one();
             release.notified().await;
@@ -960,9 +837,7 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
         })
         .unwrap_or_else(|| panic!("{observed:?}"));
     assert!(
-        exhaustion
-            .message
-            .contains("resolving checkpoint reviewer credentials"),
+        exhaustion.message.contains("loading tool integrations"),
         "{}",
         exhaustion.message
     );

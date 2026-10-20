@@ -190,31 +190,6 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
         ),
         event(
             5,
-            SessionEvent::CheckpointStarted {
-                run_id: RUN,
-                correlation: "final:1".to_owned(),
-                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                tool_call_id: None,
-            },
-        ),
-        event(
-            6,
-            SessionEvent::CheckpointReviewed {
-                spend: Some(qq_protocol::CheckpointSpend {
-                    usage: Some(qq_protocol::TokenUsage::default()),
-                    estimated_cost_usd_nanos: Some(0),
-                }),
-                run_id: RUN,
-                correlation: "final:1".to_owned(),
-                phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                tool_call_id: None,
-                outcome: qq_protocol::CheckpointOutcome::Supported,
-                confidence_basis_points: Some(9_500),
-                feedback: "JEV evidence support; not guaranteed correctness".to_owned(),
-            },
-        ),
-        event(
-            7,
             SessionEvent::RunFinished {
                 origin: None,
                 session: Box::new(summary(SessionStatus::Idle, false)),
@@ -331,7 +306,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 35);
+    assert_eq!(PROTOCOL_VERSION, 36);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);

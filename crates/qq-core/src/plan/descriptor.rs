@@ -203,20 +203,19 @@ pub struct AgentPlanDescriptor {
     /// Explicit model-facing tool projection policy (version 15).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_output_projection: Option<ToolOutputProjection>,
-    /// Mandatory post-result/final reviewer identity; absent means disabled.
+    /// Historical, decode-only: the Jev checkpoint reviewer identity. Jev was
+    /// removed; QQ never sets this, so new descriptors omit it and encode as
+    /// before, while descriptors stored with it still decode and digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint: Option<String>,
-    /// Optional pre-run routing policy identity.
+    /// Historical, decode-only: the Jev routing policy identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<String>,
-    /// Identity of the delegate consulted first for held calls (Jev approval,
-    /// ADR-0052); absent means that delegate is off. Recorded so a run's
-    /// durable plan says whether it authorized an external approval
-    /// delegate, and so owned children and routed reloads inherit it (version
-    /// 12).
+    /// Historical, decode-only: the Jev approval delegate identity
+    /// (version 12).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_delegate: Option<String>,
-    /// Fingerprint of the authorized candidates and selection constraints.
+    /// Historical, decode-only: the Jev routing candidate fingerprint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_configuration: Option<String>,
     /// Explicit request effort; absence preserves provider defaults.

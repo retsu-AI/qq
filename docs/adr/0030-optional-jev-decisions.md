@@ -1,6 +1,6 @@
 # ADR-0030 — Explicit, independent Jev capabilities
 
-**Status:** Accepted; "never authorizes side effects" superseded for the `jev_approval` lane by [ADR-0041](0041-jev-delegated-approval.md)
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-18
 **Decider:** User direction for the stacked Jev review implementation
 **Supersedes:** ADR-0028's credential-driven activation rule

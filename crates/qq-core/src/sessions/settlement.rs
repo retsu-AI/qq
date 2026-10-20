@@ -820,9 +820,6 @@ pub(super) fn settle_panicked_execution(
                 goal_admission: None,
                 check_deadline: None,
                 origin: None,
-                checkpoint: None,
-                routing: None,
-                approval_delegate: None,
                 identity: RunIdentity {
                     workspace_id: original.identity.workspace_id,
                     session_id: original.identity.session_id,
@@ -1284,9 +1281,6 @@ pub(super) fn recover_interrupted_runs(
             goal_admission: None,
             check_deadline: None,
             origin: None,
-            checkpoint: None,
-            routing: None,
-            approval_delegate: None,
             identity: RunIdentity {
                 workspace_id,
                 session_id,
