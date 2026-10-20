@@ -180,6 +180,29 @@ pub(super) fn agent_need(session: &SessionView) -> Option<Need> {
     })
 }
 
+/// An agent row's indent level below its listed session, 1–4. `depth` is
+/// zero outside `thread_order`, so an orphan component's agents count their
+/// loaded parent links up to the orphan instead.
+pub(super) fn agent_depth(app: &App, id: SessionId) -> usize {
+    let depth = app.sessions.depth(id);
+    if depth > 0 {
+        return depth.clamp(1, 4);
+    }
+    let mut links = 0;
+    let mut cursor = id;
+    while links < 4
+        && let Some(parent) = app
+            .sessions
+            .get(&cursor)
+            .and_then(|session| session.summary.parent_id)
+            .filter(|parent| app.sessions.contains_key(parent))
+    {
+        links += 1;
+        cursor = parent;
+    }
+    links.clamp(1, 4)
+}
+
 /// Agents whose session is not loaded (a bounded snapshot can carry a child
 /// without its parent): absent from `thread_order`, so listed as sessions of
 /// their own until the parent arrives. Cheap when there are none.
@@ -255,9 +278,13 @@ fn add_agent_cost(pending: &mut Pending, agent: &SessionView, depth: usize) {
         .accounting
         .map(|accounting| accounting.direct.estimated_cost_usd_nanos)
         .unwrap_or(agent.summary.estimated_cost_usd_nanos);
-    if let Some(direct) = direct.filter(|nanos| *nanos > 0) {
-        pending.entry.cost = Some(pending.entry.cost.unwrap_or(0).saturating_add(direct));
-    }
+    // An unknown part makes the total unknown: a missing cost is never a
+    // known zero, so an understated sum is never shown as the spend.
+    pending.entry.cost = pending
+        .entry
+        .cost
+        .zip(direct)
+        .map(|(sum, direct)| sum.saturating_add(direct));
 }
 
 pub(super) fn rollup(app: &App) -> Rollup {
@@ -304,6 +331,8 @@ pub(super) fn rollup(app: &App) -> Rollup {
         if let Some(agents) = agents {
             rollup.focused_tree = Some((entry.id, agents));
         }
+        // A known zero says nothing; spend shows once there is some.
+        entry.cost = entry.cost.filter(|nanos| *nanos > 0);
         buckets[group as usize].push(RailEntry { group, ..entry });
     };
     let session_entry = |id: SessionId, session: &SessionView, needs_start: usize| {
@@ -313,7 +342,7 @@ pub(super) fn rollup(app: &App) -> Rollup {
             || session.summary.status == SessionStatus::Running
             || session.summary.queued_prompts > 0
             || (!is_focused && !session.live.tail.is_empty());
-        let cost = own_cost(session).filter(|nanos| *nanos > 0);
+        let cost = own_cost(session);
         let needs_start = u32::try_from(needs_start).unwrap_or(u32::MAX);
         Pending {
             entry: RailEntry {
@@ -433,17 +462,44 @@ pub(super) fn rollup(app: &App) -> Rollup {
     }
     rollup.counts = [buckets[0].len(), buckets[1].len(), buckets[2].len()];
     rollup.sessions = Vec::with_capacity(rollup.counts.iter().sum());
-    for mut bucket in buckets {
+    let updated = |entry: &RailEntry| {
+        app.sessions
+            .get(&entry.id)
+            .map_or(0, |session| session.summary.updated_at_ms)
+    };
+    for bucket in buckets {
         // Roots arrive newest first, then orphans newest first: merge the
-        // two by freshness (stable, so ties keep roots ahead).
-        bucket.sort_by_key(|entry| {
-            std::cmp::Reverse(
+        // two runs linearly by freshness, roots first on a tie.
+        let split = bucket
+            .iter()
+            .position(|entry| {
                 app.sessions
                     .get(&entry.id)
-                    .map_or(0, |session| session.summary.updated_at_ms),
-            )
-        });
-        rollup.sessions.extend(bucket);
+                    .is_some_and(|session| session.summary.parent_id.is_some())
+            })
+            .unwrap_or(bucket.len());
+        let mut entries = bucket.into_iter();
+        let mut roots = entries
+            .by_ref()
+            .take(split)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .peekable();
+        let mut orphans = entries.peekable();
+        loop {
+            let take_root = match (roots.peek(), orphans.peek()) {
+                (Some(root), Some(orphan)) => updated(root) >= updated(orphan),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
+            };
+            let next = if take_root {
+                roots.next()
+            } else {
+                orphans.next()
+            };
+            rollup.sessions.extend(next);
+        }
     }
     rollup
 }
@@ -692,7 +748,7 @@ pub(super) fn sidebar(
                 truncate_line(line, width)
             }
             RailRow::Agent(id) => {
-                let depth = app.sessions.depth(id).clamp(1, 4);
+                let depth = agent_depth(app, id);
                 let prefix = format!("│ {}↳ ", "  ".repeat(depth - 1));
                 let mut line = session_line(app, id, width, &prefix);
                 if app.focused() == Some(id) {
@@ -701,7 +757,7 @@ pub(super) fn sidebar(
                 truncate_line(line, width)
             }
             RailRow::AgentDetail(id) => {
-                let depth = app.sessions.depth(id).clamp(1, 4);
+                let depth = agent_depth(app, id);
                 let mut line = Line::styled(format!("│ {}    ", "  ".repeat(depth - 1)), muted());
                 let used = line.width();
                 let (text, style) =

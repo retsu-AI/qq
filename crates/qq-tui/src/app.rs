@@ -3226,10 +3226,10 @@ impl App {
                 }
             }
         }
-        let active = self.sessions.values().any(|session| {
-            matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                || self.side_question_shown(session)
-        });
+        let active = self
+            .sessions
+            .values()
+            .any(|session| self.activity_shown(session));
         self.expire_status()
             || active
             || (self.has_active_goal() && self.animation_tick.is_multiple_of(10))
@@ -3252,18 +3252,24 @@ impl App {
     pub fn has_activity(&self) -> bool {
         self.has_active_goal()
             || self.status.is_some()
-            || self.sessions.values().any(|session| {
-                matches!(session.summary.status, qq_protocol::SessionStatus::Running)
-                    || self.side_question_shown(session)
-            })
+            || self
+                .sessions
+                .values()
+                .any(|session| self.activity_shown(session))
     }
 
-    /// Whether `session` answers a side question whose spinner is on screen:
-    /// in the view that follows it, on its painted rail row or the badge of
-    /// a painted ancestor. While the rail is down (the strip's working count
-    /// may show it) or before the first frame, every one counts.
-    fn side_question_shown(&self, session: &qq_client::state::SessionView) -> bool {
-        if session.summary.running_side_question.is_none() {
+    /// Whether `session`'s activity (a running run, or a side question) has
+    /// a spinner on screen: in the view that follows it, on its painted rail
+    /// row or the badge of a painted ancestor. While the rail is down (the
+    /// strip's working count may show it) or before the first frame, every
+    /// one counts. An audit's activity is never shown.
+    fn activity_shown(&self, session: &qq_client::state::SessionView) -> bool {
+        if session.summary.running_side_question.is_none()
+            && session.summary.status != qq_protocol::SessionStatus::Running
+        {
+            return false;
+        }
+        if self.under_audit(session.summary.id) {
             return false;
         }
         let Some(painted) = self.rail_painted.as_ref() else {

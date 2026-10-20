@@ -1041,7 +1041,7 @@ impl App {
     }
 
     /// Rows for the session picker in tree order, restricted to `scope`'s
-    /// subtree when set.
+    /// subtree when set. Audit sessions and their subtrees are never listed.
     fn session_rows(&self, scope: Option<SessionId>) -> Vec<SessionRow> {
         self.sessions
             .thread_order()
@@ -1049,6 +1049,7 @@ impl App {
             .copied()
             .filter(|session_id| {
                 scope.is_none_or(|root| self.is_descendant_or_self(*session_id, root))
+                    && !self.under_audit(*session_id)
             })
             .map(|id| SessionRow {
                 id,

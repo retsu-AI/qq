@@ -5433,7 +5433,19 @@ fn a_legacy_session_sums_its_agents_direct_spend() {
         Some(42_000_000),
         "the audit's subtree counts too"
     );
-    let _ = ids;
+    // One agent with no recorded cost makes the total unknown: no spend is
+    // shown rather than an understated one.
+    app.sessions
+        .get_mut(&ids[0])
+        .unwrap()
+        .summary
+        .estimated_cost_usd_nanos = None;
+    let entry = rollup(&app)
+        .sessions
+        .into_iter()
+        .find(|entry| entry.id == root)
+        .unwrap();
+    assert_eq!(entry.cost, None);
 }
 
 #[test]
@@ -5579,6 +5591,71 @@ fn a_revealed_audit_drops_the_answers_and_amendment_in_progress() {
     )));
     assert_ne!(app.focused(), Some(root));
     assert!(app.question_answers.is_empty());
+}
+
+#[test]
+fn thirteenth_review_round_on_the_rail() {
+    // 1. `/sessions` and `/agents` list no audit or anything under one.
+    let (mut app, root, ids) = app_with_fanout_where(2, |index, summary| {
+        if index == 0 {
+            summary.purpose = qq_protocol::SessionPurpose::Audit;
+        }
+    });
+    app.focus_session(root);
+    app.execute(Command::OpenAgents);
+    assert!(!app.filtered_sessions().contains(&ids[0]), "agents picker");
+    app.execute(Command::OpenSessions);
+    assert!(
+        !app.filtered_sessions().contains(&ids[0]),
+        "sessions picker"
+    );
+    app.overlay = None;
+
+    // 2. A running audit has no spinner on screen, so it wakes no frame.
+    app.sessions.get_mut(&ids[0]).unwrap().summary.status = SessionStatus::Running;
+    assert!(!app.has_activity(), "a hidden audit run animates nothing");
+
+    // 3. An orphan's grandchild is indented below its child.
+    let (mut app, _, ids) = app_with_fanout(3);
+    let orphan = ids[0];
+    app.sessions.get_mut(&orphan).unwrap().summary.parent_id =
+        Some(SessionId::from_bytes([0x77; 16]));
+    for (child, parent) in [(ids[1], orphan), (ids[2], ids[1])] {
+        let summary = app.sessions[&child].summary.clone();
+        app.sessions.upsert_summary(
+            SessionSummary {
+                parent_id: Some(parent),
+                ..summary
+            },
+            &app.models,
+            0,
+        );
+    }
+    assert_eq!(
+        app.sessions.depth(ids[2]),
+        0,
+        "fixture: outside thread_order"
+    );
+    assert_eq!(super::sidebar::agent_depth(&app, ids[1]), 1);
+    assert_eq!(super::sidebar::agent_depth(&app, ids[2]), 2);
+    // 4. A lone session with an approval and an unseen finish elsewhere in
+    // its tree: the rule names the approval and counts the finish.
+    let (mut app, _, _, _, _) = app_with_child_awaiting_approval();
+    let parent = app.focused().unwrap();
+    let done = SessionId::from_bytes([0x5e; 16]);
+    app.sessions.upsert_summary(
+        SessionSummary {
+            title: "done agent".to_owned(),
+            parent_id: Some(parent),
+            last_outcome: Some(qq_protocol::RunOutcome::Completed),
+            ..fixtures::session_summary(done)
+        },
+        &app.models,
+        0,
+    );
+    app.sessions.get_mut(&done).unwrap().finished_unread = true;
+    let rule = frame_rows(&[super::chrome::composer_rule(&app, 200)]).join("");
+    assert!(rule.contains("needs approval +1 need you"), "{rule}");
 }
 
 #[test]
