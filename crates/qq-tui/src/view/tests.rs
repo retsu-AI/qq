@@ -6732,6 +6732,31 @@ fn a_selection_is_dropped_when_streamed_text_moves_its_rows() {
     }));
     renderer.frame_and_commit(&mut app, 100, 30);
     assert!(app.selection.is_none(), "stale selections are dropped");
+
+    // Streamed text that lands after a bare press but before any drag or
+    // frame: the press fingerprinted the frame it landed on, so the next
+    // frame's moved rows drop the selection too.
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("grows")).unwrap()).unwrap();
+    let effects =
+        app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, crate::effect::Effect::AnchorSelection)),
+        "the press asks to be fingerprinted"
+    );
+    app.anchor_selection(renderer.last_frame());
+    app.apply_client_update(event(SessionEvent::TextAppended {
+        message_id,
+        channel: qq_protocol::TextChannel::Output,
+        text: " more\nand more rows\n".repeat(6),
+    }));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(
+        app.selection.is_none(),
+        "the pressed cells moved before a frame"
+    );
 }
 
 #[test]

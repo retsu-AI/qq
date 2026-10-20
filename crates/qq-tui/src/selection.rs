@@ -356,12 +356,15 @@ const ZWJ: char = '\u{200D}';
 
 /// The grapheme rules [`cells`] and the wrappers share, fed one character at
 /// a time: whether a character continues the cluster before it.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Clusters {
     /// The last character was a ZWJ or a virama: the next one joins.
     joined: bool,
     /// The last cluster is a lone regional indicator awaiting its pair.
     open_flag: bool,
+    /// The cluster still open at the end of the last text fed to
+    /// [`clusters`], so a cluster split across spans is measured whole.
+    open: String,
 }
 
 impl Clusters {
@@ -380,25 +383,65 @@ impl Clusters {
 /// false for a leading run that continues a cluster begun before `text`
 /// (`state` carries it across spans). A cluster's width is its rendered
 /// width (`text_width` of the whole cluster), so `☀️` is two cells and
-/// `👩‍💻` is two, as the terminal draws them.
+/// `👩‍💻` is two, as the terminal draws them. A continuing run's width is
+/// what the whole cluster adds over the part already measured (possibly
+/// zero), so the widths of every run still sum to the rendered width.
 pub(crate) fn clusters(
     text: &str,
     state: &mut Clusters,
 ) -> Vec<(std::ops::Range<usize>, usize, bool)> {
     let mut out: Vec<(std::ops::Range<usize>, usize, bool)> = Vec::new();
+    // Width already counted for the open cluster before this text.
+    let carried = crate::render::text_width(&state.open);
     for (offset, character) in text.char_indices() {
         let end = offset + character.len_utf8();
         let (continues, _) = state.step(character);
+        if continues {
+            state.open.push(character);
+        } else {
+            state.open.clear();
+            state.open.push(character);
+        }
         match out.last_mut() {
-            Some(last) if continues => {
-                last.0.end = end;
-                last.1 = crate::render::text_width(&text[last.0.clone()]);
+            Some(last) if continues => last.0.end = end,
+            _ => out.push((offset..end, 0, !continues)),
+        }
+        if let Some(last) = out.last_mut() {
+            // The open cluster's rendered width, less what an earlier text
+            // already counted for a continuing leading run.
+            let whole = crate::render::text_width(&state.open);
+            last.1 = if last.2 {
+                whole
+            } else {
+                whole.saturating_sub(carried)
+            };
+        }
+    }
+    out
+}
+
+/// Every cluster of `spans` in order, as `(span, bytes within the span,
+/// starts, width)`: a cluster split across spans yields one run per span,
+/// and its full rendered width is reported on the run that starts it (the
+/// continuing runs report zero), so a wrapper deciding at a cluster start
+/// already knows the whole cluster's width.
+pub(crate) fn line_clusters(
+    spans: &[crate::render::Span],
+) -> Vec<(usize, std::ops::Range<usize>, bool, usize)> {
+    let mut state = Clusters::default();
+    let mut out: Vec<(usize, std::ops::Range<usize>, bool, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (index, span) in spans.iter().enumerate() {
+        for (range, width, starts) in clusters(&span.text, &mut state) {
+            if starts {
+                open = Some(out.len());
+                out.push((index, range, true, width));
+            } else {
+                if let Some(at) = open {
+                    out[at].3 += width;
+                }
+                out.push((index, range, false, 0));
             }
-            _ => out.push((
-                offset..end,
-                crate::render::text_width(&text[offset..end]),
-                !continues,
-            )),
         }
     }
     out
@@ -435,6 +478,23 @@ fn continues_grapheme(character: char) -> bool {
     character == ZWJ
         || matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{1F3FB}'..='\u{1F3FF}')
         || (UnicodeWidthChar::width(character) == Some(0) && !character.is_control())
+}
+
+/// Whether a span of `spans` begins inside a cluster the span before it
+/// started. Cheap: one character either side of each boundary.
+pub(crate) fn splits_a_cluster(spans: &[crate::render::Span]) -> bool {
+    spans.windows(2).any(|pair| {
+        let (Some(before), Some(after)) = (
+            pair[0].text.chars().next_back(),
+            pair[1].text.chars().next(),
+        ) else {
+            return false;
+        };
+        continues_grapheme(after)
+            || before == ZWJ
+            || is_virama(before)
+            || (is_regional_indicator(before) && is_regional_indicator(after))
+    })
 }
 
 /// Each grapheme of `line` with the columns it occupies (`start..end`) and
@@ -716,6 +776,23 @@ mod tests {
                 .collect();
             let text_x = crate::render::text_width(&first[..first.find('a').unwrap()]);
             let mut selection = Selection::start(area, 0, text_x, 0).unwrap();
+            selection.extend(13, lines.len() - 1);
+            assert_eq!(selection.text(&lines).text, expected, "{source}");
+        }
+        // A drag from the pane's left edge over a quote copies no rail on
+        // its first row either; a list keeps its marker, the item's text.
+        for (source, expected) in [
+            ("> alpha beta gamma", "alpha beta gamma"),
+            ("- alpha beta gamma", "• alpha beta gamma"),
+        ] {
+            let lines = crate::view::markdown_lines_for_test(source, 14, false);
+            let area = Area {
+                x: 0,
+                y: 0,
+                width: 14,
+                height: lines.len(),
+            };
+            let mut selection = Selection::start(area, 0, 0, 0).unwrap();
             selection.extend(13, lines.len() - 1);
             assert_eq!(selection.text(&lines).text, expected, "{source}");
         }

@@ -485,7 +485,11 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                 for (index, mut row) in wrapped.into_iter().enumerate() {
                     trim_trailing_whitespace(&mut row);
                     let mut assembled = if index == 0 {
-                        prefix.clone()
+                        // The quote rail before the marker is layout too; the
+                        // marker itself is the item's text.
+                        let mut first = prefix.clone();
+                        first.chrome = quote_rail_width(hang.rail);
+                        first
                     } else {
                         let mut continuation = Line::default();
                         push_quote_rail(&mut continuation, hang.rail);

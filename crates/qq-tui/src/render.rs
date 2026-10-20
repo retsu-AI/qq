@@ -165,12 +165,27 @@ impl Line {
         self.spans.push(Span { text, style });
     }
 
+    /// Display cells of the row. A grapheme cluster split across two spans
+    /// (a style change inside `☀️`, `👩‍💻` or a flag) is measured whole, as
+    /// the terminal draws it; a row without such a split (almost every row)
+    /// takes one pass per span.
     pub(crate) fn width(&self) -> usize {
-        self.indent
+        let simple = self.indent
             + self
                 .spans
                 .iter()
                 .map(|span| text_width(&span.text))
+                .sum::<usize>();
+        if self.spans.len() < 2 || !crate::selection::splits_a_cluster(&self.spans) {
+            return simple;
+        }
+        let mut state = crate::selection::Clusters::default();
+        self.indent
+            + self
+                .spans
+                .iter()
+                .flat_map(|span| crate::selection::clusters(&span.text, &mut state))
+                .map(|(_, width, _)| width)
                 .sum::<usize>()
     }
 

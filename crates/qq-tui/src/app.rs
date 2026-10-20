@@ -1658,7 +1658,13 @@ impl App {
                 self.selection = self.geometry.transcript.and_then(|area| {
                     crate::selection::Selection::start(area, self.geometry.text_x, column, row)
                 });
-                Effects::changed_now(cleared)
+                let mut effects = Effects::changed_now(cleared);
+                if self.selection.is_some() {
+                    // Fingerprinted against the frame the press landed on,
+                    // before streamed output can move what is under it.
+                    effects.push(Effect::AnchorSelection);
+                }
+                effects
             }
             MouseEventKind::Drag(MouseButton::Left) => match &mut self.selection {
                 Some(selection) => {
@@ -1691,6 +1697,15 @@ impl App {
             // terminal.
             MouseEventKind::Down(_) => Effects::changed_now(self.selection.take().is_some()),
             _ => Effects::none(),
+        }
+    }
+
+    /// Fingerprint a just-started selection against `frame`, the frame the
+    /// press landed on, so a later frame whose cells moved under it (output
+    /// streamed before the first drag or redraw) drops it.
+    pub(crate) fn anchor_selection(&mut self, frame: &[crate::render::Line]) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.remember(frame);
         }
     }
 

@@ -343,6 +343,7 @@ where
                     }
                     queue.extend(app.note_copied(&copied));
                 }
+                Effect::AnchorSelection => app.anchor_selection(renderer.last_frame()),
                 Effect::ResolveTrust(choice) => {
                     // The root writes the trust state (or admits the files
                     // for this process) off the executor and computes what
