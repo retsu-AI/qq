@@ -7,19 +7,12 @@ on:
     branches: [main]
     paths: ['apps/desktop/**', 'crates/**', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.github/workflows/desktop.yml']
   workflow_dispatch:
-    inputs:
-      task:
-        description: 'Desktop package, or generate unsigned mobile projects only'
-        type: choice
-        default: desktop
-        options: [desktop, mobile-scaffold]
 
 permissions:
   contents: read
 
 jobs:
   windows:
-    if: ${{ inputs.task != 'mobile-scaffold' }}
     runs-on: windows-latest
     timeout-minutes: 45
     defaults:
@@ -107,53 +100,10 @@ jobs:
             echo 'The mobile build must not link host engine, auth or configuration crates.'
             exit 1
           fi
-      - name: Initialize Android project
-        run: |
-          if [ ! -d src-tauri/gen/android ]; then
-            pnpm tauri android init --ci --skip-targets-install
-          fi
       - name: Build debug APK (no engine sidecar or distribution keys)
-        if: ${{ inputs.task != 'mobile-scaffold' }}
         run: pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
       - uses: actions/upload-artifact@v4
-        if: ${{ inputs.task != 'mobile-scaffold' }}
         with:
           name: qq-android-debug
           path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: ${{ inputs.task == 'mobile-scaffold' }}
-        with:
-          name: qq-android-project
-          path: apps/desktop/src-tauri/gen/android
-          include-hidden-files: true
-          if-no-files-found: error
-
-  # Project generation only. No iOS build/sign/upload job is enabled until
-  # maintainers provide their runner and Apple developer account.
-  ios-scaffold:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'mobile-scaffold' }}
-    runs-on: macos-15
-    timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: apps/desktop
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.10.1
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: pnpm install --frozen-lockfile
-      - name: Generate unsigned iOS project without building
-        run: pnpm tauri ios init --ci --skip-targets-install
-      - uses: actions/upload-artifact@v4
-        with:
-          name: qq-ios-project
-          path: apps/desktop/src-tauri/gen/apple
-          include-hidden-files: true
           if-no-files-found: error
