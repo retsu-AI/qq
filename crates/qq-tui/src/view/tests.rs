@@ -2596,6 +2596,24 @@ fn session_picker_renders_an_empty_search_result() {
 }
 
 #[test]
+fn a_store_holding_only_audits_offers_the_creation_hint() {
+    let mut app = App::new(TuiOptions::default());
+    let audit = SessionSummary {
+        purpose: qq_protocol::SessionPurpose::Audit,
+        ..fixtures::session_summary(SessionId::from_bytes([0x5a; 16]))
+    };
+    app.apply_client_update(ClientUpdate::Snapshot(WorkspaceSnapshot {
+        check_interruption: None,
+        sessions: vec![audit],
+        focused: None,
+        ..fixtures::workspace_snapshot()
+    }));
+    app.execute(Command::OpenSessions);
+    let text = frame_text(&FrameRenderer::default().frame_and_commit(&mut app, 80, 12));
+    assert!(text.contains("creates a root session"), "{text}");
+    assert!(!text.contains("No matching sessions."), "{text}");
+}
+#[test]
 fn session_picker_renders_delete_and_prune_confirmations() {
     let mut app = app_with_messages(0);
     let session_id = SESSION;

@@ -122,7 +122,9 @@ pub(super) fn session_picker(app: &App, width: usize, height: usize) -> Vec<Line
     let create = app
         .chord_label(crate::commands::Command::NewRootSession)
         .unwrap_or_else(|| "/new".to_owned());
-    let empty = if app.sessions.is_empty() {
+    // Audit components have no rows: a store holding only those offers the
+    // same creation hint as an empty one.
+    let empty = if picker.items().is_empty() {
         format!("  {create} creates a root session.")
     } else {
         "  No matching sessions.".to_owned()

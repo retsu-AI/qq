@@ -2722,6 +2722,63 @@ fn agents_picker_scopes_an_orphan_to_its_loaded_top() {
     assert_eq!(listed, expected);
 }
 
+#[test]
+fn the_picker_merges_orphans_newest_first_and_drops_audit_targets() {
+    // An older root, and a newer orphan (its parent is not loaded).
+    let mut app = App::new(TuiOptions::default());
+    let mut initial = snapshot();
+    initial.sessions[0].updated_at_ms = 1;
+    let root = initial.sessions[0].id;
+    let missing = SessionId::from_bytes([0x8e; 16]);
+    let mut orphan = summary_named(0x81, "orphan");
+    orphan.parent_id = Some(missing);
+    orphan.updated_at_ms = 9;
+    initial.sessions.push(orphan.clone());
+    app.apply_snapshot(initial);
+    app.execute(Command::OpenSessions);
+    assert_eq!(app.filtered_sessions(), [orphan.id, root], "newest first");
+
+    // A delete confirmation on the orphan, then its parent arrives as an
+    // audit: the confirmation is cancelled and `y` deletes nothing.
+    // The cursor opens on the focused root, below the newer orphan.
+    assert_eq!(app.session_picker_selected(), Some(root));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.session_picker_selected(), Some(orphan.id));
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Sessions {
+            confirm: Some(SessionConfirm::Delete(id)),
+            ..
+        }) if *id == orphan.id
+    ));
+    app.apply_live_event(fixtures::envelope(
+        2,
+        missing,
+        SessionEvent::SessionCreated {
+            session: Box::new(SessionSummary {
+                purpose: qq_protocol::SessionPurpose::Audit,
+                ..fixtures::session_summary(missing)
+            }),
+        },
+    ));
+    assert!(matches!(
+        &app.overlay,
+        Some(Overlay::Sessions { confirm: None, .. })
+    ));
+    let (_, requests) = app.handle_key(key(KeyCode::Char('y'))).split();
+    assert!(
+        !requests.iter().any(|request| matches!(
+            request,
+            ClientRequest::Command(CommandRequest {
+                command: SessionCommand::DeleteSession { .. },
+                ..
+            })
+        )),
+        "{requests:#?}"
+    );
+}
+
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
