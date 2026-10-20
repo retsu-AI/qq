@@ -232,6 +232,7 @@ impl CommandOwner {
         {
             return Err(CommandOwnerError::Invalid);
         }
+        request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = serde_json::to_string(&request)?;
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(CommandOwnerError::Invalid);
@@ -371,24 +372,20 @@ impl CommandOwner {
         if cancelled {
             cancellation.cancel();
         }
-        let task_deadline = request
-            .not_after_ms
-            .map(|deadline| {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| CommandOwnerError::Unavailable)?;
-                let now_ms =
-                    u64::try_from(now.as_millis()).map_err(|_| CommandOwnerError::Invalid)?;
-                if deadline <= now_ms {
-                    cancellation.cancel();
-                }
-                tokio::time::Instant::now()
-                    .checked_add(std::time::Duration::from_millis(
-                        deadline.saturating_sub(now_ms),
-                    ))
-                    .ok_or(CommandOwnerError::Invalid)
-            })
-            .transpose()?;
+        let task_deadline = match request.not_after_ms.map(monotonic_deadline).transpose() {
+            Ok(deadline) => deadline,
+            // A clock change between admission and execution must remain a
+            // per-command refusal, rather than cancelling unrelated commands.
+            Err(CommandOwnerError::Invalid) => {
+                return Ok(ToolOutput::refused(
+                    "command deadline cannot be represented on this platform",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        if task_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            cancellation.cancel();
+        }
         let execution = crate::tools::dispatch::execute_with_images(
             workspace,
             Arc::default(),
@@ -586,6 +583,18 @@ impl Drop for ShutdownGuard {
                 .send_replace(Some(Err(Arc::new(CommandOwnerError::Unavailable))));
         }
     }
+}
+
+fn monotonic_deadline(deadline: u64) -> Result<tokio::time::Instant, CommandOwnerError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| CommandOwnerError::Unavailable)?;
+    let now_ms = u64::try_from(now.as_millis()).map_err(|_| CommandOwnerError::Invalid)?;
+    tokio::time::Instant::now()
+        .checked_add(std::time::Duration::from_millis(
+            deadline.saturating_sub(now_ms),
+        ))
+        .ok_or(CommandOwnerError::Invalid)
 }
 
 struct DriverGuard {

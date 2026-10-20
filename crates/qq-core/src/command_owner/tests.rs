@@ -814,3 +814,80 @@ async fn utf8_split_across_native_reads_is_preserved_in_durable_output() {
     owner.shutdown().await.unwrap();
     assert_eq!(terminal.output, "π🦀");
 }
+
+#[tokio::test]
+async fn a_stalled_journal_does_not_starve_other_workspace_operations() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let journal = Journal::open(root.path().join("owner")).await.unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let (entered, committed) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    ADMISSION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered,
+        release: gate,
+    });
+    let admission = {
+        let journal = journal.clone();
+        tokio::spawn(async move { journal.admit(id, "{}".to_owned()).await })
+    };
+    committed.await.unwrap();
+    let mut observers = Vec::new();
+    for _ in 0..32 {
+        let mut snapshot = Box::pin(journal.snapshot(id));
+        assert!(futures_util::poll!(snapshot.as_mut()).is_pending());
+        observers.push(snapshot);
+    }
+    let path = std::fs::canonicalize(workspace.path()).unwrap();
+    let opened = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        blocking(move || {
+            crate::workspace::Workspace::open(&path)
+                .map(|_| ())
+                .map_err(CommandOwnerError::Io)
+        }),
+    )
+    .await;
+    release.send(()).unwrap();
+    admission.await.unwrap().unwrap();
+    for observer in observers {
+        observer.await.unwrap();
+    }
+    journal.close().await.unwrap();
+    assert!(
+        matches!(opened, Ok(Ok(()))),
+        "an unrelated workspace must open while this journal is stalled"
+    );
+}
+
+#[tokio::test]
+async fn extreme_task_deadlines_never_stop_the_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "echo far-future");
+    request.not_after_ms = Some(u64::MAX);
+    match owner.submit(request).await {
+        Ok(()) => {
+            wait_finished(&owner, id, 0).await;
+        }
+        Err(CommandOwnerError::Invalid) => assert!(matches!(
+            owner.snapshot(id).await,
+            Err(CommandOwnerError::NotFound)
+        )),
+        result => panic!("a deadline must not fail the owner: {result:?}"),
+    }
+    let next = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(workspace.path(), next, "echo still-available"))
+        .await
+        .unwrap();
+    let finished = wait_finished(&owner, next, 0).await;
+    owner.shutdown().await.unwrap();
+    assert!(!finished.result.as_ref().unwrap().is_error());
+    assert!(finished.result.unwrap().text().contains("still-available"));
+}

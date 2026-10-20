@@ -16,6 +16,7 @@ use super::{
 #[derive(Clone)]
 pub(super) struct Journal(Arc<JournalState>);
 struct JournalState {
+    serial: Arc<tokio::sync::Semaphore>,
     connection: Mutex<Option<Connection>>,
     lock: Mutex<Option<File>>,
 }
@@ -103,6 +104,7 @@ impl Journal {
             [],
         )?;
         Ok(Self(Arc::new(JournalState {
+            serial: Arc::new(tokio::sync::Semaphore::new(1)),
             connection: Mutex::new(Some(connection)),
             lock: Mutex::new(Some(lock)),
         })))
@@ -112,8 +114,13 @@ impl Journal {
         &self,
         operation: impl FnOnce(&mut Connection) -> Result<T, CommandOwnerError> + Send + 'static,
     ) -> Result<T, CommandOwnerError> {
+        let serial = Arc::clone(&self.0.serial)
+            .acquire_owned()
+            .await
+            .map_err(|_| CommandOwnerError::Unavailable)?;
         let state = Arc::clone(&self.0);
         blocking(move || {
+            let _serial = serial;
             let mut connection = state
                 .connection
                 .lock()
@@ -124,8 +131,13 @@ impl Journal {
     }
 
     pub(super) async fn close(&self) -> Result<(), CommandOwnerError> {
+        let serial = Arc::clone(&self.0.serial)
+            .acquire_owned()
+            .await
+            .map_err(|_| CommandOwnerError::Unavailable)?;
         let state = Arc::clone(&self.0);
         blocking(move || {
+            let _serial = serial;
             let mut connection_guard = state
                 .connection
                 .lock()
