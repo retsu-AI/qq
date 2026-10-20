@@ -2,7 +2,7 @@
 //! log at the 16 KiB shell bound and at the 128 KiB ceiling, the no-op path
 //! for text that already fits, and secret masking over clean text.
 //!
-//! Budget (per `docs/plans/tool-layer.md` T1): bounding must stay well under
+//! Bounding should stay well under
 //! the cost of the work it bounds. Targets on a quiet host: `fits_no_op`
 //! ≤ 1 µs for 8 KiB, `shell_16k_from_128k` ≤ 100 µs, `mask_clean_128k`
 //! ≤ 200 µs.

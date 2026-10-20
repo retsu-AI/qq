@@ -4,8 +4,8 @@
 //! run), the in-memory apply chain, the unified diff for the UI payload,
 //! and the atomic temp+rename.
 //!
-//! Budget (per `docs/plans/tool-layer.md` T5): recorded here as the gate's
-//! first measurement; the slice must not regress `tool_dispatch`.
+//! Compare these measurements alongside `tool_dispatch` when changing the
+//! edit path; report regressions with the benchmark results.
 
 use std::{hint::black_box, time::Instant};
 

@@ -1,14 +1,13 @@
 # Runbook: run output queries — are runs producing output?
 
 Read-only queries over the sessions database. They measure whether long runs
-and sub-agents produce output, rather than only activity. This is the AP0
-baseline for [`reliability.md`](../plans/reliability.md) AP1–AP5
-and the evidence behind ADR-0054.
+and sub-agents produce output, rather than only activity. These queries
+supported the historical AP0 baseline and ADR-0054.
 
-Run it before and after each AP slice. Record the numbers in the plan's
-ledger with the date, the store schema and the row counts. Never open the
-live store read-write, and never paste session content into a ledger:
-record counts only.
+Use them when investigating a concrete run or behavior. Record the date,
+store schema, window and row counts alongside findings in the issue or PR.
+Never open the live store read-write or publish private session content.
+These diagnostics do not require a progress ledger or an observation period.
 
 ## Setup
 
@@ -232,10 +231,12 @@ FROM tool_calls WHERE name = 'spawn_agent'
 
 ## Recording
 
-Record the following in the ledger:
-- the window end, the store schema (from Setup), and `SELECT count(*) FROM runs`;
-- each section's row;
-- which AP slices were on `main` during the window.
+Record the following with the investigation:
 
-A measurement window must be at least 7 days of normal use, and it must
-start after the slice being measured merged.
+- the window boundaries, the store schema (from Setup), and `SELECT count(*) FROM runs`;
+- each section's row;
+- which runtime builds produced the records, when known.
+
+Choose a window that answers the concrete question. Identify mixed builds and
+unknown provenance; a completed run or tool call does not itself establish that
+the user's task succeeded.

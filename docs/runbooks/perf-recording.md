@@ -1,16 +1,17 @@
 # Runbook: performance recording
 
-How to capture the baseline and candidate measurements a slice must report.
+How to capture baseline and candidate measurements for performance work.
 The measurement inventory, report format, and machine-class rules are in
 [`../../benchmarks/perf/README.md`](../../benchmarks/perf/README.md); this
-runbook is the procedure a slice follows and the rules for reading tails.
+runbook explains the recording tools and how to interpret their results.
 
 ## When
 
-Every slice that names a gate in the plan records a pre-change baseline
-**before the first code change** and a post-change candidate on the same host
-in the same session. A slice with no named gate still runs the workspace
-gates but needs no recording.
+Use this procedure when the task concerns performance or size. Capture a
+pre-change baseline and a candidate on the same host under comparable
+conditions. Routine fixes use the normal checks in
+[`testing.md`](testing.md). Report budget overruns in the PR; the user
+decides whether they block delivery.
 
 ## Full H0 suite
 
@@ -71,8 +72,8 @@ Cargo's pre-override profile metadata and the compiled binary hashes.
 
 This tests repeatability of the improved build while still requiring both
 candidate recordings to satisfy absolute limits. Baseline versus candidate
-checks relative regressions against merged main. Neither inherited failures nor
-noisy controls are waived.
+checks relative regressions against merged main. Keep inherited failures and
+noisy controls visible in the reported results.
 
 Use these while iterating; they are faster and isolate one gate. The worker
 rows are hidden `xtask perf` subcommands that refuse a debug build and run only
@@ -138,7 +139,7 @@ loading/persistence through the session runtime, not the goal driver, check
 runner, or standalone notice-render latency. Compare modes on the same saved
 optimized binary and retain a goal-less/goal-less control, source/binary
 identities, pressure and all samples. Such a comparison does not establish
-production-commit A/B compatibility or replace the quiet-host/H0 gates.
+production-commit A/B compatibility or a full H0 result.
 
 The outage fixture uses a 1 ms recovery policy, **not** a real ten-minute
 outage. Resource samples are periodic, not an isolated continuous RSS peak.
@@ -146,7 +147,7 @@ Event-envelope bytes are an explicitly labelled persisted-data proxy, not
 physical DB write bytes. Actual fsync counts require an external Linux tracer
 (e.g. `strace -f -c -e trace=fsync,fdatasync` on the already-built test worker);
 SQLite commit counts must not be labelled fsyncs. Full concurrent-stream/WAL
-qualification and H0 metric registration remain AC0.2. Store raw logs beneath
+qualification and H0 metric registration were proposed as AC0.2. Store raw logs beneath
 `target/qq-perf/<slice>-<date>/`, never in Git.
 
 ## Same-binary control
@@ -171,7 +172,8 @@ The job records baseline, candidate and same-binary candidate control, then
 checks A/B and A/A against unchanged budgets and refuses excessive I/O pressure.
 A recording completing successfully is not itself a budget pass: inspect both
 check logs and the overall job result. Retained artifacts include receipts,
-pressure, reports and check logs; no local or inherited violation is waived.
+pressure, reports and check logs. Report local and inherited violations without
+relabelling a failed measurement as passing.
 
 ### Isolated turn diagnostic recording
 
@@ -219,12 +221,13 @@ included soak sources. Preserve them as whole-build diagnostics; their A/B
 changes cannot be attributed to runtime changes. Do not retrospectively qualify
 them using matching boundary labels, profiles or compiler versions.
 
-Tail gates (p95, p99) on a shared host are frequently not repeatable. For any
-tail gate the slice reports, also run a **same-binary A/A pair**: baseline
+Tail gates (p95, p99) on a shared host are frequently not repeatable. For a
+tail comparison, also run a **same-binary A/A pair**: baseline
 against itself with the same procedure. If the A/A pair fails the same gate as
 the A/B pair with matching medians, record the failure as *non-repeatable on
-this host* and schedule a quiet-host run. Do not waive it, do not remove
-samples, and do not widen the budget.
+this host*. Attribution remains inconclusive until a controlled measurement
+is available. Preserve the samples and report the observed budget overrun;
+do not turn noisy evidence into a passing result.
 
 ## Host conditions
 
@@ -235,9 +238,9 @@ samples, and do not widen the budget.
 - Prefer a clean detached worktree per arm so no rebuild happens between
   pairs.
 
-## What goes in the ledger
+## What to report
 
-A table of the gates the slice names: metric, baseline, candidate, budget,
+A short table in the PR: metric, baseline, candidate, budget,
 and the A/A result for tails. Medians and p95 as the fixture reports them
 (nearest-rank). Note the host pressure range and anything not measured. The
 raw reports stay under `target/qq-perf/<slice>-<date>/` (untracked); record
@@ -245,7 +248,7 @@ that path.
 
 ## Tightening a budget
 
-When a slice qualifies a tighter target (for example the eight-stream output
+When measurements justify a tighter target (for example the eight-stream output
 gap from 50 ms to 20 ms), change `benchmarks/perf/budgets-v1.json` in the same
-PR, cite the qualifying recording, and write or amend an ADR if the target is
-a design commitment.
+PR and cite the recording. An ADR is needed only when requested or when
+the decision is contested.

@@ -2124,7 +2124,7 @@ Application configuration types must not leak into `qq-core`.
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
-| Process execution | Local implementation plus one real sandbox adapter (deferred sandbox adapter) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
+| Process execution | Local implementation; cross-platform sandbox design under review in [PR #375](https://github.com/retsu-AI/qq/pull/375) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
 
 Rules that remain in force: the built-in Rust tools stay the zero-overhead
@@ -2164,13 +2164,14 @@ must be supported by a benchmark and must not make routine development hostile.
 
 Method: fake providers and temporary stores for deterministic runtime latency;
 provider network latency separated from QQ latency; fixed-model live runs only
-for outcome and cache qualification. Every change records the pre-change
-baseline for its own new behavior before enforcing a regression gate. The
+for outcome and cache qualification. Performance changes record a comparable
+pre-change baseline. The
 reproducible protocol is [`benchmarks/perf/README.md`](../../benchmarks/perf/README.md);
 executable budgets are `benchmarks/perf/budgets-v1.json`. Tail gates on a
 loaded host are not repeatable (same-binary A/A pairs fail the same gates as
-A/B pairs); tail acceptance requires a quiet host, and failures are retained,
-never waived.
+A/B pairs); report these results as inconclusive for attribution. Retain failed
+measurements and report budget overruns in the PR; the user decides whether they
+block delivery.
 
 Targets the executable budgets and benchmarks enforce or approach:
 
@@ -2197,9 +2198,8 @@ The repository is pure Rust. It contains none of the following, and none is
 scaffolded:
 
 - Web and mobile client surfaces beyond `qq-client`'s transport and state
-  (the WASM client crate and shared reducer exist); see
-  [`docs/plans/multi-surface-clients.md`](../plans/multi-surface-clients.md)
-  and ADR-0015.
+  (the WASM client crate and shared reducer exist); ADR-0015 records the
+  proposed enrollment design.
 - JavaScript/TypeScript packages or package workspace.
 - Separate server executable.
 - Distributed workers or cloud control plane. These belong to a supervisor

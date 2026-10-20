@@ -24,9 +24,9 @@ cargo xtask smoke          # the real qq binary against a loopback fake provider
 cargo xtask check --full   # what the merge queue runs
 ```
 
-Run `cargo bench -p qq-provider --bench provider_compiler` when provider
-compilation changes, and the focused fixtures in
-[`perf-recording.md`](./perf-recording.md) when a slice names a gate.
+For performance or size work, use the relevant focused fixture in
+[`perf-recording.md`](./perf-recording.md). Routine changes need the normal
+feedback loop, not an additional performance campaign.
 
 ## `qq --version`
 

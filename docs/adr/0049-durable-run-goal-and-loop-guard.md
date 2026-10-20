@@ -4,7 +4,7 @@
 acceptance, from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
-**Implements:** [`goals.md`](../plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
+**Implements:** [`goals.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
 
 ## Context
 
@@ -435,7 +435,7 @@ a goal.
 8. **Loop guard, for every run.** The observation windows are independent of
    runtime checkpoints: a checkpoint can occur before 256 calls when the next
    turn's capacity is reserved. This proposed clarification is tracked in
-   [decision 13](../plans/progress/decisions-needed.md).
+   [decision 13](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/decisions-needed.md).
    - **Observed results only.** The guard never predicts a result it hasn't
      seen. It keeps two structures:
      - a repeat counter for the current run of identical executed
@@ -502,7 +502,7 @@ a goal.
   budget use from `goal_updated` and the snapshot, without reading the
   transcript. That is the token-cheap surface the TUI and web clients need.
   The TUI gets `/goal`, and `qq run --goal` / `qq goal` cover headless and
-  scripting ([`goals.md`](../plans/goals.md) § Surfaces).
+  scripting ([`goals.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/goals.md) § Surfaces).
 - **Risk: a goal runs code while nobody watches.** Goal runs keep the
   session's approval mode. A held approval pauses the goal after
   `goal_approval_wait` rather than using up its budget. Check authority is

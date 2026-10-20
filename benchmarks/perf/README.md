@@ -2,13 +2,15 @@
 
 QQ's performance harness records the current default release artifact and
 deterministic end-to-end runtime paths. Codes such as H0, R4, R5, AC0.1, and
-AC0.2 name the plan slices that introduced or own a measurement: H0 is the
-speed constitution (this harness and its fixture) in
-[`speed-first.md`](../../docs/plans/speed-first.md); R4 (linear, fair durable
+AC0.2 name historical plan slices that introduced or proposed a measurement.
+H0 is this harness and its fixture from the
+[speed-first plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/speed-first.md); R4 (linear, fair durable
 streaming) and R5 (resolved model, context planning, run budgets) are
-readiness milestones from `terminal-bench.md`, recorded in the historical
-speed-first ledger; AC0.1 and AC0.2 are the soak and resource characterization
-now owned by [`reliability.md`](../../docs/plans/reliability.md). Raw
+readiness milestones from the [terminal-bench plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/terminal-bench.md);
+AC0.1 and AC0.2 proposed soak and resource characterization in the
+[reliability plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/reliability.md).
+These labels do not schedule work; current work follows the
+[core stabilization plan](../../docs/plans/README.md). Raw
 reports and dependency trees are generated under `target/qq-perf/` and remain
 untracked. `--output` is deliberately restricted to a new `.json` file in that
 directory. Capability-relative create-new file handles stay open for the full

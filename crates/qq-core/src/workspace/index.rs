@@ -1,6 +1,4 @@
-//! Merkle index of a workspace: the change-detection primitive for
-//! run-snapshot checkpoints (`docs/plans/run-snapshots.md` § Change
-//! Detection).
+//! Merkle index for detecting changes in the workspace tree the tools see.
 //!
 //! [`WorkspaceIndex::build`] walks the workspace through the contained,
 //! ignore-aware lister `search` and `tree` use — so the index sees exactly

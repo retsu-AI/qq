@@ -1,7 +1,8 @@
 # Delegation Experiment Arms
 
-Configuration overlays for the paired evaluation in
-`docs/plans/terminal-bench.md` § D6b. Each file is a complete RON
+Configuration overlays for the paired evaluation proposed in the
+[historical terminal-bench plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/terminal-bench.md) § D6b.
+Each file is a complete RON
 document applied through `QQ_CONFIG_CONTENT` on top of the operator's normal
 layers, so every arm shares the same providers, credentials, primary model,
 and policy and differs only in the section it names. Routes below are

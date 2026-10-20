@@ -1,27 +1,11 @@
-<!-- Title: type(scope): imperative summary  — e.g. fix(config): explain how to set a model -->
+## Change
 
-## What changes for users
+<!-- What changes for users and why. Link the existing issue when there is one. -->
 
-<!-- Behavior before and after, in the user's terms. Quote messages and commands. "None" for internal-only changes. -->
+## Verification
 
-## Why / design
+<!-- Relevant commands and observed results, including the final cargo xtask check. For behavior changes, describe the actual surface exercised. -->
 
-<!-- Decisions a reviewer should know about; link the issue, plan slice, or ADR. -->
+## Known impact
 
-Linear: ENG-
-Slice: <!-- docs/plans/<plan>.md#<id>, if planned -->
-
-## How verified
-
-<!-- Exact commands and counts. New or changed tests by name. -->
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- [ ] `cargo test --workspace`
-- [ ] `cargo test -p qq-provider --no-default-features --features test-support` (if `qq-provider` changed)
-- [ ] Manual check: <!-- what you ran and saw -->
-
-## Impact
-
-- Performance: <!-- none / hot path touched and measured how -->
-- Compatibility: <!-- PROTOCOL / DESCRIPTOR / store schema unchanged, or n→m with fixtures -->
-- Docs: <!-- files in docs/guide/ or docs/design/ updated, or why not -->
+<!-- Regressions, compatibility changes, budget overruns, or unverified behavior. "None" is fine. -->

@@ -1,6 +1,5 @@
 //! Cost of the Merkle workspace index over the same synthetic 10k-file
-//! workspace `search_walk` uses (`docs/plans/run-snapshots.md` § Change
-//! Detection).
+//! workspace `search_walk` uses.
 //!
 //! Three numbers matter for a per-turn checkpoint: `build_10k` is the cold
 //! cost (walk + read + SHA-256 of every file); `refresh_10k_quiet` is the

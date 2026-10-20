@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-10
 **Deciders:** multi-surface lead; second reviewer required (auth surface)
-**Implements:** `docs/plans/multi-surface-clients.md` S2 (and the auth half of S4)
+**Implements:** [historical multi-surface-clients.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/multi-surface-clients.md) S2 (and the auth half of S4)
 
 ## Context
 
@@ -116,7 +116,7 @@ Concrete shape:
 - Server identity is the store id: ADR reservation S1, `qq_protocol::ServerInfo`.
 - CORS contract (why no cookies): `docs/design/protocol.md` § Cross-Origin
   Access (S3, #16).
-- Plan: `docs/plans/multi-surface-clients.md` § S2, § S4; decision #6 in
-  `docs/plans/progress/decisions-needed.md`.
+- Plan: [historical multi-surface-clients.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/multi-surface-clients.md) § S2, § S4; decision #6 in
+  [historical progress/decisions-needed.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/decisions-needed.md).
 - To be appended on acceptance: store migration, `PROTOCOL_VERSION` bump
   commit, the S2 PR, the latency measurement.

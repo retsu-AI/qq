@@ -1,7 +1,7 @@
 //! Cost of `search` and `tree` over a synthetic 10k-file workspace: an
 //! ignore-aware walk plus content scan in the page cache.
 //!
-//! Budget (per `docs/plans/tool-layer.md` T2): a hot content search over
+//! Measurement target: a hot content search over
 //! 10k files ≤ 150 ms. The fixture mirrors a mid-size repository: 200
 //! directories × 50 source files of ~40 lines, a `.gitignore`, and a
 //! `target/` tree of the same size that the walk must skip without reading.

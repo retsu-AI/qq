@@ -113,4 +113,4 @@ prompt digest being a digest of the whole text, so any split must be exact.
   `crates/qq-core/src/plan.rs` — `PromptPrefixKey`, `prompt_prefix`;
   `crates/qq-core/src/lib.rs` — `the_transcript_is_shared_with_each_request_and_grown_in_place`,
   `prefix_plus_suffix_digest_equals_the_full_prompt_digest`.
-- Ledger receipt: `docs/plans/progress/speed-first.md` (H18, 2026-09-13).
+- Ledger receipt: [historical progress/speed-first.md](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/speed-first.md) (H18, 2026-09-13).

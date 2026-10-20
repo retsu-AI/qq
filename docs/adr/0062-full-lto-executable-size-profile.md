@@ -4,7 +4,7 @@
 **Date:** 2026-10-15
 **Deciders:** ENG-834 performance-gate repair
 **Supersedes:** [ADR-0010](0010-release-profile.md) in part (LTO and package optimization)
-**Implements:** [Performance gate repairs](../plans/progress/performance-gates.md)
+**Implements:** [Performance gate repairs](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/performance-gates.md)
 
 ## Context
 
@@ -55,7 +55,7 @@ fixture, and qualification logs expose build and workload phases.
 
 - Root `Cargo.toml` release profile and package overrides.
 - [PR #315](https://github.com/retsu-AI/qq/pull/315), ENG-834.
-- [Repair ledger](../plans/progress/performance-gates.md): red H0 reports,
+- [Repair ledger](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/progress/performance-gates.md): red H0 reports,
   serialization diagnostics, artifact sizes and final qualification status.
 - [Performance recording](../runbooks/perf-recording.md): A/B and A/A controls,
   source/binary identity and visible build/workload stages.

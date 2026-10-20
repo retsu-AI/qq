@@ -6,7 +6,8 @@ claim implementation. It supersedes the August 2026 reference audit and the
 September 2026 per-feature catalog (both deleted; see Git history before
 `445d740`).
 
-Implementation status lives in the ledgers, not here. At the time of writing
+The proposed delivery sequence below is historical. Current work follows the
+[core stabilization plan](../plans/README.md). At the time of writing
 F01 (#55), F02 (#57), F14 (#63), and the context-usability stack C1–C6
 (#56, #58, #59, #61, #64) had merged. C2 ships proactive compaction and
 mid-run stale-read stubbing and explicitly defers full mid-run summarization,
@@ -470,14 +471,15 @@ relevant execution/teardown prerequisites are satisfied. Its placement with
 daily-development adapters is architectural, not a dependency on completing
 the paid evaluations or all work in order 4.
 
-Existing owners: [speed-first](../plans/speed-first.md),
-[tools](../plans/tool-layer.md), [readiness](../plans/terminal-bench.md),
+Plans at the time of this audit: [speed-first](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/speed-first.md),
+[tools](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/tool-layer.md), [readiness](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/terminal-bench.md),
 [delegation](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/supervised-delegation.md),
-[clients](../plans/multi-surface-clients.md),
-[snapshots](../plans/run-snapshots.md), and
-[LSP](../plans/lsp-diagnostics.md). H22.2 and T8 are in the inspected Git history;
+[clients](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/multi-surface-clients.md),
+[snapshots](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/run-snapshots.md), and
+[LSP](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/lsp-diagnostics.md). H22.2 and T8 are in the inspected Git history;
 their stale “in review” ledger rows should not cause implementation to restart.
-The carried H0/fairness/native-platform and paid quality gates remain separate.
+The H0/fairness/native-platform and paid quality results below remain historical
+evidence, not current delivery gates.
 
 ## Performance and quality acceptance
 

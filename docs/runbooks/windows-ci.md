@@ -36,15 +36,14 @@ the run log.
    as a new step in the `windows-teardown` job. Include the defining module
    (`sessions::tests::delegation::` for delegation tests). Keep steps one test
    each so a failure names the test; do not bypass the coverage assertion.
-4. Run the job through `workflow_dispatch` on the branch before opening the PR
-   and cite the run URL in the ledger.
+4. For a change to Windows teardown behavior, run the job through
+   `workflow_dispatch` on the branch and cite the run URL in the PR.
 
 ## What this does not claim
 
-A full `cargo test --workspace` on Windows has not been executed. The ledger
-row `5a-windows` in `docs/plans/progress/speed-first.md` tracks whether that
-becomes required (`decisions-needed.md` #3). Do not describe Windows as
-"qualified" in a plan or design doc beyond the targeted teardown tests.
+This runbook records targeted teardown coverage, not a full
+`cargo test --workspace` result on Windows. Report the tests actually run
+and their results; do not infer whole-platform qualification from them.
 
 ## Local reproduction
 
