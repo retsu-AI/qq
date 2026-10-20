@@ -8,7 +8,6 @@ use super::{
     },
 };
 use crate::runtime::RunDeadline;
-use std::collections::HashSet;
 
 /// Denies every tool call. Compaction runs summarize existing context; a
 /// call the instruction forbade costs one denied round trip and persists
@@ -55,48 +54,6 @@ async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
             .map(|index| hooks.remove(index))
     };
     if let Some(hook) = hook {
-        let _ = hook.entered.send(());
-        let _ = hook.release.await;
-    }
-}
-
-#[cfg(test)]
-struct RoutingAdmissionHook {
-    run_id: RunId,
-    entered: oneshot::Sender<()>,
-    release: oneshot::Receiver<()>,
-}
-#[cfg(test)]
-static ROUTING_ADMISSION_HOOKS: Mutex<Vec<RoutingAdmissionHook>> = Mutex::new(Vec::new());
-
-/// Holds after policy refresh and cost declaration, before durable paid admission.
-#[cfg(test)]
-pub(super) fn hold_routing_admission(
-    run_id: RunId,
-) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = oneshot::channel();
-    ROUTING_ADMISSION_HOOKS
-        .lock()
-        .unwrap()
-        .push(RoutingAdmissionHook {
-            run_id,
-            entered,
-            release: release_rx,
-        });
-    (entered_rx, release)
-}
-#[cfg(test)]
-async fn pause_before_routing_admission(run_id: RunId) {
-    let hook = {
-        let mut hooks = ROUTING_ADMISSION_HOOKS.lock().unwrap();
-        hooks
-            .iter()
-            .position(|hook| hook.run_id == run_id)
-            .map(|index| hooks.remove(index))
-    };
-    if let Some(hook) = hook {
-        // A dropped test receiver/sender releases its fixture without blocking cleanup.
         let _ = hook.entered.send(());
         let _ = hook.release.await;
     }
@@ -261,38 +218,6 @@ async fn prepare_execution(
     resources: &RunResources,
     execution_started: tokio::time::Instant,
 ) -> Result<PreparedExecution, RunOutcome> {
-    let identity = loaded.plan.descriptor().checkpoint.as_deref();
-    if claimed
-        .checkpoint
-        .as_ref()
-        .is_some_and(|selection| !selection.matches(identity))
-    {
-        return Err(RunOutcome::Failed {
-            failure: RunFailure {
-                kind: RunFailureKind::Configuration,
-                message: "child loader did not preserve the parent's inherited reviewer identity"
-                    .to_owned(),
-            },
-        });
-    }
-    let delegate_identity = loaded.plan.descriptor().approval_delegate.as_deref();
-    if claimed
-        .approval_delegate
-        .as_ref()
-        .is_some_and(|selection| !selection.matches(delegate_identity))
-    {
-        return Err(RunOutcome::Failed {
-            failure: RunFailure {
-                kind: RunFailureKind::Configuration,
-                message: "child loader did not preserve the parent's approval delegate".to_owned(),
-            },
-        });
-    }
-    claimed.checkpoint = Some(CheckpointSelection::from_identity(identity));
-    claimed.routing = Some(RoutingSelection::from_identity(
-        loaded.plan.descriptor().routing.as_deref(),
-    ));
-    claimed.approval_delegate = Some(ApprovalDelegateSelection::from_identity(delegate_identity));
     let deadline = RunDeadline::new(claimed.limits, execution_started);
     if let Some(deadline) = deadline
         && claimed.identity.kind == RunKind::Prompt
@@ -327,7 +252,6 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.approval_delegate(),
-            loaded.plan.jev_approval(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
@@ -591,20 +515,18 @@ async fn prepare_execution(
         capabilities.audit_hook = None;
         capabilities.spawner = None;
     }
-    if !internal {
-        capabilities.routing_spend = loaded.routing_spend;
-        if (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
-            && let Some(tokens) = [
-                claimed.limits.max_total_tokens,
-                claimed.limits.max_output_tokens,
-            ]
-            .into_iter()
-            .flatten()
-            .min()
-        {
-            capabilities =
-                capabilities.with_max_output_tokens(u32::try_from(tokens).unwrap_or(u32::MAX));
-        }
+    if !internal
+        && (claimed.goal.is_some() || claimed.goal_spend_owner.is_some())
+        && let Some(tokens) = [
+            claimed.limits.max_total_tokens,
+            claimed.limits.max_output_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        capabilities =
+            capabilities.with_max_output_tokens(u32::try_from(tokens).unwrap_or(u32::MAX));
     }
     // The claimed workspace is the plan's workspace: the loader compiled the
     // plan for exactly this session's canonical root, so no per-run
@@ -696,322 +618,6 @@ async fn prepare_execution(
             }
         }
     }
-}
-
-async fn route_run(
-    inner: &Arc<SessionRuntimeInner>,
-    claimed: &mut ClaimedRun,
-    loaded: &mut LoadedRuntime,
-    cancellation: &mut watch::Receiver<bool>,
-    started: tokio::time::Instant,
-) -> Result<(), RunOutcome> {
-    if claimed
-        .routing
-        .as_ref()
-        .is_some_and(|selection| !selection.matches(loaded.plan.descriptor().routing.as_deref()))
-    {
-        return Err(RunOutcome::Failed {
-            failure: RunFailure {
-                kind: RunFailureKind::Configuration,
-                message: "child loader did not preserve the parent's routing policy".to_owned(),
-            },
-        });
-    }
-    if claimed.identity.kind != RunKind::Prompt || claimed.purpose != SessionPurpose::Task {
-        return Ok(());
-    }
-    let Some(router) = loaded.router.clone() else {
-        return Ok(());
-    };
-    let (mut budget, deadline, task, oversized) = loop {
-        let deadline = RunDeadline::new(claimed.limits, started);
-        let budget = crate::runtime::BudgetMeter::new(
-            claimed.limits,
-            loaded.resolved_model().pricing.clone(),
-            started,
-        );
-        if claimed.goal.is_none()
-            && let Err(kind) = budget.remaining(tokio::time::Instant::now())
-        {
-            return Err(RunOutcome::BudgetExhausted {
-                exhaustion: Box::new(budget.exhaustion(kind, false, tokio::time::Instant::now())),
-            });
-        }
-        if claimed.goal.is_none()
-            && let Some(limit) = claimed.limits.max_cost_usd_nanos
-        {
-            let kind = match router.max_cost_usd_nanos() {
-                None => Some(qq_protocol::BudgetLimitKind::CostUnknown),
-                Some(cost) if cost > limit => Some(qq_protocol::BudgetLimitKind::Cost),
-                Some(_) => None,
-            };
-            if let Some(kind) = kind {
-                return Err(RunOutcome::BudgetExhausted {
-                    exhaustion: Box::new(budget.exhaustion(
-                        kind,
-                        false,
-                        tokio::time::Instant::now(),
-                    )),
-                });
-            }
-        }
-        let mut task = String::new();
-        let mut oversized = false;
-        if matches!(claimed.origin, Some(qq_protocol::RunOrigin::Goal { .. }))
-            && let Some(goal) = &claimed.goal
-        {
-            task.push_str(&goal.objective);
-        } else if let Some(message) = claimed
-            .messages
-            .iter()
-            .rev()
-            .find(|message| message.role() == Role::User)
-        {
-            for block in message.content() {
-                if let ContentBlock::Text { text } = block {
-                    if task.len().saturating_add(text.len()).saturating_add(1) > 16 * 1024 {
-                        oversized = true;
-                        break;
-                    }
-                    task.push_str(text);
-                    task.push('\n');
-                }
-            }
-        }
-        if *cancellation.borrow() {
-            return Err(RunOutcome::Cancelled);
-        }
-        let routing_cost = router.max_cost_usd_nanos();
-        #[cfg(test)]
-        pause_before_routing_admission(claimed.identity.run_id).await;
-        match inner
-            .store
-            .record_routing_started(
-                claimed,
-                !oversized && !task.is_empty(),
-                routing_cost,
-                (router.max_input_tokens(), router.max_output_tokens()),
-            )
-            .await
-        {
-            Ok(Ok(Some(event))) => {
-                inner.notify(event.cursor);
-                break (budget, deadline, task, oversized);
-            }
-            Ok(Ok(None)) => return Err(RunOutcome::Cancelled),
-            Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
-                claimed.limits = *limits;
-                if let Some(goals::GoalAdmission::Allowed {
-                    final_slot: admitted,
-                    ..
-                }) = &mut claimed.goal_admission
-                {
-                    *admitted = final_slot;
-                }
-                continue;
-            }
-            Ok(Err(claim::GoalStartRefusal::PerRunDuration)) => {
-                return Err(per_run_duration_exhaustion());
-            }
-            Ok(Err(claim::GoalStartRefusal::Exhausted(reason))) => {
-                return Err(goal_admission_exhaustion(reason));
-            }
-            Ok(Err(claim::GoalStartRefusal::RoutingTokens)) => {
-                return Err(RunOutcome::Failed { failure: RunFailure {
-                    kind: RunFailureKind::Configuration,
-                    message: "task routing requires declared token ceilings within the current caller and goal allowance; configure routing bounds or disable task routing".to_owned(),
-                }});
-            }
-            Ok(Err(claim::GoalStartRefusal::RoutingCost(refusal))) => {
-                let message = match refusal {
-                    claim::RoutingCostRefusal::Undeclared => {
-                        "a finite goal cost cap requires a declared maximum task-routing cost; configure routing pricing or disable task routing"
-                    }
-                    claim::RoutingCostRefusal::AboveAllowance => {
-                        "the maximum task-routing cost exceeds the available allowance; raise the budget or lower the routing limit"
-                    }
-                };
-                return Err(RunOutcome::Failed {
-                    failure: RunFailure {
-                        kind: RunFailureKind::Configuration,
-                        message: message.to_owned(),
-                    },
-                });
-            }
-            Ok(Err(claim::GoalStartRefusal::Cancelled)) => return Err(RunOutcome::Cancelled),
-            Err(error) => {
-                return Err(persistence_failure(
-                    "failed to persist routing dispatch",
-                    &error,
-                ));
-            }
-        }
-    };
-    let fallback = ModelSelection {
-        model_is_fallback: false,
-        model: Some(loaded.resolved_model().route.clone()),
-        max_output_tokens: Some(loaded.resolved_model().max_output_tokens),
-        organization: loaded.resolved_model().organization.clone(),
-    };
-    let pinned_effort = loaded.plan.descriptor().reasoning_effort;
-    let fallback_decision = |reason: &str, spent: bool| qq_protocol::RoutingDecision {
-        model: fallback.clone(),
-        reasoning_effort: pinned_effort,
-        outcome: qq_protocol::RoutingOutcome::Fallback,
-        reason: reason.to_owned(),
-        usage: (!spent).then_some(TokenUsage::default()),
-        estimated_cost_usd_nanos: (!spent).then_some(0),
-    };
-    let mut decision = if oversized || task.is_empty() {
-        fallback_decision(
-            "task exceeds routing bounds or has no text; configured model retained",
-            false,
-        )
-    } else {
-        let task = crate::tools::output::mask_secrets(task);
-        let response = tokio::time::timeout(Duration::from_secs(5), router.route(task));
-        tokio::select! {
-            biased;
-            () = RunDeadline::wait(deadline) => return Err(RunOutcome::BudgetExhausted {
-                exhaustion: Box::new(deadline.expect("finite deadline woke").exhaustion()),
-            }),
-            changed = cancellation.changed() => return Err(if changed.is_ok() && *cancellation.borrow() { RunOutcome::Cancelled } else { RunOutcome::Interrupted }),
-            result = response => match result {
-                Ok(decision) => decision,
-                Err(_) => fallback_decision("routing timed out; configured model retained", true),
-            },
-        }
-    };
-    decision.reason = truncate_utf8(decision.reason, 1024);
-    // A router may optimize omission, but an already pinned effort is authoritative.
-    if pinned_effort.is_some() {
-        decision.reasoning_effort = pinned_effort;
-    }
-    if !claimed.session_model.model_is_fallback && decision.model.model != fallback.model {
-        decision.outcome = qq_protocol::RoutingOutcome::Fallback;
-        decision.reason = "explicit model choice retained".to_owned();
-    }
-    if decision.outcome == qq_protocol::RoutingOutcome::Fallback {
-        decision.model = fallback.clone();
-        decision.reasoning_effort = pinned_effort;
-    } else {
-        match inner
-            .store
-            .record_routing_spend(
-                claimed,
-                qq_protocol::CheckpointSpend {
-                    usage: decision.usage,
-                    estimated_cost_usd_nanos: decision.estimated_cost_usd_nanos,
-                },
-            )
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => return Err(RunOutcome::Cancelled),
-            Err(error) => {
-                return Err(persistence_failure(
-                    "failed to persist routing spend",
-                    &error,
-                ));
-            }
-        }
-        decision.model.max_output_tokens = claimed.model.max_output_tokens;
-        decision.model.organization = claimed.model.organization.clone();
-        let load_progress = RuntimeLoadProgress::default();
-        let mut load = inner.loader.load_with_progress(
-            RuntimeLoadRequest {
-                reasoning_effort: decision.reasoning_effort,
-                routing: Some(RoutingSelection::from_identity(
-                    loaded.plan.descriptor().routing.as_deref(),
-                )),
-                checkpoint: Some(CheckpointSelection::from_identity(
-                    loaded.plan.descriptor().checkpoint.as_deref(),
-                )),
-                approval_delegate: Some(ApprovalDelegateSelection::from_identity(
-                    loaded.plan.descriptor().approval_delegate.as_deref(),
-                )),
-                workspace: claimed.workspace.clone(),
-                model: decision.model.clone(),
-                profile: claimed.profile.clone(),
-            },
-            load_progress.clone(),
-        );
-        let selected = tokio::select! {
-            biased;
-            () = RunDeadline::wait(deadline) => {
-                let unfinished_stage = load_progress.stage();
-                load_progress.cancel();
-                let _ = load.await;
-                let mut exhaustion = deadline.expect("finite deadline woke").exhaustion();
-                exhaustion.message.push_str("; selected runtime preparation was still ");
-                exhaustion.message.push_str(unfinished_stage.description());
-                exhaustion.message.push_str(" when the budget expired; no selected model request was started");
-                return Err(RunOutcome::BudgetExhausted { exhaustion: Box::new(exhaustion) });
-            },
-            changed = cancellation.changed() => {
-                load_progress.cancel();
-                let _ = load.await;
-                return Err(if changed.is_ok() && *cancellation.borrow() { RunOutcome::Cancelled } else { RunOutcome::Interrupted });
-            },
-            result = &mut load => result,
-        };
-        match selected {
-            Ok(selected)
-                if selected.plan.workspace_path() == loaded.plan.workspace_path()
-                    && Some(selected.resolved_model().route.as_str())
-                        == decision.model.model.as_deref()
-                    && selected.plan.descriptor().reasoning_effort == decision.reasoning_effort
-                    && selected.plan.descriptor().routing == loaded.plan.descriptor().routing
-                    && selected.plan.descriptor().checkpoint
-                        == loaded.plan.descriptor().checkpoint
-                    && selected.plan.descriptor().approval_delegate
-                        == loaded.plan.descriptor().approval_delegate
-                    && selected.plan.descriptor().profile == loaded.plan.descriptor().profile =>
-            {
-                decision.model = ModelSelection {
-                    model_is_fallback: false,
-                    model: Some(selected.resolved_model().route.clone()),
-                    max_output_tokens: Some(selected.resolved_model().max_output_tokens),
-                    organization: selected.resolved_model().organization.clone(),
-                };
-                *loaded = selected;
-            }
-            _ => {
-                decision.model = fallback;
-                decision.reasoning_effort = pinned_effort;
-                decision.outcome = qq_protocol::RoutingOutcome::Fallback;
-                decision.reason =
-                    "selected route unavailable or incompatible; configured model retained"
-                        .to_owned();
-            }
-        }
-    }
-    let spend = qq_protocol::CheckpointSpend {
-        usage: decision.usage,
-        estimated_cost_usd_nanos: decision.estimated_cost_usd_nanos,
-    };
-    match inner
-        .store
-        .record_routing_completed(claimed, decision)
-        .await
-    {
-        Ok(Some(event)) => inner.notify(event.cursor),
-        Ok(None) => return Err(RunOutcome::Cancelled),
-        Err(error) => {
-            return Err(persistence_failure(
-                "failed to persist routing receipt",
-                &error,
-            ));
-        }
-    }
-    loaded.routing_spend = Some(spend);
-    budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
-    if let Err(kind) = budget.remaining(tokio::time::Instant::now()) {
-        return Err(RunOutcome::BudgetExhausted {
-            exhaustion: Box::new(budget.exhaustion(kind, false, tokio::time::Instant::now())),
-        });
-    }
-    Ok(())
 }
 
 fn per_run_duration_exhaustion() -> RunOutcome {
@@ -1144,16 +750,13 @@ pub(super) async fn execute_run(
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
             reasoning_effort: claimed.reasoning_effort,
-            checkpoint: claimed.checkpoint.clone(),
-            routing: claimed.routing.clone(),
-            approval_delegate: claimed.approval_delegate.clone(),
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),
             profile: claimed.profile.clone(),
         },
         load_progress.clone(),
     );
-    let mut loaded = tokio::select! {
+    let loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
@@ -1236,18 +839,6 @@ pub(super) async fn execute_run(
             .await;
             return;
         }
-    }
-    if let Err(outcome) = route_run(
-        &inner,
-        &mut claimed,
-        &mut loaded,
-        &mut cancellation,
-        execution_started,
-    )
-    .await
-    {
-        finish_reserved_run(&inner, &claimed, outcome).await;
-        return;
     }
     let mut bounded_manual_compaction = false;
     // Admission may downgrade a prompt's context once; it may not refuse the
@@ -1509,10 +1100,6 @@ pub(super) async fn execute_run(
                             claim::GoalStartRefusal::Reprepare { .. } => {
                                 unreachable!("reprepare handled before terminal refusal")
                             }
-                            claim::GoalStartRefusal::RoutingCost(_)
-                            | claim::GoalStartRefusal::RoutingTokens => {
-                                unreachable!("main start does not check routing cost")
-                            }
                         };
                         finish_reserved_run(&inner, &claimed, outcome).await;
                         return;
@@ -1533,15 +1120,8 @@ pub(super) async fn execute_run(
                     max_output_tokens: Some(prepared.audit.resolved_model.max_output_tokens),
                     organization: prepared.audit.resolved_model.organization.clone(),
                 };
-                let initial_spend = loaded.routing_spend.or_else(|| {
-                    (claimed.goal.is_some() || claimed.goal_spend_owner.is_some()).then_some(
-                        qq_protocol::CheckpointSpend {
-                            usage: Some(TokenUsage::default()),
-                            estimated_cost_usd_nanos: Some(0),
-                        },
-                    )
-                });
-                let initial_accounting = initial_spend.map(|spend| {
+                let goal_spend = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
+                let initial_accounting = goal_spend.then(|| {
                     RunAccountingAccumulator::new(
                         prepared.audit.resolved_model.pricing.clone(),
                         context_occupancy_basis(
@@ -1550,7 +1130,7 @@ pub(super) async fn execute_run(
                             prepared.audit.weight.input_bytes(),
                         ),
                     )
-                    .with_routing_spend(Some(spend))
+                    .with_zero_spend()
                     .snapshot()
                 });
                 let cancelled = match cancellation_requested(&inner, claimed.identity.run_id).await
@@ -1606,21 +1186,7 @@ pub(super) async fn execute_run(
                     .await;
                     return;
                 }
-                execute_started_run(
-                    inner,
-                    claimed,
-                    cancellation,
-                    prepared,
-                    &resources,
-                    loaded.routing_spend,
-                    loaded
-                        .plan
-                        .runtime
-                        .checkpoint
-                        .as_ref()
-                        .is_some_and(|reviewer| reviewer.reviews_tools()),
-                )
-                .await;
+                execute_started_run(inner, claimed, cancellation, prepared, &resources).await;
                 return;
             }
             context::ContextPlan::Compact { .. } if claimed.identity.kind == RunKind::Prompt => {
@@ -2052,13 +1618,6 @@ async fn run_auto_compaction(
             compaction_cancellation,
             prepared,
             resources,
-            None,
-            loaded
-                .plan
-                .runtime
-                .checkpoint
-                .as_ref()
-                .is_some_and(|reviewer| reviewer.reviews_tools()),
         )
         .await;
     }
@@ -2206,8 +1765,6 @@ async fn execute_started_run(
     mut cancellation: watch::Receiver<bool>,
     prepared: PreparedExecution,
     resources: &RunResources,
-    routing_spend: Option<qq_protocol::CheckpointSpend>,
-    checkpoint_enforced: bool,
 ) {
     let PreparedExecution {
         goal_paid: _,
@@ -2222,17 +1779,12 @@ async fn execute_started_run(
         audit.static_prefix,
         audit.weight.input_bytes(),
     );
-    let initial_spend = routing_spend.or_else(|| {
-        (claimed.goal.is_some() || claimed.goal_spend_owner.is_some()).then_some(
-            qq_protocol::CheckpointSpend {
-                usage: Some(TokenUsage::default()),
-                estimated_cost_usd_nanos: Some(0),
-            },
-        )
-    });
+    let goal_spend = claimed.goal.is_some() || claimed.goal_spend_owner.is_some();
     let mut accounting =
-        RunAccountingAccumulator::new(resolved_model.pricing.clone(), initial_occupancy_basis)
-            .with_routing_spend(initial_spend);
+        RunAccountingAccumulator::new(resolved_model.pricing.clone(), initial_occupancy_basis);
+    if goal_spend {
+        accounting = accounting.with_zero_spend();
+    }
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
         tool_cancellation.cancel();
@@ -2244,7 +1796,7 @@ async fn execute_started_run(
             &inner,
             &claimed,
             internal_failure("session runtime failed before provider work"),
-            initial_spend.map(|_| accounting.snapshot()),
+            goal_spend.then(|| accounting.snapshot()),
             teardown,
         )
         .await;
@@ -2274,8 +1826,6 @@ async fn execute_started_run(
     // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
-    let mut checkpoint_in_flight = None;
-    let mut tools_awaiting_checkpoint = std::collections::HashSet::<ToolCallId>::new();
     // An internal run's streamed output never joins the transcript; the
     // summary accumulates here and persists as a compaction row instead. A
     // turn cut at the output limit is continued mid-token, so its successor
@@ -2508,28 +2058,6 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
-                        &inner,
-                        &claimed,
-                        &mut tools_awaiting_checkpoint,
-                        &mut checkpoint_in_flight,
-                        &mut accounting,
-                        "failed while settling cancellation",
-                    )
-                    .await
-                    {
-                        finish_run(
-                            &inner,
-                            &claimed,
-                            persistence_failure(
-                                "failed to persist terminal JEV checkpoint status",
-                                &checkpoint_error,
-                            ),
-                            teardown,
-                        )
-                        .await;
-                        return;
-                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -2553,28 +2081,6 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
-                        &inner,
-                        &claimed,
-                        &mut tools_awaiting_checkpoint,
-                        &mut checkpoint_in_flight,
-                        &mut accounting,
-                        "failed while settling cancellation",
-                    )
-                    .await
-                    {
-                        finish_run(
-                            &inner,
-                            &claimed,
-                            persistence_failure(
-                                "failed to persist terminal JEV checkpoint status",
-                                &checkpoint_error,
-                            ),
-                            teardown,
-                        )
-                        .await;
-                        return;
-                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -2595,33 +2101,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                let cancellation_label = if matches!(stopped, RunInput::Cancelled) {
-                    "cancelled"
-                } else {
-                    "interrupted"
-                };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    cancellation_label,
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -2646,28 +2125,6 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
-                        &inner,
-                        &claimed,
-                        &mut tools_awaiting_checkpoint,
-                        &mut checkpoint_in_flight,
-                        &mut accounting,
-                        "failed while settling a runtime failure",
-                    )
-                    .await
-                    {
-                        finish_run(
-                            &inner,
-                            &claimed,
-                            persistence_failure(
-                                "failed to persist terminal JEV checkpoint status",
-                                &checkpoint_error,
-                            ),
-                            teardown,
-                        )
-                        .await;
-                        return;
-                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -2691,28 +2148,6 @@ async fn execute_started_run(
                         inner.failed.send_replace(true);
                         return;
                     };
-                    if let Err(checkpoint_error) = record_unreviewed_checkpoints(
-                        &inner,
-                        &claimed,
-                        &mut tools_awaiting_checkpoint,
-                        &mut checkpoint_in_flight,
-                        &mut accounting,
-                        "failed while settling a runtime failure",
-                    )
-                    .await
-                    {
-                        finish_run(
-                            &inner,
-                            &claimed,
-                            persistence_failure(
-                                "failed to persist terminal JEV checkpoint status",
-                                &checkpoint_error,
-                            ),
-                            teardown,
-                        )
-                        .await;
-                        return;
-                    }
                     finish_run(
                         &inner,
                         &claimed,
@@ -2726,28 +2161,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    "failed",
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -3233,9 +2646,6 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
-                if checkpoint_enforced {
-                    tools_awaiting_checkpoint.insert(id);
-                }
                 let settled = if interrupted {
                     inner
                         .store
@@ -3245,7 +2655,6 @@ async fn execute_started_run(
                     inner.store.deny_tool_call(&claimed, id, message).await
                 };
                 if let Err(error) = settled {
-                    tools_awaiting_checkpoint.remove(&id);
                     let Ok(teardown) = resources.stop(&mut events).await else {
                         inner.failed.send_replace(true);
                         return;
@@ -3311,80 +2720,6 @@ async fn execute_started_run(
                 cost_usd_nanos,
             })) => {
                 accounting.record_review(usage, cost_usd_nanos);
-            }
-            RunInput::Event(Some(RuntimeEvent::CheckpointStarted {
-                correlation,
-                phase,
-                tool_call_id,
-            })) => {
-                if let Err(error) = inner
-                    .store
-                    .record_checkpoint_started(&claimed, correlation.clone(), phase, tool_call_id)
-                    .await
-                {
-                    let Ok(teardown) = resources.stop(&mut events).await else {
-                        inner.failed.send_replace(true);
-                        return;
-                    };
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure("failed to persist Jev review start", &error),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
-                checkpoint_in_flight = Some((correlation, phase, tool_call_id));
-            }
-            RunInput::Event(Some(RuntimeEvent::CheckpointReviewed {
-                correlation,
-                phase,
-                tool_call_id,
-                outcome,
-                confidence,
-                feedback,
-                spend,
-            })) => {
-                if let Some(spend) = spend {
-                    accounting.record_review(spend.usage, spend.estimated_cost_usd_nanos);
-                }
-                let confidence_basis_points =
-                    confidence.map(|value| (value.clamp(0.0, 1.0) * 10_000.0).round() as u16);
-                if let Err(error) = inner
-                    .store
-                    .record_checkpoint(
-                        &claimed,
-                        streaming::CheckpointRecord {
-                            correlation,
-                            phase,
-                            tool_call_id,
-                            outcome,
-                            confidence_basis_points,
-                            feedback,
-                            spend,
-                        },
-                        Some(accounting.snapshot()),
-                    )
-                    .await
-                {
-                    let Ok(teardown) = resources.stop(&mut events).await else {
-                        inner.failed.send_replace(true);
-                        return;
-                    };
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure("failed to persist JEV checkpoint", &error),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
-                checkpoint_in_flight = None;
-                if let Some(tool_call_id) = tool_call_id {
-                    tools_awaiting_checkpoint.remove(&tool_call_id);
-                }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallStarted { id })) => {
                 if internal {
@@ -3529,12 +2864,6 @@ async fn execute_started_run(
                     .await;
                     return;
                 }
-                if checkpoint_enforced {
-                    // Mark before the durable write awaits: subscribers can
-                    // observe the committed result and request cancellation
-                    // before this task resumes from the store actor.
-                    tools_awaiting_checkpoint.insert(id);
-                }
                 match inner
                     .store
                     .finish_tool_call(
@@ -3551,7 +2880,6 @@ async fn execute_started_run(
                 {
                     Ok(_) => {}
                     Err(error) => {
-                        tools_awaiting_checkpoint.remove(&id);
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
                             return;
@@ -3821,8 +3149,7 @@ async fn execute_started_run(
                 }
             }
             // Every completed turn is durable; the session accepts the next
-            // prompt as a continuation. Settles like an exhausted budget: the
-            // reviewer's pending checkpoints are recorded as unreviewed.
+            // prompt as a continuation. Settles like an exhausted budget.
             RunInput::Event(Some(RuntimeEvent::Paused { pause })) => {
                 if let Err(error) = flush_pending_text(
                     &inner,
@@ -3851,31 +3178,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    match pause.as_ref() {
-                        qq_protocol::RunPause::ProviderRetry { .. } => "paused on a provider fault",
-                        qq_protocol::RunPause::NoProgress { .. } => "paused for no progress",
-                    },
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -3970,44 +3272,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                let unreviewed = match record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    "completed",
-                )
-                .await
-                {
-                    Ok(count) => count,
-                    Err(error) => {
-                        finish_run(
-                            &inner,
-                            &claimed,
-                            persistence_failure(
-                                "failed to persist terminal JEV checkpoint status",
-                                &error,
-                            ),
-                            teardown,
-                        )
-                        .await;
-                        return;
-                    }
-                };
-                if unreviewed != 0 {
-                    finish_run_accounted(
-                        &inner,
-                        &claimed,
-                        internal_failure(
-                            "run attempted completion with a durable tool result that was not reviewed",
-                        ),
-                        Some(accounting.snapshot()),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 let mut settled = accounting.snapshot();
                 settled.final_output = final_output;
                 finish_run_accounted(
@@ -4048,28 +3312,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    "stopped by its budget",
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -4110,28 +3352,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    "failed",
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -4196,28 +3416,6 @@ async fn execute_started_run(
                     inner.failed.send_replace(true);
                     return;
                 };
-                if let Err(error) = record_unreviewed_checkpoints(
-                    &inner,
-                    &claimed,
-                    &mut tools_awaiting_checkpoint,
-                    &mut checkpoint_in_flight,
-                    &mut accounting,
-                    "ended without a terminal event",
-                )
-                .await
-                {
-                    finish_run(
-                        &inner,
-                        &claimed,
-                        persistence_failure(
-                            "failed to persist terminal JEV checkpoint status",
-                            &error,
-                        ),
-                        teardown,
-                    )
-                    .await;
-                    return;
-                }
                 finish_run_accounted(
                     &inner,
                     &claimed,
@@ -4343,54 +3541,6 @@ async fn persist_text(
     Ok(())
 }
 
-/// Persists an explicit fail-closed status for every durable tool result whose
-/// reviewer future was cut short by terminal run settlement. This is separate
-/// from the terminal outcome: it never claims that the remote reviewer ran.
-async fn record_unreviewed_checkpoints(
-    inner: &SessionRuntimeInner,
-    claimed: &ClaimedRun,
-    pending: &mut HashSet<ToolCallId>,
-    in_flight: &mut Option<(String, qq_protocol::CheckpointPhase, Option<ToolCallId>)>,
-    accounting: &mut RunAccountingAccumulator,
-    terminal_reason: &str,
-) -> Result<usize, SessionRuntimeError> {
-    let mut count = 0;
-    if let Some((correlation, phase, tool_call_id)) = in_flight.take() {
-        accounting.record_review(None, None);
-        inner.store.record_checkpoint(claimed, streaming::CheckpointRecord {
-            correlation, phase, tool_call_id, outcome: qq_protocol::CheckpointOutcome::Unavailable, confidence_basis_points: None,
-            feedback: format!("No Jev reviewer verdict was durably recorded before the run {terminal_reason}; remote spend is unknown"),
-            spend: Some(qq_protocol::CheckpointSpend::default()),
-        }, Some(accounting.snapshot())).await?;
-        if let Some(id) = tool_call_id {
-            pending.remove(&id);
-        }
-        count += 1;
-    }
-    let mut tool_call_ids = pending.drain().collect::<Vec<_>>();
-    tool_call_ids.sort_by_key(ToString::to_string);
-    count += tool_call_ids.len();
-    for tool_call_id in tool_call_ids {
-        inner
-            .store
-            .record_checkpoint(
-                claimed,
-                streaming::CheckpointRecord {
-                    correlation: format!("tool:{tool_call_id}"),
-                    phase: qq_protocol::CheckpointPhase::ToolResult,
-                    tool_call_id: Some(tool_call_id),
-                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                    confidence_basis_points: None,
-                    feedback: format!("No JEV reviewer verdict was durably recorded before the run {terminal_reason} after the tool result became durable"),
-                    spend: None,
-                },
-                None,
-            )
-            .await?;
-    }
-    Ok(count)
-}
-
 /// Settles a started run. `teardown` proves the run's tools and children were
 /// drained first; the store will not settle a started run without it.
 pub(super) async fn finish_run(
@@ -4479,15 +3629,12 @@ impl RunAccountingAccumulator {
         }
     }
 
-    pub(super) fn with_routing_spend(
-        mut self,
-        spend: Option<qq_protocol::CheckpointSpend>,
-    ) -> Self {
-        if let Some(spend) = spend {
-            self.usage = spend.usage;
-            self.estimated_cost_usd_nanos = spend.estimated_cost_usd_nanos;
-            self.saw_spend = true;
-        }
+    /// Starts the totals as a known zero spend, so a goal run that settles
+    /// before any turn still records an exact receipt.
+    pub(super) fn with_zero_spend(mut self) -> Self {
+        self.usage = Some(TokenUsage::default());
+        self.estimated_cost_usd_nanos = Some(0);
+        self.saw_spend = true;
         self
     }
 

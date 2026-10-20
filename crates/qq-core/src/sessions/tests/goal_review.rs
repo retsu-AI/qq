@@ -349,8 +349,8 @@ async fn replayed_sponsored_child_cancel_wakes_the_goal_scheduler() {
 }
 
 #[tokio::test]
-async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_uncertainty() {
-    for routing in ["none", "measured", "unknown"] {
+async fn goal_run_start_seeds_zero_before_dispatch() {
+    {
         let (directory, store, initial) = super::goals::model_goal_claim(false).await;
         let session = initial.identity.session_id;
         store
@@ -381,41 +381,8 @@ async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_un
             .unwrap();
         let claim = store.reserve_next_run(false).await.unwrap().unwrap();
         let run = claim.identity.run_id;
-        let expected = match routing {
-            "measured" => Some(TokenUsage {
-                input_tokens: 7,
-                ..Default::default()
-            }),
-            "unknown" => None,
-            _ => Some(TokenUsage::default()),
-        };
-        let cost = match routing {
-            "measured" => Some(9),
-            "unknown" => None,
-            _ => Some(0),
-        };
-        if routing != "none" {
-            store
-                .record_routing_started(&claim, true, None, (None, None))
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-            store
-                .record_routing_completed(
-                    &claim,
-                    qq_protocol::RoutingDecision {
-                        model: claim.model.clone(),
-                        reasoning_effort: None,
-                        outcome: qq_protocol::RoutingOutcome::Fallback,
-                        reason: "deterministic routing prefix".to_owned(),
-                        usage: expected,
-                        estimated_cost_usd_nanos: cost,
-                    },
-                )
-                .await
-                .unwrap();
-        }
+        let expected = Some(TokenUsage::default());
+        let cost = Some(0);
         store
             .start_reserved_run(&claim, test_prepared_audit(&claim), None)
             .await
@@ -438,20 +405,6 @@ async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_un
             })
             .await
             .unwrap();
-        if routing != "none" {
-            store
-                .finish_run(
-                    &claim,
-                    RunOutcome::Interrupted,
-                    None,
-                    TeardownComplete::nothing_ran(),
-                )
-                .await
-                .unwrap();
-            store.close().await.unwrap();
-            assert_eq!(actual, (expected, cost), "routing={routing}");
-            continue;
-        }
         store.close().await.unwrap();
         assert_eq!(
             actual,
@@ -489,12 +442,8 @@ async fn goal_run_start_seeds_zero_before_dispatch_and_preserves_paid_routing_un
 async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
     for (boundary, own_goal) in [
         ("claim", false),
-        ("routing", false),
-        ("routing_tokens", false),
         ("start", false),
         ("claim", true),
-        ("routing", true),
-        ("routing_tokens", true),
         ("start", true),
     ] {
         let (_directory, store, parent) = super::goals::model_goal_claim(true).await;
@@ -563,28 +512,6 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
                 ),
                 "queued sponsor deadline must not restart"
             ),
-            "routing_tokens" => assert!(
-                matches!(
-                    store
-                        .record_routing_started(&claim, true, Some(0), (Some(10_000), Some(0)))
-                        .await
-                        .unwrap(),
-                    Err(claim::GoalStartRefusal::RoutingTokens)
-                ),
-                "a child cannot spend past its sponsor's fresh token remainder"
-            ),
-            "routing" => assert!(
-                matches!(
-                    store
-                        .record_routing_started(&claim, true, Some(0), (None, None))
-                        .await
-                        .unwrap(),
-                    Err(claim::GoalStartRefusal::Exhausted(
-                        qq_protocol::GoalExhaustion::Deadline
-                    ))
-                ),
-                "loading cannot extend the sponsor deadline before routing"
-            ),
             "start" => assert!(
                 matches!(
                     store
@@ -617,116 +544,6 @@ async fn sponsored_children_recheck_absolute_deadlines_at_paid_boundaries() {
             .await
             .unwrap();
         store.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
-async fn automatic_goal_routing_uses_objective_and_manual_routing_uses_prompt() {
-    struct Router(Arc<StdMutex<Vec<String>>>);
-    impl TaskRouter for Router {
-        fn identity(&self) -> &'static str {
-            "fixture/goal-objective"
-        }
-        fn configuration_identity(&self) -> &str {
-            self.identity()
-        }
-        fn max_cost_usd_nanos(&self) -> Option<u64> {
-            Some(0)
-        }
-        fn route(&self, task: String) -> TaskRoutingFuture {
-            self.0.lock().unwrap().push(task);
-            Box::pin(async {
-                qq_protocol::RoutingDecision {
-                    model: ModelSelection::default(),
-                    reasoning_effort: None,
-                    outcome: qq_protocol::RoutingOutcome::Fallback,
-                    reason: "retain model".to_owned(),
-                    usage: Some(usage(0, 0)),
-                    estimated_cost_usd_nanos: Some(0),
-                }
-            })
-        }
-    }
-    struct Loader(Arc<StdMutex<Vec<String>>>);
-    impl RuntimeLoader for Loader {
-        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
-            let tasks = Arc::clone(&self.0);
-            Box::pin(async move {
-                Ok(loaded_runtime(
-                    Runtime::new(StaticTextProvider, "test-model", 256)
-                        .unwrap()
-                        .with_task_router(Arc::new(Router(tasks))),
-                    &request.workspace,
-                    Some(budget_pricing()),
-                ))
-            })
-        }
-    }
-    for (objective, manual) in [
-        ("implement the Rust parser", false),
-        ("write the release announcement", false),
-        ("implement the Rust parser", true),
-    ] {
-        let directory = TempDir::new().unwrap();
-        let tasks = Arc::new(StdMutex::new(Vec::new()));
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-            Arc::new(Loader(Arc::clone(&tasks))),
-        )
-        .await
-        .unwrap();
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace_id, None).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id,
-                after: created.committed_through,
-            })
-            .unwrap();
-        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({"type":"set_goal","session_id":session_id,"objective":objective,"budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000}})).unwrap()).await.unwrap();
-        runtime.inner.store.drive_goals(now_ms()).await.unwrap();
-        let run = if manual {
-            queue_prompt(
-                &runtime,
-                session_id,
-                "explain the release schedule".to_owned(),
-            )
-            .await
-        } else {
-            runtime
-                .inner
-                .store
-                .call(Priority::Control, move |connection| {
-                    Ok(crate::sessions::goals::load_live(connection, session_id)?
-                        .unwrap()
-                        .pending_run_id
-                        .unwrap())
-                })
-                .await
-                .unwrap()
-        };
-        drop(held);
-        runtime.inner.schedule.send(()).await.unwrap();
-        collect_until_run_finished(&mut events, run).await;
-        runtime.shutdown().await.unwrap();
-        let tasks = tasks.lock().unwrap();
-        assert!(!tasks.is_empty());
-        assert_eq!(
-            tasks[0].trim(),
-            if manual {
-                "explain the release schedule"
-            } else {
-                objective
-            }
-        );
-        assert!(tasks.iter().all(|task| task.len() <= 16 * 1024));
     }
 }
 

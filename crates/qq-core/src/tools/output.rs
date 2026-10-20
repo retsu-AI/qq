@@ -800,17 +800,11 @@ pub(crate) fn result_reserve_bytes(tool: &str) -> usize {
     384 + tool.len()
 }
 
-pub(crate) const fn search_reservation_bytes(reviews_tools: bool) -> usize {
-    super::search::SEARCH_BOUNDS.max_bytes
-        + if reviews_tools {
-            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 512
-        } else {
-            0
-        }
-}
+/// Turn output reserved for one complete search page.
+pub(crate) const SEARCH_RESERVATION_BYTES: usize = super::search::SEARCH_BOUNDS.max_bytes;
 
 fn complete_search_page(tool: &str, text: &str) -> bool {
-    tool == "search" && text.starts_with("search ") && text.len() <= search_reservation_bytes(true)
+    tool == "search" && text.starts_with("search ") && text.len() <= SEARCH_RESERVATION_BYTES
 }
 
 /// One strict projection from persisted per-call results to model context.
@@ -1423,39 +1417,6 @@ mod tests {
         let pointer = clean.as_ptr();
         let masked = mask_secrets(clean);
         assert_eq!(masked.as_ptr(), pointer);
-    }
-
-    #[test]
-    fn ab2_checkpoint_annotated_search_pages_survive_a_spent_turn() {
-        for feedback_size in [
-            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES,
-            crate::runtime::MAX_CHECKPOINT_TEXT_BYTES + 1,
-        ] {
-            let header = "search . mode=names next=YWJjADA\n";
-            let mut page = header.to_owned();
-            page.push_str(
-                &"match\n"
-                    .repeat((super::super::search::SEARCH_BOUNDS.max_bytes - header.len()) / 6),
-            );
-            let feedback = crate::runtime::bounded_checkpoint_text(&"x".repeat(feedback_size));
-            let annotated = format!("{page}\n\n[JEV RED checkpoint: {feedback}]");
-            for recall in [
-                ResultRecall::None,
-                ResultRecall::StoredResult {
-                    tool: "search",
-                    call: ToolCallId::from_bytes([7; 16]),
-                },
-            ] {
-                let mut spent = "x".repeat(MAX_TURN_TOOL_OUTPUT_BYTES);
-                let mut budget = TurnOutputBudget::for_results(
-                    [("other", spent.as_str()), ("search", annotated.as_str())].into_iter(),
-                );
-                budget.admit("other", &mut spent, ResultRecall::None);
-                let mut actual = annotated.clone();
-                assert!(!budget.admit("search", &mut actual, recall));
-                assert_eq!(actual, annotated);
-            }
-        }
     }
 
     #[test]

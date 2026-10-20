@@ -5,8 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::blocking::Response;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -128,69 +127,96 @@ pub(super) enum DevicePoll {
     Complete(TokenSet),
 }
 
-pub(super) trait XaiTokenClient: Send + Sync {
-    fn start_device(&self) -> Result<DeviceAuthorization, XaiAuthError>;
-    fn poll_device(&self, device_code: &str) -> Result<DevicePoll, XaiAuthError>;
-    fn refresh(&self, refresh_token: &str) -> Result<TokenSet, XaiAuthError>;
+/// xAI's endpoint specs over the shared OAuth transport.
+fn post(
+    store: &CredentialStore,
+    url: &str,
+    fields: Vec<(&'static str, String)>,
+    headers: &[(&'static str, &'static str)],
+    timeout: Option<Duration>,
+) -> Result<oauth::OAuthResponse, oauth::TransportError> {
+    store.oauth.post(oauth::OAuthRequest {
+        url,
+        body: oauth::OAuthBody::Form(fields),
+        headers,
+        timeout,
+        max_body: MAX_RESPONSE_BYTES,
+    })
 }
 
-pub(super) struct SystemXaiTokenClient;
-
-impl XaiTokenClient for SystemXaiTokenClient {
-    fn start_device(&self) -> Result<DeviceAuthorization, XaiAuthError> {
-        let response = oauth_client()?
-            .post(DEVICE_ENDPOINT)
-            .header("referer", "qq")
-            .form(&[("client_id", CLIENT_ID), ("scope", SCOPE)])
-            .send()
-            .map_err(|_| XaiAuthError::DeviceRequestFailed)?;
-        let body: DeviceResponse = decode_success(response, XaiAuthError::DeviceResponseInvalid)?;
-        body.try_into()
+fn start_device(store: &CredentialStore) -> Result<DeviceAuthorization, XaiAuthError> {
+    let response = post(
+        store,
+        DEVICE_ENDPOINT,
+        vec![
+            ("client_id", CLIENT_ID.to_owned()),
+            ("scope", SCOPE.to_owned()),
+        ],
+        &[("referer", "qq")],
+        None,
+    )
+    .map_err(|_| XaiAuthError::DeviceRequestFailed)?;
+    if !response.is_success() {
+        return Err(XaiAuthError::DeviceResponseInvalid);
     }
-
-    fn poll_device(&self, device_code: &str) -> Result<DevicePoll, XaiAuthError> {
-        let response = oauth_client()?
-            .post(TOKEN_ENDPOINT)
-            .form(&[
-                ("grant_type", DEVICE_GRANT),
-                ("client_id", CLIENT_ID),
-                ("device_code", device_code),
-            ])
-            .send()
-            .map_err(|_| XaiAuthError::DeviceRequestFailed)?;
-        decode_poll(response)
-    }
-
-    fn refresh(&self, refresh_token: &str) -> Result<TokenSet, XaiAuthError> {
-        let response = oauth_client()?
-            .post(TOKEN_ENDPOINT)
-            .form(&[
-                ("grant_type", "refresh_token"),
-                ("client_id", CLIENT_ID),
-                ("refresh_token", refresh_token),
-            ])
-            .send()
-            .map_err(|_| XaiAuthError::RefreshRequestFailed)?;
-        if !response.status().is_success() {
-            return Err(XaiAuthError::RefreshRejected);
-        }
-        decode_token(response)
-    }
+    let body: DeviceResponse = response.json().ok_or(XaiAuthError::DeviceResponseInvalid)?;
+    body.try_into()
 }
 
-fn oauth_client() -> Result<reqwest::blocking::Client, XaiAuthError> {
-    oauth::http_client().map_err(|_| XaiAuthError::DeviceRequestFailed)
+/// One device poll, bounded by the time left on the device code as well as
+/// the transport's own cap: a stalled token endpoint ends the login at its
+/// deadline as a timeout, and otherwise fails the poll at the cap.
+fn poll_device(
+    store: &CredentialStore,
+    device_code: &str,
+    remaining: Duration,
+) -> Result<DevicePoll, XaiAuthError> {
+    let response = post(
+        store,
+        TOKEN_ENDPOINT,
+        vec![
+            ("grant_type", DEVICE_GRANT.to_owned()),
+            ("client_id", CLIENT_ID.to_owned()),
+            ("device_code", device_code.to_owned()),
+        ],
+        &[],
+        Some(remaining),
+    )
+    .map_err(|error| match error {
+        oauth::TransportError::DeadlineReached => XaiAuthError::AuthorizationTimedOut,
+        oauth::TransportError::Failed => XaiAuthError::DeviceRequestFailed,
+    })?;
+    decode_poll(&response)
 }
 
-fn decode_poll(mut response: Response) -> Result<DevicePoll, XaiAuthError> {
-    if response.status().is_success() {
+fn refresh(store: &CredentialStore, refresh_token: &str) -> Result<TokenSet, XaiAuthError> {
+    let response = post(
+        store,
+        TOKEN_ENDPOINT,
+        vec![
+            ("grant_type", "refresh_token".to_owned()),
+            ("client_id", CLIENT_ID.to_owned()),
+            ("refresh_token", refresh_token.to_owned()),
+        ],
+        &[],
+        None,
+    )
+    .map_err(|_| XaiAuthError::RefreshRequestFailed)?;
+    if !response.is_success() {
+        return Err(XaiAuthError::RefreshRejected);
+    }
+    decode_token(&response)
+}
+
+fn decode_poll(response: &oauth::OAuthResponse) -> Result<DevicePoll, XaiAuthError> {
+    if response.is_success() {
         return decode_token(response).map(DevicePoll::Complete);
     }
     #[derive(Deserialize)]
     struct ErrorBody {
         error: String,
     }
-    let body: ErrorBody = decode_bounded(&mut response, XaiAuthError::TokenResponseInvalid)?;
+    let body: ErrorBody = response.json().ok_or(XaiAuthError::TokenResponseInvalid)?;
     match body.error.as_str() {
         "authorization_pending" => Ok(DevicePoll::Pending),
         "slow_down" => Ok(DevicePoll::SlowDown),
@@ -200,14 +226,14 @@ fn decode_poll(mut response: Response) -> Result<DevicePoll, XaiAuthError> {
     }
 }
 
-fn decode_token(mut response: Response) -> Result<TokenSet, XaiAuthError> {
+fn decode_token(response: &oauth::OAuthResponse) -> Result<TokenSet, XaiAuthError> {
     #[derive(Deserialize)]
     struct TokenBody {
         access_token: String,
         refresh_token: Option<String>,
         expires_in: Option<u64>,
     }
-    let body: TokenBody = decode_bounded(&mut response, XaiAuthError::TokenResponseInvalid)?;
+    let body: TokenBody = response.json().ok_or(XaiAuthError::TokenResponseInvalid)?;
     if body.access_token.is_empty()
         || body.access_token.len() > MAX_TOKEN_BYTES
         || body
@@ -224,23 +250,6 @@ fn decode_token(mut response: Response) -> Result<TokenSet, XaiAuthError> {
     })
 }
 
-fn decode_success<T: DeserializeOwned>(
-    mut response: Response,
-    error: XaiAuthError,
-) -> Result<T, XaiAuthError> {
-    if !response.status().is_success() {
-        return Err(error);
-    }
-    decode_bounded(&mut response, error)
-}
-
-fn decode_bounded<T: DeserializeOwned>(
-    response: &mut Response,
-    error: XaiAuthError,
-) -> Result<T, XaiAuthError> {
-    oauth::read_json(response, MAX_RESPONSE_BYTES).ok_or(error)
-}
-
 pub struct XaiLogin {
     authorization: DeviceAuthorization,
 }
@@ -248,7 +257,7 @@ pub struct XaiLogin {
 impl XaiLogin {
     pub fn start(store: &CredentialStore) -> Result<Self, AuthError> {
         Ok(Self {
-            authorization: store.xai_client.start_device()?,
+            authorization: start_device(store)?,
         })
     }
 
@@ -271,44 +280,68 @@ impl XaiLogin {
         profile: &str,
         allow_file_fallback: bool,
     ) -> Result<CredentialBackend, AuthError> {
+        self.complete_with(
+            store,
+            profile,
+            allow_file_fallback,
+            &mut oauth::DevicePollRuntime {
+                now: Instant::now,
+                cancelled: || false,
+                sleep: thread::sleep,
+            },
+        )
+    }
+
+    pub(super) fn complete_with<N, C, S>(
+        self,
+        store: &CredentialStore,
+        profile: &str,
+        allow_file_fallback: bool,
+        runtime: &mut oauth::DevicePollRuntime<N, C, S>,
+    ) -> Result<CredentialBackend, AuthError>
+    where
+        N: FnMut() -> Instant,
+        C: FnMut() -> bool,
+        S: FnMut(Duration),
+    {
         let name = credential_name(profile)?;
-        let deadline = Instant::now()
+        let deadline = (runtime.now)()
             .checked_add(Duration::from_secs(self.authorization.expires_in))
             .ok_or(XaiAuthError::DeviceResponseInvalid)?;
-        let mut interval = Duration::from_secs(self.authorization.interval);
-        loop {
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(XaiAuthError::AuthorizationTimedOut.into());
-            }
-            thread::sleep(interval.min(deadline.saturating_duration_since(now)));
-            if Instant::now() >= deadline {
-                return Err(XaiAuthError::AuthorizationTimedOut.into());
-            }
-            match store
-                .xai_client
-                .poll_device(&self.authorization.device_code)?
-            {
-                DevicePoll::Pending => {}
-                DevicePoll::SlowDown => {
-                    interval = interval
-                        .saturating_add(Duration::from_secs(5))
-                        .min(Duration::from_secs(MAX_POLL_INTERVAL));
-                }
-                DevicePoll::Denied => return Err(XaiAuthError::AuthorizationDenied.into()),
-                DevicePoll::Expired => return Err(XaiAuthError::AuthorizationExpired.into()),
-                DevicePoll::Complete(tokens) => {
-                    let credential = StoredXaiCredential::from_tokens(tokens, None, unix_time()?)?;
-                    return store.set_with_metadata(
-                        &name,
-                        credential.encode()?,
-                        allow_file_fallback,
-                        Some("xai-oauth"),
-                        Some(XAI_CREDENTIAL_ENDPOINT),
-                    );
-                }
-            }
-        }
+        let errors = oauth::DevicePollErrors {
+            timed_out: || XaiAuthError::AuthorizationTimedOut.into(),
+            // xAI logins are not cancellable from the CLI; a cancelled
+            // runtime reads as the user giving up, a timeout.
+            cancelled: || XaiAuthError::AuthorizationTimedOut.into(),
+            denied: || XaiAuthError::AuthorizationDenied.into(),
+            expired: || XaiAuthError::AuthorizationExpired.into(),
+        };
+        let tokens = oauth::poll_device(
+            deadline,
+            Duration::from_secs(self.authorization.interval),
+            Duration::from_secs(MAX_POLL_INTERVAL),
+            runtime,
+            &errors,
+            |remaining| {
+                Ok::<_, AuthError>(
+                    match poll_device(store, &self.authorization.device_code, remaining)? {
+                        DevicePoll::Pending => oauth::DeviceStep::Pending,
+                        DevicePoll::SlowDown => oauth::DeviceStep::SlowDown,
+                        DevicePoll::Denied => oauth::DeviceStep::Denied,
+                        DevicePoll::Expired => oauth::DeviceStep::Expired,
+                        DevicePoll::Complete(tokens) => oauth::DeviceStep::Complete(tokens),
+                    },
+                )
+            },
+        )?;
+        let credential = StoredXaiCredential::from_tokens(tokens, None, unix_time()?)?;
+        store.set_with_metadata(
+            &name,
+            credential.encode()?,
+            allow_file_fallback,
+            Some("xai-oauth"),
+            Some(XAI_CREDENTIAL_ENDPOINT),
+        )
     }
 }
 
@@ -480,7 +513,7 @@ impl CredentialStore {
             return Ok(credential.into_resolution(epoch));
         }
 
-        let _refresh = self.lock_oauth_operation(OAuthProvider::XAi)?;
+        let _refresh = self.lock_oauth_operation(OAuthProvider::XAI)?;
         let (credential, epoch) = self.load_xai_oauth(&name, true)?;
         let now = unix_time()?;
         if !credential.needs_refresh(now) {
@@ -488,7 +521,7 @@ impl CredentialStore {
         }
 
         let previous_refresh_token = credential.refresh_token;
-        let tokens = self.xai_client.refresh(&previous_refresh_token)?;
+        let tokens = refresh(self, &previous_refresh_token)?;
         let credential =
             StoredXaiCredential::from_tokens(tokens, Some(previous_refresh_token), now)?;
         self.replace_with_metadata_normalized(
@@ -634,7 +667,7 @@ fn map_request_credential_error(
 }
 
 fn credential_name(profile: &str) -> Result<String, AuthError> {
-    oauth::profile_credential_name(OAuthProvider::XAi, profile)
+    oauth::profile_credential_name(OAuthProvider::XAI, profile)
 }
 
 fn unix_time() -> Result<u64, XaiAuthError> {
@@ -661,5 +694,95 @@ mod tests {
 
         assert_eq!(authorization.expires_in, 1800);
         assert_eq!(authorization.interval, 5);
+    }
+
+    /// Answers every poll as a stalled token endpoint does: the call runs
+    /// until the shorter of its deadline and the transport cap, and reports
+    /// which one ended it. Records each request's deadline.
+    struct StalledTokenEndpoint {
+        timeouts: std::sync::Mutex<Vec<Option<Duration>>>,
+    }
+
+    impl oauth::OAuthTransport for StalledTokenEndpoint {
+        fn post(
+            &self,
+            request: oauth::OAuthRequest<'_>,
+        ) -> Result<oauth::OAuthResponse, oauth::TransportError> {
+            assert_eq!(request.url, TOKEN_ENDPOINT);
+            self.timeouts.lock().unwrap().push(request.timeout);
+            Err(match request.timeout {
+                Some(timeout) if timeout < oauth::REQUEST_TIMEOUT => {
+                    oauth::TransportError::DeadlineReached
+                }
+                _ => oauth::TransportError::Failed,
+            })
+        }
+    }
+
+    fn stalled_login(expires_in: u64) -> (AuthError, Vec<Option<Duration>>, std::path::PathBuf) {
+        let directory = std::env::temp_dir().join(format!(
+            "qq-auth-xai-poll-{}-{expires_in}-{:?}",
+            std::process::id(),
+            Instant::now()
+        ));
+        let mut store = CredentialStore::with_paths(crate::CredentialPaths::new(&directory));
+        let endpoint = std::sync::Arc::new(StalledTokenEndpoint {
+            timeouts: std::sync::Mutex::new(Vec::new()),
+        });
+        store.oauth = endpoint.clone();
+        let login = XaiLogin {
+            authorization: DeviceAuthorization {
+                device_code: "device-code".to_owned(),
+                user_code: "USER-CODE".to_owned(),
+                verification_uri: "https://accounts.x.ai/activate".to_owned(),
+                verification_uri_complete: None,
+                expires_in,
+                interval: 5,
+            },
+        };
+        let start = Instant::now();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let error = login
+            .complete_with(
+                &store,
+                "work",
+                false,
+                &mut oauth::DevicePollRuntime {
+                    now: || start + elapsed.get(),
+                    cancelled: || false,
+                    sleep: |duration| elapsed.set(elapsed.get() + duration),
+                },
+            )
+            .unwrap_err();
+        let timeouts = endpoint.timeouts.lock().unwrap().clone();
+        (error, timeouts, directory)
+    }
+
+    /// With more time left than the transport's cap, a stalled poll fails at
+    /// the cap as a failed request; the device lifetime never lengthens a
+    /// single call.
+    #[test]
+    fn xai_device_polls_with_a_long_lifetime_fail_at_the_transport_cap() {
+        let (error, timeouts, directory) = stalled_login(1800);
+        assert!(
+            matches!(error, AuthError::XAi(XaiAuthError::DeviceRequestFailed)),
+            "{error:?}"
+        );
+        assert_eq!(timeouts, [Some(Duration::from_secs(1795))]);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A device poll is bounded by the time left on the device code, and a
+    /// poll that runs out that time ends the login as a timeout, not as a
+    /// failed request.
+    #[test]
+    fn xai_device_polls_are_bounded_by_the_remaining_lifetime() {
+        let (error, timeouts, directory) = stalled_login(40);
+        assert!(
+            matches!(error, AuthError::XAi(XaiAuthError::AuthorizationTimedOut)),
+            "{error:?}"
+        );
+        assert_eq!(timeouts, [Some(Duration::from_secs(35))]);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

@@ -2,7 +2,7 @@
 
 Use this profile to inspect the real QQ TUI without reading the user's QQ
 configuration, credential index, session database, or server-discovery file.
-It is a local diagnostic fixture, not a Jev, authentication, or production
+It is a local diagnostic fixture, not an authentication or production
 acceptance test.
 
 ## Prepare the fixture
@@ -157,16 +157,13 @@ switch palettes. The same frames without a terminal are written by
 `cargo test -p qq-tui --test gallery -- --ignored` to
 `target/qq-tui-gallery/<theme>/<scene>-<w>x<h>.ans` for `cat`.
 
-From a real terminal, with no enforced-review environment override, start the
-fixture:
+From a real terminal, start the fixture:
 
 ```sh
 qq --tui-qa-root "$QA_ROOT"
 ```
 
-The profile fails before runtime startup if `QQ_JEV_CHECKPOINTS=enforce` is
-present, because a credential-free fixture cannot satisfy mandatory review.
-It ignores unselected providers and rejects a remote or authenticated selected
+The profile ignores unselected providers and rejects a remote or authenticated selected
 provider, static headers, stored credentials, organizations, MCP, worker or
 reviewer routes, delegation, audit, profiles, and packs. The isolation policy
 remains attached to the runtime factory across model catalogs, session loads,

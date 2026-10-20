@@ -12,8 +12,8 @@ pub(crate) fn next_diagnostic_run() -> u64 {
 
 /// Run-lifetime state. No slice, successful turn, steering, or compaction resets
 /// these counters (ADR-0048 § 1: harness bounds reset at their seams, so none
-/// of these is a lifetime bound on output). Stall and checkpoint state retain
-/// their own reset seams.
+/// of these is a lifetime bound on output). Stall state retains its own reset
+/// seams.
 struct RunScope {
     handled_interrupt: u64,
     /// Raised toward the ceiling by empty truncations and never lowered: a
@@ -23,7 +23,6 @@ struct RunScope {
     audit_triggers: runtime::AuditTriggers,
     audit_actions: Vec<runtime::AuditedAction>,
     audit_revisions: u16,
-    checkpoint_context: Option<runtime::CheckpointContext>,
     output_repairs: u8,
     goal_handoff_requested: bool,
     goal_final_slot_announced: bool,
@@ -264,10 +263,6 @@ struct ToolOutcomes {
     calls: Vec<RuntimeToolCall>,
     results: Vec<Option<RetainedResult>>,
 }
-struct CheckedToolOutcomes {
-    outcomes: ToolOutcomes,
-    checkpoint_correction_notice: Option<String>,
-}
 impl plan::CompiledAgentPlan {
     /// Executes one run from this plan. No filesystem discovery happens
     /// before the first provider request unless the prompt invokes a command
@@ -409,19 +404,6 @@ impl plan::CompiledAgentPlan {
                         }
                     }
                 };
-                        let outcomes = {
-                    let phase = state.checkpoint_tools(outcomes);
-                    tokio::pin!(phase);
-                    loop {
-                        match phase.next().instrument(turn_span.clone()).await {
-                            Some(TurnStep::Emit(event)) => yield event,
-                            Some(TurnStep::Ready(value)) => break value,
-                            Some(TurnStep::NextTurn) => continue 'turns,
-                            Some(TurnStep::Stop) => return,
-                            None => unreachable!("phase ended without a typed outcome"),
-                        }
-                    }
-                };
                         {
                     let phase = state.close_tool_turn(outcomes);
                     tokio::pin!(phase);
@@ -517,7 +499,6 @@ impl plan::CompiledAgentPlan {
         let context_sources = Arc::clone(&plan.runtime.context_sources);
         let context_cache = Arc::clone(&plan.runtime.context_cache);
         let profile_name = plan.descriptor().profile.as_str().to_owned();
-        let checkpoint = plan.runtime.checkpoint.clone();
         stream! {
                    let RunCapabilities {
                        spawner,
@@ -528,7 +509,6 @@ impl plan::CompiledAgentPlan {
                        unattended,
                        max_output_tokens,
                        limits,
-                       routing_spend,
                        execution_started: _,
                        pricing,
                        history,
@@ -551,7 +531,7 @@ impl plan::CompiledAgentPlan {
                    let handled_interrupt = steering
                        .as_ref()
                        .map_or(0, |steering| *steering.interrupts.borrow());
-                   let mut max_output_tokens = max_output_tokens
+                   let max_output_tokens = max_output_tokens
                        .unwrap_or(model_max_output_tokens)
                        .min(model_max_output_tokens);
                    // Empty truncations raise the cap toward `output_ceiling` once
@@ -566,30 +546,8 @@ impl plan::CompiledAgentPlan {
                    let reasoning_only_truncations = 0_u16;
                    // The session owner supplies the original execution admission,
                    // including time spent loading or automatically compacting.
-                   let mut budget = BudgetMeter::new(limits, pricing, started);
-                   if let Some(spend) = routing_spend {
-                       budget.charge_child(spend.usage, spend.estimated_cost_usd_nanos);
-                   }
+                   let budget = BudgetMeter::new(limits, pricing, started);
                    yield TurnStep::Emit( RuntimeEvent::Started);
-                   if (goal.is_some() || goal_spend_tracking) && routing_spend.is_some() {
-                       let now = tokio::time::Instant::now();
-                       match budget.remaining(now) {
-                           Ok(remaining) => {
-                               if let Some(tokens) = [remaining.max_total_tokens, remaining.max_output_tokens]
-                                   .into_iter().flatten().min()
-                               {
-                                   max_output_tokens = max_output_tokens.min(u32::try_from(tokens).unwrap_or(u32::MAX));
-                               }
-                           }
-                           Err(kind) => {
-                               yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
-                                   exhaustion: budget.exhaustion(kind, false, now),
-                               });
-                               yield TurnStep::Stop; return;
-                           }
-                       }
-                   }
-
                    // Completed turns can persist an assistant message with no model-visible
                    // content (reasoning-only or a call-less empty completion). Live turns
                    // already skip those; reconstructed history must too, or a follow-up
@@ -821,7 +779,6 @@ impl plan::CompiledAgentPlan {
                    let audit_triggers = runtime::AuditTriggers::default();
                    let audit_actions: Vec<runtime::AuditedAction> = Vec::new();
                    let audit_revisions = 0_u16;
-                   let checkpoint_context = checkpoint.as_ref().map(|_| runtime::CheckpointContext::new(&messages));
                    // Repair turns spent against the output contract, for the whole
                    // run: neither an audit revision nor steering resets them.
                    let output_repairs = 0_u8;
@@ -870,7 +827,6 @@ impl plan::CompiledAgentPlan {
                        audit_triggers,
                        audit_actions,
                        audit_revisions,
-                       checkpoint_context,
                        output_repairs,
                        goal_handoff_requested: false,
                        goal_final_slot_announced: false,
@@ -983,7 +939,6 @@ impl RunState {
                                 &mut window.irreducible_message_bytes,
                                 &mut run.budget,
                                 &mut run.stall,
-                                run.checkpoint_context.as_mut(),
                             )
                             .await {
                                 Ok(delivered) => { slice.pending_deliveries += delivered.answers + delivered.reports; },
@@ -2105,7 +2060,6 @@ impl RunState {
                     let deadline = *deadline;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
-                    let checkpoint = &plan.runtime.checkpoint;
                     let turn_recovery = plan.runtime.turn_recovery;
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
@@ -2211,31 +2165,16 @@ impl RunState {
                             });
                             yield TurnStep::Stop; return;
                         }
-                        if checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools())
-                            && calls.iter().filter(|call| call.rejection.is_none()).count() > 1
-                        {
-                            for call in &mut calls {
-                                if call.rejection.is_none() {
-                                    run.guard_eligible.retain(|(id, _)| *id != call.id);
-                                    call.rejection = Some(runtime::CallRejection::Runtime(
-                                        "JEV enforcement admits one tool call per model turn so each result is reviewed before any later tool executes; retry this call alone".to_owned()));
-                                }
-                            }
-                        }
                         // Reserve complete search pages before execution. A cursor may
                         // advance only when its whole page can enter this turn's context.
-                        let reviews_tools = checkpoint.as_ref().is_some_and(|reviewer| reviewer.reviews_tools());
                         let mut search_space = tools::output::MAX_TURN_TOOL_OUTPUT_BYTES.saturating_sub(
                             calls.iter().map(|call| tools::output::result_reserve_bytes(&call.name)).sum::<usize>());
-                        let page_reserve = tools::output::search_reservation_bytes(reviews_tools);
+                        let page_reserve = tools::output::SEARCH_RESERVATION_BYTES;
                         for call in &mut calls {
                             if call.name == "search" && call.rejection.is_none() {
                                 if search_space >= page_reserve {
                                     search_space -= page_reserve;
                                 } else {
-                                    // Tool-checkpoint enforcement admitted at most one
-                                    // executable call above, which always fits this bound.
-                                    debug_assert!(!reviews_tools);
                                     run.guard_eligible.retain(|(id, _)| *id != call.id);
                                     call.rejection = Some(runtime::CallRejection::OutputBudget);
                                     // Streaming counted this request before final admission.
@@ -2464,7 +2403,7 @@ impl RunState {
                             // The interrupt exists to apply steering now. Nothing
                             // queued means the client raced a finishing run; continue
                             // with the next turn so the model resumes from its text.
-                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                                 for steer in applied {
                                     yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
@@ -2517,7 +2456,7 @@ impl RunState {
                         // returned (ADR-0054 § 3): its calls were admitted with a
                         // not-executed result and settle through the result path
                         // below, then the run completes there. A reply with no calls
-                        // completes here. Jev final review, the audit hook, and
+                        // completes here. The audit hook and
                         // steering cannot redirect it; an empty reply leaves the
                         // parent the child's latest report.
                         if final_answer_turn && calls.is_empty() {
@@ -2557,7 +2496,7 @@ impl RunState {
                                 // Steering that arrived during the report is applied
                                 // here, before the continuation notice, exactly as at
                                 // any other turn boundary.
-                                if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                                if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                                     for steer in applied {
                                         yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
@@ -2588,7 +2527,7 @@ impl RunState {
                             // Steering that arrived during the final turn is not
                             // dropped: the run continues with it instead of
                             // completing, exactly as if the model had called a tool.
-                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                                 // A reply the run continues past stays in context, so
                                 // it must be provider-valid: an empty one takes the
@@ -2653,7 +2592,7 @@ impl RunState {
                                     run.handled_interrupt = steering
                                         .as_ref()
                                         .map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
-                                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                                         for steer in applied {
                                             yield TurnStep::Emit( RuntimeEvent::SteeringApplied {
@@ -2671,7 +2610,6 @@ impl RunState {
                                         &mut window.irreducible_message_bytes,
                                         &mut run.budget,
                                         &mut run.stall,
-                                        run.checkpoint_context.as_mut(),
                                     )
                                     .await
                                     {
@@ -2769,7 +2707,6 @@ impl RunState {
             let _limits = *limits;
             let _deadline = *deadline;
             let workspace = &plan.workspace;
-            let checkpoint = &plan.runtime.checkpoint;
 
 
                     // The candidate final answer. A root run whose work meets
@@ -2870,7 +2807,7 @@ impl RunState {
                             Arc::make_mut(messages).push(assistant);
                             run.live_turns.push(turn_ordinal);
                             yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
-                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                            if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                                 for steer in applied {
                                     yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments });
@@ -2896,7 +2833,7 @@ impl RunState {
                         }
                     }
                     // Steering accepted while an audit ran still owns the next boundary.
-                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                         window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -2955,141 +2892,9 @@ impl RunState {
                             Some(Box::new(output::final_output(validation, run.output_repairs)))
                         }
                     };
-                    if let Some(reviewer) = &checkpoint {
-                        let answer = assistant
-                            .content()
-                            .iter()
-                            .filter_map(|block| match block {
-                                ContentBlock::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let context = run.checkpoint_context.as_mut().expect("enabled review context");
-                        let correlation = format!("final:{turn_ordinal}");
-                        // A review the harness could not run is recorded as
-                        // `Unavailable` and the candidate completes: the
-                        // verdict is evidence for the user, not the run's
-                        // outcome. Only the reviewer's own RED verdict, within
-                        // the repair allowance, redirects the run.
-                        let final_evidence = if context.task_overflow {
-                            Err("JEV final checkpoint was not sent because the original task exceeded the exact review bound")
-                        } else {
-                            context.final_evidence(answer).ok_or(
-                                "JEV final checkpoint was not sent because the combined candidate and tool evidence exceeded the exact review bound",
-                            )
-                        };
-                        match final_evidence {
-                            Err(feedback) => {
-                                yield TurnStep::Emit( RuntimeEvent::CheckpointReviewed {
-                                    spend: None,
-                                    correlation,
-                                    phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                                    tool_call_id: None,
-                                    outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                                    confidence: None,
-                                    feedback: feedback.to_owned(),
-                                });
-                            }
-                            Ok(final_evidence) => {
-                        let remaining = match run.budget.remaining(tokio::time::Instant::now()) {
-                            Ok(remaining) => remaining,
-                            Err(kind) => {
-                                yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                                yield TurnStep::Stop; return;
-                            }
-                        };
-                        if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
-                            if let Some(kind) = error.budget_kind() {
-                                yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                            } else {
-                                yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() });
-                            }
-                            yield TurnStep::Stop; return;
-                        }
-                        let request = runtime::CheckpointRequest {
-                            correlation: correlation.clone(),
-                            phase: runtime::CheckpointPhase::FinalCandidate,
-                            tool_call_id: None,
-                            tool: None,
-                            task: context.task.clone(),
-                            evidence: final_evidence,
-                            is_error: false,
-                        };
-                                yield TurnStep::Emit( RuntimeEvent::CheckpointStarted {
-                            correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::FinalCandidate, tool_call_id: None,
-                        });
-                        let verdict = tokio::select! {
-                                    biased;
-                                    () = interrupt_requested(steering, run.handled_interrupt) => None,
-                                    verdict = runtime::assess_checkpoint(reviewer.as_ref(), request) => Some(verdict),
-                                };
-                                let Some(verdict) = verdict else {
-                                    run.budget.charge_child(None, None);
-                                    yield TurnStep::Emit( RuntimeEvent::CheckpointReviewed {
-                                        spend: Some(qq_protocol::CheckpointSpend::default()),
-                                        correlation,
-                                        phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                                        tool_call_id: None,
-                                        outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                                        confidence: None,
-                                        feedback: "Final review interrupted by new user input; no assessment was recorded".to_owned(),
-                                    });
-                                    run.handled_interrupt = steering.as_ref().map_or(run.handled_interrupt, |steering| *steering.interrupts.borrow());
-                                    window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
-                                    Arc::make_mut(messages).push(assistant);
-                                    run.live_turns.push(turn_ordinal);
-                                    yield TurnStep::Emit( RuntimeEvent::Interrupted { turn_ordinal });
-                                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
-                        run.loop_guard.mutation();
-                                        for steer in applied {
-                                            yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments });
-                                        }
-                                    }
-                                    yield TurnStep::NextTurn; return;
-                                };
-                        run.budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
-                        yield TurnStep::Emit( RuntimeEvent::CheckpointReviewed {
-                                spend: Some(verdict.spend),
-                            correlation,
-                            phase: qq_protocol::CheckpointPhase::FinalCandidate,
-                            tool_call_id: None,
-                            outcome: checkpoint_protocol_outcome(verdict.outcome),
-                            confidence: verdict.confidence,
-                            feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
-                        });
-                        if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now()) {
-                            yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                            yield TurnStep::Stop; return;
-                        }
-                        // `Unavailable` (timeout, malformed reply, outage) is
-                        // already recorded above; the candidate stands. A RED
-                        // verdict redirects the run while a correction attempt
-                        // remains; once both are spent the run completes with
-                        // the verdict on record rather than failing.
-                        if !verdict.outcome.allows_progress()
-                            && verdict.outcome != runtime::CheckpointOutcome::Unavailable
-                            && run.checkpoint_context.as_mut().expect("enabled review context").repair()
-                        {
-                            window.irreducible_message_bytes = window.irreducible_message_bytes
-                                .saturating_add(measure_message(&assistant));
-                            Arc::make_mut(messages).push(assistant);
-                            run.live_turns.push(turn_ordinal);
-                            let notice = runtime::bounded_checkpoint_correction_notice(format!(
-                                "JEV RED {}. Correct the candidate or gather missing direct evidence before attempting completion. Feedback: {}",
-                                verdict.outcome.label(), runtime::bounded_checkpoint_text(&verdict.feedback)
-                            ));
-                            Arc::make_mut(messages).push(Message::user(notice));
-                            window.irreducible_message_bytes = window.irreducible_message_bytes
-                                .saturating_add(measure_message(messages.last().expect("just pushed")));
-                            yield TurnStep::NextTurn; return;
-                        }
-                            }
-                        }
-                    }
                     // A review may await remote inference. Input accepted during
                     // that wait belongs to this run, not its successor.
-                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                    if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                         window.irreducible_message_bytes = window.irreducible_message_bytes.saturating_add(measure_message(&assistant));
                         let keep = messages.len() - applied.len();
@@ -3633,7 +3438,7 @@ impl RunState {
                                     &result,
                                 );
                                 // Runtime rejections (over the cap, made in a report
-                                // turn, Jev's one-call rule, unknown or malformed)
+                                // turn, unknown or malformed)
                                 // never ran and are not counted.
                                 if call.rejection.is_none() {
                                     // A detached spawn's receipt is not an answer: the
@@ -3842,7 +3647,7 @@ impl RunState {
                                     &result,
                                 );
                                 // Runtime rejections (over the cap, made in a report
-                                // turn, Jev's one-call rule, unknown or malformed)
+                                // turn, unknown or malformed)
                                 // never ran and are not counted.
                                 if call.rejection.is_none() {
                                     // A detached spawn's receipt is not an answer: the
@@ -3913,146 +3718,15 @@ impl RunState {
         yield TurnStep::Ready(ToolOutcomes { turn_ordinal, final_answer_turn, calls, results });
                 }
     }
-    fn checkpoint_tools(
-        &mut self,
-        outcomes: ToolOutcomes,
-    ) -> impl futures_util::Stream<Item = TurnStep<CheckedToolOutcomes>> + Send + '_ {
-        stream! {
-                    let Self { env, run, .. } = self;
-                    let RunEnvironment { plan, .. } = env;
-                    let checkpoint = &plan.runtime.checkpoint;
-
-        let ToolOutcomes { turn_ordinal, final_answer_turn, calls, mut results } = outcomes;
-                        // Mandatory post-result checkpoints run after every outcome,
-                        // including denied, malformed, unknown, interrupted, MCP, and
-                        // child-task results. Their feedback enters the same retained
-                        // result the next provider turn sees. The reviewer is an
-                        // internal capability and is never represented as a tool call,
-                        // so this cannot recursively checkpoint itself.
-                        let mut checkpoint_correction_notice = None;
-                        if let Some(reviewer) = &checkpoint {
-                            let context = run.checkpoint_context.as_mut().expect("enabled review context");
-                            let mut correction = Vec::new();
-                            for (call, retained) in calls.iter().zip(results.iter_mut()) {
-                                let retained = retained.as_mut().expect("every tool outcome is retained before checkpointing");
-                                let correlation = format!("tool:{}", call.id);
-                                let evidence = format!(
-                                    "tool: {}\narguments: {}\nresult: {}",
-                                    call.name,
-                                    tools::output::mask_secrets(call.arguments.clone()),
-                                    retained.model_text
-                                );
-                                let evidence = tools::output::mask_secrets(evidence);
-                                context.record(format!("{correlation}\n{evidence}"));
-                                if !reviewer.reviews_tools() {
-                                    continue;
-                                }
-                                let overflow = if context.task_overflow {
-                                    Some("original task")
-                                } else if !runtime::checkpoint_text_fits(&evidence) {
-                                    Some("tool arguments and result")
-                                } else {
-                                    None
-                                };
-                                if let Some(field) = overflow {
-                                    // Recorded as unreviewed; the durable result stands
-                                    // and the run continues.
-                                    let feedback = format!(
-                                        "JEV tool checkpoint was not sent because {field} exceeded the exact review bound"
-                                    );
-                                    retained.model_text.push_str(&format!("\n\n[JEV unavailable: {feedback}]"));
-                                    yield TurnStep::Emit( RuntimeEvent::CheckpointReviewed {
-                                        spend: None,
-                                        correlation,
-                                        phase: qq_protocol::CheckpointPhase::ToolResult,
-                                        tool_call_id: Some(call.id),
-                                        outcome: qq_protocol::CheckpointOutcome::Unavailable,
-                                        confidence: None,
-                                        feedback,
-                                    });
-                                    continue;
-                                }
-                                let remaining = match run.budget.remaining(tokio::time::Instant::now()) {
-                                    Ok(remaining) => remaining,
-                                    Err(kind) => {
-                                        yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                                        yield TurnStep::Stop; return;
-                                    }
-                                };
-                                if let Err(error) = context.admit(remaining.max_cost_usd_nanos, reviewer.max_cost_usd_nanos()) {
-                                    if let Some(kind) = error.budget_kind() {
-                                        yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                                    } else {
-                                        yield TurnStep::Emit( RuntimeEvent::Failed { kind: RunFailureKind::Policy, message: error.to_string() });
-                                    }
-                                    yield TurnStep::Stop; return;
-                                }
-                                let request = runtime::CheckpointRequest {
-                                    correlation: correlation.clone(),
-                                    phase: runtime::CheckpointPhase::ToolResult,
-                                    tool_call_id: Some(call.id),
-                                    tool: Some(call.name.clone()),
-                                    task: context.task.clone(),
-                                    evidence,
-                                    is_error: retained.is_error,
-                                };
-                                yield TurnStep::Emit( RuntimeEvent::CheckpointStarted {
-                                    correlation: correlation.clone(), phase: qq_protocol::CheckpointPhase::ToolResult, tool_call_id: Some(call.id),
-                                });
-                                let verdict = runtime::assess_checkpoint(reviewer.as_ref(), request).await;
-                                run.budget.charge_child(verdict.spend.usage, verdict.spend.estimated_cost_usd_nanos);
-                                yield TurnStep::Emit( RuntimeEvent::CheckpointReviewed {
-                                        spend: Some(verdict.spend),
-                                    correlation,
-                                    phase: qq_protocol::CheckpointPhase::ToolResult,
-                                    tool_call_id: Some(call.id),
-                                    outcome: checkpoint_protocol_outcome(verdict.outcome),
-                                    confidence: verdict.confidence,
-                                    feedback: runtime::bounded_checkpoint_text(&verdict.feedback),
-                                });
-                                let marker = if verdict.outcome.allows_progress() { "GREEN" } else { "RED" };
-                                retained.model_text.push_str(&format!(
-                                    "\n\n[JEV {marker} {}: {}]",
-                                    verdict.outcome.label(),
-                                    runtime::bounded_checkpoint_text(&verdict.feedback)
-                                ));
-                                if let Some(kind) = run.budget.exceeded(tokio::time::Instant::now()) {
-                                    yield TurnStep::Emit( RuntimeEvent::BudgetExhausted { exhaustion: run.budget.exhaustion(kind, false, tokio::time::Instant::now()) });
-                                    yield TurnStep::Stop; return;
-                                }
-                                // An unavailable reviewer leaves its marker on the
-                                // retained result and the run continues; only a RED
-                                // verdict asks for correction.
-                                if !verdict.outcome.allows_progress()
-                                    && verdict.outcome != runtime::CheckpointOutcome::Unavailable
-                                {
-                                    correction.push(format!("{}: {}", call.name, runtime::bounded_checkpoint_text(&verdict.feedback)));
-                                }
-                            }
-                            // Both correction attempts spent: the RED markers stay on
-                            // the results as evidence and the model proceeds without
-                            // another redirect, instead of the run failing.
-                            if !correction.is_empty() && context.repair() {
-                                checkpoint_correction_notice = Some(runtime::bounded_checkpoint_correction_notice(format!(
-                                    "JEV RED. Do not claim completion. Produce fresh direct evidence or correct the work, then retry one tool call. Feedback:\n- {}",
-                                    correction.join("\n- ")
-                                )));
-                            }
-                        }
-
-        yield TurnStep::Ready(CheckedToolOutcomes { outcomes: ToolOutcomes { turn_ordinal, final_answer_turn, calls, results }, checkpoint_correction_notice });
-                }
-    }
     fn close_tool_turn(
         &mut self,
-        checked: CheckedToolOutcomes,
+        outcomes: ToolOutcomes,
     ) -> impl futures_util::Stream<Item = TurnStep<()>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, .. } = self;
                     let RunEnvironment { plan, file_state, spills, .. } = env;
                     let workspace = &plan.workspace;
 
-        let CheckedToolOutcomes { outcomes, mut checkpoint_correction_notice } = checked;
         let ToolOutcomes { turn_ordinal, final_answer_turn, calls, results } = outcomes;
                         // The per-turn output budget: results enter context in call
                         // order, and a late result that would overshoot is re-bounded
@@ -4090,23 +3764,16 @@ impl RunState {
                             .collect();
                         let projection = Arc::new(runtime::ProjectedToolTurn {
                             message: Message::tool_results(result_blocks),
-                            correction_notice: checkpoint_correction_notice.take(),
                         });
                         yield TurnStep::Emit(RuntimeEvent::ToolResultsProjected {
                             turn_ordinal,
                             projection: Arc::clone(&projection),
                         });
-                        let runtime::ProjectedToolTurn { message: tool_results, correction_notice } =
+                        let runtime::ProjectedToolTurn { message: tool_results } =
                             Arc::unwrap_or_clone(projection);
                         window.irreducible_message_bytes = window.irreducible_message_bytes
                             .saturating_add(measure_message(&tool_results));
                         Arc::make_mut(messages).push(tool_results);
-                        if let Some(notice) = correction_notice {
-                            let notice = Message::user(notice);
-                            window.irreducible_message_bytes = window.irreducible_message_bytes
-                                .saturating_add(measure_message(&notice));
-                            Arc::make_mut(messages).push(notice);
-                        }
                         // The final-answer turn's calls never ran; their results are
                         // durable, so the run completes with the turn as it stands
                         // (ADR-0054 § 3). Steering is left for the child's next run.
@@ -4131,7 +3798,7 @@ impl RunState {
                         // The boundary: every result of this turn is in context, and
                         // the next request has not been built. Steering joins here as
                         // a user message after the tool results.
-                        if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, run.checkpoint_context.as_mut(), workspace, file_state).await {
+                        if let Some(applied) = apply_steering(&mut run.stall, steering, Arc::make_mut(messages), &mut window.irreducible_message_bytes, workspace, file_state).await {
                         run.loop_guard.mutation();
                             for steer in applied {
                                 yield TurnStep::Emit( RuntimeEvent::SteeringApplied {

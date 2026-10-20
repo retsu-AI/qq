@@ -1480,14 +1480,13 @@ async fn a_delegate_host_grant_covers_the_exact_host_only() {
 }
 
 #[tokio::test]
-async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exactly() {
-    // DA5: when the verdict came from Jev the grant row says so, so an audit
-    // can tell Jev from `reviewer_model`. The row is still a delegate row:
-    // exact match only, counted against the same per-run cap, never a human
-    // prefix grant.
-    let (reviewer, consulted) = StubReviewer::immediate(
-        ReviewVerdict::free(ReviewDecision::Approve).by(DelegateIdentity::Jev),
-    );
+async fn a_reviewer_approval_records_a_delegate_grant_row_that_still_matches_exactly() {
+    // DA5: a reviewer's grant row names its source, so an audit can tell it
+    // from a human grant. It is a delegate row: exact match only, counted
+    // against the same per-run cap, never a human prefix grant. New rows
+    // never say `jev`: that source is historical.
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = scripted_runs_harness_with(
         ApprovalMode::Auto,
         vec![vec![
@@ -1513,7 +1512,7 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
     assert_eq!(
         consulted.lock().unwrap().len(),
         2,
-        "the exact command is covered after Jev approved it; the longer one is not"
+        "the exact command is covered after the reviewer approved it; the longer one is not"
     );
     assert!(observed.iter().all(|event| !matches!(
         &event.event,
@@ -1543,12 +1542,12 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
             (
                 "shell_prefix".to_owned(),
                 "git push origin x".to_owned(),
-                "jev".to_owned()
+                "delegate".to_owned()
             ),
             (
                 "shell_prefix".to_owned(),
                 "git push origin x --amend".to_owned(),
-                "jev".to_owned()
+                "delegate".to_owned()
             ),
         ]
     );
@@ -1561,7 +1560,7 @@ async fn a_jev_approval_records_a_grant_row_that_names_jev_and_still_matches_exa
         .unwrap();
     assert!(
         grants.shell_prefixes.is_empty(),
-        "a Jev row is a delegate row, not a human prefix: {grants:?}"
+        "a reviewer row is a delegate row, not a human prefix: {grants:?}"
     );
     assert!(grants.delegate.commands.contains("git push origin x"));
 }
@@ -2034,12 +2033,9 @@ async fn a_reviewer_escalation_is_published_with_its_reason_before_the_human_is_
 async fn an_advisory_denial_under_ask_is_published_as_an_escalation_naming_the_delegate() {
     // DA6 on DA3: under `ask` with the delegate on, a `deny` is advice. The
     // prompt learns it was advice, and from whom, through the escalation.
-    let (reviewer, _) = StubReviewer::immediate(
-        ReviewVerdict::free(ReviewDecision::Deny {
-            reason: "would overwrite history".to_owned(),
-        })
-        .by(DelegateIdentity::Jev),
-    );
+    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
+        reason: "would overwrite history".to_owned(),
+    }));
     let mut harness = approval_harness_with_delegate(
         ApprovalMode::Ask,
         "__test_shell",
@@ -2065,7 +2061,7 @@ async fn an_advisory_denial_under_ask_is_published_as_an_escalation_naming_the_d
     })
     .await
     .unwrap();
-    assert_eq!(escalated.0, Some(DelegateIdentity::Jev));
+    assert_eq!(escalated.0, Some(DelegateIdentity::Reviewer));
     assert!(
         escalated.1.starts_with(approval::ADVISORY_DENIAL_PREFIX)
             && escalated.1.ends_with("would overwrite history"),
@@ -3880,9 +3876,8 @@ async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve()
     // refused before the hold that consults any delegate, the reviewer sees
     // nothing, and no `tool_approval_requested` is published for a client to
     // answer either.
-    let (reviewer, consulted) = StubReviewer::immediate(
-        ReviewVerdict::free(ReviewDecision::Approve).by(DelegateIdentity::Jev),
-    );
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = approval_harness_with_delegate(
         ApprovalMode::Auto,
         "fetch",

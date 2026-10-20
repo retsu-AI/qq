@@ -1,6 +1,6 @@
 # ADR-0041 — Jev as an approval delegate, for held calls only
 
-**Status:** Accepted; decision 5's activation sentence superseded by [ADR-0052](0052-jev-approval-activation-from-plan.md)
+**Status:** Superseded — Jev was removed from QQ (protocol 36). Kept for history; nothing here describes current behavior.
 **Date:** 2026-09-23
 **Deciders:** delegated-approval DA5 (ENG-862)
 **Supersedes:** [ADR-0030](0030-optional-jev-decisions.md) § Consequences, "Jev never authorizes side effects", for the `jev_approval` lane only

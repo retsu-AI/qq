@@ -86,8 +86,7 @@ Clients render state and submit commands but do not become the source of truth.
 Beyond the TUI, `qq` provides `ask` (one streamed answer), `run` (a durable
 headless agent run), `serve` (the foreground server), `config` (inspect and
 validate configuration), `auth` (provider credentials), `mcp` (inspect an MCP
-server's descriptors), `jev` (Jev credentials and the advisory observer),
-`org` (organization manifests), `trust` (approve sensitive project
+server's descriptors), `org` (organization manifests), `trust` (approve sensitive project
 configuration), `doctor` (readiness checks), `init` (a starter
 `config.ron`), and `version` (product and contract versions). The
 [CLI guide](../guide/cli.md) documents every command and flag.

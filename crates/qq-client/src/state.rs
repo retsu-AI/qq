@@ -827,8 +827,8 @@ pub struct ToolCallTiming {
     pub settled: Option<ApprovalSettlement>,
 }
 
-/// Who settled a held call and how, so a surface can say "approved by Jev"
-/// rather than only "approved".
+/// Who settled a held call and how, so a surface can say "approved by
+/// reviewer" rather than only "approved".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ApprovalSettlement {
     pub resolution: ApprovalResolution,
@@ -839,7 +839,7 @@ pub struct ApprovalSettlement {
 }
 
 impl ApprovalSettlement {
-    /// A short label for the row: `approved by jev`, `denied by reviewer`,
+    /// A short label for the row: `approved by reviewer`, `denied by reviewer`,
     /// `approved for session`, `denied by timeout`. `None` for resolutions
     /// that need no remark (a once-approval by the human, an answer).
     #[must_use]
