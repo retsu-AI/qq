@@ -3804,6 +3804,9 @@ async fn execute_started_run(
                 message,
             })) => {
                 if internal {
+                    // A faulted response is resumed just like an output-cut
+                    // response. Keep its visible prefix when the retry arrives.
+                    summary_continues_truncated_turn = true;
                     continue;
                 }
                 match inner

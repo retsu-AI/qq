@@ -1545,6 +1545,53 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
 }
 
 #[tokio::test]
+async fn manual_compaction_transport_retry_preserves_the_visible_prefix() {
+    const PREFIX: &str = "RECOVERED_PREFIX: staging only; never modify production.\n";
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("session evidence".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::TextThenTransportFault(PREFIX.to_owned()),
+            AutoCompactScript::Text(valid_summary("continued summary")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "seed, faulted summary, successful continuation"
+        );
+        let continuation = request_texts(&requests[2]).join("\n");
+        assert!(
+            continuation.contains(PREFIX),
+            "provider received the persisted partial reply"
+        );
+        assert!(
+            continuation.contains(crate::TURN_RETRY_CONTINUE_NOTICE),
+            "runtime explicitly asked for continuation"
+        );
+    }
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("continued summary"));
+    assert!(
+        summary.contains(PREFIX),
+        "committed summary lost the prefix even though the retry continued it; stored summary: {summary}"
+    );
+}
+
+#[tokio::test]
 async fn manual_compaction_folds_all_portions_and_commits_only_the_final_summary() {
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text(format!("BEGIN {} END", "evidence ".repeat(12_000))),
