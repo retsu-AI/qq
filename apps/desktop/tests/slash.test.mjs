@@ -45,6 +45,15 @@ test("suggestions rank prefix matches first and include side commands", () => {
   );
 });
 
+test("goal commands are offered only where goals are available", () => {
+  const side = { available: false, running: false };
+  assert.deepEqual(slashSuggestions("go", skills, side).map((s) => s.value), []);
+  assert.deepEqual(
+    slashSuggestions("goal", skills, side, true).map((s) => s.value),
+    ["goal", "goal edit", "goal pause", "goal resume"],
+  );
+});
+
 test("choosing a command replaces the typed name and keeps the rest", () => {
   assert.deepEqual(insertSlash("/sh", 3, "ship"), { text: "/ship ", caret: 6 });
   assert.deepEqual(insertSlash("/sh the release", 3, "ship"), {

@@ -42,7 +42,7 @@ export function FormDialog({
             await submit();
             close();
           } catch (error) {
-            setError(String(error));
+            setError(error instanceof Error ? error.message : String(error));
             setBusy(false);
           }
         }}

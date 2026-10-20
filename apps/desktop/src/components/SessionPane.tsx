@@ -7,7 +7,14 @@ import {
   useState,
 } from "react";
 import clsx from "clsx";
-import { ArrowDown, Code2, FileDiff, KeyRound, Loader2 } from "lucide-react";
+import {
+  ArrowDown,
+  Code2,
+  FileDiff,
+  KeyRound,
+  Loader2,
+  Target,
+} from "lucide-react";
 import { openInEditor } from "../lib/editor";
 import { showProviders } from "../lib/store";
 import { api } from "../lib/api";
@@ -15,6 +22,7 @@ import { collectChanges, type FileChange } from "../lib/changes";
 import { updatePreferences, usePreferences } from "../lib/preferences";
 import { activityLabel, modelLabel } from "../lib/format";
 import type {
+  GoalSnapshot,
   PendingFile,
   ProjectState,
   Transcript as TranscriptData,
@@ -22,7 +30,18 @@ import type {
 import { ChangesPanel } from "./ChangesPanel";
 import { Composer } from "./Composer";
 import { GitStrip } from "./GitStrip";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { GoalDialog } from "./GoalDialog";
+import { GoalPanel, TONE_CLASSES } from "./GoalPanel";
 import { SideQuestions } from "./SideQuestions";
+import { budgetSummary, goalStatus } from "../lib/goals";
+import {
+  closeGoalDialog,
+  closeGoalPanel,
+  toggleGoalPanel,
+  useGoalUi,
+} from "../lib/goal-ui";
+import { toast } from "../lib/toast";
 import { Starters } from "./Starters";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
@@ -83,8 +102,15 @@ function SessionView({
     () => collectChanges(transcript.items),
     [transcript.items],
   );
-  const toggleChanges = () =>
-    updatePreferences({ changesPanel: !changesPanel });
+  const goalUi = useGoalUi();
+  const goalOpen = goalUi.panel === transcript.session_id;
+  // One side panel at a time: opening Changes closes the goal panel.
+  const toggleChanges = () => {
+    if (goalOpen) closeGoalPanel();
+    updatePreferences({ changesPanel: goalOpen ? true : !changesPanel });
+  };
+  const dialog =
+    goalUi.dialog?.sessionId === transcript.session_id ? goalUi.dialog : null;
   return (
     <div className="relative flex min-h-0 flex-1">
       <div className="flex min-w-0 flex-1 flex-col">
@@ -102,17 +128,30 @@ function SessionView({
           project={project}
           transcript={transcript}
           changes={changes}
-          changesOpen={changesPanel}
+          changesOpen={changesPanel && !goalOpen}
           toggleChanges={toggleChanges}
+          goalOpen={goalOpen}
         />
         <TranscriptScroller project={project} transcript={transcript} />
         <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
           <SideQuestions project={project} transcript={transcript} />
+          <CheckInterruptionBanner project={project} />
           <NoticeLine project={project} />
           <Composer project={project} transcript={transcript} />
         </div>
       </div>
-      {changesPanel && (
+      {goalOpen && <GoalPanel project={project} transcript={transcript} />}
+      {dialog && (
+        <GoalDialog
+          projectId={project.project_id}
+          sessionId={transcript.session_id}
+          current={transcript.goal}
+          initialObjective={dialog.objective}
+          edit={dialog.edit}
+          close={closeGoalDialog}
+        />
+      )}
+      {changesPanel && !goalOpen && (
         <ChangesPanel
           key={transcript.session_id}
           projectId={project.project_id}
@@ -195,12 +234,14 @@ function Header({
   changes,
   changesOpen,
   toggleChanges,
+  goalOpen,
 }: {
   project: ProjectState;
   transcript: TranscriptData;
   changes: FileChange[];
   changesOpen: boolean;
   toggleChanges: () => void;
+  goalOpen: boolean;
 }) {
   const running = transcript.status !== "idle";
   const runningTool = project.sessions.find(
@@ -229,6 +270,13 @@ function Header({
       >
         {modelLabel(transcript.model, project.models)}
       </span>
+      {(project.can_goal || transcript.goal) && (
+        <GoalChip
+          goal={transcript.goal}
+          open={goalOpen}
+          toggle={() => toggleGoalPanel(transcript.session_id)}
+        />
+      )}
       <GitStrip
         projectId={project.project_id}
         sessionTitle={transcript.title}
@@ -366,6 +414,85 @@ function TranscriptScroller({
         >
           <ArrowDown className="h-3.5 w-3.5" /> Latest
         </button>
+      )}
+    </div>
+  );
+}
+
+/** Opens the goal panel; shows the goal's state and budget at a glance. */
+function GoalChip({
+  goal,
+  open,
+  toggle,
+}: {
+  goal: GoalSnapshot | null;
+  open: boolean;
+  toggle: () => void;
+}) {
+  const status = goal ? goalStatus(goal) : null;
+  return (
+    <button
+      onClick={toggle}
+      aria-pressed={open}
+      title={goal ? `${goal.objective}\n${budgetSummary(goal)}` : "Set a goal (/goal)"}
+      className={clsx(
+        "flex h-7 max-w-[220px] items-center gap-1.5 rounded-md px-2 text-[12px]",
+        open ? "bg-active text-fg" : "text-muted hover:bg-hover hover:text-fg",
+      )}
+    >
+      <Target className="h-3.5 w-3.5 shrink-0" />
+      {status ? (
+        <span
+          className={clsx(
+            "shrink-0 rounded-full px-1.5 text-[10.5px] font-medium",
+            TONE_CLASSES[status.tone],
+          )}
+        >
+          {status.label}
+        </span>
+      ) : (
+        "Goal"
+      )}
+    </button>
+  );
+}
+
+/** An interrupted completion check holds the workspace until acknowledged. */
+function CheckInterruptionBanner({ project }: { project: ProjectState }) {
+  const [confirming, setConfirming] = useState(false);
+  const hold = project.check_interruption;
+  if (!hold) return null;
+  return (
+    <div
+      role="alert"
+      className="mb-2 flex items-start gap-3 rounded-md bg-warn-soft px-3 py-2 text-[12.5px] text-warn"
+    >
+      <span className="flex-1">
+        A goal's completion check was interrupted and may have left changes
+        behind. New work in this workspace waits until you review its effects
+        and acknowledge it.
+      </span>
+      <button
+        onClick={() => setConfirming(true)}
+        className="shrink-0 rounded-md border border-warn/50 px-2 py-0.5 hover:bg-warn-soft"
+      >
+        Acknowledge…
+      </button>
+      {confirming && (
+        <ConfirmDialog
+          title="Acknowledge the interrupted check?"
+          confirmLabel="I've resolved it"
+          tone="primary"
+          onConfirm={async () => {
+            await api.acknowledgeCheckInterruption(project.project_id, hold.run_id);
+            toast("Workspace released; resume the goal when ready");
+          }}
+          close={() => setConfirming(false)}
+        >
+          Confirm you have checked what the interrupted check changed (files,
+          processes, anything external). This releases the workspace; it does
+          not resume the goal.
+        </ConfirmDialog>
       )}
     </div>
   );

@@ -99,6 +99,32 @@ pub enum UiCommand {
     },
     /// Cancel the session's running side question, not its run.
     CancelSideQuestion(SessionId),
+    /// Create, edit or replace the session's goal. `expected` is the goal the
+    /// user saw (none for a first goal); a different current goal is refused.
+    SetGoal {
+        session_id: SessionId,
+        objective: String,
+        check: Option<qq_protocol::GoalCheck>,
+        preset: crate::goals::BudgetPreset,
+        defaults: crate::goals::GoalDefaultsDto,
+        expected: Option<qq_protocol::GoalIdentity>,
+        replace: bool,
+        reply: SubmissionReply,
+    },
+    /// Pause, resume, clear, or answer check consent for the goal revision
+    /// the user saw.
+    GoalControl {
+        session_id: SessionId,
+        expected: qq_protocol::GoalIdentity,
+        action: qq_protocol::GoalControl,
+        reply: SubmissionReply,
+    },
+    /// The user resolved an interrupted check's uncertain effects; release
+    /// the workspace hold (does not resume any goal).
+    AcknowledgeCheckInterruption {
+        run_id: qq_protocol::RunId,
+        reply: SubmissionReply,
+    },
     Approve {
         session_id: SessionId,
         tool_call_id: ToolCallId,
@@ -191,6 +217,8 @@ enum PendingIntent {
         reply: Option<SubmissionReply>,
         adopt: bool,
     },
+    /// A command whose acceptance or rejection the UI waits for.
+    Reply(SubmissionReply),
     Other,
 }
 
@@ -198,6 +226,7 @@ impl PendingIntent {
     fn finish(self, result: Result<(), String>) {
         let reply = match self {
             Self::Create { reply, .. } | Self::Prompt { reply, .. } => reply,
+            Self::Reply(reply) => Some(reply),
             Self::Other => None,
         };
         if let Some(reply) = reply {
@@ -719,6 +748,82 @@ impl Project {
                 },
                 PendingIntent::Other,
             ),
+            UiCommand::SetGoal {
+                session_id,
+                objective,
+                check,
+                preset,
+                defaults,
+                expected,
+                replace,
+                reply,
+            } => {
+                let current = self
+                    .sessions
+                    .get(&session_id)
+                    .and_then(|view| view.goal.as_deref());
+                let seen = current.map(|goal| qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                });
+                if seen != expected {
+                    let _ = reply.send(Err(
+                        "the goal changed since you opened it; review it again".to_owned(),
+                    ));
+                    return;
+                }
+                // Editing rebases on the current budget; a first goal or a
+                // replacement starts from the configured defaults.
+                let base = current.filter(|_| !replace).map(|goal| &goal.budget);
+                let budget =
+                    match crate::goals::budget(preset, &defaults, base, crate::goals::now_ms()) {
+                        Ok(budget) => budget,
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            return;
+                        }
+                    };
+                self.command(
+                    client,
+                    SessionCommand::SetGoal {
+                        session_id,
+                        objective,
+                        check,
+                        budget: Box::new(budget),
+                        expected,
+                        replace,
+                    },
+                    PendingIntent::Reply(reply),
+                );
+            }
+            UiCommand::GoalControl {
+                session_id,
+                expected,
+                action,
+                reply,
+            } => self.command(
+                client,
+                SessionCommand::GoalControl {
+                    session_id,
+                    expected,
+                    action,
+                },
+                PendingIntent::Reply(reply),
+            ),
+            UiCommand::AcknowledgeCheckInterruption { run_id, reply } => {
+                let Some(workspace_id) = self.workspace_id else {
+                    let _ = reply.send(Err("the workspace is not ready yet".to_owned()));
+                    return;
+                };
+                self.command(
+                    client,
+                    SessionCommand::AcknowledgeCheckInterruption {
+                        workspace_id,
+                        run_id,
+                    },
+                    PendingIntent::Reply(reply),
+                );
+            }
             UiCommand::CancelSideQuestion(session_id) => {
                 let Some(side_question_id) = self
                     .sessions
@@ -1094,6 +1199,11 @@ impl Project {
                 caps.commands
                     .contains(&SessionCommandKind::SubmitSideQuestion)
             }),
+            can_goal: self.capabilities.as_ref().is_some_and(|caps| {
+                caps.commands.contains(&SessionCommandKind::SetGoal)
+                    && caps.commands.contains(&SessionCommandKind::GoalControl)
+            }),
+            check_interruption: self.check_interruption,
             notice: self.notice.as_ref().map(|notice| NoticeDto {
                 level: match notice.level {
                     NoticeLevel::Info => "info",
@@ -1267,6 +1377,95 @@ mod submission_tests {
             assert!(client.requests.lock().unwrap().is_empty());
             assert!(project.pending.is_empty());
         }
+    }
+
+    fn goal_project() -> Project {
+        let mut project = Project::new(
+            None,
+            Arc::new(Engine::default()),
+            Arc::new(AtomicBool::new(true)),
+            "goals".into(),
+            PathBuf::from("."),
+            None,
+        );
+        project.connection = ConnectionDto::Live;
+        project
+    }
+
+    fn goal_defaults() -> crate::goals::GoalDefaultsDto {
+        crate::goals::GoalDefaultsDto::from_config(&qq_config::GoalsConfig::default())
+    }
+
+    #[tokio::test]
+    async fn a_goal_the_user_did_not_see_is_never_overwritten() {
+        let client = Client::default();
+        let mut project = goal_project();
+        let (reply, answered) = oneshot::channel();
+        // The UI believed a goal existed; this session has none loaded.
+        project.apply_command(
+            &client,
+            UiCommand::SetGoal {
+                session_id: SessionId::from_bytes([7; 16]),
+                objective: "ship".into(),
+                check: None,
+                preset: crate::goals::BudgetPreset::Focused,
+                defaults: goal_defaults(),
+                expected: Some(qq_protocol::GoalIdentity {
+                    goal_id: qq_protocol::GoalId::from_bytes([1; 16]),
+                    revision: 4,
+                }),
+                replace: false,
+                reply,
+            },
+        );
+        assert_eq!(
+            answered.await.unwrap(),
+            Err("the goal changed since you opened it; review it again".to_owned())
+        );
+        assert!(client.requests.lock().unwrap().is_empty());
+        assert!(project.pending.is_empty());
+    }
+
+    #[test]
+    fn a_first_goal_is_sent_with_the_preset_budget() {
+        let client = Client::default();
+        let mut project = goal_project();
+        let (reply, _answered) = oneshot::channel();
+        let session_id = SessionId::from_bytes([7; 16]);
+        let before = crate::goals::now_ms();
+        project.apply_command(
+            &client,
+            UiCommand::SetGoal {
+                session_id,
+                objective: "ship".into(),
+                check: None,
+                preset: crate::goals::BudgetPreset::Focused,
+                defaults: goal_defaults(),
+                expected: None,
+                replace: false,
+                reply,
+            },
+        );
+        let requests = client.requests.lock().unwrap();
+        let Some(ClientRequest::Command(CommandRequest {
+            command:
+                SessionCommand::SetGoal {
+                    session_id: sent,
+                    budget,
+                    expected,
+                    replace,
+                    ..
+                },
+            ..
+        })) = requests.first()
+        else {
+            panic!("expected a SetGoal command, got {requests:?}");
+        };
+        assert_eq!(*sent, session_id);
+        assert_eq!((expected, replace), (&None, &false));
+        assert_eq!(budget.max_goal_runs, 20);
+        assert!(budget.deadline_ms >= before + 3_600_000);
+        assert_eq!(project.pending.len(), 1);
     }
 
     #[test]
