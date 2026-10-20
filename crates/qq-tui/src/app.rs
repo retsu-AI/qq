@@ -1085,10 +1085,14 @@ impl App {
             // The snapshot carried no body: fetch the one now shown.
             fallback_fetch = Some(self.focus_session(first));
         }
-        // The summaries may have revealed that the session on screen sits
-        // under an audit, whichever body this snapshot carried.
-        if fallback_fetch.is_none() {
-            fallback_fetch = Some(self.leave_hidden_focus());
+        // The summaries may have revealed that the session on screen, or one
+        // an overlay or picker confirmation targets, sits under an audit,
+        // whichever body this snapshot carried. Always run: after a
+        // fallback above it finds focus moved and only drops the rest.
+        let hidden = self.leave_hidden_focus();
+        match fallback_fetch.as_mut() {
+            Some(fetch) => fetch.extend(hidden),
+            None => fallback_fetch = Some(hidden),
         }
         self.evict_cold_bodies();
         if initial {
@@ -1389,7 +1393,7 @@ impl App {
         // The sessions the last frame's panes drew (a workspace view the
         // inspector holds leaves its transcript in the main pane), and the
         // view now followed.
-        let drawn = |id: SessionId| self.drawn.contains(&id) || self.focused() == Some(id);
+        let drawn = |id: SessionId| self.is_drawn(id);
         if drawn(event.session_id) {
             return true;
         }
@@ -1839,6 +1843,15 @@ impl App {
     /// surface (composer, approvals, footers, tree navigation) acts on.
     pub(crate) fn focused(&self) -> Option<SessionId> {
         self.view().session()
+    }
+
+    /// Whether `id`'s transcript (or side view) is on screen: drawn by the
+    /// last frame's panes, or newly followed by the focused pane with no
+    /// overlay covering it (the next frame draws it).
+    fn is_drawn(&self, id: SessionId) -> bool {
+        self.drawn.contains(&id)
+            || (self.focused() == Some(id)
+                && matches!(self.mode(), Mode::Approval | Mode::Trust | Mode::Compose))
     }
 
     /// The focused pane shows no session at all: neither a transcript nor a
@@ -3336,7 +3349,7 @@ impl App {
         // The sessions the last frame's panes drew (its own view, or the
         // transcript an inspector-held workspace view left in the main pane),
         // plus the view now followed, which the next frame draws.
-        let drawn = |id: SessionId| self.drawn.contains(&id) || self.view().session() == Some(id);
+        let drawn = |id: SessionId| self.is_drawn(id);
         // Loaded parent links up to a missing parent: `depth` is zero outside
         // `thread_order`, so an orphan component is walked by its links.
         for _ in 0..=self.sessions.len() {
@@ -3438,7 +3451,7 @@ impl App {
     /// Sessions in components `thread_order` omits because their topmost
     /// session's parent is not loaded (a bounded snapshot can carry a child
     /// without its parent), depth-first. Empty in the common case.
-    fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
+    pub(super) fn orphan_trees(&self) -> impl Iterator<Item = SessionId> + '_ {
         let complete = self.sessions.thread_order().len() == self.sessions.len();
         let mut stack: Vec<SessionId> = if complete {
             Vec::new()
@@ -3534,6 +3547,16 @@ impl App {
     /// (a missing parent arrived and is an audit), focus moves to the newest
     /// non-audit root and its body is fetched.
     fn leave_hidden_focus(&mut self) -> Effects {
+        // A goal form or goal-check consent for a session now known to sit
+        // under an audit is closed: its accept would act on that session.
+        let goal_target = match &self.overlay {
+            Some(Overlay::GoalForm(form)) => Some(form.session),
+            Some(Overlay::GoalCheck { target, .. }) => Some(target.session_id),
+            _ => None,
+        };
+        if goal_target.is_some_and(|id| self.under_audit(id)) {
+            self.overlay = None;
+        }
         // An open picker drops rows now known to sit under an audit.
         if let Some(Overlay::Sessions { picker, .. }) = &self.overlay
             && picker.items().iter().any(|row| self.under_audit(row.id))

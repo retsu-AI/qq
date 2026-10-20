@@ -401,6 +401,11 @@ pub(super) fn rollup(app: &App) -> Rollup {
         };
         add_agent_cost(pending, session);
         pending.entry.agents += 1;
+        // An unfocused agent's new output is the session's new output: its
+        // agents have no rows of their own.
+        if focused != Some(id) {
+            pending.entry.unread = pending.entry.unread.saturating_add(session.unread);
+        }
         if is_working(session) {
             pending.entry.agents_working += 1;
         }
@@ -447,6 +452,9 @@ pub(super) fn rollup(app: &App) -> Rollup {
                 continue;
             }
             pending.entry.agents += 1;
+            if focused != Some(agent) {
+                pending.entry.unread = pending.entry.unread.saturating_add(session.unread);
+            }
             if is_working(session) {
                 pending.entry.agents_working += 1;
             }
