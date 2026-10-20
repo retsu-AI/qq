@@ -22,6 +22,33 @@ A new or empty session offers starting points: explain the project, review
 your changes (`@diff`), fix a bug, or add tests. Choosing one fills the composer
 for you to finish; nothing is sent until you send it.
 
+## Goals
+
+A goal keeps QQ working on a session across runs until it is achieved, a
+budget runs out, or it needs you (see [Session goals](tui.md#session-goals)
+for how the server pursues one). The **Goal** button in the session header
+opens the goal panel: objective, why it stopped, checklist, notes, runs,
+deadline, tokens and cost used (unknown stays labelled unknown), waits, the
+completion check and its last output. Pause, Resume, Edit and Clear act on the
+revision you are looking at; if the goal changed meanwhile, the command is
+refused instead of applied to the newer goal.
+
+Set a goal from the panel or with `/goal <objective>`; `/goal` alone opens the
+panel and `/goal edit`, `/goal pause`, `/goal resume` and `/goal clear` do what
+they say. The dialog takes the objective, an optional completion check command
+and a budget: the workspace's configured defaults, Focused (up to one hour and
+20 runs) or Extended (the workspace maximum); editing can keep the current
+deadline and limits. Replacing an existing goal, including an achieved one,
+asks you to confirm which goal it replaces. Budgets come from the `goals`
+section of the project's configuration and are capped by its ceilings.
+
+A check command never runs on an ordinary approval. When the goal needs it,
+the panel asks for consent to that exact command: **Deny**, **Allow once** or
+**Allow for this goal**. Changing the goal or the command asks again. If a
+check is interrupted (for example by a restart), a banner holds new work in
+the workspace until you review what it may have changed and acknowledge it;
+acknowledging does not resume the goal.
+
 ## Sessions and run controls
 
 Search sessions in the sidebar (Ctrl F; Esc clears). Each session's ⋯ menu

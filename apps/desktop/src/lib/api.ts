@@ -8,7 +8,8 @@ import type {
   ProjectInfo,
   Provider,
 } from "./types";
-import type { GitStatusDto } from "./generated";
+import type { GitStatusDto, GoalDefaultsDto } from "./generated";
+import type { BudgetPreset, GoalAction, SeenGoal } from "./goals";
 
 export const api = {
   sessionAction: (
@@ -46,6 +47,28 @@ export const api = {
   /** Pushes and opens a pull request; resolves to its URL. */
   gitCreatePr: (projectId: string, title: string, body: string, draft: boolean) =>
     invoke<string>("git_create_pr", { projectId, title, body, draft }),
+  goalDefaults: (projectId: string) =>
+    invoke<GoalDefaultsDto>("goal_defaults", { projectId }),
+  /** Creates, edits or replaces a goal; resolves once the server accepts it. */
+  setGoal: (
+    projectId: string,
+    sessionId: string,
+    goal: {
+      objective: string;
+      check: string | null;
+      preset: BudgetPreset;
+      expected: SeenGoal | null;
+      replace: boolean;
+    },
+  ) => invoke<void>("set_goal", { projectId, sessionId, ...goal }),
+  goalControl: (
+    projectId: string,
+    sessionId: string,
+    expected: SeenGoal,
+    action: GoalAction,
+  ) => invoke<void>("goal_control", { projectId, sessionId, expected, action }),
+  acknowledgeCheckInterruption: (projectId: string, runId: string) =>
+    invoke<void>("acknowledge_check_interruption", { projectId, runId }),
   /** Resolves to the editor's name. `path` is project-relative. */
   openInEditor: (projectId: string, path?: string) =>
     invoke<string>("open_in_editor", { projectId, path: path ?? null }),
