@@ -72,6 +72,7 @@ enum Reply {
     Text(&'static str),
     ReadFile(&'static str),
     WriteFile(&'static str, &'static str),
+    Tool(&'static str, serde_json::Value),
     Status(u16, &'static str),
 }
 
@@ -87,13 +88,17 @@ impl Reply {
                     COMPLETED
                 ),
             ),
-            Self::ReadFile(path) | Self::WriteFile(path, _) => {
+            Self::ReadFile(_) | Self::WriteFile(_, _) | Self::Tool(_, _) => {
                 let (name, arguments) = match self {
-                    Self::WriteFile(_, content) => (
+                    Self::WriteFile(path, content) => (
                         "write_file",
                         serde_json::json!({ "path": path, "content": content }).to_string(),
                     ),
-                    _ => ("read_file", serde_json::json!({ "path": path }).to_string()),
+                    Self::ReadFile(path) => {
+                        ("read_file", serde_json::json!({ "path": path }).to_string())
+                    }
+                    Self::Tool(name, arguments) => (*name, arguments.to_string()),
+                    Self::Text(_) | Self::Status(_, _) => unreachable!("tool reply"),
                 };
                 let item = serde_json::json!({
                     "type": "function_call", "id": "fc_1", "call_id": "call_1",
@@ -419,6 +424,11 @@ struct Scenario {
 
 const SCENARIOS: &[Scenario] = &[
     Scenario {
+        name: "run-command-deadlines",
+        proves: "shell and exec accept build deadlines over ten minutes and return their native results through qq run",
+        run: |home| Box::pin(run_command_deadlines(home)),
+    },
+    Scenario {
         name: "permission-dispatch",
         proves: "all four approval modes dispatch correctly, Ask denies unattended writes, and built-ins protect policy/Git files",
         run: |home| Box::pin(permission_dispatch(home)),
@@ -701,6 +711,56 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
                 .any(|record| record["span"]["name"] == name
                     && record["fields"]["message"] == "close"),
             "missing {name} close"
+        );
+    }
+    Ok(())
+}
+
+async fn run_command_deadlines(home: &Home) -> Result<(), String> {
+    for (name, arguments) in [
+        (
+            "shell",
+            serde_json::json!({"command": "printf deadline-ok", "timeout_seconds": 1800}),
+        ),
+        (
+            "exec",
+            serde_json::json!({"program": "printf", "args": ["deadline-ok"], "timeout_seconds": 1800}),
+        ),
+    ] {
+        let provider = home
+            .provider(vec![Reply::Tool(name, arguments), Reply::Text("finished")])
+            .await
+            .map_err(|error| error.to_string())?;
+        let output = home
+            .run(
+                &provider.base_url,
+                &[
+                    "run",
+                    "--format",
+                    "jsonl",
+                    "--allow-shell",
+                    "printf",
+                    "run the command",
+                ],
+            )
+            .await?;
+        ensure!(output.status == Some(0), "{name}: {}", output.stderr);
+        let records = jsonl(&output.stdout)?;
+        let finished = records
+            .iter()
+            .find(|record| record["envelope"]["event"]["type"] == "tool_call_finished")
+            .map(|record| &record["envelope"]["event"]["tool_call"]);
+        ensure!(
+            finished.is_some_and(|call| call["is_error"] == false
+                && call["result"]
+                    .as_str()
+                    .is_some_and(|result| result.contains("deadline-ok"))),
+            "{name} failed: {finished:?}"
+        );
+        let requests = provider.requests()?;
+        ensure!(
+            requests.len() == 2 && requests[1].contains("deadline-ok"),
+            "{name} result did not reach the next model turn"
         );
     }
     Ok(())

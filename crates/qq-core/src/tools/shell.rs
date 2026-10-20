@@ -21,7 +21,6 @@ pub(super) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
-pub(super) const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
 
 #[cfg(test)]
 struct SpawnHook {
@@ -129,7 +128,11 @@ impl Launch<'_> {
             }
         }
         let timeout = self.timeout_seconds().unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-        if timeout == 0 || timeout > MAX_SHELL_TIMEOUT_SECS {
+        if timeout == 0
+            || std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(timeout))
+                .is_none()
+        {
             return Err(InvalidLaunch::Timeout);
         }
         if self.env().len() > MAX_SHELL_ENV_NAMES
@@ -211,7 +214,7 @@ pub(super) enum InvalidLaunch {
     Args,
     #[error("invalid_stdin: stdin exceeds 65536 bytes")]
     Stdin,
-    #[error("timeout_seconds must be between 1 and 600")]
+    #[error("timeout_seconds must be positive and fit a monotonic deadline")]
     Timeout,
     #[error("invalid_env: at most 16 valid environment names per call")]
     Env,
@@ -281,8 +284,11 @@ pub(super) async fn run_shell(
     let timeout_seconds = launch
         .timeout_seconds()
         .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-    let preparation_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+    let Some(preparation_deadline) =
+        std::time::Instant::now().checked_add(std::time::Duration::from_secs(timeout_seconds))
+    else {
+        return ToolOutput::refused(InvalidLaunch::Timeout.to_string());
+    };
     let permit = tokio::select! {
         biased;
         () = cancelled.cancelled() => return ToolOutput::interrupted("tool execution was cancelled"),

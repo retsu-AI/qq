@@ -15,10 +15,7 @@ use super::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
         MAX_QUERY_BYTES,
     },
-    shell::{
-        MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES,
-        MAX_SHELL_TIMEOUT_SECS,
-    },
+    shell::{MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES},
     tree::{MAX_DEPTH, MAX_ENTRIES},
 };
 use crate::{
@@ -35,9 +32,9 @@ pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 const WAIT_AGENTS_TOOL: &str = "wait_agents";
 /// Cancels one background sub-agent (ADR-0054 § 4).
 const CANCEL_AGENT_TOOL: &str = "cancel_agent";
-/// The longest one `wait_agents` call blocks its turn: a shell command's
-/// own ceiling, so a wait is never the longest thing a turn can do.
-pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = MAX_SHELL_TIMEOUT_SECS;
+/// The longest one `wait_agents` call blocks its turn. Command execution
+/// deadlines are independent of this observation bound.
+pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = 600;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuiltInTool {
@@ -227,8 +224,7 @@ impl BuiltInTool {
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_SHELL_TIMEOUT_SECS
+                            "minimum": 1
                         },
                         "env": {
                             "type": "array",
@@ -256,8 +252,7 @@ impl BuiltInTool {
                         "stdin": { "type": "string", "maxLength": MAX_EXEC_STDIN_BYTES },
                         "timeout_seconds": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_SHELL_TIMEOUT_SECS
+                            "minimum": 1
                         },
                         "env": {
                             "type": "array",
