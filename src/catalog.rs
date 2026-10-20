@@ -11,8 +11,8 @@ use std::{
 use hmac::{Hmac, Mac};
 use qq_auth::{CredentialStore, Secret};
 use qq_config::{
-    BuiltinAudience, EndpointMode, HttpAccess, HttpCredential, ProviderApi, ProviderAuth,
-    ProviderConfig, ProviderKind, SecretRef,
+    BuiltinAudience, EndpointMode, HttpAccess, HttpCredential, ModelDiscoveryShape, ProviderApi,
+    ProviderAuth, ProviderConfig, ProviderKind, SecretRef,
 };
 
 use crate::runtime::resolve_builtin_api_key;
@@ -154,14 +154,15 @@ impl ModelDiscovery {
         auth: &DiscoveryAuth,
     ) -> Option<Vec<DiscoveredModel>> {
         let (mut endpoint, direct) = models_endpoint(access)?;
-        match (kind, access.api()) {
-            (ProviderKind::Anthropic, _) | (_, ProviderApi::AnthropicMessages) => {
+        let shape = kind.discovery();
+        match (shape, access.api()) {
+            (_, ProviderApi::AnthropicMessages) => {
                 endpoint.query_pairs_mut().append_pair("limit", "1000");
             }
-            (ProviderKind::Google, _) | (_, ProviderApi::GoogleGenerateContent) => {
+            (_, ProviderApi::GoogleGenerateContent) => {
                 endpoint.query_pairs_mut().append_pair("pageSize", "1000");
             }
-            (ProviderKind::OpenAiCodex, _) => {
+            (ModelDiscoveryShape::Codex, _) => {
                 endpoint
                     .query_pairs_mut()
                     .append_pair("client_version", CODEX_MODELS_CLIENT_VERSION);
@@ -183,10 +184,10 @@ impl ModelDiscovery {
             }
             let mut request = apply_static_headers(client.get(url), access)
                 .timeout(deadline.checked_duration_since(Instant::now())?);
-            if kind == ProviderKind::Anthropic || access.api() == ProviderApi::AnthropicMessages {
+            if access.api() == ProviderApi::AnthropicMessages {
                 request = request.header("anthropic-version", "2023-06-01");
             }
-            let response = apply_auth(request, kind, access.api(), auth)?.send().ok()?;
+            let response = apply_auth(request, access.api(), auth)?.send().ok()?;
             if !response.status().is_success() {
                 return None;
             }
@@ -200,11 +201,11 @@ impl ModelDiscovery {
                 return None;
             }
             let body: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-            models.extend(parse_models(&body, kind, access.api())?);
+            models.extend(parse_models(&body, shape, access.api())?);
             if models.len() > MAX_DISCOVERED_MODELS {
                 return None;
             }
-            if !(kind == ProviderKind::Anthropic || access.api() == ProviderApi::AnthropicMessages)
+            if access.api() != ProviderApi::AnthropicMessages
                 || body.get("has_more").and_then(serde_json::Value::as_bool) != Some(true)
             {
                 models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -243,26 +244,22 @@ fn cache_key(
 ) -> Option<[u8; 32]> {
     let mut digest = Hmac::<Sha256>::new_from_slice(key).ok()?;
     update_digest(&mut digest, provider_id.as_bytes());
-    digest.update(&[kind as u8, access.api() as u8, access.endpoint_mode() as u8]);
+    update_digest(&mut digest, kind.name().as_bytes());
+    digest.update(&[access.api() as u8, access.endpoint_mode() as u8]);
     update_digest(&mut digest, access.endpoint().as_bytes());
     for (name, value) in access.headers() {
         update_digest(&mut digest, name.as_bytes());
         update_digest(&mut digest, value.expose_value().as_bytes());
     }
-    update_auth_digest(&mut digest, kind, access.api(), auth);
+    update_auth_digest(&mut digest, access.api(), auth);
     Some(digest.finalize().into_bytes().into())
 }
 
-fn update_auth_digest(
-    digest: &mut Hmac<Sha256>,
-    kind: ProviderKind,
-    api: ProviderApi,
-    auth: &DiscoveryAuth,
-) {
+fn update_auth_digest(digest: &mut Hmac<Sha256>, api: ProviderApi, auth: &DiscoveryAuth) {
     match auth {
         DiscoveryAuth::NoAuth => update_digest(digest, b"no-auth"),
         DiscoveryAuth::ApiKey(secret) => {
-            let name = api_key_header(kind, api);
+            let name = api_key_header(api);
             update_digest(digest, name.as_bytes());
             if name == "authorization" {
                 update_digest(digest, b"Bearer ");
@@ -427,13 +424,12 @@ fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<Di
 
 fn apply_auth(
     request: RequestBuilder,
-    kind: ProviderKind,
     api: ProviderApi,
     auth: &DiscoveryAuth,
 ) -> Option<RequestBuilder> {
     match auth {
         DiscoveryAuth::NoAuth => Some(request),
-        DiscoveryAuth::ApiKey(secret) => apply_api_key(request, kind, api, secret),
+        DiscoveryAuth::ApiKey(secret) => apply_api_key(request, api, secret),
         DiscoveryAuth::Bearer(secret) => bearer(request, secret),
         DiscoveryAuth::Header(name, secret) => {
             Some(request.header(name, secret.expose_secret_str().ok()?))
@@ -457,22 +453,24 @@ fn apply_auth(
 
 fn apply_api_key(
     request: RequestBuilder,
-    kind: ProviderKind,
     api: ProviderApi,
     secret: &Secret,
 ) -> Option<RequestBuilder> {
     let value = secret.expose_secret_str().ok()?;
-    match api_key_header(kind, api) {
+    match api_key_header(api) {
         "authorization" => bearer(request, secret),
         name => Some(request.header(name, value)),
     }
 }
 
-fn api_key_header(kind: ProviderKind, api: ProviderApi) -> &'static str {
-    match (kind, api) {
-        (ProviderKind::Anthropic, _) | (_, ProviderApi::AnthropicMessages) => "x-api-key",
-        (ProviderKind::Google, _) | (_, ProviderApi::GoogleGenerateContent) => "x-goog-api-key",
-        _ => "authorization",
+/// The header a discovery API key travels in, by protocol.
+fn api_key_header(api: ProviderApi) -> &'static str {
+    match api {
+        ProviderApi::AnthropicMessages => "x-api-key",
+        ProviderApi::GoogleGenerateContent => "x-goog-api-key",
+        ProviderApi::OpenAiResponses
+        | ProviderApi::OpenAiChatCompletions
+        | ProviderApi::BedrockConverse => "authorization",
     }
 }
 
@@ -485,26 +483,22 @@ fn bearer(request: RequestBuilder, secret: &Secret) -> Option<RequestBuilder> {
 
 fn parse_models(
     body: &serde_json::Value,
-    kind: ProviderKind,
+    shape: ModelDiscoveryShape,
     api: ProviderApi,
 ) -> Option<Vec<DiscoveredModel>> {
-    let entries = if kind == ProviderKind::Google
-        || api == ProviderApi::GoogleGenerateContent
-        || kind == ProviderKind::OpenAiCodex
-    {
+    let codex = shape == ModelDiscoveryShape::Codex;
+    let entries = if api == ProviderApi::GoogleGenerateContent || codex {
         body.get("models")?.as_array()?
     } else {
         body.get("data")?.as_array()?
     };
     // A partial response must not evict the bundled fallback catalog.
-    if matches!(kind, ProviderKind::OpenAiCodex | ProviderKind::Anthropic)
-        && entries.len() > MAX_DISCOVERED_MODELS
-    {
+    if shape.is_authoritative() && entries.len() > MAX_DISCOVERED_MODELS {
         return None;
     }
     let mut models = Vec::with_capacity(entries.len().min(MAX_DISCOVERED_MODELS));
     for entry in entries.iter().take(MAX_DISCOVERED_MODELS) {
-        if kind == ProviderKind::OpenAiCodex {
+        if codex {
             match entry.get("visibility") {
                 None => {}
                 Some(value) if value.as_str() == Some("list") => {}
@@ -532,7 +526,7 @@ fn parse_models(
             .map(|id| id.strip_prefix("models/").unwrap_or(id))
             .filter(|id| valid_model_id(id))
         else {
-            if matches!(kind, ProviderKind::OpenAiCodex | ProviderKind::Anthropic) {
+            if shape.is_authoritative() {
                 return None;
             }
             continue;
@@ -563,7 +557,7 @@ fn parse_models(
                 }
                 efforts
             });
-        let efforts = if kind == ProviderKind::Anthropic || api == ProviderApi::AnthropicMessages {
+        let efforts = if api == ProviderApi::AnthropicMessages {
             match entry.pointer("/capabilities/effort") {
                 Some(capability) if !capability.is_null() => {
                     let supported = capability.get("supported")?.as_bool()?;
@@ -666,6 +660,10 @@ mod tests {
         }
     }
 
+    fn builtin_kind(id: &str) -> ProviderKind {
+        ProviderKind::Builtin(qq_config::builtin_provider(id).unwrap())
+    }
+
     /// The unpatched credential of built-in provider `id`.
     fn builtin(id: &str) -> HttpCredential {
         HttpCredential::Builtin {
@@ -700,7 +698,7 @@ mod tests {
             assert!(
                 parse_models(
                     &serde_json::json!({"models": [entry]}),
-                    ProviderKind::OpenAiCodex,
+                    builtin_kind("openai-codex").discovery(),
                     ProviderApi::OpenAiResponses
                 )
                 .is_none()
@@ -709,7 +707,7 @@ mod tests {
         assert_eq!(
             parse_models(
                 &serde_json::json!({"models": []}),
-                ProviderKind::OpenAiCodex,
+                builtin_kind("openai-codex").discovery(),
                 ProviderApi::OpenAiResponses
             ),
             Some(Vec::new())
@@ -725,7 +723,7 @@ mod tests {
         ]});
         let models = parse_models(
             &body,
-            ProviderKind::OpenAiCodex,
+            builtin_kind("openai-codex").discovery(),
             ProviderApi::OpenAiResponses,
         )
         .unwrap();
@@ -740,7 +738,7 @@ mod tests {
         assert!(
             parse_models(
                 &oversized,
-                ProviderKind::OpenAiCodex,
+                builtin_kind("openai-codex").discovery(),
                 ProviderApi::OpenAiResponses
             )
             .is_none()
@@ -780,7 +778,7 @@ mod tests {
 
         let models = discovery
             .fetch(
-                ProviderKind::OpenAiCodex,
+                builtin_kind("openai-codex"),
                 &access,
                 &DiscoveryAuth::Codex {
                     access_token: Secret::from_secret_bytes("test-token"),
@@ -893,7 +891,7 @@ mod tests {
         );
         let models = ModelDiscovery::new()
             .unwrap()
-            .fetch(ProviderKind::Anthropic, &access, &DiscoveryAuth::NoAuth)
+            .fetch(builtin_kind("anthropic"), &access, &DiscoveryAuth::NoAuth)
             .unwrap();
         server.join().unwrap();
         assert_eq!(
@@ -911,7 +909,7 @@ mod tests {
         ]});
         let models = parse_models(
             &body,
-            ProviderKind::OpenAiCodex,
+            builtin_kind("openai-codex").discovery(),
             ProviderApi::OpenAiResponses,
         )
         .unwrap();
@@ -945,7 +943,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/v1/responses", listener.local_addr().unwrap());
         let provider = test_provider(
-            ProviderKind::OpenAiCodex,
+            builtin_kind("openai-codex"),
             endpoint.clone(),
             builtin("openai-codex"),
         );
@@ -1028,11 +1026,11 @@ mod tests {
                 "custom/stored".to_owned(),
             ))),
         );
-        let xai = test_provider(ProviderKind::XAi, endpoint.clone(), builtin("xai"));
+        let xai = test_provider(builtin_kind("xai"), endpoint.clone(), builtin("xai"));
         // A built-in API key with no explicit reference probes the store
         // (`openai/default`), so cache-only discovery must not use it.
         let builtin_fallback =
-            test_provider(ProviderKind::OpenAi, endpoint.clone(), builtin("openai"));
+            test_provider(builtin_kind("openai"), endpoint.clone(), builtin("openai"));
         let safe = test_provider(
             ProviderKind::Custom,
             endpoint.clone(),
@@ -1119,7 +1117,7 @@ mod tests {
         ]});
         let models = parse_models(
             &body,
-            ProviderKind::Anthropic,
+            builtin_kind("anthropic").discovery(),
             ProviderApi::AnthropicMessages,
         )
         .unwrap();
@@ -1137,7 +1135,7 @@ mod tests {
         assert!(
             parse_models(
                 &malformed,
-                ProviderKind::Anthropic,
+                builtin_kind("anthropic").discovery(),
                 ProviderApi::AnthropicMessages
             )
             .is_none()
@@ -1171,19 +1169,28 @@ mod tests {
             cache_key(&key, "custom", ProviderKind::Custom, &second, &second_auth)
         );
         let shared = Secret::from_secret_bytes("shared");
+        // The header an API key travels in follows the protocol: on an
+        // Anthropic Messages route it is `x-api-key`, never a bearer.
+        let anthropic = HttpAccess::new(
+            "https://example.test/v1/messages",
+            EndpointMode::Exact,
+            ProviderApi::AnthropicMessages,
+            HttpCredential::Configured(ProviderAuth::NoAuth),
+            BTreeMap::new(),
+        );
         assert_ne!(
             cache_key(
                 &key,
                 "custom",
-                ProviderKind::Anthropic,
-                &first,
+                builtin_kind("anthropic"),
+                &anthropic,
                 &DiscoveryAuth::ApiKey(shared.clone())
             ),
             cache_key(
                 &key,
                 "custom",
-                ProviderKind::Anthropic,
-                &first,
+                builtin_kind("anthropic"),
+                &anthropic,
                 &DiscoveryAuth::Bearer(shared)
             )
         );
@@ -1208,7 +1215,7 @@ mod tests {
             &serde_json::json!({
                 "data": [{"id": "safe-id", "display_name": "unsafe\u{1b}[2J"}]
             }),
-            ProviderKind::Custom,
+            ModelDiscoveryShape::Supplementary,
             ProviderApi::OpenAiResponses,
         )
         .unwrap();
