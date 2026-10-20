@@ -141,6 +141,10 @@ cursor fallback, and audit exclusion in every mode.
   rest (`◇ Deploy helper +3 need you`). A painted `+N need you` rail row
   points at the needs it collapses, so those are neither named nor counted
   again. The strip only counts, so beside it the notice still names.
+- `Alt-A`/`Alt-D` answer the approval the rule names when it names one,
+  and otherwise the first human-owned approval in attention order outside
+  the focused transcript; so the chords beside a named approval always act
+  on that approval, never on another the rail paints.
 - A transient notice (info, warning, error) takes the rule's left side. If
   needs are unnamed, the right side keeps a pointer to them (answer and jump
   chords, plus a count unless the strip already shows one), and the notice
@@ -151,8 +155,9 @@ cursor fallback, and audit exclusion in every mode.
 
 Acceptance: frame tests that every need is named or pointed at and never
 named twice, at Compact, Regular with and without the rail, past the agent
-cap, under a transient notice, and at narrow widths; inspector `Auto` hidden
-and shown; goldens moved deliberately.
+cap, under a transient notice, and at narrow widths; with the rail painting
+the first approval and the rule naming the second, `Alt-A` answers the
+second; inspector `Auto` hidden and shown; goldens moved deliberately.
 
 ### F6: clickable rail and scoped selection
 
