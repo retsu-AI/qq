@@ -155,6 +155,9 @@ pub(crate) struct FrameRenderer {
     cursor: Option<CursorPosition>,
     /// Sessions the last frame's rail window painted; handed to the app.
     rail_painted: Option<Vec<SessionId>>,
+    /// Sessions whose transcript the last frame's panes drew; handed to the
+    /// app.
+    drawn: Vec<SessionId>,
 }
 
 impl FrameRenderer {
@@ -168,6 +171,7 @@ impl FrameRenderer {
             }
         }
         app.rail_painted = self.rail_painted.take();
+        app.drawn = std::mem::take(&mut self.drawn);
     }
 
     /// Forget the previous frame so the next draw repaints every row, after
@@ -280,6 +284,7 @@ impl FrameRenderer {
             .map(|(_, pane)| shown_view(app, pane, inline_detail).session())
             .collect();
         self.cache.retain_visible(app, &shown);
+        self.drawn = shown.iter().flatten().copied().collect();
         // Transcript panes fill their slots left to right. Overlays take the
         // focused pane's cells; the rail stays so the picker is read in
         // context. The transcript caches stay warm behind an overlay so

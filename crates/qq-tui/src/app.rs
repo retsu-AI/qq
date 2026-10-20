@@ -486,6 +486,11 @@ pub(crate) struct App {
     /// the renderer; `None` before the first frame. A background delta for a
     /// session outside it changes no cell.
     pub(crate) rail_painted: Option<Vec<SessionId>>,
+    /// Sessions whose transcript (or side view) the last frame's panes drew,
+    /// committed by the renderer. A workspace view the inspector holds
+    /// leaves the transcript it replaced in the main pane; one drawn inline
+    /// leaves none.
+    pub(crate) drawn: Vec<SessionId>,
     /// Terminal width from the last resize event, so update paths can decide
     /// whether a change to an unshown session is visible at all. Zero until
     /// the first resize, which reads as "assume visible".
@@ -558,6 +563,7 @@ impl App {
             terminal_width: 0,
             mouse_capture: true,
             rail_painted: None,
+            drawn: Vec::new(),
             themes: if options.themes.is_empty() {
                 vec![Theme::default()]
             } else {
@@ -1076,7 +1082,8 @@ impl App {
         } else if self.focused().is_none()
             && let Some(first) = self.first_listed_root()
         {
-            self.set_focus(first);
+            // The snapshot carried no body: fetch the one now shown.
+            fallback_fetch = Some(self.focus_session(first));
         }
         // The summaries may have revealed that the session on screen sits
         // under an audit, whichever body this snapshot carried.
@@ -3311,16 +3318,14 @@ impl App {
             return true;
         }
         let mut id = session.summary.id;
-        // The session the main pane draws: a workspace view the inspector
-        // holds leaves the transcript it replaced on screen.
-        let drawn = match self.view() {
-            View::Attention | View::Changes => self.view_return,
-            view => view.session(),
-        };
+        // The sessions the last frame's panes drew (its own view, or the
+        // transcript an inspector-held workspace view left in the main pane),
+        // plus the view now followed, which the next frame draws.
+        let drawn = |id: SessionId| self.drawn.contains(&id) || self.view().session() == Some(id);
         // Loaded parent links up to a missing parent: `depth` is zero outside
         // `thread_order`, so an orphan component is walked by its links.
         for _ in 0..=self.sessions.len() {
-            if drawn == Some(id) || painted.contains(&id) {
+            if drawn(id) || painted.contains(&id) {
                 return true;
             }
             match self
@@ -3525,17 +3530,31 @@ impl App {
             self.clear_session_picker_confirm();
         }
         // The session a workspace view returns to (and that `/goal`, `/btw`
-        // act on while it is open) is replaced too.
+        // act on while it is open) is replaced too; an inspector-held view
+        // draws it in the main pane, so a cold one is fetched.
+        let mut effects = Effects::none();
         if self.view_return.is_some_and(|id| self.under_audit(id)) {
             self.view_return = self.first_listed_root();
+            if let Some(fallback) = self.view_return
+                && let Some(workspace_id) = self.workspace_id
+                && self
+                    .sessions
+                    .get(&fallback)
+                    .is_some_and(|session| !session.is_warm())
+            {
+                effects.push(Effect::Send(ClientRequest::Snapshot(body_request(
+                    workspace_id,
+                    fallback,
+                ))));
+            }
         }
         // The followed session, so a `/goal` or `/btw` view over a session
         // now known to sit under an audit moves too.
         let Some(focused) = self.view().session() else {
-            return Effects::none();
+            return effects;
         };
         if !self.under_audit(focused) {
-            return Effects::none();
+            return effects;
         }
         match self.first_listed_root() {
             Some(fallback) => self.focus_session(fallback),
