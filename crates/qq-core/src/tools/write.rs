@@ -52,7 +52,7 @@ pub(super) fn write_file(
     {
         return ToolOutput::refused("invalid_if_hash: expected h:<12 hex digits>");
     }
-    let (path, missing_parents) = match resolve_write_path(workspace, &arguments.path) {
+    let path = match resolve_write_path(workspace, &arguments.path) {
         Ok(resolved) => resolved,
         Err(error) => return ToolOutput::error(error),
     };
@@ -68,12 +68,18 @@ pub(super) fn write_file(
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled");
     }
-    let (created, before) = match workspace.root().symlink_metadata(&path) {
+    let target = match workspace.write_target(&path, true) {
+        Ok(target) => target,
+        Err(error) => {
+            return ToolOutput::refused(format!("could not validate write directory: {error}"));
+        }
+    };
+    let (created, before) = match target.0.symlink_metadata(&target.1) {
         Ok(metadata) if metadata.is_file() => {
             if arguments.create_only {
                 return ToolOutput::error(format!("exists: {} already exists", arguments.path));
             }
-            let current = match read_editable(workspace, &path) {
+            let current = match read_editable(&target) {
                 Ok(current) => current,
                 Err(error) => return ToolOutput::error(error),
             };
@@ -110,7 +116,7 @@ pub(super) fn write_file(
             }
             if let Err(error) = apply_atomically(
                 workspace,
-                &path,
+                &target,
                 arguments.content.as_bytes(),
                 Some(current.permissions),
             ) {
@@ -123,13 +129,8 @@ pub(super) fn write_file(
         }
         Ok(_) => return ToolOutput::error("not_a_file: path is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = &missing_parents
-                && let Err(error) = workspace.write_directory(parent, true)
-            {
-                return ToolOutput::error(format!("could not create parent directories: {error}"));
-            }
             if let Err(error) =
-                apply_atomically(workspace, &path, arguments.content.as_bytes(), None)
+                apply_atomically(workspace, &target, arguments.content.as_bytes(), None)
             {
                 return ToolOutput::error(error);
             }
@@ -189,13 +190,10 @@ fn shares_most_lines(before: &str, after: &str) -> bool {
 /// resolves through the same containment as every other tool; a new file
 /// resolves its deepest existing ancestor, checks the missing chain stays
 /// under [`MAX_CREATED_PARENTS`] components, and re-attaches the rest.
-/// Returns the path and, when parents must be created, their directory.
-fn resolve_write_path(
-    workspace: &Workspace,
-    requested: &str,
-) -> Result<(PathBuf, Option<PathBuf>), String> {
+/// Returns the resolved workspace-relative target.
+fn resolve_write_path(workspace: &Workspace, requested: &str) -> Result<PathBuf, String> {
     let resolve_error = match workspace.contained_path(requested) {
-        Ok(path) => return Ok((path, None)),
+        Ok(path) => return Ok(path),
         Err(error) => super::search::path_error(requested, &error),
     };
     let requested_path = Path::new(requested);
@@ -247,11 +245,10 @@ fn resolve_write_path(
     for component in missing.iter().rev() {
         parent.push(component);
     }
-    let created_parent = (!missing.is_empty()).then(|| parent.clone());
     let path = if parent.as_os_str().is_empty() || parent == Path::new(".") {
         PathBuf::from(file_name)
     } else {
         parent.join(file_name)
     };
-    Ok((path, created_parent))
+    Ok(path)
 }

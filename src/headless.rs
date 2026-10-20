@@ -1109,9 +1109,8 @@ pub async fn run(
                 }
             }
         }
-        // A first `qq run` that only read when it meant to edit is the most
-        // common surprise of the read-only default; name the flag that
-        // changes it. JSONL consumers already see each denied call's state.
+        // Explain read-only denials and name the mode allowing workspace
+        // edits. JSONL consumers already see each denied call's state.
         if options.approval == HeadlessApproval::ReadOnly && denied_calls > 0 {
             let _ = writeln!(
                 stderr,

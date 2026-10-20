@@ -472,9 +472,8 @@ pub enum RunApproval {
     /// (destructive deletions, privilege escalation, force-pushes, piping
     /// downloads into an interpreter), which are denied without prompting.
     Auto,
-    /// Approve every tool call unattended with zero restrictions. An
-    /// explicit grant of unrestricted authority: suitable only for a
-    /// disposable or otherwise trusted workspace.
+    /// Run available tools without approval prompts, within the configured
+    /// execution boundaries.
     Full,
 }
 

@@ -764,7 +764,11 @@ impl CompiledAgentPlan {
                 path: workspace.clone(),
                 source,
             })?
-            .with_protected_pack_roots(&protected_pack_roots);
+            .with_protected_pack_roots(&protected_pack_roots)
+            .map_err(|source| PlanCompileError::OpenWorkspace {
+                path: workspace.clone(),
+                source,
+            })?;
         let cancelled = crate::RunCancellation::new();
         let (instructions, mut sources) =
             crate::workspace::load_instructions_with_sources(&opened, &cancelled)?;

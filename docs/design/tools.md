@@ -1243,7 +1243,8 @@ control, not that the model needs new verbs.
   section ships shell grant prefixes for the interrogative subcommands:
   `git status`, `git diff`, `git log`, `git show`, `git blame`, and the
   jj equivalents (`jj status`, `jj diff`, `jj log`, `jj op log`,
-  `jj show`). Under `ask` these run without prompting. They are ordinary
+  `jj show`). Auto can reuse these grants without prompting; Ask still
+  requires fresh human approval for each shell call. They are ordinary
   config grants: visible in the same reviewable file, removable by a
   managed layer, matched at word granularity like every shell prefix.
 - **Mutating commands follow ordinary shell policy.** `commit`,

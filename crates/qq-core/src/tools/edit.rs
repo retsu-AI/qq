@@ -1,7 +1,9 @@
+#[cfg(test)]
+use std::path::{Path, PathBuf};
+
 use std::{
     collections::BTreeMap,
     io::Write as _,
-    path::{Path, PathBuf},
     sync::{
         PoisonError,
         atomic::{AtomicU64, Ordering},
@@ -166,7 +168,7 @@ impl Edit {
 /// One file's planned change: its original bytes and permissions, the text
 /// after every edit in the batch, and the per-edit summaries for the result.
 struct Planned {
-    path: PathBuf,
+    target: WriteTarget,
     key: String,
     original: EditableFile,
     before_hash: String,
@@ -252,10 +254,14 @@ pub(super) fn edit_file(
         }
         let key = path.to_string_lossy().into_owned();
         if !planned.contains_key(&key) {
-            if !workspace.root().is_file(&path) {
+            if path.file_name().is_none() {
                 return ToolOutput::error(format!("edit {index}: not_a_file: {}", edit.path));
             }
-            let original = match read_editable(workspace, &path) {
+            let target = match workspace.write_target(&path, false) {
+                Ok(target) => target,
+                Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
+            };
+            let original = match read_editable(&target) {
                 Ok(original) => original,
                 Err(error) => return ToolOutput::error(format!("edit {index}: {error}")),
             };
@@ -281,7 +287,7 @@ pub(super) fn edit_file(
             planned.insert(
                 key.clone(),
                 Planned {
-                    path,
+                    target,
                     key: key.clone(),
                     original,
                     before_hash,
@@ -456,7 +462,7 @@ pub(super) fn edit_file(
         return ToolOutput::interrupted("tool execution was cancelled");
     }
     for file in planned.values() {
-        let current = match read_editable(workspace, &file.path) {
+        let current = match read_editable(&file.target) {
             Ok(current) => current,
             Err(error) => return ToolOutput::error(error),
         };
@@ -476,7 +482,7 @@ pub(super) fn edit_file(
     for file in planned.values() {
         if let Err(error) = apply_atomically(
             workspace,
-            &file.path,
+            &file.target,
             file.text.as_bytes(),
             Some(file.original.permissions.clone()),
         ) {
@@ -845,14 +851,19 @@ pub(super) struct EditableFile {
     pub(super) permissions: cap_std::fs::Permissions,
 }
 
-pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<EditableFile, String> {
-    let file = workspace
-        .root()
-        .open(path)
+pub(super) type WriteTarget = (cap_std::fs::Dir, std::ffi::OsString);
+
+pub(super) fn read_editable(target: &WriteTarget) -> Result<EditableFile, String> {
+    let file = target
+        .0
+        .open(&target.1)
         .map_err(|error| format!("could not open file: {error}"))?;
     let metadata = file
         .metadata()
         .map_err(|error| format!("could not inspect file: {error}"))?;
+    if !metadata.is_file() {
+        return Err("not_a_file: path is not a regular file".to_owned());
+    }
     if metadata.len() > MAX_EDIT_FILE_BYTES {
         return Err(format!(
             "too_large: file exceeds the {} MiB editable size limit",
@@ -883,7 +894,7 @@ pub(super) fn read_editable(workspace: &Workspace, path: &Path) -> Result<Editab
 /// file, and renames into place so readers never observe a partial write.
 pub(super) fn apply_atomically(
     workspace: &Workspace,
-    path: &Path,
+    target: &WriteTarget,
     bytes: &[u8],
     permissions: Option<cap_std::fs::Permissions>,
 ) -> Result<(), String> {
@@ -892,10 +903,9 @@ pub(super) fn apply_atomically(
         std::process::id(),
         TEMP_FILE_ORDINAL.fetch_add(1, Ordering::Relaxed),
     );
-    let directory = workspace
-        .write_directory(path.parent().unwrap_or(Path::new("")), false)
-        .map_err(|error| format!("could not open the write directory without symlinks: {error}"))?;
-    let target_name = path.file_name().ok_or("write target has no filename")?;
+    let (directory, target_name) = target;
+    #[cfg(not(test))]
+    let _ = workspace;
     let mut options = cap_std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     let mut temp = directory
@@ -928,7 +938,7 @@ pub(super) fn apply_atomically(
     }
     let applied = written.and_then(|()| {
         directory
-            .rename(&temp_name, &directory, target_name)
+            .rename(&temp_name, directory, target_name)
             .map_err(|error| format!("could not apply the change: {error}"))
     });
     if applied.is_err() {
@@ -1619,6 +1629,137 @@ mod tests {
             }))
             .expect("valid edit arguments");
             assert_eq!(edit.form().err().as_deref(), Some(message), "{field}");
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod directory_identity_race_tests {
+    use super::*;
+
+    #[test]
+    fn real_git_directory_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps(".git", "config", false);
+    }
+
+    #[test]
+    fn real_qq_directory_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps(".qq", "config.ron", false);
+    }
+
+    #[test]
+    fn real_configured_pack_swaps_before_open_cannot_redirect_write_or_edit() {
+        assert_trust_swaps("vendor/reviewer", "config", true);
+    }
+
+    #[test]
+    fn real_configured_pack_parent_swaps_cannot_hide_protected_children() {
+        assert_trust_swaps("vendor", "reviewer/config", true);
+    }
+
+    fn assert_trust_swaps(protected: &str, filename: &str, pack: bool) {
+        for (name, arguments) in [
+            (
+                "write_file",
+                serde_json::json!({"path":format!("ordinary/{filename}"), "content":"untrusted", "if_hash": format!("h:{}", &content_hash(b"trusted")[..12])}),
+            ),
+            (
+                "edit_file",
+                serde_json::json!({"edits":[{"path":format!("ordinary/{filename}"), "old":"trusted", "new":"untrusted"}]}),
+            ),
+            (
+                "write_file",
+                serde_json::json!({"path":"ordinary/new/deep/config", "content":"untrusted"}),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            for path in ["ordinary", protected] {
+                let file = directory.path().join(path).join(filename);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, "trusted").unwrap();
+            }
+            let mut workspace = Workspace::open(directory.path()).unwrap();
+            if pack {
+                workspace = workspace
+                    .with_protected_pack_roots(&[directory.path().join("vendor/reviewer")])
+                    .unwrap();
+            }
+            let root = directory.path().to_owned();
+            let protected_path = protected.to_owned();
+            workspace.on_write_path_checked(move || {
+                std::fs::rename(root.join("ordinary"), root.join("original-ordinary")).unwrap();
+                std::fs::rename(root.join(protected_path), root.join("ordinary")).unwrap();
+            });
+            let result = super::super::dispatch::execute_blocking(
+                &workspace,
+                &FileState::default(),
+                name,
+                &arguments.to_string(),
+                &ToolCancellation::new(crate::RunCancellation::new()),
+            );
+            std::fs::rename(
+                directory.path().join("ordinary"),
+                directory.path().join(protected),
+            )
+            .unwrap();
+            assert!(
+                result.is_error && result.model_text.contains("protected_path"),
+                "{}",
+                result.model_text
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join(protected).join(filename)).unwrap(),
+                "trusted",
+                "{name} redirected into {protected} trust data: {}",
+                result.model_text
+            );
+            assert!(
+                !directory.path().join(protected).join("new").exists(),
+                "new parent creation entered the protected directory"
+            );
+        }
+    }
+    #[test]
+    fn a_batch_retains_original_directories_through_recheck_and_apply() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("ordinary")).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(directory.path().join("ordinary").join(name), "trusted").unwrap();
+        }
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let root = directory.path().to_owned();
+        on_edit_planned(workspace.path(), move || {
+            std::fs::rename(root.join("ordinary"), root.join("original")).unwrap();
+            std::fs::create_dir(root.join("ordinary")).unwrap();
+            for name in ["a", "b"] {
+                std::fs::write(root.join("ordinary").join(name), "trusted").unwrap();
+            }
+        });
+        let result = super::super::dispatch::execute_blocking(
+            &workspace,
+            &FileState::default(),
+            "edit_file",
+            &serde_json::json!({"edits":[
+                {"path":"ordinary/a","old":"trusted","new":"updated"},
+                {"path":"ordinary/b","old":"trusted","new":"updated"}
+            ]})
+            .to_string(),
+            &ToolCancellation::new(crate::RunCancellation::new()),
+        );
+        assert!(
+            result.model_text.starts_with("edit ok"),
+            "{}",
+            result.model_text
+        );
+        for name in ["a", "b"] {
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("ordinary").join(name)).unwrap(),
+                "trusted"
+            );
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("original").join(name)).unwrap(),
+                "updated"
+            );
         }
     }
 }
