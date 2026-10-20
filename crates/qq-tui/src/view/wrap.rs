@@ -193,6 +193,10 @@ pub(crate) fn indent_lines(
             // start of the row's cells, which now begin after the prefix and
             // the row's own margin.
             indented.wrapped = line.wrapped;
+            if line.fill > 0 {
+                indented.fill_at = crate::render::text_width(prefix) + line.indent + line.fill_at;
+                indented.fill = line.fill;
+            }
             if line.chrome > 0 {
                 indented.chrome = crate::render::text_width(prefix) + line.indent + line.chrome;
             }
@@ -220,6 +224,9 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
         indent: 0,
         wrapped: line.wrapped,
         chrome: line.chrome,
+        // Truncation cuts from the end, fill first; what is left is text.
+        fill_at: 0,
+        fill: 0,
         spans: Vec::new(),
     };
     let mut used = 0_usize;
@@ -314,6 +321,8 @@ mod tests {
             indent: 3,
             wrapped: crate::render::Wrap::Break,
             chrome: 0,
+            fill_at: 0,
+            fill: 0,
             spans: vec![Span {
                 text: "┃ body".to_owned(),
                 style: normal(),

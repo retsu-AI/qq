@@ -522,6 +522,8 @@ impl FrameRenderer {
                     indent: first.indent,
                     wrapped: first.wrapped,
                     chrome: first.chrome,
+                    fill_at: first.fill_at,
+                    fill: first.fill,
                     spans: Vec::with_capacity(first.spans.len() + extra + 1),
                 };
                 row.spans.extend(first.spans);
@@ -574,7 +576,7 @@ impl FrameRenderer {
         }
         let mut lines = fit_height(lines, height);
         if let Some(selection) = &app.selection {
-            if selection.matches(&lines) {
+            if selection.fits(&self.geometry) && selection.matches(&lines) {
                 let mut remembered = *selection;
                 remembered.remember(&lines);
                 self.selection_seen = Some(remembered);

@@ -112,6 +112,13 @@ pub(crate) struct Line {
     /// Display cells after the indent that are chrome, not text (a code
     /// panel's `┃  ` gutter): a copy skips them.
     pub(crate) chrome: usize,
+    /// Where layout fill begins, in display cells after the indent (a code
+    /// panel's padding to the slab's width); zero when the row has none. A
+    /// copy skips the `fill` cells from there, so a literal wrap that left a
+    /// row short of full does not gain a space. Columns glued on after the
+    /// fill (side panes) are outside the copy's area anyway.
+    pub(crate) fill_at: usize,
+    pub(crate) fill: usize,
 }
 
 /// See [`Line::wrapped`].
@@ -129,6 +136,8 @@ impl Line {
             indent: 0,
             wrapped: Wrap::Break,
             chrome: 0,
+            fill_at: 0,
+            fill: 0,
             spans: vec![Span {
                 text: text.into(),
                 style,

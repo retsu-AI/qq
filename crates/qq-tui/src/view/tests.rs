@@ -6646,6 +6646,33 @@ fn a_right_click_clears_a_selection() {
 }
 
 #[test]
+fn a_selection_is_dropped_when_the_rail_appears() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    // One session at 100 columns: no rail. A second session arrives during
+    // the drag and the rail takes the right edge; the selected cells (`row`,
+    // inside the text) are unchanged, only the pane's bounds move.
+    let mut app = app_with_messages(3);
+    let mut renderer = FrameRenderer::default();
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    let row = u16::try_from(rows.iter().position(|row| row.contains("row 0")).unwrap()).unwrap();
+    app.handle_terminal_event(mouse_at(MouseEventKind::Down(MouseButton::Left), 3, row));
+    app.handle_terminal_event(mouse_at(MouseEventKind::Drag(MouseButton::Left), 6, row));
+    renderer.frame_and_commit(&mut app, 100, 30);
+    assert!(app.selection.is_some());
+    let other = fixtures::session_summary(SessionId::from_bytes([0x5d; 16]));
+    app.sessions.upsert_summary(other, &app.models, 0);
+    let rows = frame_rows(&renderer.frame_and_commit(&mut app, 100, 30));
+    assert!(
+        rows.iter().any(|row| row.contains('│')),
+        "the rail is up: {rows:#?}"
+    );
+    assert!(
+        app.selection.is_none(),
+        "the old bounds would reach the rail"
+    );
+}
+
+#[test]
 fn a_click_without_a_drag_selects_and_copies_nothing() {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut app = app_with_messages(1);

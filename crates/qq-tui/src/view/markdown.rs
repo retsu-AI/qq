@@ -1193,6 +1193,8 @@ impl PanelStyles {
             indent,
             wrapped: content.wrapped,
             chrome: CODE_PANEL_INSET,
+            fill_at: 0,
+            fill: 0,
             spans: Vec::with_capacity(content.spans.len() + 2),
         };
         // Rail glyph, its trailing space, and the padding cell in one span:
@@ -1214,6 +1216,8 @@ impl PanelStyles {
             row.spans.push(span);
         }
         if used < width {
+            row.fill_at = used;
+            row.fill = width - used;
             row.spans.push(Span {
                 text: " ".repeat(width - used),
                 style: self.fill,

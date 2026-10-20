@@ -122,6 +122,13 @@ impl Selection {
         self.seen.is_none_or(|seen| seen == self.fingerprint(lines))
     }
 
+    /// Whether the frame's transcript pane is still where this selection
+    /// was made: a rail that appears or leaves moves the pane's bounds or
+    /// its text column, and the old bounds would reach into the rail.
+    pub(crate) fn fits(&self, geometry: &FrameGeometry) -> bool {
+        geometry.transcript == Some(self.area) && geometry.text_x == self.text_x
+    }
+
     /// Record the selected rows' text of the frame the user is looking at.
     pub(crate) fn remember(&mut self, lines: &[Line]) {
         if self.seen.is_none() {
@@ -185,11 +192,23 @@ impl Selection {
                 continue;
             };
             // `cells` turns the indent into leading blank cells, so the
-            // painted row has none; its wrap and chrome carry over.
+            // painted row has none; its wrap carries over, and its chrome
+            // (counted after the indent) moves right by the flattened
+            // indent so a copy from the painted frame still skips it.
             let mut painted = Line {
                 indent: 0,
                 wrapped: line.wrapped,
-                chrome: line.chrome,
+                chrome: if line.chrome > 0 {
+                    line.chrome + line.indent
+                } else {
+                    0
+                },
+                fill_at: if line.fill > 0 {
+                    line.fill_at + line.indent
+                } else {
+                    0
+                },
+                fill: line.fill,
                 spans: Vec::new(),
             };
             for (start, end, grapheme, style) in cells(line) {
@@ -231,10 +250,18 @@ impl Selection {
                 if let Some(line) = lines.get(row) {
                     wrapped = line.wrapped;
                     panel = line.chrome > 0;
-                    // Chrome cells start where the row's spans start.
+                    // Chrome cells start where the row's spans start; fill
+                    // cells end the row.
                     let chrome_end = line.indent + line.chrome;
+                    let fill = (line.fill > 0).then(|| {
+                        let at = line.indent + line.fill_at;
+                        at..at + line.fill
+                    });
                     for (start, end, grapheme, _) in cells(line) {
-                        if start < self.text_x || start < chrome_end {
+                        if start < self.text_x
+                            || start < chrome_end
+                            || fill.as_ref().is_some_and(|fill| fill.contains(&start))
+                        {
                             continue;
                         }
                         if start < to && end > from {
@@ -251,7 +278,12 @@ impl Selection {
                 (text, wrapped, panel)
             })
             .collect();
-        while rows.last().is_some_and(|(row, _, _)| row.is_empty()) {
+        // A panel's padding rows after the last text are chrome; an ordinary
+        // blank row the drag ended on is a line break the user selected.
+        while rows
+            .last()
+            .is_some_and(|(row, _, panel)| row.is_empty() && *panel)
+        {
             rows.pop();
         }
         // A panel's padding rows before the first text are chrome; an
@@ -827,6 +859,58 @@ mod tests {
         let mut selection = Selection::start(area, 0, 2, 0).unwrap();
         selection.extend(2, 0);
         assert_eq!(selection.text(&lines).text, "x");
+    }
+
+    #[test]
+    fn seventh_review_round_on_copy() {
+        // 1. A panel row with an indent, painted (the indent flattened):
+        //    a copy from the painted row still skips the gutter.
+        let mut rows =
+            crate::view::panel_rows_for_test([Line::styled("let value = 1;", normal())], None, 24);
+        for row in &mut rows {
+            row.indent = 4;
+        }
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 28,
+            height: rows.len(),
+        };
+        let mut selection = Selection::start(area, 4, 4, 0).unwrap();
+        selection.extend(27, rows.len() - 1);
+        let mut painted = rows.clone();
+        selection.paint(&mut painted);
+        assert_eq!(selection.text(&painted).text, "let value = 1;");
+
+        // 2. A drag ending on a blank row after text keeps that line break.
+        let lines = vec![
+            Line::styled("first", normal()),
+            Line::default(),
+            Line::styled("next", normal()),
+        ];
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 3,
+        };
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(9, 1);
+        assert_eq!(selection.text(&lines).text, "first\n");
+
+        // 3. A code line that wraps before a wide character leaves its row a
+        //    cell short; the panel's fill is not copied into the join.
+        let rows =
+            crate::view::panel_rows_for_test([Line::styled("123456789界", normal())], None, 13);
+        let area = Area {
+            x: 0,
+            y: 0,
+            width: 13,
+            height: rows.len(),
+        };
+        let mut selection = Selection::start(area, 0, 0, 0).unwrap();
+        selection.extend(12, rows.len() - 1);
+        assert_eq!(selection.text(&rows).text, "123456789界", "{rows:?}");
     }
     #[test]
     fn a_copy_is_bounded() {
