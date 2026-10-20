@@ -426,14 +426,13 @@ pub(super) const fn delegate_grant_source(delegate: DelegateIdentity) -> &'stati
     }
 }
 
-/// A reviewer's answer for one held tool call, with what answering cost and
-/// who answered.
+/// A reviewer's answer for one held tool call, with what answering cost.
+/// Every verdict is attributed to [`DelegateIdentity::Reviewer`]; the
+/// historical `Jev` identity only decodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewVerdict {
     pub decision: ReviewDecision,
     pub spend: ReviewSpend,
-    /// Who decided.
-    pub delegate: DelegateIdentity,
 }
 
 impl ReviewVerdict {
@@ -447,15 +446,7 @@ impl ReviewVerdict {
                 usage: None,
                 cost_usd_nanos: Some(0),
             },
-            delegate: DelegateIdentity::Reviewer,
         }
-    }
-
-    /// The same verdict attributed to a different delegate.
-    #[must_use]
-    pub const fn by(mut self, delegate: DelegateIdentity) -> Self {
-        self.delegate = delegate;
-        self
     }
 }
 

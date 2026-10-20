@@ -67,6 +67,12 @@ pub const ENVIRONMENT_VARIABLES: [&str; 5] = [
     "QQ_APPROVAL_DELEGATE",
 ];
 
+/// Environment variables of removed features. Setting one is an error naming
+/// it, so a deployment that asked for Jev review does not silently run
+/// without it.
+pub const REMOVED_ENVIRONMENT_VARIABLES: [&str; 3] =
+    ["QQ_JEV_CHECKPOINTS", "QQ_JEV_ROUTING", "QQ_JEV_APPROVAL"];
+
 pub use document::{
     DOCUMENT_FIELD_NAMES, MANAGED_ONLY_POLICY_FIELD_NAMES,
     ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES, POLICY_FIELD_NAMES,
@@ -119,6 +125,11 @@ impl LoadRequest {
             organization,
             approval_delegate,
         ] = ENVIRONMENT_VARIABLES;
+        for name in REMOVED_ENVIRONMENT_VARIABLES {
+            if env::var_os(name).is_some() {
+                return Err(ConfigError::RemovedSetting(name));
+            }
+        }
         let mut request = Self::new(cwd);
         request.explicit_path = optional_environment(config)?.map(PathBuf::from);
         request.explicit_content = optional_environment(config_content)?;
@@ -2484,6 +2495,8 @@ pub enum ConfigError {
     },
     #[error("environment variable {0} is not valid Unicode")]
     NonUnicodeEnvironment(&'static str),
+    #[error("{0} was removed with Jev; unset it")]
+    RemovedSetting(&'static str),
     #[error("invalid {setting} value {value:?}")]
     InvalidSetting {
         setting: &'static str,

@@ -2869,7 +2869,6 @@ async fn collect_reviewer_verdict(
                         usage: None,
                         cost_usd_nanos: None,
                     },
-                    delegate: qq_core::DelegateIdentity::Reviewer,
                 };
             }
             None => break,
@@ -2878,7 +2877,6 @@ async fn collect_reviewer_verdict(
     ReviewVerdict {
         decision: parse_reviewer_decision(&text),
         spend,
-        delegate: qq_core::DelegateIdentity::Reviewer,
     }
 }
 
