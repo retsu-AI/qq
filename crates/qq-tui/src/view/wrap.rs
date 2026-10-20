@@ -2,8 +2,6 @@
 //! viewport slicing. Every function preserves span styles across breaks and
 //! never emits a row wider than the requested width.
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::render::{Line, Style, muted};
 
 /// One whitespace or word run inside a single span: a byte range plus its
@@ -29,27 +27,22 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
     for (span_index, span) in spans.iter().enumerate() {
         let mut start = 0;
         let mut kind = None;
-        let mut token_width = 0;
+        let measure = |range: std::ops::Range<usize>| crate::render::text_width(&span.text[range]);
         for (offset, character) in span.text.char_indices() {
             let whitespace = character.is_whitespace();
-            let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
             match kind {
-                Some(current) if current == whitespace => token_width += character_width,
+                Some(current) if current == whitespace => {}
                 Some(current) => {
                     tokens.push(WrapToken {
                         span: span_index,
                         range: start..offset,
                         whitespace: current,
-                        width: token_width,
+                        width: measure(start..offset),
                     });
                     start = offset;
                     kind = Some(whitespace);
-                    token_width = character_width;
                 }
-                None => {
-                    kind = Some(whitespace);
-                    token_width = character_width;
-                }
+                None => kind = Some(whitespace),
             }
         }
         if let Some(whitespace) = kind {
@@ -57,7 +50,7 @@ pub(crate) fn wrap_line(line: Line, width: usize) -> Vec<Line> {
                 span: span_index,
                 range: start..span.text.len(),
                 whitespace,
-                width: token_width,
+                width: measure(start..span.text.len()),
             });
         }
     }
@@ -232,20 +225,20 @@ pub(crate) fn truncate_line(line: Line, width: usize) -> Line {
     };
     let mut used = 0_usize;
     let content_width = width - 3;
-    for span in line.spans {
-        let mut text = String::new();
-        for character in span.text.chars() {
-            let character_width = UnicodeWidthChar::width(character).unwrap_or_default();
-            if used + character_width > content_width {
-                break;
+    // Cut between grapheme clusters only, across spans too: a flag, a ZWJ
+    // emoji, or a conjunct at the ellipsis is kept whole or dropped whole.
+    let mut state = crate::selection::Clusters::default();
+    'spans: for span in line.spans {
+        let mut end = 0;
+        for (range, cluster_width, _) in crate::selection::clusters(&span.text, &mut state) {
+            if used + cluster_width > content_width {
+                output.push(&span.text[..end], span.style);
+                break 'spans;
             }
-            text.push(character);
-            used += character_width;
+            end = range.end;
+            used += cluster_width;
         }
-        output.push(text, span.style);
-        if used >= content_width {
-            break;
-        }
+        output.push(span.text, span.style);
     }
     output.push("...", muted());
     output
@@ -280,17 +273,23 @@ pub(crate) fn fit_height(mut lines: Vec<Line>, height: usize) -> Vec<Line> {
 
 pub(crate) fn preview(text: &str, width: usize) -> String {
     let plain = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if plain.chars().count() <= width {
-        plain
-    } else {
-        format!(
-            "{}...",
-            plain
-                .chars()
-                .take(width.saturating_sub(3))
-                .collect::<String>()
-        )
+    if crate::render::text_width(&plain) <= width {
+        return plain;
     }
+    // Whole clusters up to the ellipsis, measured as they render.
+    let budget = width.saturating_sub(3);
+    let mut used = 0;
+    let mut end = 0;
+    for (range, cluster_width, _) in
+        crate::selection::clusters(&plain, &mut crate::selection::Clusters::default())
+    {
+        if used + cluster_width > budget {
+            break;
+        }
+        used += cluster_width;
+        end = range.end;
+    }
+    format!("{}...", &plain[..end])
 }
 
 pub(crate) fn bounded_tail(text: &str, max_bytes: usize) -> &str {
@@ -369,6 +368,30 @@ mod tests {
         for width in 0..10 {
             let line = truncate_line(Line::styled("a long row", normal()), width);
             assert!(line.width() <= width);
+        }
+    }
+
+    #[test]
+    fn clusters_measure_and_cut_as_they_render() {
+        // `☀️` draws two cells: at width 3 it cannot follow `ab`.
+        let rows = frame_rows(&wrap_line_chars(Line::styled("ab☀\u{FE0F}x", normal()), 3));
+        assert_eq!(rows, ["ab", "☀\u{FE0F}x"]);
+        // `👩‍💻` draws two cells, not four: it fits beside `ab` at width 4.
+        let coder = "👩\u{200D}💻";
+        let row = Line::styled(format!("ab{coder}"), normal());
+        assert_eq!(row.width(), 4);
+        assert_eq!(frame_rows(&wrap_line_chars(row, 4)), [format!("ab{coder}")]);
+        // At the ellipsis a cluster is kept or dropped whole, in rows and
+        // previews alike.
+        for (text, expected) in [
+            (format!("a{coder}{coder}zz"), format!("a{coder}...")),
+            ("ab🇺🇸zzz".to_owned(), "ab...".to_owned()),
+        ] {
+            let cut = truncate_line(Line::styled(text.clone(), normal()), 6);
+            let kept: String = cut.spans.iter().map(|span| span.text.as_str()).collect();
+            assert_eq!(kept, expected);
+            assert!(cut.width() <= 6, "{kept}");
+            assert_eq!(preview(&text, 6), expected);
         }
     }
 }

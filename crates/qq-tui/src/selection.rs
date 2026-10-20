@@ -339,10 +339,12 @@ impl Selection {
             truncated = true;
         }
         Copied {
+            // One line per retained row boundary: `str::lines` would drop a
+            // selected trailing blank row (`first\n` is two lines).
             lines: if text.is_empty() {
                 0
             } else {
-                text.lines().count()
+                text.matches('\n').count() + 1
             },
             text,
             truncated,
@@ -376,23 +378,27 @@ impl Clusters {
 
 /// `text` split into clusters, each `(bytes, width, starts)`: `starts` is
 /// false for a leading run that continues a cluster begun before `text`
-/// (`state` carries it across spans). Widths sum the characters' widths,
-/// as `text_width` measures the row.
+/// (`state` carries it across spans). A cluster's width is its rendered
+/// width (`text_width` of the whole cluster), so `☀️` is two cells and
+/// `👩‍💻` is two, as the terminal draws them.
 pub(crate) fn clusters(
     text: &str,
     state: &mut Clusters,
 ) -> Vec<(std::ops::Range<usize>, usize, bool)> {
     let mut out: Vec<(std::ops::Range<usize>, usize, bool)> = Vec::new();
     for (offset, character) in text.char_indices() {
-        let width = UnicodeWidthChar::width(character).unwrap_or_default();
         let end = offset + character.len_utf8();
         let (continues, _) = state.step(character);
         match out.last_mut() {
             Some(last) if continues => {
                 last.0.end = end;
-                last.1 += width;
+                last.1 = crate::render::text_width(&text[last.0.clone()]);
             }
-            _ => out.push((offset..end, width, !continues)),
+            _ => out.push((
+                offset..end,
+                crate::render::text_width(&text[offset..end]),
+                !continues,
+            )),
         }
     }
     out
@@ -442,19 +448,17 @@ fn cells(line: &Line) -> Vec<(usize, usize, String, Style)> {
     let mut state = Clusters::default();
     for span in &line.spans {
         for character in span.text.chars() {
-            let (continues, pairs) = state.step(character);
+            let (continues, _) = state.step(character);
             let attaches = continues && out.len() > line.indent;
             if attaches && let Some(last) = out.last_mut() {
                 last.2.push(character);
-                // Two one-column indicators show as one two-column flag, and
-                // an emoji presentation selector draws its base two wide.
-                if (pairs || character == '\u{FE0F}') && last.1 - last.0 < 2 {
-                    last.1 = last.0 + 2;
-                    column = last.1;
-                }
+                // The cluster is as wide as it renders: two for a flag, an
+                // emoji presentation sequence, or a ZWJ sequence.
+                last.1 = last.0 + crate::render::text_width(&last.2);
+                column = last.1;
                 continue;
             }
-            let width = UnicodeWidthChar::width(character).unwrap_or_default();
+            let width = crate::render::text_width(character.encode_utf8(&mut [0; 4]));
             out.push((column, column + width, character.to_string(), span.style));
             column += width;
         }
@@ -517,6 +521,18 @@ mod tests {
         assert_eq!(copied.lines, 3);
         assert!(!copied.truncated);
         assert!(!copied.text.contains('│') && !copied.text.contains("RAIL"));
+        // A selection ending on a blank row copies `…\n` and counts it.
+        let blank = vec![Line::styled("first", normal()), Line::default()];
+        let mut selection = Selection::start(area, 0, 0, 1).unwrap();
+        selection.extend(19, 2);
+        let copied = selection.text(
+            &[Line::default()]
+                .into_iter()
+                .chain(blank)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(copied.text, "first\n");
+        assert_eq!(copied.lines, 2);
         // Upward drags read the same way.
         let mut backwards = Selection::start(area, 3, 9, 3).unwrap();
         backwards.extend(9, 1);
@@ -669,6 +685,40 @@ mod tests {
         let last = copied.text.chars().next_back().unwrap();
         assert_ne!(last, ZWJ, "never ends on a joiner");
         assert!(!continues_grapheme(last) || last == '💻');
+    }
+
+    #[test]
+    fn a_wrapped_list_item_or_quote_copies_without_its_hanging_prefix() {
+        for (source, expected) in [
+            (
+                "- alpha beta gamma delta epsilon",
+                "alpha beta gamma delta epsilon",
+            ),
+            (
+                "> alpha beta gamma delta epsilon",
+                "alpha beta gamma delta epsilon",
+            ),
+        ] {
+            let lines = crate::view::markdown_lines_for_test(source, 14, false);
+            assert!(lines.len() > 2, "the item wraps: {lines:#?}");
+            let area = Area {
+                x: 0,
+                y: 0,
+                width: 14,
+                height: lines.len(),
+            };
+            // From the first word's first cell (after the marker or rail) to
+            // the end of the last row.
+            let first: String = lines[0]
+                .spans
+                .iter()
+                .map(|span| span.text.as_str())
+                .collect();
+            let text_x = crate::render::text_width(&first[..first.find('a').unwrap()]);
+            let mut selection = Selection::start(area, 0, text_x, 0).unwrap();
+            selection.extend(13, lines.len() - 1);
+            assert_eq!(selection.text(&lines).text, expected, "{source}");
+        }
     }
 
     #[test]

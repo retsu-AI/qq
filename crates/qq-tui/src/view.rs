@@ -46,6 +46,8 @@ pub(crate) use layout::LayoutPrefs;
 pub(crate) use layout::PanePref;
 use layout::{TranscriptSlot, compute_layout};
 #[cfg(test)]
+pub(crate) use markdown::markdown_lines as markdown_lines_for_test;
+#[cfg(test)]
 pub(crate) use markdown::panel_rows as panel_rows_for_test;
 use markdown::{has_fenced_code, markdown_lines, settled_prefix_end};
 use overlay::*;

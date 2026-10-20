@@ -493,6 +493,10 @@ pub(crate) fn markdown_lines(source: &str, width: usize, highlight: bool) -> Vec
                             " ".repeat(hang.width - quote_rail_width(hang.rail)),
                             normal(),
                         );
+                        // The hanging indent (and a quote's repeated rail) is
+                        // layout, not text: a copy of the wrapped item joins
+                        // its rows without it.
+                        continuation.chrome = hang.width;
                         continuation
                     };
                     assembled.wrapped = row.wrapped;

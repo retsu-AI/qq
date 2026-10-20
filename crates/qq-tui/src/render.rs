@@ -8,7 +8,7 @@ use crossterm::{
     queue,
     style::{Attribute, Color, Print, SetAttribute, SetBackgroundColor, SetForegroundColor},
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{app::terminal_safe_character, theme};
 
@@ -179,13 +179,13 @@ impl Line {
     }
 }
 
-/// Display columns of `text`. One pass over the characters; a printable-ASCII
-/// byte-scan fast path measured +8 % on the 32 KiB streaming ceiling because
-/// `wrap_line` measures every span and the second scan cost more than the
-/// width table saves.
+/// Display columns of `text`, measured the way the terminal renders it: an
+/// emoji presentation sequence (`☀️`), a ZWJ sequence (`👩‍💻`), or a skin-tone
+/// modifier counts as the one wide glyph it draws, not the sum of its
+/// characters. Control characters count zero (they never reach the screen).
 pub(crate) fn text_width(text: &str) -> usize {
-    text.chars()
-        .map(|character| UnicodeWidthChar::width(character).unwrap_or_default())
+    text.split(char::is_control)
+        .map(UnicodeWidthStr::width)
         .sum()
 }
 
