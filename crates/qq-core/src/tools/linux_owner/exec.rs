@@ -13,11 +13,12 @@ use std::{
 };
 
 pub(super) const MAX_PACKET: u64 = 4 * 1024 * 1024;
+pub(super) const MAX_REFUSAL_BYTES: usize = 1024;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Packet {
-    pub filesystem: Option<Vec<super::filesystem::Directory>>,
+    pub filesystem: Option<super::filesystem_root::Filesystem>,
     pub isolated_network: bool,
     pub program: Vec<u8>,
     pub arguments: Vec<Vec<u8>>,
@@ -175,6 +176,16 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(filesystem) = &packet.filesystem
+        && let Err(error) = super::filesystem_root::enter(filesystem)
+    {
+        let message = error.to_string();
+        let bytes = &message.as_bytes()[..message.len().min(MAX_REFUSAL_BYTES)];
+        ack.write_all(b"r")?;
+        ack.write_all(&(bytes.len() as u16).to_le_bytes())?;
+        ack.write_all(bytes)?;
+        return Err(error);
+    }
     protect_supervisor()?;
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     live(monitor)?;
@@ -183,14 +194,14 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     let mut retained = vec![ack.as_raw_fd()];
     retained.extend(image.iter().map(|image| image.as_raw_fd()));
     if let Some(filesystem) = &packet.filesystem {
-        retained.extend(filesystem.iter().map(|directory| directory.fd));
+        retained.extend(filesystem.directories.iter().map(|directory| directory.fd));
     }
     close_ambient_descriptors(&retained)?;
     if packet.isolated_network {
         super::network::enforce()?;
     }
     if let Some(filesystem) = packet.filesystem {
-        super::filesystem::enforce(filesystem)?;
+        super::filesystem::enforce(filesystem.directories)?;
     }
     // PID 1 remains trusted: commands retain ordinary signal/reaping semantics.
     // Exiting PID 1 makes the kernel kill every remaining namespace member.
@@ -329,8 +340,11 @@ fn monitor(fields: &str) -> io::Result<u8> {
             "--fork",
             "--kill-child=KILL",
             "--mount-proc",
+            "--propagation",
+            "private",
         ])
         .args(packet.isolated_network.then_some("--net"))
+        .args(packet.filesystem.is_some().then_some("--keep-caps"))
         .arg("--")
         .arg(std::ffi::OsString::from_vec(packet.launcher_program))
         .args(

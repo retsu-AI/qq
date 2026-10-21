@@ -20,6 +20,7 @@ use command_fds::CommandFdExt as _;
 mod bootstrap;
 mod exec;
 mod filesystem;
+mod filesystem_root;
 mod network;
 pub(crate) use exec::execute;
 
@@ -144,6 +145,12 @@ impl LinuxOwner {
                 let (rules, fds) = filesystem::prepare(scope)?;
                 descriptors.extend(fds);
                 Ok::<_, io::Error>(rules)
+            })
+            .transpose()?;
+        let filesystem = filesystem
+            .map(|directories| {
+                let cwd_path = std::fs::read_link(format!("/proc/self/fd/{}", cwd.as_raw_fd()))?;
+                filesystem_root::prepare(directories, cwd_path, command)
             })
             .transpose()?;
         let namespace_image = self.namespace_image.as_fd().try_clone_to_owned()?;
@@ -369,6 +376,24 @@ impl Startup {
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
         match read_pipe(&acknowledgement, 1).await?.as_slice() {
             b"g" => {}
+            b"r" => {
+                let length: [u8; 2] = read_pipe(&acknowledgement, 2)
+                    .await?
+                    .try_into()
+                    .map_err(|_| io::Error::other("invalid filesystem refusal"))?;
+                let length = usize::from(u16::from_le_bytes(length));
+                if length > exec::MAX_REFUSAL_BYTES {
+                    return Err(io::Error::other("filesystem refusal exceeds its bound"));
+                }
+                let message = read_pipe(&acknowledgement, length).await?;
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "private filesystem setup failed: {}",
+                        String::from_utf8_lossy(&message)
+                    ),
+                ));
+            }
             b"e" => {
                 let error: [u8; 4] = read_pipe(&acknowledgement, 4)
                     .await?
@@ -387,8 +412,8 @@ async fn read_pipe(file: &tokio::io::unix::AsyncFd<File>, length: usize) -> io::
     let mut bytes = Vec::with_capacity(length);
     while bytes.len() < length {
         let mut ready = file.readable().await?;
-        let mut buffer = [0; 4];
-        let available = length - bytes.len();
+        let mut buffer = [0; 64];
+        let available = (length - bytes.len()).min(buffer.len());
         match ready.try_io(|file| {
             rustix::io::read(file.get_ref(), &mut buffer[..available]).map_err(io::Error::from)
         }) {

@@ -25,12 +25,14 @@ impl NativeDirectoryGrant {
     }
 }
 
-/// Default-deny file-content access, with explicit readable and writable roots.
+/// Default-deny filesystem access, with explicit readable and writable roots.
 ///
-/// This limits filesystem operations, not CPU, memory, network or credentials
-/// exposed through an explicitly readable root, or metadata operations such as
-/// chmod/utime that Landlock does not mediate. It is not a complete Auto
-/// sandbox. No implicit system, home, temporary or workspace roots are added.
+/// Linux mounts the granted directories in a private root and applies
+/// Landlock before payload execution. Metadata writes outside writable roots
+/// are blocked too. A verified /dev/null supports standard subprocess I/O;
+/// no implicit home, toolchain, temporary or workspace roots are added.
+/// This does not bound CPU/memory or broker credentials in readable inputs,
+/// and is not a complete Auto sandbox. Nested mounts need explicit grants.
 /// Grants are additive: a writable ancestor includes its descendants, including
 /// existing hardlinks. Callers must not treat this primitive as protection for
 /// policy files or host inodes already aliased inside a writable root.
