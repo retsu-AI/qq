@@ -1051,6 +1051,15 @@ proof of completion. Completion must retain the same process identity, and
 an interrupted result cannot erase it. A receipt alone does not support
 reattachment or justify signalling a persisted PID after a server restart.
 
+The Linux custody helper is a sealed native executable. Dynamic GNU helpers
+start through a protected root-owned glibc loader with an explicitly resolved
+root-owned dependency closure; mutable search directories cannot substitute
+libraries on subsequent starts. Bootstrap loader auditing/filter modules and
+system preload modules are refused. Static ELF helpers remain supported.
+The backend requires an unprivileged owner and refuses unsupported loader or
+dependency configurations. These checks protect process custody; they do not
+provide filesystem or network containment.
+
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).

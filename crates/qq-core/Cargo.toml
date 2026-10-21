@@ -42,6 +42,7 @@ rustix = { workspace = true, features = ["fs", "event", "pipe", "thread"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 command-fds.workspace = true
+goblin.workspace = true
 nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]

@@ -63,6 +63,7 @@ directories = "6"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
+goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hmac = "0.12"
 http-body = "1"
 httpdate = "1"

@@ -13,6 +13,7 @@ use std::{
 
 use command_fds::CommandFdExt as _;
 
+mod bootstrap;
 mod exec;
 pub(crate) use exec::execute;
 
@@ -21,10 +22,19 @@ pub(super) struct LinuxOwner {
     executable: PathBuf,
     launcher: crate::command_owner::CommandLauncher,
     launcher_image: std::sync::Arc<File>,
+    bootstrap: bootstrap::Bootstrap,
 }
 
 impl LinuxOwner {
     pub(super) fn discover(launcher: crate::command_owner::CommandLauncher) -> io::Result<Self> {
+        if rustix::process::getuid().is_root()
+            || rustix::process::geteuid() != rustix::process::getuid()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Linux command custody requires an unprivileged owner",
+            ));
+        }
         let launcher_image = File::open(&launcher.executable)?;
         let metadata = launcher_image.metadata()?;
         if !launcher.executable.is_absolute()
@@ -42,6 +52,8 @@ impl LinuxOwner {
             ));
         }
         let launcher_len = metadata.len();
+        let mut launcher_image = immutable_launcher(launcher_image, launcher_len)?;
+        let bootstrap = bootstrap::Bootstrap::capture(&mut launcher_image, &launcher.executable)?;
         for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
             if !directory.is_absolute() {
                 continue;
@@ -79,10 +91,8 @@ impl LinuxOwner {
                 return Ok(Self {
                     executable: path,
                     launcher,
-                    launcher_image: std::sync::Arc::new(immutable_launcher(
-                        launcher_image,
-                        launcher_len,
-                    )?),
+                    launcher_image: std::sync::Arc::new(launcher_image),
+                    bootstrap,
                 });
             }
         }
@@ -124,6 +134,10 @@ impl LinuxOwner {
                 None,
             )
         };
+        let (launcher_program, mut launcher_arguments) = self
+            .bootstrap
+            .invocation(format!("/proc/self/fd/{launcher_fd}").into());
+        launcher_arguments.extend(self.launcher.arguments.iter().cloned());
         let packet = exec::Packet {
             program: program.as_bytes().to_vec(),
             argv0: argv0.as_bytes().to_vec(),
@@ -140,11 +154,9 @@ impl LinuxOwner {
             cwd_fd: cwd.as_raw_fd(),
             image_fd,
             namespace_program: self.executable.as_os_str().as_bytes().to_vec(),
-            launcher_program: format!("/proc/self/fd/{launcher_fd}").into_bytes(),
+            launcher_program: launcher_program.as_bytes().to_vec(),
             launcher_fd,
-            launcher_arguments: self
-                .launcher
-                .arguments
+            launcher_arguments: launcher_arguments
                 .iter()
                 .map(|arg| arg.as_bytes().to_vec())
                 .collect(),
@@ -162,10 +174,10 @@ impl LinuxOwner {
             owner.as_raw_fd(),
             host_proc.as_raw_fd()
         );
-        let mut wrapped = tokio::process::Command::new(format!("/proc/self/fd/{launcher_fd}"));
+        let mut wrapped = tokio::process::Command::new(launcher_program);
         wrapped
             .env_clear()
-            .args(&self.launcher.arguments)
+            .args(launcher_arguments)
             .arg(entry)
             .kill_on_drop(true);
         wrapped.current_dir(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
@@ -454,6 +466,75 @@ pub(super) async fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owner_writable_dynamic_loader_or_dependencies_are_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let library = root.path().join("library.c");
+        let main = root.path().join("main.c");
+        std::fs::write(&library, "int qq_native_probe(void) { return 0; }\n").unwrap();
+        std::fs::write(
+            &main,
+            "extern int qq_native_probe(void); int main(void) { return qq_native_probe(); }\n",
+        )
+        .unwrap();
+        let shared = root.path().join("libqqnativeprobe.so");
+        let compiled = std::process::Command::new("cc")
+            .args(["-shared", "-fPIC"])
+            .arg(&library)
+            .arg("-o")
+            .arg(&shared)
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        for mutable_interpreter in [false, true] {
+            let executable = root.path().join(if mutable_interpreter {
+                "loader-helper"
+            } else {
+                "runpath-helper"
+            });
+            let mut compile = std::process::Command::new("cc");
+            compile
+                .arg(&main)
+                .arg("-o")
+                .arg(&executable)
+                .arg(format!("-L{}", root.path().display()))
+                .arg(format!("-Wl,-rpath,{}", root.path().display()))
+                .arg("-lqqnativeprobe");
+            if mutable_interpreter {
+                compile.arg(format!(
+                    "-Wl,--dynamic-linker,{}",
+                    root.path().join("mutable-loader").display()
+                ));
+            }
+            let compiled = compile.output().unwrap();
+            assert!(
+                compiled.status.success(),
+                "{}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+            if !mutable_interpreter {
+                let bytes = std::fs::read(&executable).unwrap();
+                let elf = goblin::elf::Elf::parse(&bytes).unwrap();
+                std::fs::copy(elf.interpreter.unwrap(), root.path().join("mutable-loader"))
+                    .unwrap();
+            }
+            let captured =
+                LinuxOwner::discover(crate::command_owner::CommandLauncher::new(executable));
+            assert!(
+                captured.is_err(),
+                "sealing the main ELF must not trust writable loader/dependency paths"
+            );
+            assert_eq!(
+                captured.err().unwrap().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+    }
 
     #[test]
     fn interpreted_launchers_are_not_native_helper_entry_points() {

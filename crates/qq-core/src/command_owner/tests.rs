@@ -117,6 +117,56 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[tokio::test]
+async fn adding_a_library_to_a_mutable_runpath_cannot_change_the_captured_helper() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let executable = root.path().join("helper");
+    std::fs::copy(launcher().executable, &executable).unwrap();
+    let bytes = std::fs::read(&executable).unwrap();
+    let elf = goblin::elf::Elf::parse(&bytes).unwrap();
+    let dependency = elf
+        .libraries
+        .first()
+        .expect("GNU fixture must have a dynamic dependency")
+        .to_string();
+    let mut runpath = vec![root.path().to_str().unwrap()];
+    runpath.extend(elf.rpaths.iter().chain(elf.runpaths.iter()).copied());
+    let patched = tokio::process::Command::new("patchelf")
+        .arg("--set-rpath")
+        .arg(runpath.join(":"))
+        .arg(&executable)
+        .output()
+        .await
+        .expect("native ELF fixture requires patchelf");
+    assert!(
+        patched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&patched.stderr)
+    );
+    let owner = CommandOwner::open(
+        root.path().join("owner"),
+        "unknown",
+        CommandLauncher::new(executable),
+    )
+    .await
+    .unwrap();
+    // The payload could plant this after any previous command. Future helper
+    // starts must continue using the protected dependency captured at open.
+    std::fs::write(root.path().join(dependency), b"not an ELF library").unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(workspace.path(), id, "printf original"))
+        .await
+        .unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    let result = finished.result.unwrap();
+    assert!(!result.is_error(), "{}", result.text());
+    assert!(result.text().contains("original"));
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_payload_with_a_missing_interpreter_is_a_launch_refusal() {
