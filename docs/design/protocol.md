@@ -60,12 +60,16 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 37
+PROTOCOL_VERSION = 38
 ```
 
 Descriptor 16 adds sorted workspace-relative configured pack roots to the
 compiled authority identity; descriptor 15 and earlier retain their original
 encoding and digest domains.
+
+Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
+can discover registered roots without interpreting server paths locally;
+continuation cursors reject another store.
 
 Version 37 exposes four approval modes: `read_only`, `ask`, `auto`, and
 `full`. Ask requires fresh human approval for every non-read action;

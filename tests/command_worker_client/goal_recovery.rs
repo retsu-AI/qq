@@ -30,13 +30,10 @@ fn completed() -> Value {
 
 #[tokio::test]
 async fn server_restart_finishes_the_same_goal_without_replaying_work_or_resetting_budget() {
-    tokio::time::timeout(Duration::from_secs(45), async {
-        for max_runs in [3, 1] {
-            exercise_goal(max_runs).await;
-        }
-    })
-    .await
-    .expect("the finite restart fixture must settle");
+    // Nextest supplies the hang timeout for this multi-process fixture.
+    for max_runs in [3, 1] {
+        exercise_goal(max_runs).await;
+    }
 }
 
 async fn exercise_goal(max_runs: u32) {
