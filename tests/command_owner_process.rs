@@ -160,6 +160,49 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     );
 }
 
+#[tokio::test]
+async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let (mut child, connection) = start(&directory).await;
+    let store_id = connection.server_info().server_id;
+    let db = rusqlite::Connection::open(directory.join("commands/commands.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER fail_admission BEFORE INSERT ON commands
+         BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;",
+    )
+    .unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    // Cancelling an unknown ID durably inserts a tombstone. The failed write
+    // must fail the owner and end discovery, even without an active command.
+    let _ = client
+        .post(format!(
+            "http://{}/internal/command-owner/v1/cancel",
+            connection.address()
+        ))
+        .bearer_auth(connection.expose_bearer_token())
+        .json(&serde_json::json!({"id":ToolCallId::generate().unwrap()}))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+    let stopped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    if stopped.is_err() {
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+    }
+    let status = stopped
+        .expect("a failed worker must exit without an OS signal")
+        .unwrap();
+    assert!(!status.success());
+    assert!(!directory.join("server.ron").exists());
+    db.execute_batch("DROP TRIGGER fail_admission").unwrap();
+    drop(db);
+    let (mut replacement, connection) = start(&directory).await;
+    assert_eq!(connection.server_info().server_id, store_id);
+    replacement.kill().await.unwrap();
+    replacement.wait().await.unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn detached_command_process_finishes_after_observers_disconnect() {

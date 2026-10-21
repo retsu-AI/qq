@@ -2783,6 +2783,7 @@ dependencies = [
  "reqwest",
  "ron",
  "rpassword",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

@@ -90,8 +90,11 @@ async fn admit(State(state): State<OwnerState>, request: Request, next: Next) ->
     })
 }
 
-async fn health(State(state): State<OwnerState>) -> Json<qq_protocol::ServerInfo> {
-    Json(state.connection.server_info().clone())
+async fn health(State(state): State<OwnerState>) -> Response {
+    if !state.owner.is_available() {
+        return api_error(StatusCode::SERVICE_UNAVAILABLE, "command owner unavailable");
+    }
+    Json(state.connection.server_info().clone()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -175,6 +178,21 @@ mod tests {
         };
         let server = reservation.start_command_owner(owner.clone()).unwrap();
         (root, owner, server)
+    }
+
+    #[tokio::test]
+    async fn an_unavailable_owner_is_not_advertised_as_healthy() {
+        let (_root, owner, server) = fixture().await;
+        let connection = server.connection();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("http://{}/v1/health", connection.address());
+        let token = connection.expose_bearer_token();
+        let healthy = client.get(&url).bearer_auth(token).send().await.unwrap();
+        assert_eq!(healthy.status(), StatusCode::OK);
+        owner.shutdown().await.unwrap();
+        let unavailable = client.get(&url).bearer_auth(token).send().await.unwrap();
+        server.shutdown().await.unwrap();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

@@ -54,14 +54,15 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
             let drained = owner.shutdown().await;
             stopped?;
             drained?;
+            return Ok(());
         }
-        _ = &mut stop => {
-            server.begin_shutdown();
-            let drained = owner.shutdown().await;
-            let stopped = server.shutdown().await;
-            stopped?;
-            drained?;
-        }
+        _ = &mut stop => {},
+        _ = owner.wait_for_failure() => {},
     }
+    server.begin_shutdown();
+    let drained = owner.shutdown().await;
+    let stopped = server.shutdown().await;
+    stopped?;
+    drained?;
     Ok(())
 }

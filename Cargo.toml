@@ -196,4 +196,5 @@ provider-bedrock = ["qq-provider/provider-bedrock"]
 [dev-dependencies]
 base64.workspace = true
 ron.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
