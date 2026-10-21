@@ -1,5 +1,9 @@
 //! Native identity of the directory held by the admitting host.
-use cap_std::fs::{Dir, MetadataExt as _};
+#[cfg(windows)]
+use cap_primitives::fs::_WindowsByHandle as _;
+use cap_std::fs::Dir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt as _;
 use serde::{Deserialize, Serialize};
 use std::{io, path::Path};
 
