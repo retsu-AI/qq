@@ -843,6 +843,10 @@ async fn exhausted_execution_slots_refuse_admission_without_poisoning_the_owner(
         .submit(command(workspace.path(), id, "echo accepted"))
         .await
         .unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    let result = finished.result.unwrap();
+    assert!(!result.is_error(), "{}", result.text());
+    assert!(result.text().contains("accepted"));
     owner.shutdown().await.unwrap();
 }
 
