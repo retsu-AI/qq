@@ -43,7 +43,8 @@ Sessions, prompts, approvals/denials, questions, steering/stopping, goals and si
 questions reuse the same components and protocol driver. Mobile uses a sidebar
 drawer, full-height panel/dialog sheets, safe-area insets and keyboard-aware
 composer sizing with ≥44px touch targets. Notifications are in-app only while
-foregrounded; foreground resume must reconnect SSE from its saved cursor.
+foregrounded; once M3 adds the remote connection, foreground resume must
+reconnect SSE from its saved cursor.
 
 ## Build and verification
 
