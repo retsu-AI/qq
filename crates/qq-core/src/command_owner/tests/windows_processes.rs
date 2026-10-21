@@ -75,7 +75,7 @@ fn fixture_parent() {
         .unwrap();
     let mut control = connect_fixture(b'p');
     let mut token = [0];
-    if control.read_exact(&mut token).is_ok() && token == *b'e' {
+    if control.read_exact(&mut token).is_ok() && token == *b"e" {
         // Exit with the descendant alive and all its capture pipes closed.
         // The command owner must terminate the job, not this fixture.
         std::process::exit(0);
