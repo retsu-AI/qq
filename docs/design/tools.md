@@ -1166,8 +1166,9 @@ Explicit CLI resume waits for inherited commands; queued prompts start only
 after their results are saved. Interrupting that wait cancels and drains the
 inherited run and pauses its owning live goal. Observation-only recovered runs
 reject steering; queued pre-crash steering is published as superseded when the
-run settles. The interrupted model run then settles rather
-than being silently redispatched. Automatic task continuation is separate.
+run settles. The interrupted model run settles; the durable goal driver can
+then queue a successor for the same active goal within its remaining shared
+budget. Ordinary prompt runs require explicit resume.
 Unavailable or replaced workers leave their observations unacknowledged.
 A native result that exceeds remaining context capacity
 is still saved; that run ends with a context-policy failure before another

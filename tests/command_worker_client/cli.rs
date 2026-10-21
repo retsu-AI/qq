@@ -34,9 +34,9 @@ fn blocked_command() {
     println!("native-result");
 }
 
-struct Worker(AsyncFd<std::os::fd::OwnedFd>);
+pub(super) struct Worker(AsyncFd<std::os::fd::OwnedFd>);
 impl Worker {
-    fn child_of(coordinator: u32) -> Self {
+    pub(super) fn child_of(coordinator: u32) -> Self {
         for task in std::fs::read_dir(format!("/proc/{coordinator}/task")).unwrap() {
             let task = task.unwrap();
             let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
@@ -74,7 +74,7 @@ impl Worker {
         }
         panic!("the real CLI must create an independently owned command worker");
     }
-    async fn stop(&self) {
+    pub(super) async fn stop(&self) {
         rustix::process::pidfd_send_signal(self.0.get_ref(), rustix::process::Signal::TERM)
             .unwrap();
         let _ = tokio::time::timeout(Duration::from_secs(20), self.0.readable())
@@ -89,7 +89,7 @@ impl Drop for Worker {
     }
 }
 
-fn reply(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
+pub(super) fn reply(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
     let body = events
         .into_iter()
         .map(|event| format!("data: {event}\n\n"))
@@ -315,7 +315,11 @@ async fn exercise_cli(restart: bool) {
     );
 }
 
-fn configured_cli(home: &Path, workspace: &Path, config: &str) -> tokio::process::Command {
+pub(super) fn configured_cli(
+    home: &Path,
+    workspace: &Path,
+    config: &str,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_qq"));
     command
         .env_clear()
