@@ -68,6 +68,7 @@ pub(crate) use goals::GoalRunInput;
 pub use goals::GoalValidationError;
 mod in_run_compaction;
 mod native_ack;
+mod native_recovery;
 mod projection;
 mod runtime;
 mod scheduler;

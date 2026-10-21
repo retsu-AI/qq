@@ -25,6 +25,13 @@ pub use environment::NativeEnvironment;
 pub use workspace_identity::NativeWorkspaceIdentity;
 mod observer;
 pub(crate) use observer::observe;
+
+pub(crate) fn lost_output(output: &str) -> ToolOutput {
+    ToolOutput::unobserved(format!(
+        "native command owner lost the invocation; it was not replayed\n{output}",
+    ))
+}
+
 #[cfg(windows)]
 mod windows_state;
 use journal::Journal;
@@ -144,11 +151,21 @@ pub enum CommandStatus {
 #[serde(transparent)]
 pub struct ProcessReceipt(Box<ExecutionContextReceipt>);
 
+impl ProcessReceipt {
+    pub(crate) fn into_context(self) -> Box<ExecutionContextReceipt> {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CommandResult(ToolOutput);
 
 impl CommandResult {
+    pub(crate) fn into_output(self) -> ToolOutput {
+        self.0
+    }
+
     pub fn text(&self) -> &str {
         &self.0.model_text
     }
