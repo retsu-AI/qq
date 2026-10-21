@@ -2010,6 +2010,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,
@@ -2084,6 +2085,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,
@@ -3298,6 +3300,7 @@ async fn schedules_ready_sessions_fairly() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,

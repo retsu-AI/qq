@@ -515,3 +515,180 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
         "current schema without receipts must not be reinterpreted"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn configured_owner_preserves_call_identity_and_permission_admission() {
+    use crate::command_owner::{CommandOwner, CommandStatus};
+    let allowed = r#"{"command":"printf owned; printf once >> counter"}"#;
+    for (mode, arguments, admitted) in [
+        (ApprovalMode::Full, allowed, true),
+        (ApprovalMode::ReadOnly, allowed, false),
+        (
+            ApprovalMode::Full,
+            r#"{"command":"printf once >> counter","env":["UNGRANTED_SECRET"]}"#,
+            false,
+        ),
+    ] {
+        let state = tempfile::tempdir().unwrap();
+        let owner = CommandOwner::open(
+            state.path().join("owner"),
+            "unknown",
+            crate::command_owner::tests::launcher(),
+        )
+        .await
+        .unwrap();
+        let mut harness = scripted_runs_harness_with_commands(
+            mode,
+            vec![vec![("shell", arguments.to_owned())]],
+            None,
+            None,
+            Some(Arc::new(owner.clone())),
+        )
+        .await;
+        let run = submit_prompt(&harness, "execute").await;
+        collect_until(&mut harness.events, finished_for(run)).await;
+        let id: ToolCallId = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                let id: String = connection.query_row(
+                    "SELECT id FROM tool_calls WHERE run_id=?1",
+                    [run.to_string()],
+                    |row| row.get(0),
+                )?;
+                parse_id(&id)
+            })
+            .await
+            .unwrap();
+        let observed = owner.snapshot(id).await;
+        harness.runtime.shutdown().await.unwrap();
+        owner.shutdown().await.unwrap();
+        if !admitted {
+            assert!(matches!(
+                observed,
+                Err(crate::command_owner::CommandOwnerError::NotFound)
+            ));
+            assert!(!harness.workspace_path.join("counter").exists());
+            continue;
+        }
+        let observed = observed.expect("the session call must execute through the supplied owner");
+        assert_eq!(observed.status, CommandStatus::Finished);
+        assert!(observed.result.unwrap().text().contains("owned"));
+        assert_eq!(
+            std::fs::read_to_string(harness.workspace_path.join("counter")).unwrap(),
+            "once"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn cancelling_a_session_call_cancels_and_drains_its_configured_owner() {
+    use crate::command_owner::{CommandOwner, CommandStatus};
+    let state = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(
+        state.path().join("owner"),
+        "unknown",
+        crate::command_owner::tests::launcher(),
+    )
+    .await
+    .unwrap();
+    let mut harness = scripted_runs_harness_with_commands(
+        ApprovalMode::Full,
+        vec![vec![(
+            "shell",
+            r#"{"command":"printf ready; read token < release; printf escaped > escaped"}"#
+                .to_owned(),
+        )]],
+        None,
+        None,
+        Some(Arc::new(owner.clone())),
+    )
+    .await;
+    crate::tools::create_test_fifo(&harness.workspace_path.join("release")).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(harness.workspace_path.join("release"))
+        .unwrap();
+    let run = submit_prompt(&harness, "execute").await;
+    let events = collect_until(&mut harness.events, |event| matches!(event, SessionEvent::ToolCallOutputDelta { chunk, .. } if chunk.contains("ready"))).await;
+    let id = events
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolCallOutputDelta { tool_call_id, .. } => Some(*tool_call_id),
+            _ => None,
+        })
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id: run },
+        )
+        .await
+        .unwrap();
+    let terminal = collect_until(&mut harness.events, finished_for(run)).await;
+    let observed = owner.snapshot(id).await.unwrap();
+    harness.runtime.shutdown().await.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(matches!(
+        &terminal.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Cancelled,
+            ..
+        }
+    ));
+    assert_eq!(observed.status, CommandStatus::Finished);
+    assert!(observed.result.unwrap().is_error());
+    assert!(!harness.workspace_path.join("escaped").exists());
+}
+
+#[tokio::test]
+async fn native_capacity_refusal_does_not_poison_session_cleanup() {
+    use crate::command_owner::{
+        CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+        NativeCommandService,
+    };
+    struct Full;
+    impl NativeCommandService for Full {
+        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+            Box::pin(async { Err(CommandOwnerError::Full) })
+        }
+        fn wait(&self, _: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
+            unreachable!()
+        }
+        fn cancel(&self, _: ToolCallId) -> NativeCommandFuture<()> {
+            unreachable!()
+        }
+    }
+    let mut harness = scripted_runs_harness_with_commands(
+        ApprovalMode::Full,
+        vec![vec![("shell", r#"{"command":"echo unused"}"#.to_owned())]],
+        None,
+        None,
+        Some(Arc::new(Full)),
+    )
+    .await;
+    let run = submit_prompt(&harness, "execute").await;
+    let finished = tokio::time::timeout(
+        Duration::from_secs(5),
+        collect_until(&mut harness.events, finished_for(run)),
+    )
+    .await;
+    assert!(
+        finished.is_ok(),
+        "a refused admission must allow the run to settle"
+    );
+    let finished = finished.unwrap();
+    assert!(matches!(
+        &finished.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    harness.runtime.shutdown().await.unwrap();
+}

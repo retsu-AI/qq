@@ -102,7 +102,8 @@ pub(super) async fn schedule_runs(
                 let run_span = tracing::info_span!(target: "qq::diagnostic", "run", run_ordinal = crate::runtime::next_diagnostic_run());
                 tokio::spawn(
                     async move {
-                        let resources = RunResources::default();
+                        let resources =
+                            RunResources::with_native_commands(task_inner.native_commands.clone());
                         #[cfg(test)]
                         let resources = resources.for_test_run(claimed.identity.run_id);
                         let execution = AssertUnwindSafe(supervise_reserved_run(

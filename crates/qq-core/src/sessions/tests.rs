@@ -1278,11 +1278,22 @@ async fn scripted_runs_harness_with(
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
 ) -> ScriptedRunsHarness {
+    scripted_runs_harness_with_commands(mode, runs, grant_authority, approval_reviewer, None).await
+}
+
+async fn scripted_runs_harness_with_commands(
+    mode: ApprovalMode,
+    runs: Vec<Vec<(&'static str, String)>>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+) -> ScriptedRunsHarness {
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.grant_authority = grant_authority;
     options.approval_reviewer = approval_reviewer;
+    options.native_commands = native_commands;
     let runtime = SessionRuntime::open(
         options,
         Arc::new(ScriptedRunsLoader {
@@ -1459,6 +1470,7 @@ async fn approval_harness_with_clocks(
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,

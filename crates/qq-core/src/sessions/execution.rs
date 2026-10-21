@@ -169,6 +169,15 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 }
 
 impl RunResources {
+    pub(super) fn with_native_commands(
+        service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    ) -> Self {
+        Self {
+            tools: crate::tools::ToolTasks::with_native_commands(service),
+            ..Self::default()
+        }
+    }
+
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }
@@ -234,6 +243,13 @@ async fn prepare_execution(
             exhaustion: Box::new(deadline.exhaustion()),
         });
     }
+    resources
+        .tools
+        .shorten_native_deadline(claimed.limits.max_duration_ms.map(|limit| {
+            let elapsed =
+                u64::try_from(execution_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            now_ms().saturating_add(limit.saturating_sub(elapsed))
+        }));
     let tool_cancellation = RunCancellation::new();
     let internal = claimed.identity.kind == RunKind::Compaction;
     // Take the only full transcript before cloning run metadata into gates or

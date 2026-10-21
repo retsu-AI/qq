@@ -840,7 +840,11 @@ async fn persist_shell_chunk(
 
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
-fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usize, bytes: &[u8]) {
+pub(crate) fn forward_shell_chunk(
+    output: Option<&mpsc::Sender<String>>,
+    streamed: &mut usize,
+    bytes: &[u8],
+) {
     let Some(sender) = output else {
         return;
     };

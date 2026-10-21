@@ -1061,6 +1061,21 @@ The backend requires an unprivileged owner and refuses unsupported loader or
 dependency configurations. These checks protect process custody; they do not
 provide filesystem or network containment.
 
+On Linux and Windows, the CLI, TUI and server submit approved `shell`/`exec`
+calls to a lazily started independent command worker. The persisted tool-call
+ID is also the worker's idempotency key. Transport reconnects reuse that ID;
+a replacement journal is rejected within a connected runtime. Worker failure
+or unavailable native custody returns an error without executing on the host
+through another path. Approval checks still happen before submission.
+
+The session waits for journal changes and persists the process receipt before
+forwarding output. Explicit cancellation reaches the worker and waits for
+confirmed completion. Losing the coordinator leaves the worker and its
+command running; restarting QQ does not yet reconcile or resume that unfinished
+session. macOS retains local execution until independent custody qualifies.
+This worker integration provides process ownership, not filesystem, network,
+credential or resource isolation.
+
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).

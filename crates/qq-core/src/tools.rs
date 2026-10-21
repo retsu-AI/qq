@@ -15,6 +15,7 @@ pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
+pub(crate) use shell::forward_shell_chunk;
 mod specs;
 mod tree;
 pub(crate) mod walk;

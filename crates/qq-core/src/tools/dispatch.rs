@@ -40,6 +40,8 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 struct ToolTaskState {
     #[cfg(target_os = "linux")]
     linux_owner: Option<super::linux_owner::LinuxOwner>,
+    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    native_deadline_ms: std::sync::atomic::AtomicU64,
     process_recorder: OnceLock<ProcessRecorder>,
     output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
@@ -74,6 +76,31 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    pub(crate) fn shorten_native_deadline(&self, deadline: Option<u64>) {
+        if let Some(deadline) = deadline {
+            let _ = self.0.native_deadline_ms.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |saved| {
+                    Some(if saved == 0 {
+                        deadline
+                    } else {
+                        saved.min(deadline)
+                    })
+                },
+            );
+        }
+    }
+
+    pub(crate) fn with_native_commands(
+        service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    ) -> Self {
+        Self(Arc::new(ToolTaskState {
+            native_commands: service,
+            ..ToolTaskState::default()
+        }))
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn owned_linux(
         launcher: crate::command_owner::CommandLauncher,
@@ -397,8 +424,53 @@ pub(crate) async fn execute_with_images(
             (false, _) => None,
         };
         let lease = tasks.enter();
+        let native_commands = tasks.0.native_commands.clone();
+        let deadline_ms = tasks.0.native_deadline_ms.load(Ordering::Acquire);
+        let not_after_ms = (deadline_ms != 0).then_some(deadline_ms);
         return match tokio::spawn(async move {
             let mut lease = lease;
+            if let Some(service) = native_commands {
+                let Some(id) = call_id else {
+                    return ToolOutput::refused(
+                        "native execution requires a persisted call identity",
+                    );
+                };
+                let requested = shell_arguments
+                    .as_ref()
+                    .map(|args| args.env.as_slice())
+                    .or_else(|| exec_arguments.as_ref().map(|args| args.env.as_slice()))
+                    .unwrap_or(&[]);
+                if let Some(name) = requested.iter().find(|name| !shell_policy.permits_env(name)) {
+                    return ToolOutput::refused(format!(
+                        "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
+                        crate::BASE_ENV.join(" ")
+                    ));
+                }
+                let environment = match crate::command_owner::NativeEnvironment::capture(requested)
+                {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let request = crate::command_owner::NativeCommand {
+                    environment,
+                    id,
+                    workspace: workspace.path().to_owned(),
+                    tool: name,
+                    arguments,
+                    shell_policy: shell_policy.as_ref().clone(),
+                    approved_images: approved_read_images.entries().to_vec(),
+                    not_after_ms,
+                };
+                return crate::command_owner::observe(
+                    service,
+                    request,
+                    &cancelled,
+                    output.as_ref(),
+                    &mut lease,
+                )
+                .await;
+            }
+
             let launch = match (&shell_arguments, &exec_arguments) {
                 (Some(shell), _) => Launch::Shell(shell),
                 (_, Some(exec)) => Launch::Exec(exec),

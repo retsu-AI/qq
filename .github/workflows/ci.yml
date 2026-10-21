@@ -242,7 +242,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::an_unavailable_owner_is_not_advertised_as_healthy qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::private_command_routes_authenticate_before_parsing_or_cancelling qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::saturated_completion_waits_do_not_block_command_cancellation qq-server
-          cargo test --locked -p qq --no-default-features --test command_owner_process
+          cargo test --locked -p qq --no-default-features --test command_owner_process --test command_worker_client
 
   release-size:
     name: release build size

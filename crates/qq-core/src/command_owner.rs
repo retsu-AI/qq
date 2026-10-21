@@ -21,11 +21,39 @@ use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellat
 mod environment;
 mod journal;
 pub use environment::NativeEnvironment;
+mod observer;
+pub(crate) use observer::observe;
 #[cfg(windows)]
 mod windows_state;
 use journal::Journal;
 
 pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;
+
+pub type NativeCommandFuture<T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, CommandOwnerError>> + Send + 'static>,
+>;
+
+/// The trusted host's command service. Observation never implies cancellation.
+pub trait NativeCommandService: Send + Sync + 'static {
+    fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()>;
+    fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot>;
+    fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()>;
+}
+
+impl NativeCommandService for CommandOwner {
+    fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.submit(request).await })
+    }
+    fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
+        let owner = self.clone();
+        Box::pin(async move { owner.wait(id, after).await })
+    }
+    fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.cancel(id).await })
+    }
+}
 
 const MAX_ACTIVE: u32 = 128;
 const MAX_RETAINED: usize = 10_000;
