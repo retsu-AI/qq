@@ -3,6 +3,75 @@ use std::path::Path;
 
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn cancellation_during_cold_admission_keeps_submission_progressing() {
+    use crate::{
+        cancellation::RunCancellation,
+        tools::dispatch::{ToolCancellation, ToolTasks},
+    };
+    struct Starting {
+        startup: Arc<tokio::sync::Semaphore>,
+        cancellation: RunCancellation,
+    }
+    impl NativeCommandService for Starting {
+        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+            let startup = self.startup.clone();
+            let cancellation = self.cancellation.clone();
+            Box::pin(async move {
+                let _permit = startup.acquire().await.unwrap();
+                cancellation.cancel();
+                // Startup must be polled again before cancellation can connect.
+                tokio::task::yield_now().await;
+                Ok(())
+            })
+        }
+        fn cancel(&self, _: ToolCallId) -> NativeCommandFuture<()> {
+            let startup = self.startup.clone();
+            Box::pin(async move {
+                let _permit = startup.acquire().await.unwrap();
+                Ok(())
+            })
+        }
+        fn wait(&self, id: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
+            Box::pin(async move {
+                Ok(CommandSnapshot {
+                    id,
+                    version: 1,
+                    status: CommandStatus::Finished,
+                    process: None,
+                    output: String::new(),
+                    result: Some(CommandResult(ToolOutput::interrupted("cancelled"))),
+                })
+            })
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let cancellation = RunCancellation::new();
+    let service = Arc::new(Starting {
+        startup: Arc::new(tokio::sync::Semaphore::new(1)),
+        cancellation: cancellation.clone(),
+    });
+    let tasks = ToolTasks::default();
+    let mut lease = tasks.enter();
+    let cancelled = ToolCancellation::new(cancellation);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::observer::observe(
+            service,
+            command(root.path(), id, "unused"),
+            &cancelled,
+            None,
+            &mut lease,
+        ),
+    )
+    .await
+    .expect("cancellation must not suspend the startup holding its connection permit");
+    assert_eq!(result, ToolOutput::interrupted("cancelled"));
+    drop(lease);
+    tasks.drain().await.unwrap();
+}
+
 #[cfg(windows)]
 mod windows_processes;
 

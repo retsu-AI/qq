@@ -21,11 +21,14 @@ pub(crate) async fn observe(
     let submitted = tokio::select! {
         biased;
         () = cancelled.cancelled() => {
-            if let Err(error) = service.cancel(id).await {
+            // Both operations can need the same cold-start connection permit.
+            // Keep admission progressing while cancellation connects.
+            let (submitted, cancelled) = tokio::join!(submitted, service.cancel(id));
+            if let Err(error) = cancelled {
                 return ToolOutput::unobserved(format!("could not cancel native admission: {error}"));
             }
             stopping = true;
-            submitted.await
+            submitted
         }
         submitted = &mut submitted => submitted,
     };
