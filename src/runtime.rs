@@ -2986,6 +2986,7 @@ impl RuntimeHandler {
                     .data_dir()
                     .join("command-owner-v2"),
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
+                crate::cli::BUILD_VERSION,
             )?));
         #[cfg(not(any(target_os = "linux", windows)))]
         let commands = None;

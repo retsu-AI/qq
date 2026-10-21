@@ -20,7 +20,7 @@ mod specs;
 mod tree;
 pub(crate) mod walk;
 #[cfg(windows)]
-mod windows_job;
+pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};

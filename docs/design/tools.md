@@ -1088,7 +1088,9 @@ credential or resource isolation.
   and confirm that it has no remaining processes before settling the tool.
   An inherited outer job owns even suspended children during startup; its
   handle closes on host exit. Trusted independent worker launchers must
-  explicitly break away from that outer job.
+  establish QQ's breakaway-enabled host job before launch, then explicitly
+  break away from it into a separate console process group. Enclosing job
+  restrictions still apply.
 - Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
   marked `bytes not captured` when exceeded) and streamed to clients as
   `ToolCallOutputDelta` events through the existing batching path so long

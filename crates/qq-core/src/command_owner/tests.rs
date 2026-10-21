@@ -366,6 +366,10 @@ async fn the_journal_has_one_owner_and_rejects_id_reuse() {
         owner.submit(reused).await,
         Err(CommandOwnerError::Conflict)
     ));
+    let finished = wait_finished(&owner, id, 0).await;
+    let result = finished.result.unwrap();
+    assert!(!result.is_error(), "{}", result.text());
+    assert!(result.text().contains("first"));
     owner.shutdown().await.unwrap();
 }
 

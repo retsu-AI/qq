@@ -13,8 +13,18 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let directory = root.path().join("worker");
-        let client =
-            client::CommandWorker::new(directory.clone(), env!("CARGO_BIN_EXE_qq").into()).unwrap();
+        let client = client::CommandWorker::new(
+            directory.clone(),
+            env!("CARGO_BIN_EXE_qq").into(),
+            concat!(
+                env!("CARGO_PKG_VERSION"),
+                "+",
+                env!("QQ_BUILD_REVISION"),
+                ".",
+                env!("QQ_BUILD_DATE")
+            ),
+        )
+        .unwrap();
         let request = NativeCommand {
             environment: NativeEnvironment::capture(&[]).unwrap(),
             id: ToolCallId::generate().unwrap(),
@@ -71,3 +81,42 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/cli.rs"]
 mod cli;
+
+#[tokio::test]
+async fn incompatible_worker_build_is_refused_before_command_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = root.path().join("worker");
+    let client = client::CommandWorker::new(
+        directory.clone(),
+        env!("CARGO_BIN_EXE_qq").into(),
+        "incompatible-build",
+    )
+    .unwrap();
+    let request = NativeCommand {
+        environment: NativeEnvironment::capture(&[]).unwrap(),
+        id: ToolCallId::generate().unwrap(),
+        workspace: std::fs::canonicalize(workspace.path()).unwrap(),
+        tool: "shell".to_owned(),
+        arguments: r#"{"command":"echo forbidden>counter"}"#.to_owned(),
+        shell_policy: Default::default(),
+        approved_images: Vec::new(),
+        not_after_ms: None,
+    };
+    let result = client.submit(request).await;
+    client.stop_spawned().await;
+    assert!(matches!(
+        result,
+        Err(CommandOwnerError::IncompatibleBuild { .. })
+    ));
+    assert!(!workspace.path().join("counter").exists());
+    let connection =
+        rusqlite::Connection::open(directory.join("commands/commands.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM commands", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+}

@@ -18,6 +18,7 @@ pub(crate) struct CommandWorker(Arc<State>);
 struct State {
     directory: PathBuf,
     executable: PathBuf,
+    expected_build: String,
     http: reqwest::Client,
     connection: Mutex<Option<ServerConnection>>,
     store: Mutex<Option<StoreId>>,
@@ -27,7 +28,11 @@ struct State {
 }
 
 impl CommandWorker {
-    pub(crate) fn new(directory: PathBuf, executable: PathBuf) -> Result<Self, CommandOwnerError> {
+    pub(crate) fn new(
+        directory: PathBuf,
+        executable: PathBuf,
+        expected_build: &str,
+    ) -> Result<Self, CommandOwnerError> {
         let http = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -37,6 +42,7 @@ impl CommandWorker {
         Ok(Self(Arc::new(State {
             directory,
             executable,
+            expected_build: expected_build.to_owned(),
             http,
             connection: Mutex::new(None),
             store: Mutex::new(None),
@@ -88,6 +94,10 @@ impl CommandWorker {
         {
             Some(connection) => connection,
             None => {
+                #[cfg(windows)]
+                tokio::task::spawn_blocking(qq_core::command_owner::prepare_independent_worker)
+                    .await
+                    .map_err(io_error)??;
                 let mut command = tokio::process::Command::new(&self.0.executable);
                 command.env_clear();
                 for name in qq_core::BASE_ENV.into_iter().chain([
@@ -106,7 +116,7 @@ impl CommandWorker {
                 #[cfg(unix)]
                 command.process_group(0);
                 #[cfg(windows)]
-                command.creation_flags(0x0100_0000); // Trusted worker may leave the coordinator's outer job.
+                command.creation_flags(0x0100_0000 | 0x0000_0200); // BREAKAWAY_FROM_JOB | NEW_PROCESS_GROUP.
                 let mut child = command
                     .arg("_command-owner")
                     .arg("--state-dir")
@@ -163,6 +173,12 @@ impl CommandWorker {
                     .ok_or(CommandOwnerError::Unavailable)?
             }
         };
+        if connection.server_info().version != self.0.expected_build {
+            return Err(CommandOwnerError::IncompatibleBuild {
+                expected: self.0.expected_build.clone(),
+                actual: connection.server_info().version.clone(),
+            });
+        }
         {
             let mut expected = self
                 .0

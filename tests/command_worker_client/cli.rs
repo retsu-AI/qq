@@ -107,17 +107,20 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
     let listener = tokio::net::UnixListener::bind(workspace.join(&marker)).unwrap();
     let arguments = json!({"program":std::env::current_exe().unwrap(),"args":["--exact","cli::blocked_command","--nocapture","--skip",marker]}).to_string();
     let completed = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
-    let provider = LoopbackServer::respond_sequence(vec![
-        reply(vec![
-            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}),
-            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":arguments}}),
-            completed.clone(),
-        ]),
-        reply(vec![
-            json!({"type":"response.output_text.delta","delta":"finished"}),
-            completed,
-        ]),
-    ]);
+    let provider = LoopbackServer::respond_sequence_with_timeout(
+        vec![
+            reply(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":""}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":arguments}}),
+                completed.clone(),
+            ]),
+            reply(vec![
+                json!({"type":"response.output_text.delta","delta":"finished"}),
+                completed,
+            ]),
+        ],
+        Duration::from_secs(60),
+    );
     let config = format!(
         r#"(version: 1, model: "fake/model", providers: {{"fake": Custom(connection: (base_url: "{}/v1", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Fake")}})}})"#,
         provider.base_url

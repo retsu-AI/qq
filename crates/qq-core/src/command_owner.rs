@@ -85,6 +85,13 @@ pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
     crate::tools::linux_owner::execute(encoded)
 }
 
+/// Establish QQ's host job before a trusted worker requests breakaway.
+/// The worker leaves this job while retaining any enclosing job's restrictions.
+#[cfg(windows)]
+pub fn prepare_independent_worker() -> std::io::Result<()> {
+    crate::tools::windows_job::root_job().map(|_| ())
+}
+
 /// An authorized invocation. Its ID is an idempotency key, not a new attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -154,6 +161,8 @@ pub struct CommandSnapshot {
 pub enum CommandOwnerError {
     #[error("command observations were reclaimed after acknowledgement")]
     Retired,
+    #[error("command worker build {actual} differs from this QQ build {expected}")]
+    IncompatibleBuild { expected: String, actual: String },
     #[error("another command owner holds this journal")]
     Busy,
     #[error("command owner state is not private or is not a regular file")]
