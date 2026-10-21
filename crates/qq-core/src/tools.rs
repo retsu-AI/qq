@@ -4569,12 +4569,17 @@ mod tests {
                     }
                 })
                 .unwrap();
+            let mut arguments: serde_json::Value =
+                serde_json::from_str(PANIC_SHELL_ARGUMENTS).unwrap();
+            if expire {
+                arguments["timeout_seconds"] = json!(120);
+            }
             let execution = tokio::spawn(dispatch::execute_with_images(
                 None,
                 workspace,
                 Arc::default(),
                 "shell".to_owned(),
-                PANIC_SHELL_ARGUMENTS.to_owned(),
+                arguments.to_string(),
                 cancelled.clone(),
                 None,
                 tasks.clone(),
@@ -4848,6 +4853,117 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_running_build_survives_the_old_ten_minute_ceiling() {
+        running_build_survives_clock_advance(
+            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800}"#,
+            601,
+        ).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_build_without_a_command_timeout_survives_two_minutes() {
+        running_build_survives_clock_advance(
+            r#"{"command":"printf ready; read token < release; printf build-finished"}"#,
+            121,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn native_admission_freezes_task_and_explicit_command_deadlines_without_a_default_cap() {
+        use crate::command_owner::{
+            CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+            NativeCommandService,
+        };
+        struct Capture(Arc<std::sync::Mutex<Vec<NativeCommand>>>);
+        impl NativeCommandService for Capture {
+            fn identity(&self) -> NativeCommandFuture<qq_protocol::StoreId> {
+                Box::pin(async { Ok(qq_protocol::StoreId::from_bytes([7; 16])) })
+            }
+            fn acknowledge(&self, _: Vec<qq_protocol::ToolCallId>) -> NativeCommandFuture<()> {
+                unreachable!()
+            }
+            fn cancel(&self, _: qq_protocol::ToolCallId) -> NativeCommandFuture<()> {
+                unreachable!()
+            }
+            fn wait(
+                &self,
+                _: qq_protocol::ToolCallId,
+                _: u64,
+            ) -> NativeCommandFuture<CommandSnapshot> {
+                unreachable!()
+            }
+            fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+                self.0.lock().unwrap().push(request);
+                Box::pin(async { Err(CommandOwnerError::Full) })
+            }
+        }
+        let now = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let task_deadline = now + 600_000;
+        for name in ["shell", "exec"] {
+            for (timeout, task) in [
+                (None, Some(task_deadline)),
+                (None, None),
+                (Some(3600), Some(task_deadline)),
+                (Some(1), Some(task_deadline)),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let workspace = Workspace::open(directory.path()).unwrap();
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let service = Arc::new(Capture(requests.clone()));
+                let tasks = ToolTasks::with_native_commands(Some(service));
+                tasks.set_native_recorder(|_, _| async { Ok(()) }).unwrap();
+                tasks.shorten_native_deadline(task);
+                let mut arguments = if name == "shell" {
+                    json!({"command":"unused"})
+                } else {
+                    json!({"program":"unused","args":[]})
+                };
+                if let Some(timeout) = timeout {
+                    arguments["timeout_seconds"] = json!(timeout);
+                }
+                let result = super::dispatch::execute_with_images(
+                    None,
+                    workspace,
+                    Arc::new(FileState::default()),
+                    name.to_owned(),
+                    arguments.to_string(),
+                    RunCancellation::new(),
+                    None,
+                    tasks.clone(),
+                    Arc::new(crate::ShellPolicy::default()),
+                    Arc::default(),
+                    Arc::default(),
+                    Arc::default(),
+                    Some(qq_protocol::ToolCallId::generate().unwrap()),
+                )
+                .await;
+                assert!(result.is_error);
+                tasks.drain().await.unwrap();
+                let requests = requests.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                let frozen = requests[0].not_after_ms;
+                if timeout == Some(1) {
+                    let frozen = frozen.expect("an explicit command timeout remains bounded");
+                    assert!(frozen >= now + 1_000 && frozen < task_deadline);
+                } else {
+                    assert_eq!(
+                        frozen, task,
+                        "{name} timeout={timeout:?} must not invent a two-minute cap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn running_build_survives_clock_advance(arguments: &'static str, seconds: u64) {
         use std::io::Write as _;
 
         let directory = tempfile::tempdir().unwrap();
@@ -4865,7 +4981,7 @@ mod tests {
         let cancellation = RunCancellation::new();
         let execution = tokio::spawn(run_shell_tool(
             workspace,
-            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800}"#,
+            arguments,
             cancellation.clone(),
             Some(output),
         ));
@@ -4878,10 +4994,10 @@ mod tests {
         .await
         .expect("command started");
 
-        // Move the deadline clock past ten minutes while the real native
-        // process remains blocked on an explicit input, not a fixed sleep.
+        // Advance the deadline clock while the real native process waits on
+        // explicit input, rather than making a long build fixture sleep.
         tokio::time::pause();
-        tokio::time::advance(std::time::Duration::from_secs(601)).await;
+        tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
         tokio::time::resume();
         let mut writer = gate.try_clone().unwrap();
         tokio::task::spawn_blocking(move || {

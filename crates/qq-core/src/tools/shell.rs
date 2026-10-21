@@ -30,7 +30,8 @@ pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-pub(super) const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
+// This bounds admission work, not the lifetime of a running command.
+const PREPARATION_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
 struct SpawnHook {
@@ -187,11 +188,11 @@ impl Launch<'_> {
                 }
             }
         }
-        let timeout = self.timeout_seconds().unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-        if timeout == 0
-            || std::time::Instant::now()
-                .checked_add(std::time::Duration::from_secs(timeout))
-                .is_none()
+        if let Some(timeout) = self.timeout_seconds()
+            && (timeout == 0
+                || std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_secs(timeout))
+                    .is_none())
         {
             return Err(InvalidLaunch::Timeout);
         }
@@ -343,12 +344,20 @@ pub(super) async fn run_shell(
             alternative.builtin, alternative.program
         )),
     };
-    let timeout_seconds = launch
-        .timeout_seconds()
-        .unwrap_or(DEFAULT_SHELL_TIMEOUT_SECS);
-    let Some(preparation_deadline) =
-        std::time::Instant::now().checked_add(std::time::Duration::from_secs(timeout_seconds))
-    else {
+    let timeout_seconds = launch.timeout_seconds();
+    let preparation_started = std::time::Instant::now();
+    let command_deadline = match timeout_seconds {
+        Some(seconds) => {
+            match preparation_started.checked_add(std::time::Duration::from_secs(seconds)) {
+                Some(deadline) => Some(deadline),
+                None => return ToolOutput::refused(InvalidLaunch::Timeout.to_string()),
+            }
+        }
+        None => None,
+    };
+    let Some(preparation_deadline) = preparation_started.checked_add(
+        std::time::Duration::from_secs(timeout_seconds.unwrap_or(PREPARATION_TIMEOUT_SECS)),
+    ) else {
         return ToolOutput::refused(InvalidLaunch::Timeout.to_string());
     };
     let permit = tokio::select! {
@@ -358,7 +367,7 @@ pub(super) async fn run_shell(
             Ok(permit) => permit,
             Err(_) => return ToolOutput::unobserved("tool executor is unavailable"),
         },
-        () = tokio::time::sleep(std::time::Duration::from_secs(timeout_seconds)) => return ToolOutput::refused("process preparation timed out"),
+        () = tokio::time::sleep_until(tokio::time::Instant::from_std(preparation_deadline)) => return ToolOutput::refused("process preparation timed out"),
     };
     let owned = match &launch {
         Launch::Shell(args) => super::process_context::OwnedLaunch::Shell((*args).clone()),
@@ -449,11 +458,10 @@ pub(super) async fn run_shell(
     // the child promptly if cancellation or the command deadline wins first.
     if let (Some(id), Some(receipt)) = (call_id, receipt.as_ref()) {
         let mut write = process.record_process(id, receipt.clone());
-        let deadline = tokio::time::Instant::from_std(preparation_deadline);
         let interrupted = tokio::select! {
             biased;
             () = cancelled.cancelled() => Some("tool execution was cancelled"),
-            () = tokio::time::sleep_until(deadline) => Some("command timed out"),
+            () = wait_for_command_deadline(command_deadline) => Some("command timed out"),
             result = &mut write => {
                 if let Err(error) = result {
                     return match stop_shell(&mut child, &mut guard, process).await {
@@ -512,7 +520,6 @@ pub(super) async fn run_shell(
     let mut stdout = child.stdout.take();
     let mut stderr = child.stderr.take();
     let started = tokio::time::Instant::now();
-    let deadline = tokio::time::Instant::from_std(preparation_deadline);
     let mut capture = BoundedCapture::new(MAX_SHELL_OUTPUT_BYTES);
     let mut identity = ShellResultIdentity::default();
     let mut streamed = 0_usize;
@@ -536,7 +543,7 @@ pub(super) async fn run_shell(
     // One timer and one cancellation wait for the whole call: this loop wakes
     // once per output chunk, and re-creating either per iteration would
     // re-register on each of them.
-    let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
+    let mut timeout = std::pin::pin!(wait_for_command_deadline(command_deadline));
     let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
@@ -690,12 +697,12 @@ pub(super) async fn run_shell(
                 if !content.ends_with('\n') {
                     content.push('\n');
                 }
-                if cancellation.timed_out() {
-                    content.push_str("command deadline expired; its process group was killed");
-                } else {
+                if let Some(seconds) = timeout_seconds.filter(|_| !cancellation.timed_out()) {
                     content.push_str(&format!(
-                        "command timed out after {timeout_seconds} s; its process group was killed"
+                        "command timed out after {seconds} s; its process group was killed"
                     ));
+                } else {
+                    content.push_str("command deadline expired; its process group was killed");
                 }
                 let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
                 result.result_digest = identity.finish(None, None, true);
@@ -800,6 +807,13 @@ pub(super) fn shell_command(command: &str) -> tokio::process::Command {
     shell
 }
 
+async fn wait_for_command_deadline(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending().await,
+    }
+}
+
 /// Reads from a pipe that may already be closed; a closed side never resolves,
 /// letting `select!` disable it without re-arming.
 async fn read_from<R>(reader: &mut Option<R>, buffer: &mut [u8]) -> std::io::Result<usize>
@@ -823,7 +837,7 @@ async fn persist_shell_chunk(
     bytes: &[u8],
     recorded: &mut usize,
     mut cancelled: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
-    mut timeout: std::pin::Pin<&mut tokio::time::Sleep>,
+    mut timeout: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
 ) -> Result<(), OutputWriteInterrupted> {
     let Some(id) = call_id else {
         return Ok(());

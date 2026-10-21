@@ -2079,6 +2079,21 @@ async fn a_replaced_workspace_never_receives_the_admitted_command() {
 #[cfg(unix)]
 #[tokio::test]
 async fn worker_deadline_retains_timeout_output_instead_of_reporting_cancellation() {
+    assert_worker_deadline_retains_timeout(
+        r#"{"command":"printf ready; read token < release","timeout_seconds":3600}"#,
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_task_deadline_still_bounds_commands_without_an_explicit_timeout() {
+    assert_worker_deadline_retains_timeout(r#"{"command":"printf ready; read token < release"}"#)
+        .await;
+}
+
+#[cfg(unix)]
+async fn assert_worker_deadline_retains_timeout(arguments: &str) {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
@@ -2093,8 +2108,7 @@ async fn worker_deadline_retains_timeout_output_instead_of_reporting_cancellatio
         .unwrap();
     let id = ToolCallId::generate().unwrap();
     let mut request = command(workspace.path(), id, "printf ready; read token < release");
-    request.arguments =
-        r#"{"command":"printf ready; read token < release","timeout_seconds":3600}"#.to_owned();
+    request.arguments = arguments.to_owned();
     request.not_after_ms = Some(
         u64::try_from(
             std::time::SystemTime::now()
@@ -2183,4 +2197,63 @@ async fn worker_deadline_during_preparation_and_receipt_is_not_user_cancellation
         assert_eq!(finished.process.is_none(), before_spawn);
         assert!(!path.join("escaped").exists());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_owned_build_uses_its_frozen_task_deadline_without_a_two_minute_cap() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let fifo = workspace.path().join("release");
+    crate::tools::create_test_fifo(&fifo).await;
+    let mut gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fifo)
+        .unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(
+        workspace.path(),
+        id,
+        "printf ready; read token < release; printf build-finished; printf once >> executions",
+    );
+    request.not_after_ms = Some(
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 600_000,
+    );
+    owner.submit(request).await.unwrap();
+    let mut version = 0;
+    loop {
+        let snapshot = owner.wait(id, version).await.unwrap();
+        if snapshot.output.contains("ready") {
+            break;
+        }
+        assert_ne!(snapshot.status, CommandStatus::Finished);
+        version = snapshot.version;
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(121)).await;
+    tokio::time::resume();
+    tokio::task::spawn_blocking(move || gate.write_all(b"continue\n").unwrap())
+        .await
+        .unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    let result = finished.result.unwrap();
+    assert!(!result.is_error(), "{}", result.text());
+    assert!(result.text().contains("build-finished"));
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("executions")).unwrap(),
+        "once"
+    );
 }
