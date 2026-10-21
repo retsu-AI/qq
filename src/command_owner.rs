@@ -25,11 +25,10 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
         interrupt.recv().await;
     };
     tokio::pin!(stop);
-    let options =
-        ServerOptions::new(ServerPaths::new(&directory)).with_version(crate::cli::BUILD_VERSION);
+    let options = ServerOptions::for_command_owner(ServerPaths::new(&directory))
+        .with_version(crate::cli::BUILD_VERSION);
     let reservation = match qq_server::reserve(options).await? {
         ReserveOutcome::Existing(connection) => {
-            qq_server::command_owner::verify_command_owner(&connection).await?;
             println!(
                 "qq command owner already running at {}",
                 connection.address()

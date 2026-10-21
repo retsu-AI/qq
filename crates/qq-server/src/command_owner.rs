@@ -19,10 +19,12 @@ use serde::Deserialize;
 use tokio::sync::Semaphore;
 
 use crate::{
-    ServerConnection, ServerError, ServerHandle, ServerIdentity, ServerReservation, api_error,
+    ServerConnection, ServerError, ServerHandle, ServerIdentity, ServerOptions, ServerPaths,
+    ServerReservation, api_error,
 };
 
 const PREFIX: &str = "/internal/command-owner/v1";
+const HEALTH_PATH: &str = "/internal/command-owner/v1/health";
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 
 impl ServerReservation {
@@ -34,17 +36,20 @@ impl ServerReservation {
     }
 }
 
-/// Verify the private transport version and discovery identity before reusing
-/// an instance as a command worker. Display names are not identity.
-pub async fn verify_command_owner(connection: &ServerConnection) -> Result<(), ServerError> {
-    let client = crate::probe_client().map_err(|_| ServerError::ExistingCommandOwnerUnavailable)?;
-    let info = crate::probe_health(&client, connection, &format!("{PREFIX}/health"))
-        .await
-        .map_err(|_| ServerError::ExistingCommandOwnerUnavailable)?;
-    if &info != connection.server_info() {
-        return Err(ServerError::StateRace);
+/// Discover only a healthy command worker with matching discovery identity.
+pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
+    crate::discover_at_endpoint(paths, HEALTH_PATH).await
+}
+
+impl ServerOptions {
+    /// Reserve or reuse the private command service, never a session server.
+    #[must_use]
+    pub fn for_command_owner(paths: ServerPaths) -> Self {
+        Self {
+            health_path: HEALTH_PATH,
+            ..Self::new(paths)
+        }
     }
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -65,8 +70,7 @@ fn router(owner: CommandOwner, connection: ServerConnection) -> Router {
         cancellations: Arc::new(Semaphore::new(16)),
     };
     Router::new()
-        .route("/v1/health", get(health))
-        .route(&format!("{PREFIX}/health"), get(health))
+        .route(HEALTH_PATH, get(health))
         .route(&format!("{PREFIX}/submit"), post(submit))
         .route(&format!("{PREFIX}/snapshot"), post(snapshot))
         .route(&format!("{PREFIX}/wait"), post(wait))
@@ -80,10 +84,7 @@ async fn admit(State(state): State<OwnerState>, request: Request, next: Next) ->
     if !crate::authorized(request.headers(), &state.connection) {
         return api_error(StatusCode::UNAUTHORIZED, "authentication required");
     }
-    if matches!(
-        request.uri().path(),
-        "/v1/health" | "/internal/command-owner/v1/health"
-    ) {
+    if request.uri().path() == HEALTH_PATH {
         return next.run(request).await;
     }
     let slots = match request.uri().path() {
@@ -184,7 +185,7 @@ mod tests {
         let owner = CommandOwner::open(root.path().join("journal"), "unknown")
             .await
             .unwrap();
-        let reservation = match crate::reserve(ServerOptions::new(ServerPaths::new(
+        let reservation = match crate::reserve(ServerOptions::for_command_owner(ServerPaths::new(
             root.path().join("transport"),
         )))
         .await
@@ -202,7 +203,7 @@ mod tests {
         let (_root, owner, server) = fixture().await;
         let connection = server.connection();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        let url = format!("http://{}/v1/health", connection.address());
+        let url = format!("http://{}{HEALTH_PATH}", connection.address());
         let token = connection.expose_bearer_token();
         let healthy = client.get(&url).bearer_auth(token).send().await.unwrap();
         assert_eq!(healthy.status(), StatusCode::OK);

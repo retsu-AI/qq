@@ -201,12 +201,12 @@ pub struct ServerOptions {
     bind_address: SocketAddr,
     version: String,
     allowed_origins: AllowedOrigins,
+    health_path: &'static str,
 }
 
 impl ServerOptions {
-    /// Creates options using the default ephemeral IPv4 loopback address,
-    /// this crate's version as the reported server version, and no
-    /// cross-origin access.
+    /// Creates session-server options using the default ephemeral IPv4
+    /// loopback address, this crate's version, and no cross-origin access.
     #[must_use]
     pub fn new(paths: ServerPaths) -> Self {
         Self {
@@ -214,11 +214,12 @@ impl ServerOptions {
             bind_address: DEFAULT_BIND_ADDRESS,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             allowed_origins: AllowedOrigins::default(),
+            health_path: "/v1/health",
         }
     }
 
-    /// Overrides the version reported by `/v1/health`, the discovery file, and
-    /// capabilities. The binary passes its build string (version plus source
+    /// Overrides the version reported by health probes and discovery, and by
+    /// session-server capabilities. The binary passes its build string (version plus source
     /// revision) so a client can tell two servers of the same version apart.
     /// Must be non-empty, at most 256 bytes, and printable ASCII without
     /// spaces; anything else is rejected at start as `InvalidVersion`.
@@ -661,7 +662,7 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
             drop(lock);
-            return find_existing_server(&options.paths)
+            return find_existing_server(&options.paths, options.health_path)
                 .await
                 .map(ReserveOutcome::Existing);
         }
@@ -1189,13 +1190,20 @@ pub async fn discover() -> Result<Option<ServerConnection>, ServerError> {
 /// This is intended for isolated embeddings and test fixtures. Ordinary
 /// callers should use [`discover`], which retains the user-scoped default.
 pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
+    discover_at_endpoint(paths, "/v1/health").await
+}
+
+async fn discover_at_endpoint(
+    paths: &ServerPaths,
+    health_path: &str,
+) -> Result<Option<ServerConnection>, ServerError> {
     let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
 
     for attempt in 0..DISCOVERY_RETRIES {
         let Some(connection) = connection_for_discovery(read_connection(paths))? else {
             return Ok(None);
         };
-        match probe_health(&client, &connection, "/v1/health").await {
+        match probe_health(&client, &connection, health_path).await {
             Ok(info) if info == *connection.server_info() => return Ok(Some(connection)),
             Ok(_) | Err(HealthProbeError::Unavailable) => {}
             Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1293,13 +1301,16 @@ fn write_metadata_atomically(
     result
 }
 
-async fn find_existing_server(paths: &ServerPaths) -> Result<ServerConnection, ServerError> {
+async fn find_existing_server(
+    paths: &ServerPaths,
+    health_path: &str,
+) -> Result<ServerConnection, ServerError> {
     let client = probe_client().map_err(|_| ServerError::ExistingServerUnavailable)?;
     let mut meaningful_error = None;
 
     for attempt in 0..STARTUP_RETRIES {
         match read_connection(paths) {
-            Ok(Some(connection)) => match probe_health(&client, &connection, "/v1/health").await {
+            Ok(Some(connection)) => match probe_health(&client, &connection, health_path).await {
                 Ok(info) if info == *connection.server_info() => return Ok(connection),
                 Ok(_) | Err(HealthProbeError::Unavailable) => {}
                 Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1637,8 +1648,6 @@ pub enum ServerError {
     },
     #[error("the existing server did not become healthy")]
     ExistingServerUnavailable,
-    #[error("the existing instance does not provide a healthy command-owner service")]
-    ExistingCommandOwnerUnavailable,
     #[error("local server stopped unexpectedly")]
     Serve {
         #[source]

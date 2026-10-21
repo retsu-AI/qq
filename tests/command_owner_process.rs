@@ -44,7 +44,7 @@ async fn start(directory: &Path) -> (Child, ServerConnection) {
         line.starts_with("qq command owner listening at "),
         "{line:?}"
     );
-    let connection = qq_server::discover_at(&ServerPaths::new(directory))
+    let connection = qq_server::command_owner::discover_at(&ServerPaths::new(directory))
         .await
         .unwrap()
         .unwrap();
@@ -282,7 +282,10 @@ async fn a_worker_refuses_to_reuse_a_regular_server_even_with_the_same_label() {
     assert!(!directory.join("commands").exists());
     let (mut worker, connection) = start(&directory).await;
     let output = invoke_start(&directory).await;
-    let reused = qq_server::discover_at(&paths).await.unwrap().unwrap();
+    let reused = qq_server::command_owner::discover_at(&paths)
+        .await
+        .unwrap()
+        .unwrap();
     worker.kill().await.unwrap();
     worker.wait().await.unwrap();
     assert!(
@@ -294,6 +297,29 @@ async fn a_worker_refuses_to_reuse_a_regular_server_even_with_the_same_label() {
         String::from_utf8_lossy(&output.stdout).starts_with("qq command owner already running at ")
     );
     assert_eq!(reused.server_info(), connection.server_info());
+}
+
+#[tokio::test]
+async fn ordinary_server_discovery_never_reuses_a_command_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let paths = ServerPaths::new(&directory);
+    let (mut worker, _) = start(&directory).await;
+    let metadata = tokio::fs::read(directory.join("server.ron")).await.unwrap();
+    let discovered = qq_server::discover_at(&paths).await.unwrap();
+    let reservation = qq_server::reserve(qq_server::ServerOptions::new(paths)).await;
+    let unchanged = tokio::fs::read(directory.join("server.ron")).await.unwrap();
+    worker.kill().await.unwrap();
+    worker.wait().await.unwrap();
+    assert!(
+        discovered.is_none(),
+        "session clients must not discover a command-only service"
+    );
+    assert!(matches!(
+        reservation,
+        Err(qq_server::ServerError::ExistingServerUnavailable)
+    ));
+    assert_eq!(unchanged, metadata);
 }
 
 #[cfg(unix)]
