@@ -1258,11 +1258,20 @@ async fn prepare_session(
             )
         }
         Some(session_id) => {
-            // Store ownership was taken when the runtime opened and its
-            // recovery sweep has already run, so what the snapshot shows is
-            // the recovered state. Ordinary prompts require an idle root;
-            // a stored active goal may already be running its driver. Session
-            // settings apply to the next claim without rewriting running work.
+            // Only commands inherited from the previous coordinator delay an
+            // explicit resume. Ordinary busy sessions keep their existing error.
+            match sessions
+                .await_recovered_commands(workspace_id, session_id)
+                .await
+            {
+                Ok(()) | Err(SessionRuntimeError::SessionNotFound) => {}
+                Err(error) => {
+                    return Err(Failure {
+                        status: status_for_error(&error),
+                        message: error.to_string(),
+                    });
+                }
+            }
             let snapshot = match sessions
                 .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 1, 1))
                 .await

@@ -1154,12 +1154,19 @@ acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
 Sessions bind the original worker journal before submission and commit an
 acknowledgement intent with the actual terminal result. Only then can worker
-observations be reclaimed. On reopening a session store, a bounded startup
-observation pass imports terminal results and their process receipts from the
-original worker journal before interrupted model runs settle. It never submits
-or replays a command. Unavailable, replaced or still-running worker observations
-remain unacknowledged; this pass does not reattach active commands or resume
-their model runs. A native result that exceeds remaining context capacity
+observations be reclaimed. Reopening captures pending native invocation IDs and
+observes their original journal in the background, retaining the original run
+until those invocations drain. Server startup does not wait for a worker.
+The observer retains process receipts and terminal output, acknowledges only
+saved results, and handles explicit cancellation through the original worker.
+An invocation bound before admission is fenced with durable cancellation if
+its journal entry is absent, preventing a delayed admission from starting it.
+No command is submitted again and its original deadline remains in force.
+Explicit CLI resume waits for inherited commands; queued prompts start only
+after their results are saved. The interrupted model run then settles rather
+than being silently redispatched. Automatic task continuation is separate.
+Unavailable or replaced workers leave their observations unacknowledged.
+A native result that exceeds remaining context capacity
 is still saved; that run ends with a context-policy failure before another
 model turn. Pending intents survive interruption and session
 pruning; reopening and later tool results retry a bounded batch. A generic

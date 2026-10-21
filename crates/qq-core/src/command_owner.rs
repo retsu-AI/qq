@@ -74,7 +74,7 @@ impl NativeCommandService for CommandOwner {
     }
 }
 
-const MAX_ACTIVE: u32 = 128;
+pub(crate) const MAX_ACTIVE: u32 = 128;
 const MAX_RETAINED: usize = 10_000;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_LIVE_OUTPUT_BYTES: usize = crate::tools::MAX_SHELL_OUTPUT_BYTES;

@@ -154,6 +154,10 @@ history. The model and profile come from this invocation. The stored approval
 mode is preserved unless you explicitly pass `--approval`. New sessions
 default to Auto. Every exit prints the id you need.
 
+When reopening after a coordinator crash, it waits for that session's inherited native commands and includes their
+saved results before starting the new prompt. Commands keep their original
+deadlines and are not executed again.
+
 ### Steering from a pipe
 
 `--steer-stdin` reads one line per steering message and injects each at the

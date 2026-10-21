@@ -695,6 +695,7 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) async fn recover_interrupted_runs(
         &self,
     ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
