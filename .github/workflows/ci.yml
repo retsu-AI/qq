@@ -198,6 +198,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_migration_preserves_the_journal_identity_and_results
+          bash .github/scripts/test-exact.sh command_owner::tests::accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdown
           bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
           bash .github/scripts/test-exact.sh command_owner::tests::unconfirmed_process_exit_blocks_owner_continuation
           bash .github/scripts/test-exact.sh command_owner::tests::losing_the_cancel_response_does_not_abandon_committed_cancellation

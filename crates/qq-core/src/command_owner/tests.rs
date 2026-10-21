@@ -1642,6 +1642,10 @@ async fn acknowledged_results_release_capacity_without_replaying_retired_command
             .is_error()
     );
     owner.acknowledge(vec![next]).await.unwrap();
+    assert!(
+        owner.0.jobs.lock().unwrap().is_empty(),
+        "acknowledgement must reclaim terminal live-state entries"
+    );
     let replay = owner.submit(original.clone()).await;
     if replay.is_ok() {
         let _ = wait_finished(&owner, id, 0).await;
@@ -1786,5 +1790,47 @@ async fn acknowledgement_migration_preserves_the_journal_identity_and_results() 
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u64>(0))
             .unwrap(),
         4
+    );
+}
+
+#[tokio::test]
+async fn accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdown() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner.cancel(id).await.unwrap();
+    let other = ToolCallId::generate().unwrap();
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    ADMISSION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id: other,
+        entered,
+        release: gate,
+    });
+    let journal = owner.0.journal.clone();
+    let stalled = tokio::spawn(async move { journal.admit(other, "{}".to_owned()).await });
+    blocked.await.unwrap();
+    let mut acknowledgement = Box::pin(owner.acknowledge(vec![id]));
+    assert!(futures_util::poll!(acknowledgement.as_mut()).is_pending());
+    let mut shutdown = Box::pin(owner.shutdown());
+    assert!(futures_util::poll!(shutdown.as_mut()).is_pending());
+    drop(acknowledgement);
+    release.send(()).unwrap();
+    stalled.await.unwrap().unwrap();
+    shutdown.await.unwrap();
+    let connection = Connection::open(directory.join("commands.sqlite3")).unwrap();
+    let retired: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM retired_commands WHERE id=?1)",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        retired,
+        "shutdown must drain an accepted acknowledgement even when its caller disconnects"
     );
 }

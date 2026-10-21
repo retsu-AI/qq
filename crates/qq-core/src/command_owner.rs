@@ -361,7 +361,17 @@ impl CommandOwner {
                     let _ = reply.send(Ok(()));
                     guard.completed = true;
                 }
-                Err(error @ (CommandOwnerError::Conflict | CommandOwnerError::Retired)) => {
+                Err(error @ CommandOwnerError::Retired) => {
+                    owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(&id);
+                    let _ = reply.send(Err(error));
+                    guard.completed = true;
+                }
+                Err(error @ CommandOwnerError::Conflict) => {
                     let _ = reply.send(Err(error));
                     guard.completed = true;
                 }
@@ -588,11 +598,50 @@ impl CommandOwner {
     /// Discard terminal observations only after the consumer has saved or deliberately
     /// discarded them. A compact record continues to prevent repeated execution.
     pub async fn acknowledge(&self, ids: Vec<ToolCallId>) -> Result<(), CommandOwnerError> {
-        self.available()?;
         if ids.is_empty() || ids.len() > 128 {
             return Err(CommandOwnerError::Invalid);
         }
-        self.0.journal.acknowledge(ids).await
+        let slot = Arc::clone(&self.0.controls)
+            .try_acquire_owned()
+            .map_err(|_| CommandOwnerError::Full)?;
+        let lease = self.0.tools.enter();
+        self.available()?;
+        let (reply, applied) = tokio::sync::oneshot::channel();
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let mut guard = DriverGuard {
+                failed: owner.0.failed.clone(),
+                jobs: Arc::clone(&owner.0.jobs),
+                completed: false,
+            };
+            let result = owner.0.journal.acknowledge(ids.clone()).await;
+            match &result {
+                Ok(()) => {
+                    let mut jobs = owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    for id in ids {
+                        jobs.remove(&id);
+                    }
+                    guard.completed = true;
+                }
+                Err(CommandOwnerError::Invalid | CommandOwnerError::NotFound) => {
+                    guard.completed = true
+                }
+                Err(error) => {
+                    tracing::error!(target: "qq::command_owner", error = %error, "could not persist command acknowledgement");
+                    owner.failure();
+                }
+            }
+            let _ = reply.send(result);
+            drop(guard);
+            drop(owner);
+            drop(lease);
+            drop(slot);
+        });
+        applied.await.map_err(|_| CommandOwnerError::Unavailable)?
     }
 
     pub async fn shutdown(&self) -> Result<(), CommandOwnerError> {
