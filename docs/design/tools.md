@@ -1121,6 +1121,18 @@ for both tools, and an argument like `rm -rf /` is a literal word, never a
 command. The system prompt steers the model to `exec` for single programs
 and `shell` for pipelines. Its header is `exec exit=<code> …`.
 
+Trusted native-command SDK consumers retain terminal results until they have
+saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
+(or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
+Acknowledgement atomically removes terminal output, receipts and results while
+retaining compact command IDs and request hashes that prevent re-execution.
+The 10,000-observation limit therefore counts unacknowledged commands; compact
+retired identities continue to grow with history. Running commands cannot be
+acknowledged, repeated acknowledgements are harmless, and an acknowledged
+command returns `Retired` rather than becoming eligible for admission again.
+The SDK example exercises this lifecycle; session consumers must persist their
+own result before acknowledging the worker.
+
 Both tools accept an optional workspace-relative `cwd`. Launch validation
 rejects empty, NUL-containing, absolute or prefixed paths and parent traversal
 above the lexical workspace root. Within-root normalization such as `sub/..`

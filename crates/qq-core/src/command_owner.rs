@@ -124,6 +124,8 @@ pub struct CommandSnapshot {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandOwnerError {
+    #[error("command observations were reclaimed after acknowledgement")]
+    Retired,
     #[error("another command owner holds this journal")]
     Busy,
     #[error("command owner state is not private or is not a regular file")]
@@ -166,6 +168,7 @@ struct OwnerState {
     jobs: Arc<Mutex<HashMap<ToolCallId, LiveCommand>>>,
     slots: Arc<Semaphore>,
     controls: Arc<Semaphore>,
+    acknowledgements: Arc<Semaphore>,
     tools: ToolTasks,
     producer: Arc<ProcessProducer>,
     failed: watch::Sender<bool>,
@@ -272,6 +275,7 @@ impl CommandOwner {
             jobs,
             slots: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
             controls: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
+            acknowledgements: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
             tools,
             producer: Arc::new(ProcessProducer::new(source_revision)),
             failed,
@@ -313,7 +317,10 @@ impl CommandOwner {
             .existing(request.id, encoded.clone())
             .await
             .inspect_err(|error| {
-                if !matches!(error, CommandOwnerError::Conflict) {
+                if !matches!(
+                    error,
+                    CommandOwnerError::Conflict | CommandOwnerError::Retired
+                ) {
                     self.failure();
                 }
             })?;
@@ -356,8 +363,18 @@ impl CommandOwner {
                     let _ = reply.send(Ok(()));
                     guard.completed = true;
                 }
-                Err(CommandOwnerError::Conflict) => {
-                    let _ = reply.send(Err(CommandOwnerError::Conflict));
+                Err(error @ CommandOwnerError::Retired) => {
+                    owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remove(&id);
+                    let _ = reply.send(Err(error));
+                    guard.completed = true;
+                }
+                Err(error @ CommandOwnerError::Conflict) => {
+                    let _ = reply.send(Err(error));
                     guard.completed = true;
                 }
                 Err(CommandOwnerError::Full) => {
@@ -492,7 +509,10 @@ impl CommandOwner {
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
         self.0.journal.snapshot(id).await.inspect_err(|error| {
-            if !matches!(error, CommandOwnerError::NotFound) {
+            if !matches!(
+                error,
+                CommandOwnerError::NotFound | CommandOwnerError::Retired
+            ) {
                 self.failure();
             }
         })
@@ -565,6 +585,55 @@ impl CommandOwner {
                 Err(CommandOwnerError::Full) => guard.completed = true,
                 Err(error) => {
                     tracing::error!(target: "qq::command_owner", error = %error, "could not persist command cancellation");
+                    owner.failure();
+                }
+            }
+            let _ = reply.send(result);
+            drop(guard);
+            drop(owner);
+            drop(lease);
+            drop(slot);
+        });
+        applied.await.map_err(|_| CommandOwnerError::Unavailable)?
+    }
+
+    /// Discard terminal observations only after the consumer has saved or deliberately
+    /// discarded them. A compact record continues to prevent repeated execution.
+    pub async fn acknowledge(&self, ids: Vec<ToolCallId>) -> Result<(), CommandOwnerError> {
+        if ids.is_empty() || ids.len() > 128 {
+            return Err(CommandOwnerError::Invalid);
+        }
+        let slot = Arc::clone(&self.0.acknowledgements)
+            .try_acquire_owned()
+            .map_err(|_| CommandOwnerError::Full)?;
+        let lease = self.0.tools.enter();
+        self.available()?;
+        let (reply, applied) = tokio::sync::oneshot::channel();
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let mut guard = DriverGuard {
+                failed: owner.0.failed.clone(),
+                jobs: Arc::clone(&owner.0.jobs),
+                completed: false,
+            };
+            let result = owner.0.journal.acknowledge(ids.clone()).await;
+            match &result {
+                Ok(()) => {
+                    let mut jobs = owner
+                        .0
+                        .jobs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    for id in ids {
+                        jobs.remove(&id);
+                    }
+                    guard.completed = true;
+                }
+                Err(CommandOwnerError::Invalid | CommandOwnerError::NotFound) => {
+                    guard.completed = true
+                }
+                Err(error) => {
+                    tracing::error!(target: "qq::command_owner", error = %error, "could not persist command acknowledgement");
                     owner.failure();
                 }
             }

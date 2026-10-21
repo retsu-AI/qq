@@ -135,7 +135,7 @@ impl Journal {
         let _database_file = private_file(&path)?;
         let mut connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 0 | 3) {
+        if !matches!(version, 0 | 3 | 4) {
             return Err(CommandOwnerError::Schema(version));
         }
         if version == 0 {
@@ -172,6 +172,14 @@ impl Journal {
                 "INSERT INTO metadata (singleton, store_id) VALUES (1, ?1)",
                 [store_id.to_string()],
             )?;
+            tx.commit()?;
+        }
+        if version != 4 {
+            let tx = connection.transaction()?;
+            tx.execute_batch("CREATE TABLE retired_commands (
+                id TEXT NOT NULL PRIMARY KEY CHECK(length(id)=32),
+                request_sha256 BLOB CHECK(request_sha256 IS NULL OR (typeof(request_sha256)='blob' AND length(request_sha256)=32))
+            ) STRICT, WITHOUT ROWID; PRAGMA user_version=4;")?;
             tx.commit()?;
         }
         let store_id: String = connection.query_row(
@@ -281,7 +289,11 @@ impl Journal {
             match previous {
                 Some(Some(previous)) if previous != request => Err(CommandOwnerError::Conflict),
                 Some(Some(_)) => Ok(true),
-                Some(None) | None => Ok(false),
+                Some(None) => Ok(false),
+                None => {
+                    reject_retired(db, id, Some(&request))?;
+                    Ok(false)
+                }
             }
         })
         .await
@@ -313,6 +325,7 @@ impl Journal {
                 }
                 None => {}
             }
+            reject_retired(&tx, id, Some(&request))?;
             let count: usize =
                 tx.query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))?;
             if count >= MAX_RETAINED {
@@ -453,6 +466,9 @@ impl Journal {
                     },
                 )
                 .optional()?;
+            if row.is_none() {
+                reject_retired(db, id, None)?;
+            }
             let StoredSnapshot {
                 version,
                 status,
@@ -484,8 +500,52 @@ impl Journal {
         .await
     }
 
+    pub(super) async fn acknowledge(&self, ids: Vec<ToolCallId>) -> Result<(), CommandOwnerError> {
+        self.call(move |db| {
+            use sha2::{Digest as _, Sha256};
+            let tx = db.transaction()?;
+            for id in ids {
+                let row: Option<(Option<String>, String)> = tx
+                    .query_row(
+                        "SELECT request,status FROM commands WHERE id=?1",
+                        [id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                let Some((request, status)) = row else {
+                    let retired: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM retired_commands WHERE id=?1)",
+                        [id.to_string()],
+                        |row| row.get(0),
+                    )?;
+                    if retired {
+                        continue;
+                    }
+                    return Err(CommandOwnerError::NotFound);
+                };
+                if !matches!(status.as_str(), "finished" | "lost") {
+                    return Err(CommandOwnerError::Invalid);
+                }
+                let digest = request.map(|request| Sha256::digest(request.as_bytes()).to_vec());
+                tx.execute(
+                    "INSERT INTO retired_commands(id,request_sha256) VALUES (?1,?2)",
+                    params![id.to_string(), digest],
+                )?;
+                tx.execute("DELETE FROM commands WHERE id=?1", [id.to_string()])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     pub(super) async fn cancel(&self, id: ToolCallId) -> Result<(), CommandOwnerError> {
         self.call(move |db| {
+            match reject_retired(db, id, None) {
+                Err(CommandOwnerError::Retired) => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(()) => {},
+            }
             let tx = db.transaction()?;
             if tx.execute("UPDATE commands SET cancel_requested=1 WHERE id=?1", [id.to_string()])? == 0 {
                 let count: usize = tx.query_row("SELECT COUNT(*) FROM commands", [], |row| row.get(0))?;
@@ -508,6 +568,31 @@ impl Journal {
             )?)
         })
         .await
+    }
+}
+
+fn reject_retired(
+    db: &Connection,
+    id: ToolCallId,
+    request: Option<&str>,
+) -> Result<(), CommandOwnerError> {
+    use sha2::{Digest as _, Sha256};
+    let retired: Option<Option<Vec<u8>>> = db
+        .query_row(
+            "SELECT request_sha256 FROM retired_commands WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match retired {
+        None => Ok(()),
+        Some(Some(previous))
+            if request
+                .is_some_and(|request| previous != Sha256::digest(request.as_bytes()).to_vec()) =>
+        {
+            Err(CommandOwnerError::Conflict)
+        }
+        Some(_) => Err(CommandOwnerError::Retired),
     }
 }
 

@@ -75,6 +75,7 @@ fn router(owner: CommandOwner, connection: ServerConnection) -> Router {
         .route(&format!("{PREFIX}/snapshot"), post(snapshot))
         .route(&format!("{PREFIX}/wait"), post(wait))
         .route(&format!("{PREFIX}/cancel"), post(cancel))
+        .route(&format!("{PREFIX}/acknowledge"), post(acknowledge))
         .route_layer(middleware::from_fn_with_state(state.clone(), admit))
         .layer(DefaultBodyLimit::max(MAX_REQUEST_BYTES))
         .with_state(state)
@@ -128,6 +129,22 @@ struct Wait {
     after: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Acknowledgement {
+    ids: Vec<ToolCallId>,
+}
+
+async fn acknowledge(
+    State(state): State<OwnerState>,
+    Json(request): Json<Acknowledgement>,
+) -> Response {
+    match state.owner.acknowledge(request.ids).await {
+        Ok(()) => Json(()).into_response(),
+        Err(error) => failure(error),
+    }
+}
+
 async fn submit(State(state): State<OwnerState>, Json(request): Json<NativeCommand>) -> Response {
     match state.owner.submit(request).await {
         Ok(()) => Json(()).into_response(),
@@ -161,6 +178,7 @@ fn failure(error: CommandOwnerError) -> Response {
         CommandOwnerError::Invalid => (StatusCode::BAD_REQUEST, "invalid native command"),
         CommandOwnerError::Conflict => (StatusCode::CONFLICT, "command identity conflict"),
         CommandOwnerError::NotFound => (StatusCode::NOT_FOUND, "command not found"),
+        CommandOwnerError::Retired => (StatusCode::GONE, "command observations acknowledged"),
         CommandOwnerError::Full => (
             StatusCode::TOO_MANY_REQUESTS,
             "command owner capacity exhausted",
@@ -282,6 +300,23 @@ mod tests {
         .unwrap();
         assert!(snapshot.output.contains("reconnected"));
         assert!(!snapshot.result.unwrap().is_error());
+        let acknowledged = client
+            .post(format!("{base}/acknowledge"))
+            .bearer_auth(connection.expose_bearer_token())
+            .json(&serde_json::json!({"ids":[request.id]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(acknowledged.status(), StatusCode::OK);
+        let replay = client
+            .post(format!("{base}/submit"))
+            .bearer_auth(connection.expose_bearer_token())
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(replay.status(), StatusCode::GONE);
+        assert!(owner.is_available());
         server.shutdown().await.unwrap();
         owner.shutdown().await.unwrap();
     }
@@ -291,7 +326,7 @@ mod tests {
         let connection = server.connection();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let id = ToolCallId::generate().unwrap();
-        for path in ["submit", "snapshot", "wait", "cancel"] {
+        for path in ["submit", "snapshot", "wait", "cancel", "acknowledge"] {
             let response = client
                 .post(format!("http://{}{PREFIX}/{path}", connection.address()))
                 .bearer_auth("not-the-owner-token")
