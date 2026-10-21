@@ -2972,9 +2972,39 @@ impl RuntimeHandler {
     /// Opens the durable runtime with the server-side approval wait chosen
     /// by the caller: `None` is no deadline (the interactive default); a
     /// headless supervisor passes what its configuration asked for.
+    pub async fn open_owned(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
+        #[cfg(any(target_os = "linux", windows))]
+        let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
+            Some(Arc::new(crate::command_owner::client::CommandWorker::new(
+                factory
+                    .inner
+                    .config
+                    .paths()
+                    .data_dir()
+                    .join("command-owner-v3"),
+                std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
+                crate::cli::BUILD_VERSION,
+            )?));
+        #[cfg(not(any(target_os = "linux", windows)))]
+        let commands = None;
+        Self::open_with_commands(factory, approval_timeout, commands).await
+    }
+
+    #[cfg(test)]
     pub async fn open_with(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
+        Self::open_with_commands(factory, approval_timeout, None).await
+    }
+
+    async fn open_with_commands(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+        native_commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>>,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
@@ -2987,10 +3017,11 @@ impl RuntimeHandler {
         // about it.
         let reviewer: Arc<dyn ApprovalReviewer> =
             Arc::new(ModelApprovalReviewer::new(factory.clone()));
-        let options = SessionRuntimeOptions::new(database_path)
+        let mut options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
+        options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -3260,6 +3291,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[error("native command service failed: {0}")]
+    NativeCommands(#[from] qq_core::command_owner::CommandOwnerError),
     #[error(transparent)]
     Build(#[from] RuntimeBuildError),
     #[error(transparent)]

@@ -16,7 +16,7 @@ use super::dispatch::{ToolCancellation, ToolTaskLease};
 // assigning the suspended child to its command job. Only trusted worker
 // launchers may request explicit breakaway from this outer job. Every command
 // gets an inner job which forbids breakaway before its first instruction.
-fn root_job() -> io::Result<&'static win32job::Job> {
+pub(crate) fn root_job() -> io::Result<&'static win32job::Job> {
     static ROOT: OnceLock<Result<win32job::Job, Arc<win32job::JobError>>> = OnceLock::new();
     ROOT.get_or_init(|| {
         let mut limits = win32job::ExtendedLimitInfo::default();

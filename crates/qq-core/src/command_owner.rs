@@ -20,12 +20,52 @@ use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellat
 
 mod environment;
 mod journal;
+mod workspace_identity;
 pub use environment::NativeEnvironment;
+pub use workspace_identity::NativeWorkspaceIdentity;
+mod observer;
+pub(crate) use observer::observe;
 #[cfg(windows)]
 mod windows_state;
 use journal::Journal;
 
 pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;
+
+pub type NativeCommandFuture<T> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<T, CommandOwnerError>> + Send + 'static>,
+>;
+
+/// The trusted host's command service. Observation never implies cancellation.
+pub trait NativeCommandService: Send + Sync + 'static {
+    fn identity(&self) -> NativeCommandFuture<StoreId>;
+    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()>;
+    fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()>;
+    fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot>;
+    fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()>;
+}
+
+impl NativeCommandService for CommandOwner {
+    fn identity(&self) -> NativeCommandFuture<StoreId> {
+        let id = self.store_id();
+        Box::pin(async move { Ok(id) })
+    }
+    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.acknowledge(ids).await })
+    }
+    fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.submit(request).await })
+    }
+    fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
+        let owner = self.clone();
+        Box::pin(async move { owner.wait(id, after).await })
+    }
+    fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.cancel(id).await })
+    }
+}
 
 const MAX_ACTIVE: u32 = 128;
 const MAX_RETAINED: usize = 10_000;
@@ -57,6 +97,13 @@ pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
     crate::tools::linux_owner::execute(encoded)
 }
 
+/// Establish QQ's host job before a trusted worker requests breakaway.
+/// The worker leaves this job while retaining any enclosing job's restrictions.
+#[cfg(windows)]
+pub fn prepare_independent_worker() -> std::io::Result<()> {
+    crate::tools::windows_job::root_job().map(|_| ())
+}
+
 /// An authorized invocation. Its ID is an idempotency key, not a new attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +112,7 @@ pub struct NativeCommand {
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
+    pub workspace_identity: NativeWorkspaceIdentity,
     pub tool: String,
     pub arguments: String,
     pub shell_policy: ShellPolicy,
@@ -126,6 +174,10 @@ pub struct CommandSnapshot {
 pub enum CommandOwnerError {
     #[error("command observations were reclaimed after acknowledgement")]
     Retired,
+    #[error("workspace directory identity changed before command execution")]
+    WorkspaceChanged,
+    #[error("command worker build {actual} differs from this QQ build {expected}")]
+    IncompatibleBuild { expected: String, actual: String },
     #[error("another command owner holds this journal")]
     Busy,
     #[error("command owner state is not private or is not a regular file")]
@@ -454,9 +506,16 @@ impl CommandOwner {
         cancellation: RunCancellation,
         task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
+        let started = tokio::time::Instant::now();
+        let tool = request.tool.clone();
         let path = request.workspace;
+        let expected_workspace = request.workspace_identity;
         let workspace = match blocking(move || {
-            crate::workspace::Workspace::open(&path).map_err(CommandOwnerError::Io)
+            let workspace = crate::workspace::Workspace::open(&path)?;
+            if NativeWorkspaceIdentity::held(workspace.root())? != expected_workspace {
+                return Err(CommandOwnerError::WorkspaceChanged);
+            }
+            Ok(workspace)
         })
         .await
         {
@@ -466,6 +525,11 @@ impl CommandOwner {
                     "could not open command workspace: {error}"
                 )));
             }
+            Err(CommandOwnerError::WorkspaceChanged) => {
+                return Ok(ToolOutput::refused(
+                    CommandOwnerError::WorkspaceChanged.to_string(),
+                ));
+            }
             Err(error) => return Err(error),
         };
         let cancelled = self.0.journal.cancel_requested(request.id).await?;
@@ -473,7 +537,7 @@ impl CommandOwner {
             cancellation.cancel();
         }
         if task_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
-            cancellation.cancel();
+            cancellation.expire();
         }
         let execution = crate::tools::dispatch::execute_with_images(
             Some(Arc::new(request.environment)),
@@ -498,12 +562,17 @@ impl CommandOwner {
             }
         };
         tokio::pin!(expired);
-        let output = tokio::select! {
+        let mut output = tokio::select! {
             biased;
-            () = &mut expired => { cancellation.cancel(); execution.await }
+            () = &mut expired => { cancellation.expire(); execution.await }
             output = &mut execution => output,
         };
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;
+        if cancellation.timed_out()
+            && output.disposition == crate::tools::ResultDisposition::Interrupted
+        {
+            output = output.expired_before_capture(&tool, started.elapsed());
+        }
         Ok(output)
     }
 

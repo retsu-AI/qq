@@ -1826,6 +1826,18 @@ impl Store {
         .await
     }
 
+    pub(super) async fn set_native_owner(
+        &self,
+        identity: RunIdentity,
+        id: ToolCallId,
+        owner: Option<StoreId>,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call_write(Priority::AwaitControl, move |connection| {
+            super::tool_calls::set_native_owner(connection, identity, id, owner)
+        })
+        .await
+    }
+
     pub(super) async fn record_tool_process(
         &self,
         identity: RunIdentity,
@@ -1871,7 +1883,8 @@ impl Store {
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
         execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        native_owner: Option<StoreId>,
+    ) -> Result<ToolCallCommit, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
@@ -1886,6 +1899,7 @@ impl Store {
                 display,
                 spill,
                 execution_context,
+                native_owner,
             )
         })
         .await

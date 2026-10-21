@@ -90,7 +90,7 @@ async fn wait_for(
         loop {
             let response = client
                 .post(format!(
-                    "http://{}/internal/command-owner/v2/wait",
+                    "http://{}/internal/command-owner/v3/wait",
                     connection.address()
                 ))
                 .bearer_auth(connection.expose_bearer_token())
@@ -128,6 +128,10 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     let command = NativeCommand {
         environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
+        workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+            &(std::fs::canonicalize(workspace.path()).unwrap()),
+        )
+        .unwrap(),
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
         arguments: r#"{"command":"echo once>>count"}"#.to_owned(),
@@ -137,7 +141,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     };
     let response = client
         .post(format!(
-            "http://{}/internal/command-owner/v2/submit",
+            "http://{}/internal/command-owner/v3/submit",
             connection.address()
         ))
         .bearer_auth(connection.expose_bearer_token())
@@ -190,6 +194,10 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
                 serde_json::to_value(NativeCommand {
                     environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                     id,
+                    workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+                        &(std::fs::canonicalize(root.path()).unwrap()),
+                    )
+                    .unwrap(),
                     workspace: std::fs::canonicalize(root.path()).unwrap(),
                     tool: "shell".to_owned(),
                     arguments: r#"{"command":"echo forbidden"}"#.to_owned(),
@@ -203,7 +211,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
         };
         let _ = client
             .post(format!(
-                "http://{}/internal/command-owner/v2/{operation}",
+                "http://{}/internal/command-owner/v3/{operation}",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -359,6 +367,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
     let command = NativeCommand {
 environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
+        workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(&(std::fs::canonicalize(workspace.path()).unwrap())).unwrap(),
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
         arguments: r#"{"command":"printf x >> count; printf started; read token < release; printf finished"}"#.to_owned(),
@@ -367,7 +376,7 @@ environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         not_after_ms: None,
     };
     let submit = format!(
-        "http://{}/internal/command-owner/v2/submit",
+        "http://{}/internal/command-owner/v3/submit",
         connection.address()
     );
     assert!(
@@ -394,7 +403,7 @@ environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         loop {
             let snapshot: CommandSnapshot = client
                 .post(format!(
-                    "http://{}/internal/command-owner/v2/wait",
+                    "http://{}/internal/command-owner/v3/wait",
                     connection.address()
                 ))
                 .bearer_auth(connection.expose_bearer_token())
@@ -417,7 +426,7 @@ environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
     let mut observer = Box::pin(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v2/wait",
+                "http://{}/internal/command-owner/v3/wait",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -468,6 +477,10 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     let command = NativeCommand {
         environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
+        workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+            &(std::fs::canonicalize(workspace.path()).unwrap()),
+        )
+        .unwrap(),
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
         arguments: r#"{"command":"sleep 300"}"#.to_owned(),
@@ -478,7 +491,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     assert!(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v2/submit",
+                "http://{}/internal/command-owner/v3/submit",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -491,7 +504,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     );
     let running: CommandSnapshot = client
         .post(format!(
-            "http://{}/internal/command-owner/v2/wait",
+            "http://{}/internal/command-owner/v3/wait",
             connection.address()
         ))
         .bearer_auth(connection.expose_bearer_token())

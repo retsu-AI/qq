@@ -341,6 +341,8 @@ pub(super) fn prepare(
     cancelled: &ToolCancellation,
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
+    #[cfg(test)]
+    crate::workspace::pause_blocking_preparation(&workspace);
     if cancelled.is_cancelled() || Instant::now() >= deadline {
         return Err(PreparationError::Cancelled);
     }

@@ -197,6 +197,7 @@ default = ["provider-bedrock"]
 provider-bedrock = ["qq-provider/provider-bedrock"]
 
 [dev-dependencies]
+qq-provider = { workspace = true, features = ["test-support"] }
 base64.workspace = true
 ron.workspace = true
 rusqlite.workspace = true

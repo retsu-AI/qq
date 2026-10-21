@@ -487,6 +487,8 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
+    /// Execute approved shell/exec calls through this trusted service.
+    pub native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     pub database_path: PathBuf,
     pub max_active_runs: usize,
     /// May lower, but not raise, the independent derived side-query ceiling.
@@ -524,6 +526,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("delegate_timeout", &self.delegate_timeout)
             .field("grant_authority", &self.grant_authority.is_some())
             .field("approval_reviewer", &self.approval_reviewer.is_some())
+            .field("native_commands", &self.native_commands.is_some())
             .finish()
     }
 }
@@ -533,6 +536,7 @@ impl SessionRuntimeOptions {
     pub fn new(database_path: PathBuf) -> Self {
         Self {
             database_path,
+            native_commands: None,
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -574,6 +578,8 @@ pub(super) struct SessionRuntimeInner {
     pub(super) loader: Arc<dyn RuntimeLoader>,
     pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    pub(super) native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    pub(super) native_ack: Option<super::native_ack::Acknowledgements>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -753,11 +759,16 @@ impl SessionRuntime {
         let (scheduler_stopped, _) = watch::channel(false);
         let (grant_promotion_stopped, _) = watch::channel(false);
         let (settlements, _) = watch::channel(0_u64);
+        let native_ack = options.native_commands.as_ref().map(|service| {
+            super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
+        });
         let inner = Arc::new(SessionRuntimeInner {
+            native_ack,
             store,
             loader,
             grant_authority: options.grant_authority,
             approval_reviewer: options.approval_reviewer,
+            native_commands: options.native_commands,
             permits: Arc::new(Semaphore::new(options.max_active_runs)),
             side_permits: Arc::new(Semaphore::new(side_limit)),
             side_tasks: AtomicUsize::new(0),
@@ -1292,6 +1303,9 @@ impl SessionRuntime {
                 // cannot race this success boundary.
                 if *self.inner.failed.borrow() {
                     return Err(SessionRuntimeError::Unavailable);
+                }
+                if let Some(acknowledgements) = &self.inner.native_ack {
+                    acknowledgements.shutdown().await;
                 }
                 return Ok(());
             }

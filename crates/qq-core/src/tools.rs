@@ -15,11 +15,12 @@ pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
+pub(crate) use shell::forward_shell_chunk;
 mod specs;
 mod tree;
 pub(crate) mod walk;
 #[cfg(windows)]
-mod windows_job;
+pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};

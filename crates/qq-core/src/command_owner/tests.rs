@@ -3,6 +3,161 @@ use std::path::Path;
 
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn cancellation_during_cold_admission_keeps_submission_progressing() {
+    use crate::{
+        cancellation::RunCancellation,
+        tools::dispatch::{ToolCancellation, ToolTasks},
+    };
+    struct Starting {
+        startup: Arc<tokio::sync::Semaphore>,
+        cancellation: RunCancellation,
+    }
+    impl NativeCommandService for Starting {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            Box::pin(async { Ok(StoreId::from_bytes([7; 16])) })
+        }
+        fn acknowledge(&self, _: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            unreachable!()
+        }
+        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+            let startup = self.startup.clone();
+            let cancellation = self.cancellation.clone();
+            Box::pin(async move {
+                let _permit = startup.acquire().await.unwrap();
+                cancellation.cancel();
+                // Startup must be polled again before cancellation can connect.
+                tokio::task::yield_now().await;
+                Ok(())
+            })
+        }
+        fn cancel(&self, _: ToolCallId) -> NativeCommandFuture<()> {
+            let startup = self.startup.clone();
+            Box::pin(async move {
+                let _permit = startup.acquire().await.unwrap();
+                Ok(())
+            })
+        }
+        fn wait(&self, id: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
+            Box::pin(async move {
+                Ok(CommandSnapshot {
+                    id,
+                    version: 1,
+                    status: CommandStatus::Finished,
+                    process: None,
+                    output: String::new(),
+                    result: Some(CommandResult(ToolOutput::interrupted("cancelled"))),
+                })
+            })
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let cancellation = RunCancellation::new();
+    let service = Arc::new(Starting {
+        startup: Arc::new(tokio::sync::Semaphore::new(1)),
+        cancellation: cancellation.clone(),
+    });
+    let tasks = ToolTasks::default();
+    tasks.set_native_recorder(|_, _| async { Ok(()) }).unwrap();
+    let mut lease = tasks.enter();
+    let cancelled = ToolCancellation::new(cancellation);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::observer::observe(
+            service,
+            command(root.path(), id, "unused"),
+            &cancelled,
+            None,
+            &mut lease,
+        ),
+    )
+    .await
+    .expect("cancellation must not suspend the startup holding its connection permit");
+    let mut expected = ToolOutput::interrupted("cancelled");
+    expected.native_owner = Some(StoreId::from_bytes([7; 16]));
+    assert_eq!(result, expected);
+    drop(lease);
+    tasks.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelled_refused_admission_retains_its_terminal_result_for_reclamation() {
+    use crate::tools::dispatch::ToolCancellation;
+
+    struct Full {
+        owner: CommandOwner,
+        cancellation: RunCancellation,
+    }
+    impl NativeCommandService for Full {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            self.owner.identity()
+        }
+        fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            NativeCommandService::acknowledge(&self.owner, ids)
+        }
+        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+            let cancellation = self.cancellation.clone();
+            Box::pin(async move {
+                cancellation.cancel();
+                tokio::task::yield_now().await;
+                Err(CommandOwnerError::Full)
+            })
+        }
+        fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+            NativeCommandService::cancel(&self.owner, id)
+        }
+        fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
+            NativeCommandService::wait(&self.owner, id, after)
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let cancellation = RunCancellation::new();
+    let service = Arc::new(Full {
+        owner: owner.clone(),
+        cancellation: cancellation.clone(),
+    });
+    let bindings = Arc::new(Mutex::new(Vec::new()));
+    let recorded = bindings.clone();
+    let tasks = ToolTasks::default();
+    tasks
+        .set_native_recorder(move |id, owner| {
+            recorded.lock().unwrap().push((id, owner));
+            async { Ok(()) }
+        })
+        .unwrap();
+    let mut lease = tasks.enter();
+    let result = observer::observe(
+        service,
+        command(root.path(), id, "echo damage > unexpected"),
+        &ToolCancellation::new(cancellation),
+        None,
+        &mut lease,
+    )
+    .await;
+    assert_eq!(result.native_owner, Some(owner.store_id()));
+    assert!(result.model_text.contains("cancelled before admission"));
+    assert_eq!(
+        *bindings.lock().unwrap(),
+        vec![(id, Some(owner.store_id()))]
+    );
+    assert!(!root.path().join("unexpected").exists());
+    drop(lease);
+    tasks.drain().await.unwrap();
+    assert_eq!(tasks.drain_native_results(), vec![(id, result)]);
+    // A session can acknowledge only after saving this returned result.
+    owner.acknowledge(vec![id]).await.unwrap();
+    assert!(matches!(
+        owner.wait(id, 0).await,
+        Err(CommandOwnerError::Retired)
+    ));
+    owner.shutdown().await.unwrap();
+}
+
 #[cfg(windows)]
 mod windows_processes;
 
@@ -109,6 +264,10 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
         environment: crate::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         // Existing fixture roots may be reached through macOS's /var alias.
+        workspace_identity: crate::command_owner::NativeWorkspaceIdentity::capture(
+            &(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())),
+        )
+        .unwrap(),
         workspace: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
         tool: "shell".to_owned(),
         arguments: serde_json::json!({"command":script}).to_string(),
@@ -366,6 +525,10 @@ async fn the_journal_has_one_owner_and_rejects_id_reuse() {
         owner.submit(reused).await,
         Err(CommandOwnerError::Conflict)
     ));
+    let finished = wait_finished(&owner, id, 0).await;
+    let result = finished.result.unwrap();
+    assert!(!result.is_error(), "{}", result.text());
+    assert!(result.text().contains("first"));
     owner.shutdown().await.unwrap();
 }
 
@@ -718,7 +881,7 @@ async fn owner_enforces_the_task_deadline_without_a_live_observer() {
             .as_ref()
             .unwrap()
             .text()
-            .contains("cancelled")
+            .contains("exit=timeout")
     );
     owner.submit(request).await.unwrap();
     assert_eq!(owner.snapshot(id).await.unwrap(), terminal);
@@ -763,14 +926,11 @@ async fn a_missing_workspace_refuses_that_command_without_stopping_other_work() 
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
-    owner
-        .submit(command(
-            &workspace.path().join("missing"),
-            id,
-            "echo should-not-run",
-        ))
-        .await
-        .unwrap();
+    let missing = workspace.path().join("missing");
+    std::fs::create_dir(&missing).unwrap();
+    let request = command(&missing, id, "echo should-not-run");
+    std::fs::remove_dir(missing).unwrap();
+    owner.submit(request).await.unwrap();
     let result = owner.wait(id, 0).await;
     let next = ToolCallId::generate().unwrap();
     let next_admission = owner
@@ -1885,4 +2045,142 @@ async fn acknowledgement_saturation_does_not_delay_live_cancellation() {
         cancelled,
         "live revocation must bypass stalled acknowledgement writes"
     );
+}
+
+#[tokio::test]
+async fn a_replaced_workspace_never_receives_the_admitted_command() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("workspace");
+    std::fs::create_dir(&path).unwrap();
+    let path = std::fs::canonicalize(path).unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let request = command(&path, id, "echo escaped>marker");
+    std::fs::rename(&path, root.path().join("original")).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    owner.submit(request).await.unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        !path.join("marker").exists(),
+        "a replacement directory must not receive an approved command"
+    );
+    let result = finished.result.unwrap();
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result
+            .text()
+            .contains("workspace directory identity changed")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_deadline_retains_timeout_output_instead_of_reporting_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let release = workspace.path().join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "printf ready; read token < release");
+    request.arguments =
+        r#"{"command":"printf ready; read token < release","timeout_seconds":3600}"#.to_owned();
+    request.not_after_ms = Some(
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60000,
+    );
+    owner.submit(request).await.unwrap();
+    let mut after = 0;
+    loop {
+        let observed = owner.wait(id, after).await.unwrap();
+        if observed.output.contains("ready") {
+            break;
+        }
+        after = observed.version;
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    let finished = wait_finished(&owner, id, after).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        finished.text().contains("exit=timeout"),
+        "{}",
+        finished.text()
+    );
+    assert!(
+        finished.text().contains("ready"),
+        "timeout output must be preserved"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_deadline_during_preparation_and_receipt_is_not_user_cancellation() {
+    for before_spawn in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(workspace.path()).unwrap();
+        let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+            .await
+            .unwrap();
+        let (entered, release) = if before_spawn {
+            crate::workspace::hold_blocking_preparation(path.clone())
+        } else {
+            crate::tools::hold_shell_receipt(&path)
+        };
+        let fifo = path.join("release");
+        crate::tools::create_test_fifo(&fifo).await;
+        let _gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let mut request = command(&path, id, "read token < release; printf escaped > escaped");
+        request.arguments = serde_json::json!({"command":"read token < release; printf escaped > escaped", "timeout_seconds":3600}).to_string();
+        request.not_after_ms = Some(
+            u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+                + 60000,
+        );
+        owner.submit(request).await.unwrap();
+        entered.await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::time::resume();
+        release.send(()).unwrap();
+        let finished = wait_finished(&owner, id, 0).await;
+        let result = finished.result.unwrap();
+        owner.shutdown().await.unwrap();
+        assert!(
+            result.text().contains("exit=timeout"),
+            "before_spawn={before_spawn}: {}",
+            result.text()
+        );
+        assert!(!result.text().contains("cancelled"));
+        assert_eq!(finished.process.is_none(), before_spawn);
+        assert!(!path.join("escaped").exists());
+    }
 }

@@ -30,7 +30,7 @@ pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
+pub(super) const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
 struct SpawnHook {
@@ -226,7 +226,7 @@ impl Launch<'_> {
         Ok(())
     }
 
-    fn timeout_seconds(&self) -> Option<u64> {
+    pub(super) fn timeout_seconds(&self) -> Option<u64> {
         match self {
             Self::Shell(args) => args.timeout_seconds,
             Self::Exec(args) => args.timeout_seconds,
@@ -537,6 +537,7 @@ pub(super) async fn run_shell(
     // once per output chunk, and re-creating either per iteration would
     // re-register on each of them.
     let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
+    let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
@@ -636,6 +637,10 @@ pub(super) async fn run_shell(
         }
     };
 
+    let outcome = match outcome {
+        ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
+        outcome => outcome,
+    };
     let elapsed = started.elapsed();
     let mut result = async {
         match outcome {
@@ -685,9 +690,13 @@ pub(super) async fn run_shell(
                 if !content.ends_with('\n') {
                     content.push('\n');
                 }
-                content.push_str(&format!(
-                    "command timed out after {timeout_seconds} s; its process group was killed"
-                ));
+                if cancellation.timed_out() {
+                    content.push_str("command deadline expired; its process group was killed");
+                } else {
+                    content.push_str(&format!(
+                        "command timed out after {timeout_seconds} s; its process group was killed"
+                    ));
+                }
                 let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
                 result.result_digest = identity.finish(None, None, true);
                 result
@@ -840,7 +849,11 @@ async fn persist_shell_chunk(
 
 /// Forwards one raw output chunk as a lossy UTF-8 delta, bounded by the same
 /// budget as the captured result so a runaway command cannot flood clients.
-fn forward_shell_chunk(output: Option<&mpsc::Sender<String>>, streamed: &mut usize, bytes: &[u8]) {
+pub(crate) fn forward_shell_chunk(
+    output: Option<&mpsc::Sender<String>>,
+    streamed: &mut usize,
+    bytes: &[u8],
+) {
     let Some(sender) = output else {
         return;
     };

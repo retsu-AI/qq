@@ -6,7 +6,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 
 use tokio::sync::Notify;
@@ -16,7 +16,7 @@ pub struct RunCancellation(Arc<Inner>);
 
 #[derive(Default)]
 struct Inner {
-    cancelled: AtomicBool,
+    reason: AtomicU8,
     wake: Notify,
 }
 
@@ -45,13 +45,29 @@ impl RunCancellation {
 
     /// Cancels the run. Idempotent; every current and future waiter wakes.
     pub fn cancel(&self) {
-        self.0.cancelled.store(true, Ordering::Release);
+        let _ = self
+            .0
+            .reason
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
         self.0.wake.notify_waiters();
+    }
+
+    /// Keep the first stop reason so explicit cancellation cannot become timeout.
+    pub(crate) fn expire(&self) {
+        let _ = self
+            .0
+            .reason
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
+        self.0.wake.notify_waiters();
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        self.0.reason.load(Ordering::Acquire) == 2
     }
 
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        self.0.cancelled.load(Ordering::Acquire)
+        self.0.reason.load(Ordering::Acquire) != 0
     }
 
     /// Whether two handles are the same token (clones of one run's token).

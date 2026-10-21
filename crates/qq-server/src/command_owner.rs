@@ -23,8 +23,8 @@ use crate::{
     ServerReservation, api_error,
 };
 
-const PREFIX: &str = "/internal/command-owner/v2";
-const HEALTH_PATH: &str = "/internal/command-owner/v2/health";
+const PREFIX: &str = "/internal/command-owner/v3";
+const HEALTH_PATH: &str = "/internal/command-owner/v3/health";
 const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 impl ServerReservation {
@@ -89,8 +89,8 @@ async fn admit(State(state): State<OwnerState>, request: Request, next: Next) ->
         return next.run(request).await;
     }
     let slots = match request.uri().path() {
-        "/internal/command-owner/v2/wait" => state.waits,
-        "/internal/command-owner/v2/cancel" => state.cancellations,
+        "/internal/command-owner/v3/wait" => state.waits,
+        "/internal/command-owner/v3/cancel" => state.cancellations,
         _ => state.requests,
     };
     let Ok(permit) = slots.try_acquire_owned() else {
@@ -260,6 +260,10 @@ mod tests {
         let request = NativeCommand {
             environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
             id: ToolCallId::generate().unwrap(),
+            workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+                &(std::fs::canonicalize(workspace.path()).unwrap()),
+            )
+            .unwrap(),
             workspace: std::fs::canonicalize(workspace.path()).unwrap(),
             tool: "shell".to_owned(),
             arguments: r#"{"command":"echo reconnected"}"#.to_owned(),
@@ -267,7 +271,7 @@ mod tests {
             approved_images: Vec::new(),
             not_after_ms: None,
         };
-        let base = format!("http://{}/internal/command-owner/v2", connection.address());
+        let base = format!("http://{}/internal/command-owner/v3", connection.address());
         let response = client
             .post(format!("{base}/submit"))
             .bearer_auth(connection.expose_bearer_token())
@@ -364,6 +368,10 @@ mod tests {
             .submit(NativeCommand {
                 environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                 id,
+                workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+                    &(std::fs::canonicalize(workspace.path()).unwrap()),
+                )
+                .unwrap(),
                 workspace: std::fs::canonicalize(workspace.path()).unwrap(),
                 tool: "shell".to_owned(),
                 arguments: if cfg!(windows) {

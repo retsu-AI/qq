@@ -40,7 +40,12 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 struct ToolTaskState {
     #[cfg(target_os = "linux")]
     linux_owner: Option<super::linux_owner::LinuxOwner>,
+    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    native_deadline_ms: std::sync::atomic::AtomicU64,
     process_recorder: OnceLock<ProcessRecorder>,
+    native_recorder: OnceLock<NativeRecorder>,
+    native_results:
+        std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
     output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
     unrecorded_output: AtomicBool,
@@ -61,6 +66,10 @@ type ProcessRecorder = Box<
         + Sync,
 >;
 
+type NativeRecorder = Box<
+    dyn Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> RecordFuture + Send + Sync,
+>;
+
 type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -74,6 +83,55 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    pub(crate) fn saved_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .get(&id)
+            .cloned()
+    }
+    pub(crate) fn drain_native_results(&self) -> Vec<(qq_protocol::ToolCallId, ToolOutput)> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .drain()
+            .collect()
+    }
+    pub(crate) fn take_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .remove(&id)
+    }
+
+    pub(crate) fn shorten_native_deadline(&self, deadline: Option<u64>) {
+        if let Some(deadline) = deadline {
+            let _ = self.0.native_deadline_ms.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |saved| {
+                    Some(if saved == 0 {
+                        deadline
+                    } else {
+                        saved.min(deadline)
+                    })
+                },
+            );
+        }
+    }
+
+    pub(crate) fn with_native_commands(
+        service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    ) -> Self {
+        Self(Arc::new(ToolTaskState {
+            native_commands: service,
+            ..ToolTaskState::default()
+        }))
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn owned_linux(
         launcher: crate::command_owner::CommandLauncher,
@@ -83,6 +141,19 @@ impl ToolTasks {
             ..ToolTaskState::default()
         })))
     }
+    pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .native_recorder
+            .set(Box::new(move |id, owner| Box::pin(recorder(id, owner))))
+            .map_err(|_| ToolDrainError::UnrecordedProcess)
+    }
+
     pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
         F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
@@ -151,6 +222,14 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    pub(crate) fn save_native_result(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
+        self.tasks
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .insert(id, result.clone());
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn linux_owner(&self) -> Option<&super::linux_owner::LinuxOwner> {
         self.tasks.linux_owner.as_ref()
@@ -163,6 +242,17 @@ impl ToolTaskLease {
             tasks: Arc::clone(&self.tasks),
             process_pending: false,
         }
+    }
+
+    pub(crate) fn set_native_owner(
+        &self,
+        id: qq_protocol::ToolCallId,
+        owner: Option<qq_protocol::StoreId>,
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.native_recorder.get() else {
+            return Box::pin(async { Err(crate::sessions::SessionRuntimeError::Unavailable) });
+        };
+        self.record(recorder(id, owner), RecordKind::Process)
     }
 
     pub(crate) fn record_process(
@@ -264,6 +354,10 @@ impl ToolCancellation {
             run,
             call: Arc::new(CallCancellation::default()),
         }
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        self.run.timed_out()
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -397,8 +491,93 @@ pub(crate) async fn execute_with_images(
             (false, _) => None,
         };
         let lease = tasks.enter();
+        let native_commands = tasks.0.native_commands.clone();
+        let deadline_ms = tasks.0.native_deadline_ms.load(Ordering::Acquire);
+        let not_after_ms = if native_commands.is_some() {
+            let launch = match (&shell_arguments, &exec_arguments) {
+                (Some(shell), _) => Launch::Shell(shell),
+                (_, Some(exec)) => Launch::Exec(exec),
+                (None, None) => unreachable!("one launch shape was parsed"),
+            };
+            let timeout = launch
+                .timeout_seconds()
+                .unwrap_or(super::shell::DEFAULT_SHELL_TIMEOUT_SECS);
+            let call_deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|now| u64::try_from(now.as_millis()).ok())
+                .and_then(|now| {
+                    timeout
+                        .checked_mul(1000)
+                        .and_then(|duration| now.checked_add(duration))
+                });
+            let Some(call_deadline) = call_deadline.filter(|_| timeout > 0) else {
+                return ToolOutput::refused(
+                    "timeout_seconds must be positive and fit a command deadline",
+                );
+            };
+            // Freeze before preparation/connection so retries cannot renew it.
+            Some(if deadline_ms == 0 {
+                call_deadline
+            } else {
+                deadline_ms.min(call_deadline)
+            })
+        } else {
+            None
+        };
         return match tokio::spawn(async move {
             let mut lease = lease;
+            if let Some(service) = native_commands {
+                let Some(id) = call_id else {
+                    return ToolOutput::refused(
+                        "native execution requires a persisted call identity",
+                    );
+                };
+                let requested = shell_arguments
+                    .as_ref()
+                    .map(|args| args.env.as_slice())
+                    .or_else(|| exec_arguments.as_ref().map(|args| args.env.as_slice()))
+                    .unwrap_or(&[]);
+                if let Some(name) = requested.iter().find(|name| !shell_policy.permits_env(name)) {
+                    return ToolOutput::refused(format!(
+                        "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
+                        crate::BASE_ENV.join(" ")
+                    ));
+                }
+                let environment = match crate::command_owner::NativeEnvironment::capture(requested)
+                {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let held_workspace = workspace.clone();
+                let workspace_identity = match tokio::task::spawn_blocking(move || {
+                    crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())
+                }).await {
+                    Ok(Ok(identity)) => identity,
+                    Ok(Err(error)) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                    Err(error) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                };
+                let request = crate::command_owner::NativeCommand {
+                    environment,
+                    id,
+                    workspace: workspace.path().to_owned(),
+                    workspace_identity,
+                    tool: name,
+                    arguments,
+                    shell_policy: shell_policy.as_ref().clone(),
+                    approved_images: approved_read_images.entries().to_vec(),
+                    not_after_ms,
+                };
+                return crate::command_owner::observe(
+                    service,
+                    request,
+                    &cancelled,
+                    output.as_ref(),
+                    &mut lease,
+                )
+                .await;
+            }
+
             let launch = match (&shell_arguments, &exec_arguments) {
                 (Some(shell), _) => Launch::Shell(shell),
                 (_, Some(exec)) => Launch::Exec(exec),
@@ -466,6 +645,9 @@ pub(crate) enum ResultDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
+    /// Only the observer can attest that this is the worker's terminal result.
+    #[serde(skip)]
+    pub(crate) native_owner: Option<qq_protocol::StoreId>,
     pub(crate) disposition: ResultDisposition,
     /// Result identity before masking, output bounds or citations.
     /// Constructors hash their input; producers that clip earlier override it.
@@ -583,6 +765,24 @@ impl ToolOutput {
         result
     }
 
+    /// Normalize worker expiry before the shell's capture loop has a result.
+    pub(crate) fn expired_before_capture(self, tool: &str, elapsed: std::time::Duration) -> Self {
+        let content = super::output::Header::new(tool, None)
+            .field("exit", "timeout")
+            .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+            .field("bytes", 0)
+            .into_line()
+            + "command deadline expired during preparation";
+        let mut result = Self::bounded(content, &super::shell::SHELL_BOUNDS, true);
+        // No output was observed before capture; elapsed time is not progress.
+        result.result_digest = Sha256::digest(b"qq-native-preparation-timeout-v1").into();
+        result.execution_context = self.execution_context;
+        if result.execution_context.is_none() {
+            result.disposition = ResultDisposition::Refused;
+        }
+        result
+    }
+
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
         // The complete text is kept only when the size alone says a cut may
         // happen: cloning every small result would cost on the hot path for
@@ -609,6 +809,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill,
             execution_context: None,
+            native_owner: None,
         }
     }
 
@@ -625,6 +826,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
         }
     }
 
@@ -640,6 +842,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
         }
     }
 }

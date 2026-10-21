@@ -62,6 +62,36 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
+/// Binds an invocation to its stable worker journal before admission can have effects.
+pub(super) fn set_native_owner(
+    connection: &mut Connection,
+    identity: RunIdentity,
+    id: ToolCallId,
+    owner: Option<StoreId>,
+) -> Result<(), SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let Some(owner) = owner else {
+        transaction.execute(
+            "DELETE FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0
+             AND EXISTS(SELECT 1 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running')",
+            params![id.to_string(), identity.run_id.to_string()],
+        )?;
+        transaction.commit()?;
+        return Ok(());
+    };
+    let written = transaction.execute(
+        "INSERT INTO native_command_owners(tool_call_id, owner_id)
+         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec')
+         ON CONFLICT(tool_call_id) DO UPDATE SET owner_id=excluded.owner_id WHERE native_command_owners.owner_id=excluded.owner_id",
+        params![id.to_string(),identity.run_id.to_string(),owner.to_string()],
+    )?;
+    if written != 1 {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Records the native process while its call is still running. This is
 /// private recovery evidence, not an authorization grant or a result.
 pub(super) fn record_tool_process(
@@ -99,6 +129,14 @@ pub(super) fn record_tool_process(
     Ok(())
 }
 
+/// Native results remain durable even when they cannot enter model context.
+/// An exhausted completion requires run settlement before another model turn.
+#[derive(Debug)]
+pub(super) struct ToolCallCommit {
+    pub(super) event: SessionEventEnvelope,
+    pub(super) context_exhausted: bool,
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one persisted row update; bundling the columns adds nothing"
@@ -114,7 +152,8 @@ pub(super) fn finish_tool_call(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    native_owner: Option<StoreId>,
+) -> Result<ToolCallCommit, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
         .query_row(
@@ -142,13 +181,17 @@ pub(super) fn finish_tool_call(
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
-    reserve_tool_result_capacity(
+    let context_exhausted = match reserve_tool_result_capacity(
         &transaction,
         identity.run_id,
         &provider_call_id,
         &result,
         first_result_in_turn,
-    )?;
+    ) {
+        Ok(()) => false,
+        Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
+        Err(error) => return Err(error),
+    };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -195,6 +238,15 @@ pub(super) fn finish_tool_call(
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
     }
+    if let Some(owner) = native_owner {
+        let written = transaction.execute(
+            "UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2",
+            params![tool_call_id.to_string(), owner.to_string()],
+        )?;
+        if written != 1 {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
     for update in &file_states {
         record_session_file(&transaction, identity.session_id, update, now)?;
     }
@@ -210,7 +262,10 @@ pub(super) fn finish_tool_call(
         SessionEvent::ToolCallFinished { tool_call },
     )?;
     transaction.commit()?;
-    Ok(event)
+    Ok(ToolCallCommit {
+        event,
+        context_exhausted,
+    })
 }
 
 /// Writes one complete output under its call. Past the per-session cap, the

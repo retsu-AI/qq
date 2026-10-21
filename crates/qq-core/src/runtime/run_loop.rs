@@ -3459,6 +3459,7 @@ impl RunState {
                                     display: result.ui_payload,
                                     spill: result.spill,
                                     execution_context: result.execution_context,
+                                    native_owner: result.native_owner,
                                 });
                             }
                             for index in batch_start..cursor {
@@ -3483,7 +3484,7 @@ impl RunState {
                                     run.tool_schema = catalog.schema_measurement(&run.tool_specs);
                                 }
                                 drop(tool_span);
-                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, });
+                                yield TurnStep::Emit(RuntimeEvent::ToolCallFinished { id: call.id, result: result.model_text, is_error: result.is_error, file_states: Vec::new(), display: result.ui_payload, spill: None, execution_context: None, native_owner: None, });
                                 continue;
                             }
 
@@ -3504,7 +3505,7 @@ impl RunState {
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                             id:call.id, result:INTERRUPTED_TOOL_RESULT.to_owned(), is_error:true,
                                             file_states:Vec::new(), display:None, spill:None,
-                                         execution_context: None, });
+                                         execution_context: None, native_owner: None, });
                                         break;
                                     }
                             let result = match serde_json::from_str::<tools::goal::UpdateGoalArgs>(&call.arguments) {
@@ -3573,7 +3574,7 @@ impl RunState {
                             yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
                                 id:call.id, result:result.model_text, is_error:result.is_error,
                                 file_states:Vec::new(), display:result.ui_payload, spill:None,
-                             execution_context: None, });
+                             execution_context: None, native_owner: None, });
                                     if tool_scope.interrupted {
                                         break;
                                     }
@@ -3669,6 +3670,7 @@ impl RunState {
                                     display: result.ui_payload,
                                     spill: result.spill,
                                     execution_context: result.execution_context,
+                                    native_owner: result.native_owner,
                                 });
                                 if interrupted_here {
                                     tool_scope.interrupted = true;
@@ -3696,18 +3698,23 @@ impl RunState {
                             // transcript stays provider-valid: one result per call.
                             for (index, call) in calls.iter().enumerate() {
                                 if results[index].is_none() {
-                                    results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
                                     if started_calls[index] {
-                                    yield TurnStep::Emit( RuntimeEvent::ToolCallFinished {
-                                        id: call.id,
-                                        result: INTERRUPTED_TOOL_RESULT.to_owned(),
-                                        is_error: true,
-                                        file_states: Vec::new(),
-                                        display: None,
-                                        spill: None,
-                                    execution_context: None,
-                                    });
+                                        let result = tool_tasks.saved_native_result(call.id)
+                                            .unwrap_or_else(|| tools::ToolOutput::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
+                                        let result = cite_spill(result, &call.name, call.id, spills.is_some());
+                                        results[index] = Some(RetainedResult::retain(&result, &call.name, call.id));
+                                        yield TurnStep::Emit(RuntimeEvent::ToolCallFinished {
+                                            id: call.id,
+                                            result: result.model_text,
+                                            is_error: result.is_error,
+                                            file_states: result.file_states,
+                                            display: result.ui_payload,
+                                            spill: result.spill,
+                                            execution_context: result.execution_context,
+                                            native_owner: result.native_owner,
+                                        });
                                     } else {
+                                        results[index] = Some(RetainedResult::interrupted(INTERRUPTED_TOOL_RESULT.to_owned()));
                                         yield TurnStep::Emit(RuntimeEvent::ToolCallUnexecuted { id: call.id, message: INTERRUPTED_TOOL_RESULT.to_owned(), interrupted: true });
                                     }
                                 }

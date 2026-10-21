@@ -552,12 +552,13 @@ async fn prepare_headless(
         ),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())
+    let handler = runtime::RuntimeHandler::open_owned(factory, snapshot.approval_timeout())
         .await
         .map_err(|error| match error {
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
+            runtime::RuntimeHandlerError::NativeCommands(error) => harness(error.to_string()),
         })?;
 
     let (reviewer_configured, configured_delegate) =
@@ -659,7 +660,7 @@ async fn serve(
                 .await?
             };
             let handler =
-                Arc::new(runtime::RuntimeHandler::open_with(factory, approval_timeout).await?);
+                Arc::new(runtime::RuntimeHandler::open_owned(factory, approval_timeout).await?);
             let identity = handler.server_identity(None);
             let server = match reservation.start(handler.clone(), identity) {
                 Ok(server) => server,
@@ -854,7 +855,7 @@ async fn interactive(
                 server::ReserveOutcome::Reserved(reservation) => {
                     owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open_with(factory.clone(), approval_timeout)
+                        runtime::RuntimeHandler::open_owned(factory.clone(), approval_timeout)
                             .await
                             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );

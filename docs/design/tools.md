@@ -1061,6 +1061,24 @@ The backend requires an unprivileged owner and refuses unsupported loader or
 dependency configurations. These checks protect process custody; they do not
 provide filesystem or network containment.
 
+On Linux and Windows, the CLI, TUI and server submit approved `shell`/`exec`
+calls to a lazily started independent command worker. The persisted tool-call
+ID is also the worker's idempotency key. Transport reconnects reuse that ID;
+a replacement journal is rejected within a connected runtime. Worker failure
+or unavailable native custody returns an error without executing on the host
+through another path. Approval checks still happen before submission. The request carries the
+native identity of the session's held workspace directory. The worker compares
+its reopened directory before execution and refuses a replacement at the same
+path.
+
+The session waits for journal changes and persists the process receipt before
+forwarding output. Explicit cancellation reaches the worker and waits for
+confirmed completion. Losing the coordinator leaves the worker and its
+command running; restarting QQ does not yet reconcile or resume that unfinished
+session. macOS retains local execution until independent custody qualifies.
+This worker integration provides process ownership, not filesystem, network,
+credential or resource isolation.
+
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).
@@ -1073,7 +1091,9 @@ provide filesystem or network containment.
   and confirm that it has no remaining processes before settling the tool.
   An inherited outer job owns even suspended children during startup; its
   handle closes on host exit. Trusted independent worker launchers must
-  explicitly break away from that outer job.
+  establish QQ's breakaway-enabled host job before launch, then explicitly
+  break away from it into a separate console process group. Enclosing job
+  restrictions still apply.
 - Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
   marked `bytes not captured` when exceeded) and streamed to clients as
   `ToolCallOutputDelta` events through the existing batching path so long
@@ -1092,7 +1112,7 @@ provide filesystem or network containment.
   captured by the caller; a long-lived worker never substitutes its own values
   for missing names. The journal stores an environment digest for retry identity,
   rather than the values themselves. Command output can still contain values
-  the command prints. This request format uses private command-owner API v2.
+  the command prints. This request format uses private command-owner API v3.
 - A **built-in preference nudge** (`policy.builtin_preference`): when the
   command's first program has a bounded built-in (`grep|rg` → `search`,
   `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,
@@ -1126,12 +1146,23 @@ saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
 (or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
 Acknowledgement atomically removes terminal output, receipts and results while
 retaining compact command IDs and request hashes that prevent re-execution.
+A terminal `Lost` observation is saved as an unobserved result, including its
+retained output prefix, before acknowledgement.
 The 10,000-observation limit therefore counts unacknowledged commands; compact
 retired identities continue to grow with history. Running commands cannot be
 acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
-The SDK example exercises this lifecycle; session consumers must persist their
-own result before acknowledging the worker.
+Sessions bind the original worker journal before submission and commit an
+acknowledgement intent with the actual terminal result. Only then can worker
+observations be reclaimed. A native result that exceeds remaining context capacity
+is still saved; that run ends with a context-policy failure before another
+model turn. Pending intents survive interruption and session
+pruning; reopening and later tool results retry a bounded batch. A generic
+interrupted result does not acknowledge an unobserved worker result. Cancellation
+teardown saves the actual terminal worker result even when its event waiter was
+dropped. A bounded background task coalesces acknowledgements so reclamation
+does not delay agent execution. The SDK
+example exercises the explicit save/discard-and-acknowledge lifecycle.
 
 Both tools accept an optional workspace-relative `cwd`. Launch validation
 rejects empty, NUL-containing, absolute or prefixed paths and parent traversal
