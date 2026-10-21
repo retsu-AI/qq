@@ -652,9 +652,11 @@ async fn native_capacity_refusal_does_not_poison_session_cleanup() {
         CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
         NativeCommandService,
     };
-    struct Full;
+    type Admissions = Arc<std::sync::Mutex<Vec<(NativeCommand, u64)>>>;
+    struct Full(Admissions);
     impl NativeCommandService for Full {
-        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+        fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+            self.0.lock().unwrap().push((request, now_ms()));
             Box::pin(async { Err(CommandOwnerError::Full) })
         }
         fn wait(&self, _: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
@@ -664,12 +666,23 @@ async fn native_capacity_refusal_does_not_poison_session_cleanup() {
             unreachable!()
         }
     }
+    let admissions: Admissions = Arc::default();
+    let started = now_ms();
     let mut harness = scripted_runs_harness_with_commands(
         ApprovalMode::Full,
-        vec![vec![("shell", r#"{"command":"echo unused"}"#.to_owned())]],
+        vec![vec![
+            (
+                "shell",
+                r#"{"command":"echo unused","timeout_seconds":1}"#.to_owned(),
+            ),
+            (
+                "exec",
+                r#"{"program":"unused","timeout_seconds":2}"#.to_owned(),
+            ),
+        ]],
         None,
         None,
-        Some(Arc::new(Full)),
+        Some(Arc::new(Full(admissions.clone()))),
     )
     .await;
     let run = submit_prompt(&harness, "execute").await;
@@ -691,4 +704,14 @@ async fn native_capacity_refusal_does_not_poison_session_cleanup() {
         }
     ));
     harness.runtime.shutdown().await.unwrap();
+    let admissions = admissions.lock().unwrap();
+    assert_eq!(admissions.len(), 2);
+    for (request, received) in admissions.iter() {
+        let timeout_ms = if request.tool == "shell" { 1000 } else { 2000 };
+        let deadline = request
+            .not_after_ms
+            .expect("per-call timeout must include worker startup and admission");
+        assert!(deadline >= started + timeout_ms);
+        assert!(deadline <= received + timeout_ms);
+    }
 }

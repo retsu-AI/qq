@@ -426,7 +426,38 @@ pub(crate) async fn execute_with_images(
         let lease = tasks.enter();
         let native_commands = tasks.0.native_commands.clone();
         let deadline_ms = tasks.0.native_deadline_ms.load(Ordering::Acquire);
-        let not_after_ms = (deadline_ms != 0).then_some(deadline_ms);
+        let not_after_ms = if native_commands.is_some() {
+            let launch = match (&shell_arguments, &exec_arguments) {
+                (Some(shell), _) => Launch::Shell(shell),
+                (_, Some(exec)) => Launch::Exec(exec),
+                (None, None) => unreachable!("one launch shape was parsed"),
+            };
+            let timeout = launch
+                .timeout_seconds()
+                .unwrap_or(super::shell::DEFAULT_SHELL_TIMEOUT_SECS);
+            let call_deadline = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|now| u64::try_from(now.as_millis()).ok())
+                .and_then(|now| {
+                    timeout
+                        .checked_mul(1000)
+                        .and_then(|duration| now.checked_add(duration))
+                });
+            let Some(call_deadline) = call_deadline.filter(|_| timeout > 0) else {
+                return ToolOutput::refused(
+                    "timeout_seconds must be positive and fit a command deadline",
+                );
+            };
+            // Freeze before preparation/connection so retries cannot renew it.
+            Some(if deadline_ms == 0 {
+                call_deadline
+            } else {
+                deadline_ms.min(call_deadline)
+            })
+        } else {
+            None
+        };
         return match tokio::spawn(async move {
             let mut lease = lease;
             if let Some(service) = native_commands {

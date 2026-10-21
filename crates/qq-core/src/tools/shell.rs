@@ -30,7 +30,7 @@ pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
 const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
+pub(super) const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
 struct SpawnHook {
@@ -226,7 +226,7 @@ impl Launch<'_> {
         Ok(())
     }
 
-    fn timeout_seconds(&self) -> Option<u64> {
+    pub(super) fn timeout_seconds(&self) -> Option<u64> {
         match self {
             Self::Shell(args) => args.timeout_seconds,
             Self::Exec(args) => args.timeout_seconds,
