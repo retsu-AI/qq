@@ -20,6 +20,7 @@ pub(crate) const MAX_SHELL_OUTPUT_BYTES: usize = 128 * 1024;
 /// is noise it should page into deliberately.
 pub(super) const SHELL_BOUNDS: Bounds = Bounds::new(16 * 1024, 4_000);
 const SHELL_READ_CHUNK_BYTES: usize = 8 * 1024;
+const OUTPUT_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 const DEFAULT_SHELL_TIMEOUT_SECS: u64 = 120;
 
 #[cfg(test)]
@@ -481,6 +482,8 @@ pub(super) async fn run_shell(
     let mut identity = ShellResultIdentity::default();
     let mut streamed = 0_usize;
     let mut recorded = 0_usize;
+    let mut buffered_output = Vec::with_capacity(SHELL_READ_CHUNK_BYTES);
+    let mut output_flush = std::pin::pin!(tokio::time::sleep(OUTPUT_FLUSH_INTERVAL));
     let mut pending_output = None;
     #[cfg(test)]
     let read_chunk_bytes = {
@@ -502,10 +505,42 @@ pub(super) async fn run_shell(
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
+        // Bound both memory and durable-write frequency. Flush the final tail
+        // before observing completion, while the journal still accepts output.
+        if !buffered_output.is_empty()
+            && (buffered_output.len() >= SHELL_READ_CHUNK_BYTES
+                || (stdout.is_none() && stderr.is_none()))
+        {
+            if let Err(stop) = persist_shell_chunk(
+                process,
+                call_id,
+                &buffered_output,
+                &mut recorded,
+                cancelled.as_mut(),
+                timeout.as_mut(),
+            )
+            .await
+            {
+                buffered_output.clear(); // The pending write owns these bytes.
+                pending_output = stop.pending;
+                break stop.outcome;
+            }
+            forward_shell_chunk(output, &mut streamed, &buffered_output);
+            buffered_output.clear();
+        }
         tokio::select! {
             biased;
             () = &mut cancelled => break ShellOutcome::Cancelled,
             () = &mut timeout => break ShellOutcome::TimedOut,
+            () = &mut output_flush, if !buffered_output.is_empty() => {
+                if let Err(stop) = persist_shell_chunk(process, call_id, &buffered_output, &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
+                    buffered_output.clear();
+                    pending_output = stop.pending;
+                    break stop.outcome;
+                }
+                forward_shell_chunk(output, &mut streamed, &buffered_output);
+                buffered_output.clear();
+            }
             read = read_from(&mut stdout, &mut stdout_buffer), if stdout.is_some() => {
                 #[cfg(test)]
                 let read = if read_fault == Some(false) {
@@ -519,11 +554,11 @@ pub(super) async fn run_shell(
                         identity.stdout.update(&stdout_buffer[..read]);
                         identity.stdout_bytes += read as u64;
                         capture.push(&stdout_buffer[..read]);
-                        if let Err(stop) = persist_shell_chunk(process, call_id, &stdout_buffer[..read], &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
-                            pending_output = stop.pending;
-                            break stop.outcome;
+                        if buffered_output.is_empty() {
+                            output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        forward_shell_chunk(output, &mut streamed, &stdout_buffer[..read]);
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(recorded + buffered_output.len());
+                        buffered_output.extend_from_slice(&stdout_buffer[..read.min(remaining)]);
                     }
                 }
             }
@@ -540,11 +575,11 @@ pub(super) async fn run_shell(
                         identity.stderr.update(&stderr_buffer[..read]);
                         identity.stderr_bytes += read as u64;
                         capture.push(&stderr_buffer[..read]);
-                        if let Err(stop) = persist_shell_chunk(process, call_id, &stderr_buffer[..read], &mut recorded, cancelled.as_mut(), timeout.as_mut()).await {
-                            pending_output = stop.pending;
-                            break stop.outcome;
+                        if buffered_output.is_empty() {
+                            output_flush.as_mut().reset(tokio::time::Instant::now() + OUTPUT_FLUSH_INTERVAL);
                         }
-                        forward_shell_chunk(output, &mut streamed, &stderr_buffer[..read]);
+                        let remaining = MAX_SHELL_OUTPUT_BYTES.saturating_sub(recorded + buffered_output.len());
+                        buffered_output.extend_from_slice(&stderr_buffer[..read.min(remaining)]);
                     }
                 }
             }
@@ -645,6 +680,20 @@ pub(super) async fn run_shell(
         && let Err(error) = write.await
     {
         result = ToolOutput::unobserved(format!("could not persist command output: {error}"));
+    }
+    // Cancellation and read failures also retain the bounded tail, after the
+    // process has stopped. No cancelled/deadline wait can discard this write.
+    if !buffered_output.is_empty() {
+        if let Some(write) = call_id.and_then(|id| process.output_record(id, &buffered_output)) {
+            if let Err(error) = write.await {
+                result =
+                    ToolOutput::unobserved(format!("could not persist command output: {error}"));
+            } else {
+                forward_shell_chunk(output, &mut streamed, &buffered_output);
+            }
+        } else {
+            forward_shell_chunk(output, &mut streamed, &buffered_output);
+        }
     }
     result.execution_context = receipt;
     drop(prepared);

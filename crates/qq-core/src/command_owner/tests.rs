@@ -731,6 +731,13 @@ async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
     let owner = CommandOwner::open(root.path().join("owner"), "unknown")
         .await
         .unwrap();
+    let db = Connection::open(root.path().join("owner/commands.sqlite3")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE output_commits (bytes INTEGER NOT NULL);
+         CREATE TRIGGER count_output_commits AFTER UPDATE OF output ON commands
+         BEGIN INSERT INTO output_commits VALUES (length(NEW.output)-length(OLD.output)); END;",
+    )
+    .unwrap();
     let id = ToolCallId::generate().unwrap();
     let text = "x".repeat(32);
     owner
@@ -746,6 +753,13 @@ async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
     assert_eq!(
         terminal.output, expected,
         "durable output must retain every byte within its bound"
+    );
+    let commits: u64 = db
+        .query_row("SELECT count(*) FROM output_commits", [], |row| row.get(0))
+        .unwrap();
+    assert!(
+        commits <= 8,
+        "one-byte reads must be coalesced before durable commits, observed {commits}"
     );
 }
 
