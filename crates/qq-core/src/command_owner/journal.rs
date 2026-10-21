@@ -1,4 +1,4 @@
-use qq_protocol::ToolCallId;
+use qq_protocol::{StoreId, ToolCallId};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     fs::{File, OpenOptions, TryLockError},
@@ -16,6 +16,7 @@ use super::{
 #[derive(Clone)]
 pub(super) struct Journal(Arc<JournalState>);
 struct JournalState {
+    store_id: StoreId,
     serial: Arc<tokio::sync::Semaphore>,
     connection: Mutex<Option<Connection>>,
     lock: Mutex<Option<File>>,
@@ -132,9 +133,9 @@ impl Journal {
         }
         let path = directory.join("commands.sqlite3");
         let _database_file = private_file(&path)?;
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(path)?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        if !matches!(version, 0 | 2) {
+        if !matches!(version, 0 | 3) {
             return Err(CommandOwnerError::Schema(version));
         }
         if version == 0 {
@@ -148,8 +149,13 @@ impl Journal {
         }
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         if version == 0 {
-            connection.execute_batch(
-                "BEGIN IMMEDIATE;
+            let store_id = StoreId::generate()?;
+            let tx = connection.transaction()?;
+            tx.execute_batch(
+                "CREATE TABLE metadata (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    store_id TEXT NOT NULL CHECK(length(store_id)=32)
+                );
                 CREATE TABLE commands (
                     id TEXT PRIMARY KEY,
                     request TEXT CHECK(request IS NULL OR length(CAST(request AS BLOB))<=262144),
@@ -160,15 +166,26 @@ impl Journal {
                     receipt TEXT CHECK(receipt IS NULL OR length(CAST(receipt AS BLOB))<=16384),
                     result TEXT CHECK(result IS NULL OR length(CAST(result AS BLOB))<=1048576)
                 );
-                PRAGMA user_version=2;
-                COMMIT;",
+                PRAGMA user_version=3;",
             )?;
+            tx.execute(
+                "INSERT INTO metadata (singleton, store_id) VALUES (1, ?1)",
+                [store_id.to_string()],
+            )?;
+            tx.commit()?;
         }
+        let store_id: String = connection.query_row(
+            "SELECT store_id FROM metadata WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        let store_id = store_id.parse()?;
         connection.execute(
             "UPDATE commands SET status='lost',version=version+1 WHERE status IN ('queued','running')",
             [],
         )?;
         Ok(Self(Arc::new(JournalState {
+            store_id,
             serial: Arc::new(tokio::sync::Semaphore::new(1)),
             connection: Mutex::new(Some(connection)),
             lock: Mutex::new(Some(lock)),
@@ -177,6 +194,10 @@ impl Journal {
             #[cfg(test)]
             cleanup: Mutex::new(None),
         })))
+    }
+
+    pub(super) fn store_id(&self) -> StoreId {
+        self.0.store_id
     }
 
     #[cfg(test)]

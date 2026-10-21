@@ -16,6 +16,7 @@ use qq_server as server;
 
 mod catalog;
 mod cli;
+mod command_owner;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
@@ -126,6 +127,7 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             bind,
             allow_origins,
         }) => serve(bind, &allow_origins, &overrides).await?,
+        Some(cli::Command::NativeWorker { state_dir }) => command_owner::run(state_dir).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?

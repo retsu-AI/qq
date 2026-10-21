@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use qq_protocol::ToolCallId;
+use qq_protocol::{StoreId, ToolCallId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, watch};
 
@@ -108,6 +108,8 @@ pub enum CommandOwnerError {
     Sqlite(#[from] rusqlite::Error),
     #[error("command journal encoding failed: {0}")]
     Codec(#[from] serde_json::Error),
+    #[error("command journal identity failed: {0}")]
+    Identity(#[from] qq_protocol::IdError),
     #[error("unsupported command journal schema {0}")]
     Schema(i64),
     #[error("command cleanup failed: {0}")]
@@ -141,6 +143,24 @@ struct LiveCommand {
 }
 
 impl CommandOwner {
+    /// Whether this owner is accepting work. Failure and shutdown both make
+    /// discovery unavailable; a listening transport alone does not mean healthy.
+    pub fn is_available(&self) -> bool {
+        self.available().is_ok()
+    }
+
+    /// Wait for a fatal execution or journal failure. This is cancellation-safe
+    /// and also returns immediately for a failure that preceded subscription.
+    pub async fn wait_for_failure(&self) {
+        let mut failed = self.0.failed.subscribe();
+        let _ = failed.wait_for(|failed| *failed).await;
+    }
+
+    /// The journal identity, retained across process and endpoint changes.
+    pub fn store_id(&self) -> StoreId {
+        self.0.journal.store_id()
+    }
+
     pub async fn open(
         directory: PathBuf,
         source_revision: &str,

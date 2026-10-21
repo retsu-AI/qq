@@ -605,11 +605,11 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
     owner.shutdown().await.unwrap();
     drop(owner);
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
-    db.pragma_update(None, "user_version", 3).unwrap();
+    db.pragma_update(None, "user_version", 4).unwrap();
     drop(db);
     assert!(matches!(
         CommandOwner::open(directory.clone(), "unknown").await,
-        Err(CommandOwnerError::Schema(3))
+        Err(CommandOwnerError::Schema(4))
     ));
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
     let count: u64 = db
@@ -668,19 +668,20 @@ async fn unconfirmed_process_exit_blocks_owner_continuation() {
     let id = ToolCallId::generate().unwrap();
     let mut request = command(workspace.path(), id, "unused");
     request.arguments = crate::tools::PANIC_SHELL_ARGUMENTS.to_owned();
-    let mut failed = owner.0.failed.subscribe();
+    assert!(owner.is_available());
+    let mut failed = Box::pin(owner.wait_for_failure());
+    assert!(futures_util::poll!(failed.as_mut()).is_pending());
     owner.submit(request).await.unwrap();
     let pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
         .await
         .unwrap()
         .unwrap();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        failed.wait_for(|failed| *failed),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), failed)
+        .await
+        .unwrap();
+    assert!(!owner.is_available());
+    let mut late = Box::pin(owner.wait_for_failure());
+    assert!(futures_util::poll!(late.as_mut()).is_ready());
     let next = ToolCallId::generate().unwrap();
     assert!(matches!(
         owner
