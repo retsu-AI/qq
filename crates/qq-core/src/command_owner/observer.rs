@@ -162,10 +162,7 @@ pub(crate) async fn observe(
                 if let Some(error) = persistence_error {
                     return ToolOutput::unobserved(error);
                 }
-                let mut result = ToolOutput::unobserved(format!(
-                    "native command owner lost the invocation; it was not replayed\n{}",
-                    snapshot.output,
-                ));
+                let mut result = lost_output(&snapshot.output);
                 result.native_owner = Some(owner);
                 lease.save_native_result(id, &result);
                 return result;

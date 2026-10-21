@@ -28,6 +28,7 @@ mod goal_upgrade;
 mod goals;
 mod loop_guard;
 mod migrations;
+mod native_recovery;
 mod nonblocking;
 mod progress;
 mod projection;

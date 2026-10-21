@@ -728,7 +728,10 @@ impl SessionRuntime {
         }
         let side_limits = options.side_query_limits.resolve()?;
         let store = Store::open(options.database_path).await?;
-        let recovered = store.recover_interrupted_runs().await?;
+        let mut recovered =
+            super::native_recovery::recover_terminal(&store, options.native_commands.as_ref())
+                .await?;
+        recovered.extend(store.recover_interrupted_runs().await?);
         let store_id = store.store_id();
         store
             .call_write(store::Priority::AwaitControl, move |connection| {

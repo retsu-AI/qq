@@ -16,6 +16,13 @@ fn blocked_command() {
     }) else {
         return;
     };
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("executions")
+        .unwrap()
+        .write_all(b"once\n")
+        .unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect(marker).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(60)))
@@ -92,6 +99,15 @@ fn reply(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
 
 #[tokio::test]
 async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() {
+    exercise_cli(false).await;
+}
+
+#[tokio::test]
+async fn restarted_cli_recovers_the_original_command_result_without_reexecution() {
+    exercise_cli(true).await;
+}
+
+async fn exercise_cli(restart: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -125,26 +141,8 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
         r#"(version: 1, model: "fake/model", providers: {{"fake": Custom(connection: (base_url: "{}/v1", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Fake")}})}})"#,
         provider.base_url
     );
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_qq"));
-    command
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("HOME", root.path())
-        .env("QQ_CONFIG_CONTENT", config)
-        .current_dir(&workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (name, directory) in [
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_DATA_HOME", "data"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_RUNTIME_DIR", "runtime"),
-    ] {
-        command.env(name, root.path().join(directory));
-    }
-    let child = command
+    let mut command = configured_cli(root.path(), &workspace, &config);
+    let mut child = command
         .args([
             "run",
             "--approval",
@@ -163,8 +161,78 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
     stream.read_exact(&mut ready).await.unwrap();
     assert_eq!(&ready, b"ready");
     let worker = Worker::child_of(child.id().unwrap());
-    stream.write_all(b"e").await.unwrap();
-    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await;
+    let output = if restart {
+        child.start_kill().unwrap();
+        let killed = child.wait_with_output().await.unwrap();
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(
+            killed.status.signal(),
+            Some(9),
+            "fixture must kill the coordinator with SIGKILL"
+        );
+        assert!(
+            tokio::time::timeout(Duration::ZERO, worker.0.readable())
+                .await
+                .is_err(),
+            "the worker must survive coordinator death"
+        );
+        let data = root.path().join("data/qq");
+        let connection = rusqlite::Connection::open(data.join("sessions.sqlite3")).unwrap();
+        let (call, session): (String, String) = connection
+            .query_row(
+                "SELECT t.id,r.session_id FROM tool_calls t JOIN runs r ON r.id=t.run_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        drop(connection);
+        stream.write_all(b"e").await.unwrap();
+        let observer = super::client::CommandWorker::new(
+            data.join("command-owner-v3"),
+            env!("CARGO_BIN_EXE_qq").into(),
+            concat!(
+                env!("CARGO_PKG_VERSION"),
+                "+",
+                env!("QQ_BUILD_REVISION"),
+                ".",
+                env!("QQ_BUILD_DATE")
+            ),
+        )
+        .unwrap();
+        let id = call.parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut version = 0;
+            loop {
+                let observed = super::NativeCommandService::wait(&observer, id, version)
+                    .await
+                    .unwrap();
+                if observed.status == super::CommandStatus::Finished {
+                    break;
+                }
+                version = observed.version;
+            }
+        })
+        .await
+        .unwrap();
+        let mut resumed = configured_cli(root.path(), &workspace, &config);
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            resumed
+                .args([
+                    "run",
+                    "--session",
+                    &session,
+                    "--format",
+                    "jsonl",
+                    "continue the fixture",
+                ])
+                .output(),
+        )
+        .await
+    } else {
+        stream.write_all(b"e").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(20), child.wait_with_output()).await
+    };
     assert!(
         tokio::time::timeout(Duration::ZERO, worker.0.readable())
             .await
@@ -180,7 +248,18 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("native-result"));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(if restart {
+            "finished"
+        } else {
+            "native-result"
+        })
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("executions")).unwrap(),
+        "once\n",
+        "command execution must not be replayed"
+    );
     assert_eq!(
         std::fs::read_to_string(workspace.join("artifact")).unwrap(),
         "native-once"
@@ -226,11 +305,35 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
         saved.contains("native-result"),
         "reclaimed worker output must remain in the session: {saved}"
     );
-    assert_eq!(
-        tokio::task::spawn_blocking(move || provider.capture_all())
-            .await
-            .unwrap()
-            .len(),
-        2
+    let captured = tokio::task::spawn_blocking(move || provider.capture_all())
+        .await
+        .unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(
+        captured[1].body().contains("native-result"),
+        "the resumed model must see the original command result"
     );
+}
+
+fn configured_cli(home: &Path, workspace: &Path, config: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_qq"));
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", home)
+        .env("QQ_CONFIG_CONTENT", config)
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    for (name, directory) in [
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_STATE_HOME", "state"),
+        ("XDG_RUNTIME_DIR", "runtime"),
+    ] {
+        command.env(name, home.join(directory));
+    }
+    command
 }

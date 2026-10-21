@@ -234,15 +234,41 @@ pub(super) async fn process_call_fixture(
     store: &Store,
     path: &Path,
 ) -> (ClaimedRun, ToolCallId, ExecutionContextReceipt) {
+    let arguments = r#"{"program":"grep","args":["x","f"]}"#;
+    let (claimed, id) = pending_process_call(store, path, "exec", arguments).await;
+    let receipt = ExecutionContextReceipt::V1(ExecutionContextFacts {
+        context_id: ToolCallId::generate().unwrap(),
+        arguments_sha256: arguments_digest("exec", arguments).unwrap(),
+        manifest_sha256: qq_protocol::ContentHash::from_bytes([1; 32]),
+        base_env_present: 1,
+        requested_env: false,
+        locale: Locale::C,
+        cwd: CwdIdentity::HeldDirectory {
+            device: 1,
+            inode: 2,
+        },
+        verdict: ExecutionVerdict::Work {
+            reason: UnverifiedReason::UnapprovedProgram,
+        },
+        pid: 11,
+    });
+    (claimed, id, receipt)
+}
+
+pub(super) async fn pending_process_call(
+    store: &Store,
+    path: &Path,
+    tool: &str,
+    arguments: &str,
+) -> (ClaimedRun, ToolCallId) {
     let (_, _, claimed) = create_claimed_parent(store, path).await;
     let id = ToolCallId::generate().unwrap();
-    let arguments = r#"{"program":"grep","args":["x","f"]}"#;
     let call = RuntimeToolCall {
         id,
         turn_ordinal: 1,
         call_ordinal: 1,
         provider_call_id: "context".to_owned(),
-        name: "exec".to_owned(),
+        name: tool.to_owned(),
         arguments: arguments.to_owned(),
         effect: crate::catalog::EffectClass::Shell,
         rejection: None,
@@ -257,7 +283,7 @@ pub(super) async fn process_call_fixture(
                     Role::Assistant,
                     vec![ContentBlock::tool_call(
                         "context",
-                        "exec",
+                        tool,
                         &serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
                     )],
                 ),
@@ -277,23 +303,7 @@ pub(super) async fn process_call_fixture(
         .await
         .unwrap();
     store.start_tool_call(&claimed, id).await.unwrap();
-    let receipt = ExecutionContextReceipt::V1(ExecutionContextFacts {
-        context_id: ToolCallId::generate().unwrap(),
-        arguments_sha256: arguments_digest("exec", arguments).unwrap(),
-        manifest_sha256: qq_protocol::ContentHash::from_bytes([1; 32]),
-        base_env_present: 1,
-        requested_env: false,
-        locale: Locale::C,
-        cwd: CwdIdentity::HeldDirectory {
-            device: 1,
-            inode: 2,
-        },
-        verdict: ExecutionVerdict::Work {
-            reason: UnverifiedReason::UnapprovedProgram,
-        },
-        pid: 11,
-    });
-    (claimed, id, receipt)
+    (claimed, id)
 }
 
 #[tokio::test]
