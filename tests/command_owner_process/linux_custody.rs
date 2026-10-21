@@ -94,6 +94,7 @@ async fn command_cannot_read_its_supervisors_control_descriptors() {
     let (mut worker, connection) = start(&root.path().join("owner")).await;
     let id = ToolCallId::generate().unwrap();
     let request = NativeCommand {
+        environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id, workspace: std::fs::canonicalize(workspace.path()).unwrap(), tool: "exec".to_owned(),
         arguments: serde_json::json!({"program": std::env::current_exe().unwrap(), "args": ["--exact", "linux_custody::fixture_supervisor_privacy", "--nocapture", "--skip", format!("qq-custody-{id}")]}).to_string(),
         shell_policy: Default::default(), approved_images: Vec::new(), not_after_ms: None,
@@ -102,7 +103,7 @@ async fn command_cannot_read_its_supervisors_control_descriptors() {
     assert!(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v1/submit",
+                "http://{}/internal/command-owner/v2/submit",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -156,6 +157,7 @@ async fn exercise_ending(ending: Ending) {
     let listener = tokio::net::UnixListener::bind(workspace.path().join(&marker)).unwrap();
     let (mut worker, connection) = start(&directory).await;
     let request = NativeCommand {
+        environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "exec".to_owned(),
@@ -184,7 +186,7 @@ async fn exercise_ending(ending: Ending) {
     assert!(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v1/submit",
+                "http://{}/internal/command-owner/v2/submit",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -239,7 +241,7 @@ async fn exercise_ending(ending: Ending) {
             assert!(
                 client
                     .post(format!(
-                        "http://{}/internal/command-owner/v1/cancel",
+                        "http://{}/internal/command-owner/v2/cancel",
                         connection.address()
                     ))
                     .bearer_auth(connection.expose_bearer_token())
@@ -301,7 +303,7 @@ async fn exercise_ending(ending: Ending) {
     let (mut replacement, restored) = start(&directory).await;
     let recovered: CommandSnapshot = client
         .post(format!(
-            "http://{}/internal/command-owner/v1/snapshot",
+            "http://{}/internal/command-owner/v2/snapshot",
             restored.address()
         ))
         .bearer_auth(restored.expose_bearer_token())

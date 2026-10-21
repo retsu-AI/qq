@@ -3233,7 +3233,7 @@ impl RunState {
                                         }
                                     }
                                     None => {
-                                        tools::execute_with_images(
+                                        tools::execute_with_images(None,
                                             workspace,
                                             file_state,
                                             call.name.clone(),

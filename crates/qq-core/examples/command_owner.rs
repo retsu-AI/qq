@@ -44,6 +44,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let id = ToolCallId::generate()?;
     owner
         .submit(NativeCommand {
+            environment: qq_core::command_owner::NativeEnvironment::capture(&[])?,
             id,
             workspace: workspace_path,
             tool: "shell".to_owned(),

@@ -327,7 +327,12 @@ pub(crate) enum PreparationError {
     Cancelled,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "captured invocation values, image approvals, identity and cancellation are distinct inputs"
+)]
 pub(super) fn prepare(
+    captured: Option<&crate::command_owner::NativeEnvironment>,
     workspace: Workspace,
     launch: OwnedLaunch,
     approvals: Arc<ApprovedReadImages>,
@@ -365,7 +370,10 @@ pub(super) fn prepare(
         if environment.iter().any(|(saved, _)| saved == name) {
             continue;
         }
-        if let Some(value) = std::env::var_os(name) {
+        if let Some(value) = match captured {
+            Some(captured) => captured.get(name),
+            None => std::env::var_os(name),
+        } {
             bytes = bytes
                 .saturating_add(name.len())
                 .saturating_add(value.as_encoded_bytes().len());
@@ -786,6 +794,7 @@ mod tests {
         let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
         requested.env.push("PATH".to_owned());
         let unsupported = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(requested),
             approved.clone(),
@@ -802,6 +811,7 @@ mod tests {
             }
         );
         let unapproved = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             Arc::default(),
@@ -818,6 +828,7 @@ mod tests {
             }
         );
         let mut prepared = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             approved.clone(),
@@ -833,6 +844,7 @@ mod tests {
         ));
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Shell(
                 serde_json::from_value(
@@ -901,6 +913,7 @@ mod tests {
         );
         assert!(!root.join("written.txt").exists());
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
+            None,
             workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -929,6 +942,7 @@ mod tests {
             .unwrap(),
         );
         let script_bound = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             script_approval,
@@ -947,6 +961,7 @@ mod tests {
         );
         std::fs::write(&program, &image).unwrap();
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
+            None,
             workspace,
             Arc::default(),
             "exec".to_owned(),
@@ -990,6 +1005,7 @@ pub(crate) fn prepare_goal_check(
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
     prepare(
+        None,
         workspace,
         OwnedLaunch::Shell(ShellArgs {
             command,

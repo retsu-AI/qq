@@ -313,6 +313,7 @@ pub(crate) async fn execute(
     network_policy: Arc<super::network::NetworkPolicy>,
 ) -> ToolOutput {
     execute_with_images(
+        None,
         workspace,
         file_state,
         name,
@@ -334,6 +335,7 @@ pub(crate) async fn execute(
     reason = "one dispatch per call; every argument is a distinct capability the tool receives"
 )]
 pub(crate) async fn execute_with_images(
+    environment: Option<Arc<crate::command_owner::NativeEnvironment>>,
     workspace: Workspace,
     file_state: Arc<FileState>,
     name: String,
@@ -403,6 +405,7 @@ pub(crate) async fn execute_with_images(
                 (None, None) => unreachable!("one launch shape was parsed"),
             };
             run_shell(
+                environment,
                 &workspace,
                 &shell_policy,
                 approved_read_images,

@@ -10,7 +10,7 @@ use std::{
 use super::{ADMISSION_HOOKS, CANCELLATION_HOOKS, wait_at_commit};
 use super::{
     CommandOwnerError, CommandSnapshot, CommandStatus, ExecutionContextReceipt,
-    MAX_LIVE_OUTPUT_BYTES, MAX_RETAINED, NativeCommand, ToolOutput, blocking,
+    MAX_LIVE_OUTPUT_BYTES, MAX_RETAINED, ToolOutput, blocking,
 };
 
 #[derive(Clone)]
@@ -342,7 +342,12 @@ impl Journal {
                 [id.to_string()],
                 |row| row.get(0),
             )?;
-            let request: NativeCommand = serde_json::from_str(&request)?;
+            #[derive(serde::Deserialize)]
+            struct ReceiptBinding {
+                tool: String,
+                arguments: String,
+            }
+            let request: ReceiptBinding = serde_json::from_str(&request)?;
             if !receipt.valid() || !receipt.bound_to(id, &request.tool, &request.arguments) {
                 return Err(CommandOwnerError::Invalid);
             }

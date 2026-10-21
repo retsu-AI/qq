@@ -1088,7 +1088,11 @@ provide filesystem or network containment.
   TMPDIR` only, plus variables the call names in `env` (≤ 16) that
   `policy.shell_env` allows. A name outside the allowlist fails the call
   (`env_not_allowed`) before anything runs. Secrets the server holds never
-  reach a child by accident.
+  reach a child by accident. Native command-owner submissions carry a snapshot
+  captured by the caller; a long-lived worker never substitutes its own values
+  for missing names. The journal stores an environment digest for retry identity,
+  rather than the values themselves. Command output can still contain values
+  the command prints. This request format uses private command-owner API v2.
 - A **built-in preference nudge** (`policy.builtin_preference`): when the
   command's first program has a bounded built-in (`grep|rg` → `search`,
   `cat|head|tail|sed -n` → `read_file`, `find|fd` → `search mode=names`,

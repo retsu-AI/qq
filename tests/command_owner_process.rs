@@ -90,7 +90,7 @@ async fn wait_for(
         loop {
             let response = client
                 .post(format!(
-                    "http://{}/internal/command-owner/v1/wait",
+                    "http://{}/internal/command-owner/v2/wait",
                     connection.address()
                 ))
                 .bearer_auth(connection.expose_bearer_token())
@@ -126,6 +126,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
         .unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+        environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
@@ -136,7 +137,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     };
     let response = client
         .post(format!(
-            "http://{}/internal/command-owner/v1/submit",
+            "http://{}/internal/command-owner/v2/submit",
             connection.address()
         ))
         .bearer_auth(connection.expose_bearer_token())
@@ -187,6 +188,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
             "submit" => (
                 "submit",
                 serde_json::to_value(NativeCommand {
+                    environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                     id,
                     workspace: std::fs::canonicalize(root.path()).unwrap(),
                     tool: "shell".to_owned(),
@@ -201,7 +203,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
         };
         let _ = client
             .post(format!(
-                "http://{}/internal/command-owner/v1/{operation}",
+                "http://{}/internal/command-owner/v2/{operation}",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -355,6 +357,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
@@ -364,7 +367,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
         not_after_ms: None,
     };
     let submit = format!(
-        "http://{}/internal/command-owner/v1/submit",
+        "http://{}/internal/command-owner/v2/submit",
         connection.address()
     );
     assert!(
@@ -391,7 +394,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
         loop {
             let snapshot: CommandSnapshot = client
                 .post(format!(
-                    "http://{}/internal/command-owner/v1/wait",
+                    "http://{}/internal/command-owner/v2/wait",
                     connection.address()
                 ))
                 .bearer_auth(connection.expose_bearer_token())
@@ -414,7 +417,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
     let mut observer = Box::pin(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v1/wait",
+                "http://{}/internal/command-owner/v2/wait",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -463,6 +466,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+        environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
@@ -474,7 +478,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     assert!(
         client
             .post(format!(
-                "http://{}/internal/command-owner/v1/submit",
+                "http://{}/internal/command-owner/v2/submit",
                 connection.address()
             ))
             .bearer_auth(connection.expose_bearer_token())
@@ -487,7 +491,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     );
     let running: CommandSnapshot = client
         .post(format!(
-            "http://{}/internal/command-owner/v1/wait",
+            "http://{}/internal/command-owner/v2/wait",
             connection.address()
         ))
         .bearer_auth(connection.expose_bearer_token())

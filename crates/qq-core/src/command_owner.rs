@@ -18,7 +18,9 @@ use tokio::sync::{Semaphore, watch};
 use crate::tools::{ToolOutput, ToolTasks, process_context::ExecutionContextReceipt};
 use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellation, ShellPolicy};
 
+mod environment;
 mod journal;
+pub use environment::NativeEnvironment;
 #[cfg(windows)]
 mod windows_state;
 use journal::Journal;
@@ -59,6 +61,7 @@ pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCommand {
+    pub environment: NativeEnvironment,
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
@@ -69,6 +72,14 @@ pub struct NativeCommand {
     /// Absolute task deadline, captured by the admitting host. Reconnecting
     /// cannot grant a fresh duration. The owner converts it to a monotonic wait.
     pub not_after_ms: Option<u64>,
+}
+
+impl NativeCommand {
+    fn identity(&self) -> Result<String, CommandOwnerError> {
+        let mut identity = serde_json::to_value(self)?;
+        identity["environment"] = serde_json::Value::String(self.environment.fingerprint()?);
+        Ok(serde_json::to_string(&identity)?)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +284,7 @@ impl CommandOwner {
     /// the existing command; it never executes the invocation a second time.
     pub async fn submit(&self, mut request: NativeCommand) -> Result<(), CommandOwnerError> {
         self.available()?;
+        request.environment.normalize()?;
         let images = ApprovedReadImages::new(std::mem::take(&mut request.approved_images))
             .map_err(|_| CommandOwnerError::Invalid)?;
         request.approved_images = images.entries().to_vec();
@@ -291,7 +303,7 @@ impl CommandOwner {
             return Err(CommandOwnerError::Invalid);
         }
         let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
-        let encoded = serde_json::to_string(&request)?;
+        let encoded = request.identity()?;
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(CommandOwnerError::Invalid);
         }
@@ -447,6 +459,7 @@ impl CommandOwner {
             cancellation.cancel();
         }
         let execution = crate::tools::dispatch::execute_with_images(
+            Some(Arc::new(request.environment)),
             workspace,
             Arc::default(),
             request.tool,

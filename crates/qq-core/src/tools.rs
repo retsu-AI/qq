@@ -4519,6 +4519,7 @@ mod tests {
             })
             .unwrap();
         let result = dispatch::execute_with_images(
+            None,
             workspace,
             Arc::new(FileState::default()),
             "shell".to_owned(),
@@ -4568,6 +4569,7 @@ mod tests {
                 })
                 .unwrap();
             let execution = tokio::spawn(dispatch::execute_with_images(
+                None,
                 workspace,
                 Arc::default(),
                 "shell".to_owned(),

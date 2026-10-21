@@ -305,6 +305,7 @@ enum ShellOutcome {
     reason = "process identity, producer, image approvals and supervision are distinct capabilities"
 )]
 pub(super) async fn run_shell(
+    environment: Option<std::sync::Arc<crate::command_owner::NativeEnvironment>>,
     workspace: &Workspace,
     policy: &ShellPolicy,
     approved_read_images: std::sync::Arc<crate::runtime::ApprovedReadImages>,
@@ -370,6 +371,7 @@ pub(super) async fn run_shell(
     let mut prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let prepared = super::process_context::prepare(
+            environment.as_deref(),
             preparation_workspace,
             owned,
             approved_read_images,
@@ -1134,6 +1136,7 @@ mod identity_tests {
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     run_shell(
+                        None,
                         &workspace,
                         &ShellPolicy::default(),
                         std::sync::Arc::default(),
