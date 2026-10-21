@@ -87,6 +87,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     let workspace = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
     let (mut child, connection) = start(&directory).await;
+    let store_id = connection.server_info().server_id;
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -118,6 +119,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
     child.kill().await.unwrap();
     child.wait().await.unwrap();
     let (mut restarted, connection) = start(&directory).await;
+    assert_eq!(connection.server_info().server_id, store_id);
     let recovered = finished(&client, &connection, id).await;
     restarted.kill().await.unwrap();
     restarted.wait().await.unwrap();
@@ -245,7 +247,14 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn interrupting_the_worker_settles_running_commands_before_exit() {
+async fn stopping_the_worker_settles_running_commands_before_exit() {
+    for signal in [rustix::process::Signal::INT, rustix::process::Signal::TERM] {
+        assert_worker_stops(signal).await;
+    }
+}
+
+#[cfg(unix)]
+async fn assert_worker_stops(signal: rustix::process::Signal) {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
@@ -290,12 +299,22 @@ async fn interrupting_the_worker_settles_running_commands_before_exit() {
         .unwrap();
     assert_eq!(running.status, CommandStatus::Running);
     let pid = rustix::process::Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()).unwrap();
-    rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+    rustix::process::kill_process(pid, signal).unwrap();
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
         .await
         .unwrap()
         .unwrap();
-    assert!(status.success());
+    if !status.success() {
+        // Clean up only this fixture's live command, captured before its owner
+        // was signalled; never use a recovered journal PID for teardown.
+        let receipt = serde_json::to_value(running.process.as_ref().unwrap()).unwrap();
+        let facts = receipt.get("facts").unwrap_or(&receipt);
+        let group =
+            rustix::process::Pid::from_raw(i32::try_from(facts["pid"].as_u64().unwrap()).unwrap())
+                .unwrap();
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+    assert!(status.success(), "worker must settle on {signal:?}");
     assert!(!directory.join("server.ron").exists());
     let (mut restarted, connection) = start(&directory).await;
     let terminal = finished(&client, &connection, id).await;

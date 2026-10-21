@@ -605,11 +605,11 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
     owner.shutdown().await.unwrap();
     drop(owner);
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
-    db.pragma_update(None, "user_version", 3).unwrap();
+    db.pragma_update(None, "user_version", 4).unwrap();
     drop(db);
     assert!(matches!(
         CommandOwner::open(directory.clone(), "unknown").await,
-        Err(CommandOwnerError::Schema(3))
+        Err(CommandOwnerError::Schema(4))
     ));
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
     let count: u64 = db

@@ -29,10 +29,7 @@ impl ServerReservation {
     /// Starts only the command-owner transport. The caller retains ownership
     /// of the journal and must shut it down after stopping this listener.
     pub fn start_command_owner(self, owner: CommandOwner) -> Result<ServerHandle, ServerError> {
-        let identity = ServerIdentity::new(
-            qq_protocol::StoreId::generate().map_err(|_| ServerError::RandomnessUnavailable)?,
-            Some("qq-command-owner"),
-        );
+        let identity = ServerIdentity::new(owner.store_id(), Some("qq-command-owner"));
         self.start_with(identity, |connection, _| router(owner, connection))
     }
 }

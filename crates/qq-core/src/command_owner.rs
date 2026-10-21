@@ -11,7 +11,7 @@ use std::{
     },
 };
 
-use qq_protocol::ToolCallId;
+use qq_protocol::{StoreId, ToolCallId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, watch};
 
@@ -108,6 +108,8 @@ pub enum CommandOwnerError {
     Sqlite(#[from] rusqlite::Error),
     #[error("command journal encoding failed: {0}")]
     Codec(#[from] serde_json::Error),
+    #[error("command journal identity failed: {0}")]
+    Identity(#[from] qq_protocol::IdError),
     #[error("unsupported command journal schema {0}")]
     Schema(i64),
     #[error("command cleanup failed: {0}")]
@@ -141,6 +143,11 @@ struct LiveCommand {
 }
 
 impl CommandOwner {
+    /// The journal identity, retained across process and endpoint changes.
+    pub fn store_id(&self) -> StoreId {
+        self.0.journal.store_id()
+    }
+
     pub async fn open(
         directory: PathBuf,
         source_revision: &str,

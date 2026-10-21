@@ -11,8 +11,20 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
     }
     #[cfg(unix)]
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    #[cfg(unix)]
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     #[cfg(windows)]
     let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    let stop = async {
+        #[cfg(unix)]
+        tokio::select! {
+            _ = interrupt.recv() => {},
+            _ = terminate.recv() => {},
+        }
+        #[cfg(windows)]
+        interrupt.recv().await;
+    };
+    tokio::pin!(stop);
     let options =
         ServerOptions::new(ServerPaths::new(&directory)).with_version(crate::cli::BUILD_VERSION);
     let reservation = match qq_server::reserve(options).await? {
@@ -43,7 +55,7 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
             stopped?;
             drained?;
         }
-        _ = interrupt.recv() => {
+        _ = &mut stop => {
             server.begin_shutdown();
             let drained = owner.shutdown().await;
             let stopped = server.shutdown().await;
