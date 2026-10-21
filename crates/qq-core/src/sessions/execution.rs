@@ -656,6 +656,19 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    let process_store = inner.store.clone();
+    let process_identity = claimed.identity;
+    if let Err(error) = resources.tools.set_process_recorder(move |id, receipt| {
+        let store = process_store.clone();
+        async move {
+            store
+                .record_tool_process(process_identity, id, receipt)
+                .await
+        }
+    }) {
+        finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
+        return;
+    }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
         Ok(true) => {}
         Ok(false) => {

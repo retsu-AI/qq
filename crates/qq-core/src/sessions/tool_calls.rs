@@ -62,6 +62,43 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
+/// Records the native process while its call is still running. This is
+/// private recovery evidence, not an authorization grant or a result.
+pub(super) fn record_tool_process(
+    connection: &mut Connection,
+    identity: RunIdentity,
+    id: ToolCallId,
+    receipt: &crate::tools::process_context::ExecutionContextReceipt,
+) -> Result<(), SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let (name, arguments, previous): (String, String, Option<String>) = transaction
+        .query_row(
+            "SELECT name,arguments_json,execution_context_json FROM tool_calls
+         WHERE id=?1 AND run_id=?2 AND state='running'",
+            params![id.to_string(), identity.run_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?
+        .ok_or(SessionRuntimeError::ToolCallNotFound)?;
+    if !receipt.valid() || !receipt.bound_to(id, &name, &arguments) {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    let encoded = serde_json::to_string(receipt)?;
+    if encoded.len() > crate::tools::process_context::MAX_EXECUTION_CONTEXT_BYTES
+        || previous
+            .as_ref()
+            .is_some_and(|previous| previous != &encoded)
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    transaction.execute(
+        "UPDATE tool_calls SET execution_context_json=?3 WHERE id=?1 AND run_id=?2",
+        params![id.to_string(), identity.run_id.to_string(), encoded],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one persisted row update; bundling the columns adds nothing"
@@ -79,7 +116,7 @@ pub(super) fn finish_tool_call(
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    let (provider_call_id, tool_name, first_result_in_turn) = transaction
+    let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
         .query_row(
             "SELECT current.provider_call_id, current.name,
                     NOT EXISTS(
@@ -87,7 +124,7 @@ pub(super) fn finish_tool_call(
                         WHERE previous.run_id = current.run_id
                           AND previous.turn_ordinal = current.turn_ordinal
                           AND previous.result IS NOT NULL
-                    )
+                    ), current.execution_context_json
              FROM tool_calls current
              WHERE current.id = ?1 AND current.run_id = ?2 AND current.state = 'running'",
             params![tool_call_id.to_string(), identity.run_id.to_string()],
@@ -96,6 +133,7 @@ pub(super) fn finish_tool_call(
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, bool>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             },
         )
@@ -128,7 +166,11 @@ pub(super) fn finish_tool_call(
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
             let json = serde_json::to_string(&receipt)?;
-            if json.len() > crate::tools::process_context::MAX_EXECUTION_CONTEXT_BYTES {
+            if json.len() > crate::tools::process_context::MAX_EXECUTION_CONTEXT_BYTES
+                || recorded_context
+                    .as_ref()
+                    .is_some_and(|recorded| recorded != &json)
+            {
                 return Err(SessionRuntimeError::CONSTRAINT);
             }
             Some(json)
@@ -137,7 +179,7 @@ pub(super) fn finish_tool_call(
     };
     let updated = transaction.execute(
         "UPDATE tool_calls
-             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = ?8
+             SET state = ?2, result = ?3, is_error = ?4, finished_at_ms = ?5, display_json = ?7, execution_context_json = COALESCE(?8, execution_context_json)
              WHERE id = ?1 AND run_id = ?6 AND state = 'running'",
         params![
             tool_call_id.to_string(),

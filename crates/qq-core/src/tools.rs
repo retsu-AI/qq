@@ -125,6 +125,8 @@ use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
+#[cfg(all(test, unix))]
+pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
 pub(crate) use shell::observe_shell_spawn;
 
@@ -4450,6 +4452,53 @@ mod tests {
         let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process(pid).is_err());
         assert!(!cancelled.is_cancelled());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_process_receipt_write_reaps_child_and_blocks_settlement() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tasks = ToolTasks::default();
+        let (sender, spawned) = tokio::sync::oneshot::channel();
+        let sender = std::sync::Mutex::new(Some(sender));
+        tasks
+            .set_process_recorder(move |_, receipt| {
+                sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(receipt.facts().pid)
+                    .unwrap();
+                async { Err(crate::sessions::SessionRuntimeError::Unavailable) }
+            })
+            .unwrap();
+        let result = dispatch::execute_with_images(
+            workspace,
+            Arc::new(FileState::default()),
+            "shell".to_owned(),
+            PANIC_SHELL_ARGUMENTS.to_owned(),
+            RunCancellation::new(),
+            None,
+            tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Some(qq_protocol::ToolCallId::generate().unwrap()),
+        )
+        .await;
+        assert_eq!(result.disposition, ResultDisposition::Unobserved);
+        assert!(
+            result
+                .model_text
+                .contains("could not persist the command process")
+        );
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedProcess));
+        let pid =
+            rustix::process::Pid::from_raw(i32::try_from(spawned.await.unwrap()).unwrap()).unwrap();
+        assert!(rustix::process::test_kill_process(pid).is_err());
     }
 
     #[cfg(any(unix, windows))]

@@ -1,7 +1,5 @@
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
@@ -41,21 +39,55 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 
 #[derive(Default)]
 struct ToolTaskState {
+    process_recorder: OnceLock<ProcessRecorder>,
+    unrecorded_process: AtomicBool,
     active: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
 }
 
+type ProcessRecordFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>> + Send>,
+>;
+type ProcessRecorder = Box<
+    dyn Fn(
+            qq_protocol::ToolCallId,
+            Box<super::process_context::ExecutionContextReceipt>,
+        ) -> ProcessRecordFuture
+        + Send
+        + Sync,
+>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ToolDrainError {
+    #[error("the command process receipt could not be persisted")]
+    UnrecordedProcess,
     #[error("local shell process termination could not be confirmed")]
     UnconfirmedProcessExit,
 }
 
 impl ToolTasks {
+    pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .process_recorder
+            .set(Box::new(move |id, receipt| Box::pin(recorder(id, receipt))))
+            .map_err(|_| ToolDrainError::UnrecordedProcess)
+    }
+
     pub(crate) fn check(&self) -> Result<(), ToolDrainError> {
         if self.0.unconfirmed_process_exit.load(Ordering::Acquire) {
             Err(ToolDrainError::UnconfirmedProcessExit)
+        } else if self.0.unrecorded_process.load(Ordering::Acquire) {
+            Err(ToolDrainError::UnrecordedProcess)
         } else {
             Ok(())
         }
@@ -88,6 +120,20 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    pub(crate) async fn record_process(
+        &self,
+        id: qq_protocol::ToolCallId,
+        receipt: Box<super::process_context::ExecutionContextReceipt>,
+    ) -> Result<(), crate::sessions::SessionRuntimeError> {
+        if let Some(recorder) = self.tasks.process_recorder.get()
+            && let Err(error) = recorder(id, receipt).await
+        {
+            self.tasks.unrecorded_process.store(true, Ordering::Release);
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub(crate) fn process_started(&mut self) {
         self.process_pending = true;
     }
@@ -278,7 +324,7 @@ pub(crate) async fn execute_with_images(
                 launch,
                 &cancelled,
                 output.as_ref(),
-                &mut lease.process_pending,
+                &mut lease,
             )
             .await
         })
