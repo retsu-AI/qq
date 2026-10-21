@@ -39,6 +39,7 @@ async fn reopen_preserves_completed_native_results_without_reexecuting_commands(
             approved_images: Vec::new(),
             environment: NativeEnvironment::capture(&[]).unwrap(),
             network: crate::command_owner::NativeNetwork::Host,
+            resources: crate::command_owner::NativeResources::Host,
             filesystem: crate::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         })
@@ -306,6 +307,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
                 approved_images: Vec::new(),
                 environment: NativeEnvironment::capture(&[]).unwrap(),
                 network: crate::command_owner::NativeNetwork::Host,
+                resources: crate::command_owner::NativeResources::Host,
                 filesystem: crate::command_owner::NativeFilesystem::Host,
                 not_after_ms: None,
             })

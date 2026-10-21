@@ -22,6 +22,7 @@ mod exec;
 mod filesystem;
 mod filesystem_root;
 mod network;
+mod resources;
 pub(crate) use exec::execute;
 
 #[derive(Clone)]
@@ -153,6 +154,38 @@ impl LinuxOwner {
                 filesystem_root::prepare(directories, cwd_path, command)
             })
             .transpose()?;
+        let resource_scope = native
+            .map(|native| native.resources)
+            .unwrap_or(crate::command_owner::NativeResources::Host);
+        let (resource_group, resource_fd) = match resource_scope {
+            crate::command_owner::NativeResources::Host => (None, None),
+            crate::command_owner::NativeResources::Limited { limits } => {
+                if filesystem.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "resource enforcement requires a private filesystem root",
+                    ));
+                }
+                let root = self.launcher.cgroup_root.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "resource enforcement requires an explicitly delegated cgroup root",
+                    )
+                })?;
+                for directory in &filesystem.as_ref().expect("checked filesystem").directories {
+                    if directory.writable {
+                        resources::reject_writable_controller(&File::open(format!(
+                            "/proc/self/fd/{}",
+                            directory.fd
+                        ))?)?;
+                    }
+                }
+                let (group, fd) = resources::Group::create(root, limits)?;
+                let raw = fd.as_raw_fd();
+                descriptors.push(fd);
+                (Some(group), Some(raw))
+            }
+        };
         let namespace_image = self.namespace_image.as_fd().try_clone_to_owned()?;
         let namespace_fd = namespace_image.as_raw_fd();
         let (namespace_program, namespace_arguments) = self
@@ -181,6 +214,7 @@ impl LinuxOwner {
             .invocation(format!("/proc/self/fd/{launcher_fd}").into());
         launcher_arguments.extend(self.launcher.arguments.iter().cloned());
         let packet = exec::Packet {
+            resource_fd,
             filesystem,
             isolated_network,
             program: program.as_bytes().to_vec(),
@@ -246,6 +280,7 @@ impl LinuxOwner {
             Startup {
                 acknowledgement,
                 gate,
+                resources: resource_group,
             },
         ))
     }
@@ -331,6 +366,7 @@ fn pipe() -> io::Result<(File, File)> {
 }
 
 pub(super) struct Startup {
+    resources: Option<resources::Group>,
     acknowledgement: File,
     gate: File,
 }
@@ -342,6 +378,7 @@ impl Startup {
         cancelled: &super::dispatch::ToolCancellation,
         deadline: std::time::Instant,
     ) -> io::Result<()> {
+        child.resources = self.resources;
         let acknowledgement = tokio::io::unix::AsyncFd::new(self.acknowledgement)?;
         let bytes = read_pipe(&acknowledgement, 4).await?;
         let pid = i32::from_le_bytes(
@@ -376,20 +413,25 @@ impl Startup {
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
         match read_pipe(&acknowledgement, 1).await?.as_slice() {
             b"g" => {}
-            b"r" => {
+            kind @ (b"r" | b"l") => {
+                let context = if kind == b"r" {
+                    "private filesystem"
+                } else {
+                    "resource"
+                };
                 let length: [u8; 2] = read_pipe(&acknowledgement, 2)
                     .await?
                     .try_into()
-                    .map_err(|_| io::Error::other("invalid filesystem refusal"))?;
+                    .map_err(|_| io::Error::other("invalid native startup refusal"))?;
                 let length = usize::from(u16::from_le_bytes(length));
                 if length > exec::MAX_REFUSAL_BYTES {
-                    return Err(io::Error::other("filesystem refusal exceeds its bound"));
+                    return Err(io::Error::other("native startup refusal exceeds its bound"));
                 }
                 let message = read_pipe(&acknowledgement, length).await?;
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
                     format!(
-                        "private filesystem setup failed: {}",
+                        "{context} setup failed: {}",
                         String::from_utf8_lossy(&message)
                     ),
                 ));
@@ -435,6 +477,7 @@ async fn read_pipe(file: &tokio::io::unix::AsyncFd<File>, length: usize) -> io::
 // wait confirms namespace death before reaping the monitor, preserving the
 // original process-group identity until all teardown checks have finished.
 pub(crate) struct Child {
+    resources: Option<resources::Group>,
     inner: tokio::process::Child,
     namespace: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
     namespace_observed: bool,
@@ -445,6 +488,7 @@ pub(crate) struct Child {
 impl From<tokio::process::Child> for Child {
     fn from(inner: tokio::process::Child) -> Self {
         Self {
+            resources: None,
             inner,
             namespace: None,
             namespace_observed: false,
@@ -500,6 +544,11 @@ impl Child {
             }
             lease.process_reaped();
         }
+        if let Some(resources) = self.resources.take() {
+            tokio::task::spawn_blocking(move || resources.cleanup())
+                .await
+                .map_err(io::Error::other)??;
+        }
         Ok(self.reported_status.unwrap_or(status))
     }
 }
@@ -522,6 +571,7 @@ pub(super) async fn spawn(
     lease.process_started();
     drop(command);
     let mut child = Child {
+        resources: None,
         inner,
         namespace: None,
         namespace_observed: false,
@@ -654,6 +704,7 @@ mod tests {
         let owner = LinuxOwner::discover(crate::command_owner::CommandLauncher {
             executable: std::path::PathBuf::from("/bin/sh"),
             arguments: vec!["-c".into(), "exit 0".into()],
+            cgroup_root: None,
         })
         .unwrap();
         let (command, startup) = owner

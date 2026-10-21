@@ -138,6 +138,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
@@ -206,6 +207,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
                     shell_policy: Default::default(),
                     approved_images: Vec::new(),
                     network: qq_core::command_owner::NativeNetwork::Host,
+                    resources: qq_core::command_owner::NativeResources::Host,
                     filesystem: qq_core::command_owner::NativeFilesystem::Host,
                     not_after_ms: None,
                 })
@@ -378,6 +380,7 @@ environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
@@ -493,6 +496,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };

@@ -147,6 +147,7 @@ async fn retry_after_fault(operation: &'static str, fault: Fault) {
                         shell_policy: Default::default(),
                         approved_images: Vec::new(),
                         network: qq_core::command_owner::NativeNetwork::Host,
+                        resources: qq_core::command_owner::NativeResources::Host,
                         filesystem: qq_core::command_owner::NativeFilesystem::Host,
                         not_after_ms: None,
                     })

@@ -209,6 +209,7 @@ pub(crate) struct NativeExecution {
     pub environment: crate::command_owner::NativeEnvironment,
     pub filesystem: crate::command_owner::NativeFilesystem,
     pub network: crate::command_owner::NativeNetwork,
+    pub resources: crate::command_owner::NativeResources,
 }
 
 /// The command and its capabilities are prepared together. Keeping this value
@@ -318,6 +319,8 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
+    #[error("resource enforcement is unavailable for this command launcher")]
+    ResourcesUnavailable,
     #[error("network enforcement is unavailable for this command launcher")]
     NetworkUnavailable,
     #[error("filesystem enforcement is unavailable for this command launcher")]

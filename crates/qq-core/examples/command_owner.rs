@@ -55,6 +55,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             shell_policy: ShellPolicy::default(),
             approved_images: Vec::new(),
             network: qq_core::command_owner::NativeNetwork::Host,
+            resources: qq_core::command_owner::NativeResources::Host,
             filesystem: qq_core::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         })

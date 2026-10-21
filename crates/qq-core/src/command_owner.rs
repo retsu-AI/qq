@@ -21,6 +21,8 @@ use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellat
 mod environment;
 mod filesystem;
 pub use filesystem::{NativeDirectoryGrant, NativeFilesystem};
+mod resources;
+pub use resources::{NativeResourceLimits, NativeResources};
 mod journal;
 mod workspace_identity;
 pub use environment::NativeEnvironment;
@@ -89,6 +91,10 @@ const MAX_LIVE_OUTPUT_BYTES: usize = crate::tools::MAX_SHELL_OUTPUT_BYTES;
 pub struct CommandLauncher {
     pub executable: PathBuf,
     pub arguments: Vec<std::ffi::OsString>,
+    /// Explicitly delegated cgroup v2 root with cpu, memory and pids enabled.
+    /// QQ never changes the host service manager's controller configuration.
+    #[cfg(target_os = "linux")]
+    pub cgroup_root: Option<NativeDirectoryGrant>,
 }
 
 impl CommandLauncher {
@@ -96,6 +102,8 @@ impl CommandLauncher {
         Self {
             executable,
             arguments: vec!["_command-exec".into()],
+            #[cfg(target_os = "linux")]
+            cgroup_root: None,
         }
     }
 }
@@ -130,6 +138,7 @@ pub struct NativeCommand {
     /// This is not inferred from the program, arguments, or a model decision.
     pub filesystem: NativeFilesystem,
     pub network: NativeNetwork,
+    pub resources: NativeResources,
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
@@ -393,6 +402,10 @@ impl CommandOwner {
             .filesystem
             .validate()
             .map_err(|_| CommandOwnerError::Invalid)?;
+        request
+            .resources
+            .validate()
+            .map_err(|_| CommandOwnerError::Invalid)?;
         let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = request.identity()?;
         if encoded.len() > MAX_REQUEST_BYTES {
@@ -579,6 +592,7 @@ impl CommandOwner {
                 environment: request.environment,
                 filesystem: request.filesystem,
                 network: request.network,
+                resources: request.resources,
             })),
             workspace,
             Arc::default(),
