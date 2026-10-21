@@ -14,6 +14,12 @@ async fn cancellation_during_cold_admission_keeps_submission_progressing() {
         cancellation: RunCancellation,
     }
     impl NativeCommandService for Starting {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            Box::pin(async { Ok(StoreId::from_bytes([7; 16])) })
+        }
+        fn acknowledge(&self, _: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            unreachable!()
+        }
         fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
             let startup = self.startup.clone();
             let cancellation = self.cancellation.clone();
@@ -53,6 +59,7 @@ async fn cancellation_during_cold_admission_keeps_submission_progressing() {
         cancellation: cancellation.clone(),
     });
     let tasks = ToolTasks::default();
+    tasks.set_native_recorder(|_, _| async { Ok(()) }).unwrap();
     let mut lease = tasks.enter();
     let cancelled = ToolCancellation::new(cancellation);
     let result = tokio::time::timeout(
@@ -67,7 +74,9 @@ async fn cancellation_during_cold_admission_keeps_submission_progressing() {
     )
     .await
     .expect("cancellation must not suspend the startup holding its connection permit");
-    assert_eq!(result, ToolOutput::interrupted("cancelled"));
+    let mut expected = ToolOutput::interrupted("cancelled");
+    expected.native_owner = Some(StoreId::from_bytes([7; 16]));
+    assert_eq!(result, expected);
     drop(lease);
     tasks.drain().await.unwrap();
 }

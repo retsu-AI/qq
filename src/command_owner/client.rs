@@ -226,7 +226,15 @@ impl CommandWorker {
         let capacity_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         let mut capacity_delay = Duration::from_millis(10);
         'request: loop {
-            let connection = self.connection().await?;
+            let connection = match self.connection().await {
+                Ok(connection) => connection,
+                Err(_) if uncertain && operation == "submit" => {
+                    return Err(io_error(
+                        "native admission outcome is unknown after reconnect",
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
             let response = self
                 .0
                 .http
@@ -265,7 +273,7 @@ impl CommandWorker {
                 continue;
             }
             if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                && matches!(operation, "cancel" | "wait")
+                && matches!(operation, "cancel" | "wait" | "acknowledge")
             {
                 let remaining =
                     capacity_deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -288,6 +296,7 @@ impl CommandWorker {
                     400 => CommandOwnerError::Invalid,
                     404 => CommandOwnerError::NotFound,
                     409 => CommandOwnerError::Conflict,
+                    410 => CommandOwnerError::Retired,
                     429 => CommandOwnerError::Full,
                     _ => CommandOwnerError::Unavailable,
                 });
@@ -318,6 +327,21 @@ impl CommandWorker {
 }
 
 impl NativeCommandService for CommandWorker {
+    fn identity(&self) -> NativeCommandFuture<StoreId> {
+        let client = self.clone();
+        Box::pin(async move { Ok(client.connection().await?.server_info().server_id) })
+    }
+    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+        let client = self.clone();
+        Box::pin(async move {
+            client
+                .post(
+                    "acknowledge",
+                    serde_json::to_vec(&serde_json::json!({"ids":ids}))?,
+                )
+                .await
+        })
+    }
     fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
         let client = self.clone();
         Box::pin(async move { client.post("submit", serde_json::to_vec(&request)?).await })

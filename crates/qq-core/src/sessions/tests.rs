@@ -1832,6 +1832,7 @@ async fn spill_one_call(
                 omitted_from_line: 2,
             }),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -4238,6 +4239,7 @@ async fn project_terminal_run_with_tool_boundaries(
             "persisted result".to_owned(),
             false,
             Vec::new(),
+            None,
             None,
             None,
             None,

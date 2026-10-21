@@ -13,6 +13,21 @@ pub(crate) async fn observe(
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled before submission");
     }
+    let owner = tokio::select! {
+        biased;
+        () = cancelled.cancelled() => return ToolOutput::interrupted("tool execution was cancelled before submission"),
+        owner = service.identity() => match owner {
+            Ok(owner) => owner,
+            Err(error @ CommandOwnerError::IncompatibleBuild { .. }) => return ToolOutput::refused(error.to_string()),
+            Err(error) => return ToolOutput::unobserved(format!("could not identify native command owner: {error}")),
+        }
+    };
+    if let Err(error) = lease.record_native_owner(id, owner).await {
+        return ToolOutput::unobserved(format!("could not persist native command owner: {error}"));
+    }
+    if cancelled.is_cancelled() {
+        return ToolOutput::interrupted("tool execution was cancelled before submission");
+    }
     // A lost admission response is not proof that no process started.
     lease.process_started();
     let mut stopping = false;
@@ -35,7 +50,11 @@ pub(crate) async fn observe(
     if let Err(error) = submitted {
         if matches!(
             error,
-            CommandOwnerError::Invalid | CommandOwnerError::Full | CommandOwnerError::Conflict
+            CommandOwnerError::Invalid
+                | CommandOwnerError::Full
+                | CommandOwnerError::Conflict
+                | CommandOwnerError::Retired
+                | CommandOwnerError::IncompatibleBuild { .. }
         ) {
             // These are definitive admission refusals, not lost responses.
             lease.process_reaped();
@@ -114,7 +133,12 @@ pub(crate) async fn observe(
                 lease.process_reaped();
                 return match persistence_error {
                     Some(error) => ToolOutput::unobserved(error),
-                    None => result.0,
+                    None => {
+                        let mut result = result.0;
+                        result.native_owner = Some(owner);
+                        lease.save_native_result(id, &result);
+                        result
+                    }
                 };
             }
             CommandStatus::Lost => {

@@ -160,6 +160,7 @@ async fn completion_cannot_replace_a_recorded_process_identity() {
             None,
             None,
             Some(Box::new(other)),
+            None,
         )
         .await;
     store
@@ -169,6 +170,7 @@ async fn completion_cannot_replace_a_recorded_process_identity() {
             "interrupted without a final receipt".to_owned(),
             true,
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -321,7 +323,8 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 Vec::new(),
                 None,
                 None,
-                Some(Box::new(other_call))
+                Some(Box::new(other_call)),
+                None,
             )
             .await
             .is_err()
@@ -354,7 +357,8 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 Vec::new(),
                 None,
                 None,
-                Some(Box::new(invalid))
+                Some(Box::new(invalid)),
+                None,
             )
             .await
             .is_err()
@@ -371,7 +375,8 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                 Vec::new(),
                 None,
                 None,
-                Some(Box::new(mismatch))
+                Some(Box::new(mismatch)),
+                None,
             )
             .await
             .is_err()
@@ -399,7 +404,8 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
                     digest: crate::workspace::content_hash(text.as_bytes()),
                     omitted_from_line: 2
                 }),
-                Some(Box::new(receipt.clone()))
+                Some(Box::new(receipt.clone())),
+                None,
             )
             .await
             .is_err()
@@ -445,6 +451,7 @@ async fn ab1_execution_receipt_is_atomic_bounded_and_survives_reopen() {
             None,
             None,
             Some(Box::new(receipt.clone())),
+            None,
         )
         .await
         .unwrap();
@@ -490,6 +497,7 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -519,14 +527,63 @@ async fn ab1_historical_context_stays_unavailable_and_wrong_schema_is_rejected()
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn configured_owner_preserves_call_identity_and_permission_admission() {
-    use crate::command_owner::{CommandOwner, CommandStatus};
+    use crate::command_owner::{
+        CommandOwner, CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+        NativeCommandService,
+    };
+    struct CheckedOwner {
+        owner: CommandOwner,
+        database: Arc<std::sync::Mutex<Option<PathBuf>>>,
+        lose_ack: bool,
+    }
+    impl NativeCommandService for CheckedOwner {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            NativeCommandService::identity(&self.owner)
+        }
+        fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+            NativeCommandService::submit(&self.owner, request)
+        }
+        fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
+            NativeCommandService::wait(&self.owner, id, after)
+        }
+        fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+            NativeCommandService::cancel(&self.owner, id)
+        }
+        fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            let path = self.database.lock().unwrap().clone().unwrap();
+            let owner = self.owner.clone();
+            let check = ids.clone();
+            let lose_ack = self.lose_ack;
+            Box::pin(async move {
+                tokio::task::spawn_blocking(move || {
+                    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+                    for id in check {
+                        let (saved,result): (bool,String) = db.query_row(
+                            "SELECT n.result_saved,t.result FROM native_command_owners n JOIN tool_calls t ON t.id=n.tool_call_id WHERE t.id=?1",
+                            [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?))
+                        ).unwrap();
+                        assert!(saved, "acknowledgement must follow the local result transaction");
+                        assert!(result.contains("owned"));
+                    }
+                }).await.unwrap();
+                owner.acknowledge(ids).await?;
+                if lose_ack {
+                    Err(CommandOwnerError::Unavailable)
+                } else {
+                    Ok(())
+                }
+            })
+        }
+    }
     let allowed = r#"{"command":"printf owned; printf once >> counter"}"#;
-    for (mode, arguments, admitted) in [
-        (ApprovalMode::Full, allowed, true),
-        (ApprovalMode::ReadOnly, allowed, false),
+    for (mode, arguments, admitted, lose_ack) in [
+        (ApprovalMode::Full, allowed, true, false),
+        (ApprovalMode::Full, allowed, true, true),
+        (ApprovalMode::ReadOnly, allowed, false, false),
         (
             ApprovalMode::Full,
             r#"{"command":"printf once >> counter","env":["UNGRANTED_SECRET"]}"#,
+            false,
             false,
         ),
     ] {
@@ -538,14 +595,22 @@ async fn configured_owner_preserves_call_identity_and_permission_admission() {
         )
         .await
         .unwrap();
+        let database = Arc::new(std::sync::Mutex::new(None));
+        let service = Arc::new(CheckedOwner {
+            owner: owner.clone(),
+            database: database.clone(),
+            lose_ack,
+        });
         let mut harness = scripted_runs_harness_with_commands(
             mode,
             vec![vec![("shell", arguments.to_owned())]],
             None,
             None,
-            Some(Arc::new(owner.clone())),
+            Some(service),
         )
         .await;
+        let database_path = harness._directory.path().join("sessions.sqlite3");
+        *database.lock().unwrap() = Some(database_path.clone());
         let run = submit_prompt(&harness, "execute").await;
         collect_until(&mut harness.events, finished_for(run)).await;
         let id: ToolCallId = harness
@@ -562,10 +627,12 @@ async fn configured_owner_preserves_call_identity_and_permission_admission() {
             })
             .await
             .unwrap();
-        let observed = owner.snapshot(id).await;
         harness.runtime.shutdown().await.unwrap();
-        owner.shutdown().await.unwrap();
+        let observed = owner.snapshot(id).await;
+        drop(harness.events);
+        drop(harness.runtime);
         if !admitted {
+            owner.shutdown().await.unwrap();
             assert!(matches!(
                 observed,
                 Err(crate::command_owner::CommandOwnerError::NotFound)
@@ -573,9 +640,47 @@ async fn configured_owner_preserves_call_identity_and_permission_admission() {
             assert!(!harness.workspace_path.join("counter").exists());
             continue;
         }
-        let observed = observed.expect("the session call must execute through the supplied owner");
-        assert_eq!(observed.status, CommandStatus::Finished);
-        assert!(observed.result.unwrap().text().contains("owned"));
+        if lose_ack {
+            let mut options = SessionRuntimeOptions::new(database_path.clone());
+            options.native_commands = Some(Arc::new(owner.clone()));
+            let reopened = SessionRuntime::open(
+                options,
+                Arc::new(ScriptedRunsLoader {
+                    requests: Arc::new(StdMutex::new(Vec::new())),
+                    runs: Vec::new(),
+                    loads: StdMutex::new(0),
+                }),
+            )
+            .await
+            .unwrap();
+            reopened.shutdown().await.unwrap();
+        }
+        owner.shutdown().await.unwrap();
+        assert!(
+            matches!(observed, Err(CommandOwnerError::Retired)),
+            "a saved result must release worker observations: {observed:?}"
+        );
+        let retained =
+            rusqlite::Connection::open(harness._directory.path().join("sessions.sqlite3")).unwrap();
+        let result: String = retained
+            .query_row(
+                "SELECT result FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(result.contains("owned"));
+        let pending: u64 = retained
+            .query_row(
+                "SELECT COUNT(*) FROM native_command_owners WHERE tool_call_id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pending, 0,
+            "restart must retry a lost acknowledgement response"
+        );
         assert_eq!(
             std::fs::read_to_string(harness.workspace_path.join("counter")).unwrap(),
             "once"
@@ -586,7 +691,7 @@ async fn configured_owner_preserves_call_identity_and_permission_admission() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn cancelling_a_session_call_cancels_and_drains_its_configured_owner() {
-    use crate::command_owner::{CommandOwner, CommandStatus};
+    use crate::command_owner::{CommandOwner, CommandOwnerError};
     let state = tempfile::tempdir().unwrap();
     let owner = CommandOwner::open(
         state.path().join("owner"),
@@ -631,8 +736,8 @@ async fn cancelling_a_session_call_cancels_and_drains_its_configured_owner() {
         .await
         .unwrap();
     let terminal = collect_until(&mut harness.events, finished_for(run)).await;
-    let observed = owner.snapshot(id).await.unwrap();
     harness.runtime.shutdown().await.unwrap();
+    let observed = owner.snapshot(id).await;
     owner.shutdown().await.unwrap();
     assert!(matches!(
         &terminal.last().unwrap().event,
@@ -641,13 +746,32 @@ async fn cancelling_a_session_call_cancels_and_drains_its_configured_owner() {
             ..
         }
     ));
-    assert_eq!(observed.status, CommandStatus::Finished);
-    assert!(observed.result.unwrap().is_error());
+    assert!(
+        matches!(observed, Err(CommandOwnerError::Retired)),
+        "cancelled results must be saved before reclaiming observations: {observed:?}"
+    );
+    let saved = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT result FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        saved.contains("cancel"),
+        "the actual worker result must survive cancellation: {saved}"
+    );
     assert!(!harness.workspace_path.join("escaped").exists());
 }
 
 #[tokio::test]
-async fn native_capacity_refusal_does_not_poison_session_cleanup() {
+async fn native_admission_refusals_do_not_poison_session_cleanup() {
     use crate::command_owner::{
         CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
         NativeCommandService,
@@ -655,9 +779,25 @@ async fn native_capacity_refusal_does_not_poison_session_cleanup() {
     type Admissions = Arc<std::sync::Mutex<Vec<(NativeCommand, u64)>>>;
     struct Full(Admissions);
     impl NativeCommandService for Full {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            Box::pin(async { Ok(StoreId::from_bytes([7; 16])) })
+        }
+        fn acknowledge(&self, _: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            unreachable!()
+        }
         fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+            let incompatible = request.tool == "exec";
             self.0.lock().unwrap().push((request, now_ms()));
-            Box::pin(async { Err(CommandOwnerError::Full) })
+            Box::pin(async move {
+                Err(if incompatible {
+                    CommandOwnerError::IncompatibleBuild {
+                        expected: "new".to_owned(),
+                        actual: "old".to_owned(),
+                    }
+                } else {
+                    CommandOwnerError::Full
+                })
+            })
         }
         fn wait(&self, _: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
             unreachable!()

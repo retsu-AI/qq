@@ -221,6 +221,7 @@ pub(crate) enum RuntimeEvent {
         projection: Arc<ProjectedToolTurn>,
     },
     ToolCallFinished {
+        native_owner: Option<qq_protocol::StoreId>,
         id: ToolCallId,
         result: String,
         is_error: bool,

@@ -3786,6 +3786,7 @@ async fn goal_parent51_upgrade_retains_notices_and_process_receipts() {
             None,
             None,
             Some(Box::new(receipt.clone())),
+            None,
         )
         .await
         .unwrap();

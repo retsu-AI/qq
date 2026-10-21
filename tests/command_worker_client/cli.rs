@@ -202,10 +202,30 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
     );
     let worker = calls(
         &data.join("command-owner-v3/commands/commands.sqlite3"),
-        "SELECT id FROM commands WHERE status='finished'",
+        "SELECT id FROM retired_commands",
     );
     assert_eq!(session.len(), 1);
     assert_eq!(session, worker);
+    assert!(
+        calls(
+            &data.join("command-owner-v3/commands/commands.sqlite3"),
+            "SELECT id FROM commands",
+        )
+        .is_empty(),
+        "the durable session result must release worker observations"
+    );
+    let connection = rusqlite::Connection::open(data.join("sessions.sqlite3")).unwrap();
+    let saved: String = connection
+        .query_row(
+            "SELECT result FROM tool_calls WHERE id=?1",
+            [&session[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        saved.contains("native-result"),
+        "reclaimed worker output must remain in the session: {saved}"
+    );
     assert_eq!(
         tokio::task::spawn_blocking(move || provider.capture_all())
             .await

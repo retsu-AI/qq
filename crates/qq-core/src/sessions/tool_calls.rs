@@ -62,6 +62,27 @@ pub(super) fn append_tool_call_output(
     Ok(event)
 }
 
+/// Binds an invocation to its stable worker journal before admission can have effects.
+pub(super) fn record_native_owner(
+    connection: &mut Connection,
+    identity: RunIdentity,
+    id: ToolCallId,
+    owner: StoreId,
+) -> Result<(), SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    let written = transaction.execute(
+        "INSERT INTO native_command_owners(tool_call_id, owner_id)
+         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec')
+         ON CONFLICT(tool_call_id) DO UPDATE SET owner_id=excluded.owner_id WHERE native_command_owners.owner_id=excluded.owner_id",
+        params![id.to_string(),identity.run_id.to_string(),owner.to_string()],
+    )?;
+    if written != 1 {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Records the native process while its call is still running. This is
 /// private recovery evidence, not an authorization grant or a result.
 pub(super) fn record_tool_process(
@@ -114,6 +135,7 @@ pub(super) fn finish_tool_call(
     display: Option<ToolCallDisplay>,
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
+    native_owner: Option<StoreId>,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
@@ -194,6 +216,15 @@ pub(super) fn finish_tool_call(
     )?;
     if updated != 1 {
         return Err(SessionRuntimeError::Unavailable);
+    }
+    if let Some(owner) = native_owner {
+        let written = transaction.execute(
+            "UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2",
+            params![tool_call_id.to_string(), owner.to_string()],
+        )?;
+        if written != 1 {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
     }
     for update in &file_states {
         record_session_file(&transaction, identity.session_id, update, now)?;

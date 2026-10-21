@@ -16,6 +16,11 @@ async fn cancellation_retries_transport_saturation() {
 }
 
 #[tokio::test]
+async fn acknowledgement_retries_transport_saturation() {
+    retry_after_fault("acknowledge", Fault::Saturated).await;
+}
+
+#[tokio::test]
 async fn submission_retries_a_truncated_response_without_replaying() {
     retry_after_fault("submit", Fault::Truncated).await;
 }
@@ -126,6 +131,7 @@ async fn retry_after_fault(operation: &'static str, fault: Fault) {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         match operation {
             "cancel" => client.cancel(id).await,
+            "acknowledge" => client.acknowledge(vec![id]).await,
             "submit" => {
                 client
                     .submit(NativeCommand {
@@ -167,6 +173,10 @@ async fn retry_after_fault(operation: &'static str, fault: Fault) {
         "retry must preserve request identity and cursor"
     );
     assert!(requests[0].0.ends_with(operation));
-    assert_eq!(snapshot.unwrap().status, CommandStatus::Finished);
+    if operation == "acknowledge" {
+        assert!(matches!(snapshot, Err(CommandOwnerError::Retired)));
+    } else {
+        assert_eq!(snapshot.unwrap().status, CommandStatus::Finished);
+    }
     assert!(!workspace.path().join("escaped").exists());
 }

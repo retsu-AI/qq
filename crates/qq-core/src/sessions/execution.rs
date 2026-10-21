@@ -147,14 +147,14 @@ pub(super) enum ExecutionCleanupError {
 /// Proof that a run's tools and children were drained. The store requires it
 /// to settle a started run, so a terminal event cannot be published while
 /// execution is still in flight; only `RunResources::drain` / `stop` mint it.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct TeardownComplete(());
+#[derive(Clone, Debug)]
+pub(super) struct TeardownComplete(Vec<(ToolCallId, crate::tools::ToolOutput)>);
 
 impl TeardownComplete {
     /// Store-level tests settle claims that never ran anything.
     #[cfg(test)]
     pub(super) const fn nothing_ran() -> Self {
-        Self(())
+        Self(Vec::new())
     }
 }
 
@@ -190,7 +190,7 @@ impl RunResources {
     pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
-            (Ok(()), Ok(_)) => Ok(TeardownComplete(())),
+            (Ok(()), Ok(_)) => Ok(TeardownComplete(self.tools.drain_native_results())),
             (Err(error), _) => Err(ExecutionCleanupError::Tools(error)),
             (_, Err(error)) => Err(ExecutionCleanupError::Children(error)),
         }
@@ -672,6 +672,15 @@ pub(super) async fn execute_run(
     mut cancellation: watch::Receiver<bool>,
     resources: RunResources,
 ) {
+    let native_store = inner.store.clone();
+    let native_identity = claimed.identity;
+    if let Err(error) = resources.tools.set_native_recorder(move |id, owner| {
+        let store = native_store.clone();
+        async move { store.record_native_owner(native_identity, id, owner).await }
+    }) {
+        finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
+        return;
+    }
     let process_store = inner.store.clone();
     let process_identity = claimed.identity;
     if let Err(error) = resources.tools.set_process_recorder(move |id, receipt| {
@@ -2857,6 +2866,7 @@ async fn execute_started_run(
                 }
             }
             RunInput::Event(Some(RuntimeEvent::ToolCallFinished {
+                native_owner,
                 id,
                 result,
                 is_error,
@@ -2902,10 +2912,16 @@ async fn execute_started_run(
                         display,
                         spill,
                         execution_context,
+                        native_owner,
                     )
                     .await
                 {
-                    Ok(_) => {}
+                    Ok(_) => {
+                        resources.tools.take_native_result(id);
+                        if let Some(acknowledgements) = &inner.native_ack {
+                            acknowledgements.wake();
+                        }
+                    }
                     Err(error) => {
                         let Ok(teardown) = resources.stop(&mut events).await else {
                             inner.failed.send_replace(true);
@@ -3584,8 +3600,36 @@ async fn finish_run_accounted(
     claimed: &ClaimedRun,
     outcome: RunOutcome,
     accounting: Option<RunAccounting>,
-    teardown: TeardownComplete,
+    mut teardown: TeardownComplete,
 ) {
+    // The event waiter may have been dropped during cancellation. Its owned
+    // observer still drains, and its actual result must precede run settlement.
+    for (id, result) in std::mem::take(&mut teardown.0) {
+        match inner
+            .store
+            .finish_tool_call(
+                claimed,
+                id,
+                result.model_text,
+                result.is_error,
+                result.file_states,
+                result.ui_payload,
+                result.spill,
+                result.execution_context,
+                result.native_owner,
+            )
+            .await
+        {
+            Ok(event) => inner.notify(event.cursor),
+            Err(_) => {
+                inner.failed.send_replace(true);
+                return;
+            }
+        }
+        if let Some(acknowledgements) = &inner.native_ack {
+            acknowledgements.wake();
+        }
+    }
     if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
         if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
         && approvals::expire_goal_hold(inner, claimed, false)

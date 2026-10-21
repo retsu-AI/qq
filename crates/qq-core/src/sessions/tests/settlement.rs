@@ -411,6 +411,7 @@ async fn recovery_interrupts_only_the_current_turns_message() {
             None,
             None,
             None,
+            None,
         )
         .await
         .unwrap();

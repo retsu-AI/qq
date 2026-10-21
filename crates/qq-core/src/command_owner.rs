@@ -37,12 +37,22 @@ pub type NativeCommandFuture<T> = std::pin::Pin<
 
 /// The trusted host's command service. Observation never implies cancellation.
 pub trait NativeCommandService: Send + Sync + 'static {
+    fn identity(&self) -> NativeCommandFuture<StoreId>;
+    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()>;
     fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()>;
     fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot>;
     fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()>;
 }
 
 impl NativeCommandService for CommandOwner {
+    fn identity(&self) -> NativeCommandFuture<StoreId> {
+        let id = self.store_id();
+        Box::pin(async move { Ok(id) })
+    }
+    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+        let owner = self.clone();
+        Box::pin(async move { owner.acknowledge(ids).await })
+    }
     fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
         let owner = self.clone();
         Box::pin(async move { owner.submit(request).await })

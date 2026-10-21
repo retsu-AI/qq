@@ -579,6 +579,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     pub(super) native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    pub(super) native_ack: Option<super::native_ack::Acknowledgements>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -758,7 +759,11 @@ impl SessionRuntime {
         let (scheduler_stopped, _) = watch::channel(false);
         let (grant_promotion_stopped, _) = watch::channel(false);
         let (settlements, _) = watch::channel(0_u64);
+        let native_ack = options.native_commands.as_ref().map(|service| {
+            super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
+        });
         let inner = Arc::new(SessionRuntimeInner {
+            native_ack,
             store,
             loader,
             grant_authority: options.grant_authority,
@@ -1298,6 +1303,9 @@ impl SessionRuntime {
                 // cannot race this success boundary.
                 if *self.inner.failed.borrow() {
                     return Err(SessionRuntimeError::Unavailable);
+                }
+                if let Some(acknowledgements) = &self.inner.native_ack {
+                    acknowledgements.shutdown().await;
                 }
                 return Ok(());
             }

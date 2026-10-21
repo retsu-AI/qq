@@ -1150,8 +1150,15 @@ The 10,000-observation limit therefore counts unacknowledged commands; compact
 retired identities continue to grow with history. Running commands cannot be
 acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
-The SDK example exercises this lifecycle; session consumers must persist their
-own result before acknowledging the worker.
+Sessions bind the original worker journal before submission and commit an
+acknowledgement intent with the actual terminal result. Only then can worker
+observations be reclaimed. Pending intents survive interruption and session
+pruning; reopening and later tool results retry a bounded batch. A generic
+interrupted result does not acknowledge an unobserved worker result. Cancellation
+teardown saves the actual terminal worker result even when its event waiter was
+dropped. A bounded background task coalesces acknowledgements so reclamation
+does not delay agent execution. The SDK
+example exercises the explicit save/discard-and-acknowledge lifecycle.
 
 Both tools accept an optional workspace-relative `cwd`. Launch validation
 rejects empty, NUL-containing, absolute or prefixed paths and parent traversal

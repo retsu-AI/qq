@@ -43,6 +43,9 @@ struct ToolTaskState {
     native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     native_deadline_ms: std::sync::atomic::AtomicU64,
     process_recorder: OnceLock<ProcessRecorder>,
+    native_recorder: OnceLock<NativeRecorder>,
+    native_results:
+        std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
     output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
     unrecorded_output: AtomicBool,
@@ -63,6 +66,9 @@ type ProcessRecorder = Box<
         + Sync,
 >;
 
+type NativeRecorder =
+    Box<dyn Fn(qq_protocol::ToolCallId, qq_protocol::StoreId) -> RecordFuture + Send + Sync>;
+
 type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -76,6 +82,30 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    pub(crate) fn saved_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .get(&id)
+            .cloned()
+    }
+    pub(crate) fn drain_native_results(&self) -> Vec<(qq_protocol::ToolCallId, ToolOutput)> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .drain()
+            .collect()
+    }
+    pub(crate) fn take_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .remove(&id)
+    }
+
     pub(crate) fn shorten_native_deadline(&self, deadline: Option<u64>) {
         if let Some(deadline) = deadline {
             let _ = self.0.native_deadline_ms.fetch_update(
@@ -110,6 +140,19 @@ impl ToolTasks {
             ..ToolTaskState::default()
         })))
     }
+    pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, qq_protocol::StoreId) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .native_recorder
+            .set(Box::new(move |id, owner| Box::pin(recorder(id, owner))))
+            .map_err(|_| ToolDrainError::UnrecordedProcess)
+    }
+
     pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
         F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
@@ -178,6 +221,14 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    pub(crate) fn save_native_result(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
+        self.tasks
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .insert(id, result.clone());
+    }
+
     #[cfg(target_os = "linux")]
     pub(super) fn linux_owner(&self) -> Option<&super::linux_owner::LinuxOwner> {
         self.tasks.linux_owner.as_ref()
@@ -190,6 +241,17 @@ impl ToolTaskLease {
             tasks: Arc::clone(&self.tasks),
             process_pending: false,
         }
+    }
+
+    pub(crate) fn record_native_owner(
+        &self,
+        id: qq_protocol::ToolCallId,
+        owner: qq_protocol::StoreId,
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.native_recorder.get() else {
+            return Box::pin(async { Err(crate::sessions::SessionRuntimeError::Unavailable) });
+        };
+        self.record(recorder(id, owner), RecordKind::Process)
     }
 
     pub(crate) fn record_process(
@@ -578,6 +640,9 @@ pub(crate) enum ResultDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
+    /// Only the observer can attest that this is the worker's terminal result.
+    #[serde(skip)]
+    pub(crate) native_owner: Option<qq_protocol::StoreId>,
     pub(crate) disposition: ResultDisposition,
     /// Result identity before masking, output bounds or citations.
     /// Constructors hash their input; producers that clip earlier override it.
@@ -721,6 +786,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill,
             execution_context: None,
+            native_owner: None,
         }
     }
 
@@ -737,6 +803,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
         }
     }
 
@@ -752,6 +819,7 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
         }
     }
 }
