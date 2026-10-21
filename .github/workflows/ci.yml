@@ -196,6 +196,8 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch
           bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
+          bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
+          bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_migration_preserves_the_journal_identity_and_results
           bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
           bash .github/scripts/test-exact.sh command_owner::tests::unconfirmed_process_exit_blocks_owner_continuation
           bash .github/scripts/test-exact.sh command_owner::tests::losing_the_cancel_response_does_not_abandon_committed_cancellation
@@ -227,6 +229,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::journal_rejects_untrusted_ancestors_before_creating_state
           bash .github/scripts/test-exact.sh command_owner::tests::control_dense_native_output_fits_the_durable_result_bound
           bash .github/scripts/test-exact.sh command_owner::tests::live_output_is_durable_before_command_completion
+          bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_is_bounded_atomic_and_never_discards_running_work
           bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound
           bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
       - name: Exercise the embedding caller
