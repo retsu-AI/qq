@@ -1195,7 +1195,7 @@ pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>
         let Some(connection) = connection_for_discovery(read_connection(paths))? else {
             return Ok(None);
         };
-        match probe_health(&client, &connection).await {
+        match probe_health(&client, &connection, "/v1/health").await {
             Ok(info) if info == *connection.server_info() => return Ok(Some(connection)),
             Ok(_) | Err(HealthProbeError::Unavailable) => {}
             Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1299,7 +1299,7 @@ async fn find_existing_server(paths: &ServerPaths) -> Result<ServerConnection, S
 
     for attempt in 0..STARTUP_RETRIES {
         match read_connection(paths) {
-            Ok(Some(connection)) => match probe_health(&client, &connection).await {
+            Ok(Some(connection)) => match probe_health(&client, &connection, "/v1/health").await {
                 Ok(info) if info == *connection.server_info() => return Ok(connection),
                 Ok(_) | Err(HealthProbeError::Unavailable) => {}
                 Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1341,9 +1341,10 @@ enum HealthProbeError {
 async fn probe_health(
     client: &reqwest::Client,
     connection: &ServerConnection,
+    path: &str,
 ) -> Result<ServerInfo, HealthProbeError> {
     let response = client
-        .get(connection.endpoint("/v1/health"))
+        .get(connection.endpoint(path))
         .bearer_auth(connection.expose_bearer_token())
         .timeout(PROBE_TIMEOUT)
         .send()
@@ -1636,6 +1637,8 @@ pub enum ServerError {
     },
     #[error("the existing server did not become healthy")]
     ExistingServerUnavailable,
+    #[error("the existing instance does not provide a healthy command-owner service")]
+    ExistingCommandOwnerUnavailable,
     #[error("local server stopped unexpectedly")]
     Serve {
         #[source]
@@ -2743,7 +2746,7 @@ mod tests {
         write_metadata_atomically(&paths, &MetadataFile::new(&stale)).unwrap();
         let probe = probe_client().unwrap();
         assert!(matches!(
-            probe_health(&probe, &stale).await,
+            probe_health(&probe, &stale, "/v1/health").await,
             Err(HealthProbeError::Unavailable)
         ));
         let handler = unavailable_handler();

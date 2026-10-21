@@ -34,6 +34,19 @@ impl ServerReservation {
     }
 }
 
+/// Verify the private transport version and discovery identity before reusing
+/// an instance as a command worker. Display names are not identity.
+pub async fn verify_command_owner(connection: &ServerConnection) -> Result<(), ServerError> {
+    let client = crate::probe_client().map_err(|_| ServerError::ExistingCommandOwnerUnavailable)?;
+    let info = crate::probe_health(&client, connection, &format!("{PREFIX}/health"))
+        .await
+        .map_err(|_| ServerError::ExistingCommandOwnerUnavailable)?;
+    if &info != connection.server_info() {
+        return Err(ServerError::StateRace);
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct OwnerState {
     owner: CommandOwner,
@@ -53,6 +66,7 @@ fn router(owner: CommandOwner, connection: ServerConnection) -> Router {
     };
     Router::new()
         .route("/v1/health", get(health))
+        .route(&format!("{PREFIX}/health"), get(health))
         .route(&format!("{PREFIX}/submit"), post(submit))
         .route(&format!("{PREFIX}/snapshot"), post(snapshot))
         .route(&format!("{PREFIX}/wait"), post(wait))
@@ -66,7 +80,10 @@ async fn admit(State(state): State<OwnerState>, request: Request, next: Next) ->
     if !crate::authorized(request.headers(), &state.connection) {
         return api_error(StatusCode::UNAUTHORIZED, "authentication required");
     }
-    if request.uri().path() == "/v1/health" {
+    if matches!(
+        request.uri().path(),
+        "/v1/health" | "/internal/command-owner/v1/health"
+    ) {
         return next.run(request).await;
     }
     let slots = match request.uri().path() {

@@ -162,45 +162,138 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
 
 #[tokio::test]
 async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
+    for fault in ["write", "snapshot", "submit"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("owner");
+        let (mut child, connection) = start(&directory).await;
+        let store_id = connection.server_info().server_id;
+        let db = rusqlite::Connection::open(directory.join("commands/commands.sqlite3")).unwrap();
+        db.execute_batch(if fault == "write" {
+            "CREATE TRIGGER fail_admission BEFORE INSERT ON commands
+             BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;"
+        } else {
+            "ALTER TABLE commands RENAME TO hidden_commands"
+        })
+        .unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let (operation, request) = match fault {
+            "write" => ("cancel", serde_json::json!({"id":id})),
+            "snapshot" => ("snapshot", serde_json::json!({"id":id})),
+            "submit" => (
+                "submit",
+                serde_json::to_value(NativeCommand {
+                    id,
+                    workspace: std::fs::canonicalize(root.path()).unwrap(),
+                    tool: "shell".to_owned(),
+                    arguments: r#"{"command":"echo forbidden"}"#.to_owned(),
+                    shell_policy: Default::default(),
+                    approved_images: Vec::new(),
+                    not_after_ms: None,
+                })
+                .unwrap(),
+            ),
+            _ => unreachable!(),
+        };
+        let _ = client
+            .post(format!(
+                "http://{}/internal/command-owner/v1/{operation}",
+                connection.address()
+            ))
+            .bearer_auth(connection.expose_bearer_token())
+            .json(&request)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        let stopped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        if stopped.is_err() {
+            child.kill().await.unwrap();
+            child.wait().await.unwrap();
+        }
+        let status = stopped
+            .expect("a failed worker must exit without an OS signal")
+            .unwrap();
+        assert!(!status.success());
+        assert!(!directory.join("server.ron").exists());
+        db.execute_batch(if fault == "write" {
+            "DROP TRIGGER fail_admission"
+        } else {
+            "ALTER TABLE hidden_commands RENAME TO commands"
+        })
+        .unwrap();
+        drop(db);
+        let (mut replacement, connection) = start(&directory).await;
+        assert_eq!(connection.server_info().server_id, store_id);
+        replacement.kill().await.unwrap();
+        replacement.wait().await.unwrap();
+    }
+}
+
+async fn invoke_start(directory: &Path) -> std::process::Output {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(env!("CARGO_BIN_EXE_qq"))
+            .args(["_command-owner", "--state-dir"])
+            .arg(directory)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_worker_refuses_to_reuse_a_regular_server_even_with_the_same_label() {
+    struct Unavailable;
+    impl qq_server::ServerHandler for Unavailable {}
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let (mut child, connection) = start(&directory).await;
-    let store_id = connection.server_info().server_id;
-    let db = rusqlite::Connection::open(directory.join("commands/commands.sqlite3")).unwrap();
-    db.execute_batch(
-        "CREATE TRIGGER fail_admission BEFORE INSERT ON commands
-         BEGIN SELECT RAISE(ABORT, 'injected journal failure'); END;",
-    )
-    .unwrap();
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    // Cancelling an unknown ID durably inserts a tombstone. The failed write
-    // must fail the owner and end discovery, even without an active command.
-    let _ = client
-        .post(format!(
-            "http://{}/internal/command-owner/v1/cancel",
-            connection.address()
-        ))
-        .bearer_auth(connection.expose_bearer_token())
-        .json(&serde_json::json!({"id":ToolCallId::generate().unwrap()}))
-        .timeout(Duration::from_secs(5))
-        .send()
-        .await;
-    let stopped = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-    if stopped.is_err() {
-        child.kill().await.unwrap();
-        child.wait().await.unwrap();
-    }
-    let status = stopped
-        .expect("a failed worker must exit without an OS signal")
+    let paths = ServerPaths::new(&directory);
+    let reservation = match qq_server::reserve(qq_server::ServerOptions::new(paths.clone()))
+        .await
+        .unwrap()
+    {
+        qq_server::ReserveOutcome::Reserved(reservation) => reservation,
+        qq_server::ReserveOutcome::Existing(_) => panic!("fixture must reserve a new server"),
+    };
+    let identity = qq_server::ServerIdentity::new(
+        qq_protocol::StoreId::generate().unwrap(),
+        Some("qq-command-owner"),
+    );
+    let server = reservation
+        .start(std::sync::Arc::new(Unavailable), identity)
         .unwrap();
-    assert!(!status.success());
-    assert!(!directory.join("server.ron").exists());
-    db.execute_batch("DROP TRIGGER fail_admission").unwrap();
-    drop(db);
-    let (mut replacement, connection) = start(&directory).await;
-    assert_eq!(connection.server_info().server_id, store_id);
-    replacement.kill().await.unwrap();
-    replacement.wait().await.unwrap();
+    let metadata = tokio::fs::read(directory.join("server.ron")).await.unwrap();
+    let output = invoke_start(&directory).await;
+    let discovered = qq_server::discover_at(&paths).await.unwrap().unwrap();
+    assert_eq!(discovered.server_info(), server.connection().server_info());
+    assert_eq!(
+        tokio::fs::read(directory.join("server.ron")).await.unwrap(),
+        metadata
+    );
+    server.shutdown().await.unwrap();
+    assert!(
+        !output.status.success(),
+        "a regular server cannot host command execution: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(!directory.join("commands").exists());
+    let (mut worker, connection) = start(&directory).await;
+    let output = invoke_start(&directory).await;
+    let reused = qq_server::discover_at(&paths).await.unwrap().unwrap();
+    worker.kill().await.unwrap();
+    worker.wait().await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("qq command owner already running at ")
+    );
+    assert_eq!(reused.server_info(), connection.server_info());
 }
 
 #[cfg(unix)]
