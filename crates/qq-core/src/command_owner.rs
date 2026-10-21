@@ -168,6 +168,7 @@ struct OwnerState {
     jobs: Arc<Mutex<HashMap<ToolCallId, LiveCommand>>>,
     slots: Arc<Semaphore>,
     controls: Arc<Semaphore>,
+    acknowledgements: Arc<Semaphore>,
     tools: ToolTasks,
     producer: Arc<ProcessProducer>,
     failed: watch::Sender<bool>,
@@ -274,6 +275,7 @@ impl CommandOwner {
             jobs,
             slots: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
             controls: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
+            acknowledgements: Arc::new(Semaphore::new(MAX_ACTIVE as usize)),
             tools,
             producer: Arc::new(ProcessProducer::new(source_revision)),
             failed,
@@ -601,7 +603,7 @@ impl CommandOwner {
         if ids.is_empty() || ids.len() > 128 {
             return Err(CommandOwnerError::Invalid);
         }
-        let slot = Arc::clone(&self.0.controls)
+        let slot = Arc::clone(&self.0.acknowledgements)
             .try_acquire_owned()
             .map_err(|_| CommandOwnerError::Full)?;
         let lease = self.0.tools.enter();

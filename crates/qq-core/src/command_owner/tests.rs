@@ -1834,3 +1834,55 @@ async fn accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdow
         "shutdown must drain an accepted acknowledgement even when its caller disconnects"
     );
 }
+
+#[tokio::test]
+async fn acknowledgement_saturation_does_not_delay_live_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let completed = ToolCallId::generate().unwrap();
+    owner.cancel(completed).await.unwrap();
+    let running = ToolCallId::generate().unwrap();
+    let cancellation = RunCancellation::new();
+    owner.0.jobs.lock().unwrap().insert(
+        running,
+        LiveCommand {
+            changed: watch::channel(0).0,
+            cancellation: cancellation.clone(),
+        },
+    );
+    let other = ToolCallId::generate().unwrap();
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    ADMISSION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id: other,
+        entered,
+        release: gate,
+    });
+    let journal = owner.0.journal.clone();
+    let stalled = tokio::spawn(async move { journal.admit(other, "{}".to_owned()).await });
+    blocked.await.unwrap();
+    let mut acknowledgements = Vec::new();
+    for _ in 0..MAX_ACTIVE {
+        let mut acknowledgement = Box::pin(owner.acknowledge(vec![completed]));
+        assert!(futures_util::poll!(acknowledgement.as_mut()).is_pending());
+        acknowledgements.push(acknowledgement);
+    }
+    let mut cancel = Box::pin(owner.cancel(running));
+    let admission = futures_util::poll!(cancel.as_mut());
+    let cancelled = cancellation.is_cancelled();
+    release.send(()).unwrap();
+    stalled.await.unwrap().unwrap();
+    drop(cancel);
+    drop(acknowledgements);
+    owner.shutdown().await.unwrap();
+    assert!(
+        admission.is_pending(),
+        "reclamation must not exhaust cancellation permits: {admission:?}"
+    );
+    assert!(
+        cancelled,
+        "live revocation must bypass stalled acknowledgement writes"
+    );
+}
