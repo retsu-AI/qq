@@ -103,6 +103,21 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
                 encoded(&script)
             ),
         );
+        // Windows PowerShell's CLR needs the ordinary Windows runtime/profile
+        // paths. Grant them explicitly rather than changing QQ's cleared env.
+        let environment = [
+            "SYSTEMROOT",
+            "WINDIR",
+            "USERPROFILE",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "TEMP",
+            "TMP",
+        ];
+        request.shell_policy.env_allowlist = environment.map(String::from).into();
+        let mut arguments: serde_json::Value = serde_json::from_str(&request.arguments).unwrap();
+        arguments["env"] = serde_json::json!(environment);
+        request.arguments = arguments.to_string();
         if ending == "deadline" {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
