@@ -1029,3 +1029,112 @@ async fn native_result_context_exhaustion_settles_only_its_run_and_retains_the_r
         "once"
     );
 }
+
+#[tokio::test]
+async fn lost_native_commands_are_saved_as_unobserved_and_reclaimed() {
+    use crate::command_owner::{
+        CommandOwner, CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+        NativeCommandService,
+    };
+    struct LostWorker {
+        owner: CommandOwner,
+        database: PathBuf,
+        with_receipt: bool,
+    }
+    impl NativeCommandService for LostWorker {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            NativeCommandService::identity(&self.owner)
+        }
+        fn wait(&self, id: ToolCallId, version: u64) -> NativeCommandFuture<CommandSnapshot> {
+            NativeCommandService::wait(&self.owner, id, version)
+        }
+        fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            NativeCommandService::acknowledge(&self.owner, ids)
+        }
+        fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+            NativeCommandService::cancel(&self.owner, id)
+        }
+        fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+            let owner = self.owner.clone();
+            let database = self.database.clone();
+            let with_receipt = self.with_receipt;
+            Box::pin(async move {
+                owner.cancel(request.id).await?;
+                let receipt = with_receipt.then(|| {
+                    ExecutionContextReceipt::V1(ExecutionContextFacts {
+                        context_id: request.id,
+                        arguments_sha256: arguments_digest(&request.tool, &request.arguments)
+                            .unwrap(),
+                        manifest_sha256: qq_protocol::ContentHash::from_bytes([1; 32]),
+                        base_env_present: 1,
+                        requested_env: false,
+                        locale: Locale::C,
+                        cwd: CwdIdentity::HeldDirectory {
+                            device: 1,
+                            inode: 2,
+                        },
+                        verdict: ExecutionVerdict::Work {
+                            reason: UnverifiedReason::Shell,
+                        },
+                        pid: 11,
+                    })
+                });
+                tokio::task::spawn_blocking(move || {
+                    let db = Connection::open(database).unwrap();
+                    db.execute("UPDATE commands SET status='lost',result=NULL,receipt=?2,output=?3,version=version+1 WHERE id=?1", params![request.id.to_string(), receipt.map(|receipt| serde_json::to_string(&receipt).unwrap()), if with_receipt { b"last-known-output".to_vec() } else { Vec::new() }]).unwrap();
+                }).await.unwrap();
+                Ok(())
+            })
+        }
+    }
+    for with_receipt in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let owner_path = directory.path().join("owner");
+        let owner = CommandOwner::open(
+            owner_path.clone(),
+            "unknown",
+            crate::command_owner::tests::launcher(),
+        )
+        .await
+        .unwrap();
+        let mut harness = scripted_runs_harness_with_commands(
+            ApprovalMode::Full,
+            vec![vec![("shell", r#"{"command":"unused"}"#.to_owned())]],
+            None,
+            None,
+            Some(Arc::new(LostWorker {
+                owner: owner.clone(),
+                database: owner_path.join("commands.sqlite3"),
+                with_receipt,
+            })),
+        )
+        .await;
+        let mut failed = harness.runtime.inner.failed.subscribe();
+        let run = submit_prompt(&harness, "execute").await;
+        let terminal = tokio::select! {
+            terminal = collect_until(&mut harness.events, finished_for(run)) => terminal,
+            () = async { let _ = failed.wait_for(|failed| *failed).await; } => panic!("a terminal Lost observation must not leave an active process lease"),
+        };
+        assert!(matches!(
+            terminal.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        ));
+        harness.runtime.shutdown().await.unwrap();
+        let (id, result, bindings): (String, String, u64) = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+            Ok(connection.query_row("SELECT id,result,(SELECT COUNT(*) FROM native_command_owners) FROM tool_calls WHERE run_id=?1", [run.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?)
+        }).await.unwrap();
+        assert!(result.contains("not replayed"));
+        if with_receipt {
+            assert!(result.contains("last-known-output"));
+        }
+        assert_eq!(bindings, 0);
+        assert!(matches!(
+            owner.snapshot(parse_id(&id).unwrap()).await,
+            Err(CommandOwnerError::Retired)
+        ));
+        owner.shutdown().await.unwrap();
+    }
+}

@@ -2052,3 +2052,58 @@ async fn worker_deadline_retains_timeout_output_instead_of_reporting_cancellatio
         "timeout output must be preserved"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_deadline_during_preparation_and_receipt_is_not_user_cancellation() {
+    for before_spawn in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(workspace.path()).unwrap();
+        let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+            .await
+            .unwrap();
+        let (entered, release) = if before_spawn {
+            crate::workspace::hold_blocking_preparation(path.clone())
+        } else {
+            crate::tools::hold_shell_receipt(&path)
+        };
+        let fifo = path.join("release");
+        crate::tools::create_test_fifo(&fifo).await;
+        let _gate = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fifo)
+            .unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let mut request = command(&path, id, "read token < release; printf escaped > escaped");
+        request.arguments = serde_json::json!({"command":"read token < release; printf escaped > escaped", "timeout_seconds":3600}).to_string();
+        request.not_after_ms = Some(
+            u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis(),
+            )
+            .unwrap()
+                + 60000,
+        );
+        owner.submit(request).await.unwrap();
+        entered.await.unwrap();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::time::resume();
+        release.send(()).unwrap();
+        let finished = wait_finished(&owner, id, 0).await;
+        let result = finished.result.unwrap();
+        owner.shutdown().await.unwrap();
+        assert!(
+            result.text().contains("exit=timeout"),
+            "before_spawn={before_spawn}: {}",
+            result.text()
+        );
+        assert!(!result.text().contains("cancelled"));
+        assert_eq!(finished.process.is_none(), before_spawn);
+        assert!(!path.join("escaped").exists());
+    }
+}

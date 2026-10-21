@@ -506,6 +506,8 @@ impl CommandOwner {
         cancellation: RunCancellation,
         task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
+        let started = tokio::time::Instant::now();
+        let tool = request.tool.clone();
         let path = request.workspace;
         let expected_workspace = request.workspace_identity;
         let workspace = match blocking(move || {
@@ -560,12 +562,17 @@ impl CommandOwner {
             }
         };
         tokio::pin!(expired);
-        let output = tokio::select! {
+        let mut output = tokio::select! {
             biased;
             () = &mut expired => { cancellation.expire(); execution.await }
             output = &mut execution => output,
         };
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;
+        if cancellation.timed_out()
+            && output.disposition == crate::tools::ResultDisposition::Interrupted
+        {
+            output = output.expired_before_capture(&tool, started.elapsed());
+        }
         Ok(output)
     }
 

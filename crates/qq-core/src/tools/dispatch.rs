@@ -765,6 +765,24 @@ impl ToolOutput {
         result
     }
 
+    /// Normalize worker expiry before the shell's capture loop has a result.
+    pub(crate) fn expired_before_capture(self, tool: &str, elapsed: std::time::Duration) -> Self {
+        let content = super::output::Header::new(tool, None)
+            .field("exit", "timeout")
+            .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+            .field("bytes", 0)
+            .into_line()
+            + "command deadline expired during preparation";
+        let mut result = Self::bounded(content, &super::shell::SHELL_BOUNDS, true);
+        // No output was observed before capture; elapsed time is not progress.
+        result.result_digest = Sha256::digest(b"qq-native-preparation-timeout-v1").into();
+        result.execution_context = self.execution_context;
+        if result.execution_context.is_none() {
+            result.disposition = ResultDisposition::Refused;
+        }
+        result
+    }
+
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
         // The complete text is kept only when the size alone says a cut may
         // happen: cloning every small result would cost on the hot path for

@@ -1146,6 +1146,8 @@ saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
 (or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
 Acknowledgement atomically removes terminal output, receipts and results while
 retaining compact command IDs and request hashes that prevent re-execution.
+A terminal `Lost` observation is saved as an unobserved result, including its
+retained output prefix, before acknowledgement.
 The 10,000-observation limit therefore counts unacknowledged commands; compact
 retired identities continue to grow with history. Running commands cannot be
 acknowledged, repeated acknowledgements are harmless, and an acknowledged

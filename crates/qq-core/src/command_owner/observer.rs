@@ -152,9 +152,19 @@ pub(crate) async fn observe(
                 };
             }
             CommandStatus::Lost => {
-                return ToolOutput::unobserved(
-                    "native command owner lost the invocation; it was not replayed",
-                );
+                // The replacement owner has no live invocation to drain. Its
+                // terminal loss evidence must still be saved before retirement.
+                lease.process_reaped();
+                if let Some(error) = persistence_error {
+                    return ToolOutput::unobserved(error);
+                }
+                let mut result = ToolOutput::unobserved(format!(
+                    "native command owner lost the invocation; it was not replayed\n{}",
+                    snapshot.output,
+                ));
+                result.native_owner = Some(owner);
+                lease.save_native_result(id, &result);
+                return result;
             }
             CommandStatus::Queued | CommandStatus::Running => {}
         }
