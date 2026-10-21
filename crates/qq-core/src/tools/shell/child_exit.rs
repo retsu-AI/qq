@@ -53,7 +53,7 @@ impl ChildExit {
             }
             // WNOWAIT keeps the exited leader waitable, preventing PID/group
             // reuse until after this signal. Tokio remains the sole reaper.
-            group.kill()?;
+            group.kill_exited()?;
         }
         let status = child.wait().await;
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]

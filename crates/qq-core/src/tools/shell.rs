@@ -941,6 +941,23 @@ impl ProcessGroupGuard {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn kill_exited(&mut self) -> std::io::Result<()> {
+        let result = self.kill();
+        // Darwin's killpg skips zombies and returns EPERM when no eligible
+        // member remains. WNOWAIT has already proved the leader exited. Reap
+        // it, then require actual group disappearance: never treat permission
+        // denial alone as termination proof for any surviving member.
+        #[cfg(target_os = "macos")]
+        if result.as_ref().is_err_and(|error| {
+            error.raw_os_error() == Some(rustix::io::Errno::PERM.raw_os_error())
+        }) {
+            self.killed_pgid = self.pgid.take();
+            return Ok(());
+        }
+        result
+    }
+
     async fn confirm_stopped(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.killed_pgid {
@@ -948,14 +965,16 @@ impl ProcessGroupGuard {
             loop {
                 match rustix::process::test_kill_process_group(pgid) {
                     Err(rustix::io::Errno::SRCH) => return Ok(()),
+                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => {}
                     Err(error) => return Err(error.into()),
-                    Ok(()) if tokio::time::Instant::now() >= deadline => {
-                        return Err(std::io::Error::other(
-                            "process group still exists after termination",
-                        ));
-                    }
-                    Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    Ok(()) => {}
                 }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(std::io::Error::other(
+                        "process group still exists after termination",
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }
         Ok(())
