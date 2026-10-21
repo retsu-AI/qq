@@ -2,6 +2,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncReadExt, sync::mpsc};
 
+mod child_exit;
+
 use crate::{
     runtime::{BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_NAMES, ShellPolicy, builtin_alternative},
     workspace::Workspace,
@@ -387,6 +389,13 @@ pub(super) async fn run_shell(
         Launch::Exec(arguments) => arguments.stdin.clone(),
         Launch::Shell(_) => None,
     };
+    // Subscribe before spawn so even an immediate exit cannot lose its wake.
+    let mut child_exit = match child_exit::ChildExit::new() {
+        Ok(exit) => exit,
+        Err(error) => {
+            return ToolOutput::refused(format!("could not observe command exits: {error}"));
+        }
+    };
     let (mut child, receipt) = match prepared.spawn(stdin_text.is_some()) {
         Ok(started) => started,
         Err(error) => return ToolOutput::refused(format!("could not start the command: {error}")),
@@ -586,13 +595,14 @@ pub(super) async fn run_shell(
             // The command is done only when both pipes reached end-of-file and
             // the child was reaped; a grandchild that inherited a pipe keeps
             // the call running (until the timeout) so its output is captured.
-            status = child.wait(), if stdout.is_none() && stderr.is_none() => {
-                // The child is reaped, so its pid (the group id) may be
-                // recycled: killing the group now could hit an innocent
-                // process. Surviving descendants closed their pipes, which is
-                // as detached as the timeout policy requires.
+            status = child_exit.wait(&mut child, &mut guard), if stdout.is_none() && stderr.is_none() => {
+                // The exit observer terminates the group before reaping its
+                // leader, while that leader still pins the group identity.
+                // Confirm disappearance without ever signalling a saved PID.
                 if status.is_ok() {
-                    guard.disarm();
+                    if let Err(error) = guard.confirm_stopped().await {
+                        break ShellOutcome::Exited(Err(error));
+                    }
                     process.process_reaped();
                 }
                 break ShellOutcome::Exited(status);
@@ -718,6 +728,9 @@ async fn stop_shell(
     }
     match child.wait().await {
         Ok(_) => {
+            guard.confirm_stopped().await.map_err(|error| {
+                format!("could not confirm the command process group stopped: {error}")
+            })?;
             process.process_reaped();
             #[cfg(test)]
             if let Some(pid) = observed_pid {
@@ -881,6 +894,8 @@ fn shell_result(
 pub(crate) struct ProcessGroupGuard {
     #[cfg(unix)]
     pgid: Option<rustix::process::Pid>,
+    #[cfg(unix)]
+    killed_pgid: Option<rustix::process::Pid>,
 }
 
 impl ProcessGroupGuard {
@@ -891,6 +906,7 @@ impl ProcessGroupGuard {
                 pgid: child_id
                     .and_then(|id| i32::try_from(id).ok())
                     .and_then(rustix::process::Pid::from_raw),
+                killed_pgid: None,
             }
         }
         #[cfg(not(unix))]
@@ -906,6 +922,7 @@ impl ProcessGroupGuard {
         #[cfg(unix)]
         {
             self.pgid = None;
+            self.killed_pgid = None;
         }
     }
 
@@ -913,8 +930,32 @@ impl ProcessGroupGuard {
         #[cfg(unix)]
         if let Some(pgid) = self.pgid {
             match rustix::process::kill_process_group(pgid, rustix::process::Signal::KILL) {
-                Ok(()) | Err(rustix::io::Errno::SRCH) => self.pgid = None,
+                Ok(()) => {
+                    self.killed_pgid = Some(pgid);
+                    self.pgid = None;
+                }
+                Err(rustix::io::Errno::SRCH) => self.pgid = None,
                 Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn confirm_stopped(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let Some(pgid) = self.killed_pgid {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match rustix::process::test_kill_process_group(pgid) {
+                    Err(rustix::io::Errno::SRCH) => return Ok(()),
+                    Err(error) => return Err(error.into()),
+                    Ok(()) if tokio::time::Instant::now() >= deadline => {
+                        return Err(std::io::Error::other(
+                            "process group still exists after termination",
+                        ));
+                    }
+                    Ok(()) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                }
             }
         }
         Ok(())

@@ -31,6 +31,52 @@ async fn wait_finished(owner: &CommandOwner, id: ToolCallId, mut version: u64) -
     .expect("the native command must finish")
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn completion_waits_for_descendants_that_closed_their_pipes() {
+    use std::io::Write as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let release = workspace.path().join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let mut gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(release)
+        .unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(
+            workspace.path(),
+            id,
+            "(read token < release) </dev/null >/dev/null 2>&1 & printf 'pid:%s\\n' \"$!\"",
+        ))
+        .await
+        .unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    let pid: i32 = terminal
+        .output
+        .trim()
+        .strip_prefix("pid:")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let pid = rustix::process::Pid::from_raw(pid).unwrap();
+    let alive = rustix::process::test_kill_process(pid).is_ok();
+    // Release this fixture through its private FIFO even on the old broken
+    // implementation; teardown never signals a PID from a terminal receipt.
+    gate.write_all(b"finish\n").unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        !alive,
+        "completion must not leave a detached descendant alive"
+    );
+    assert!(!terminal.result.unwrap().is_error());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
