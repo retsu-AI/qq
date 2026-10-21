@@ -96,8 +96,10 @@ jobs:
       - name: Verify mobile dependency boundary
         run: |
           cargo tree --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --edges normal --prefix none > /tmp/qq-mobile-dependencies.txt
-          if grep -Eq '^qq-(auth|config|core|server) ' /tmp/qq-mobile-dependencies.txt; then
-            echo 'The mobile build must not link host engine, auth or configuration crates.'
+          # Allow-list: only the remote client and its wire types may reach a
+          # phone; any other workspace crate is host engine code.
+          if grep -E '^qq-' /tmp/qq-mobile-dependencies.txt | grep -Ev '^qq-(desktop|client|protocol) '; then
+            echo 'The mobile build must not link the workspace crates listed above.'
             exit 1
           fi
       # The desktop job's clippy never compiles the `cfg(mobile)` entry point.

@@ -51,6 +51,15 @@ export function configurePlatform(name: unknown) {
   document.documentElement.dataset.mobile = String(platform.mobile);
 }
 
+/**
+ * Whether an on-screen keyboard is covering the layout viewport (iOS keeps the
+ * layout height; Android with `resizes-content` shrinks both). A pinch zoom
+ * also shrinks the visual viewport, so only an unzoomed one counts.
+ */
+export function keyboardCovers(layoutHeight: number, visualHeight: number, scale: number) {
+  return scale < 1.01 && layoutHeight - visualHeight > 120;
+}
+
 /** Follow the visible viewport while a mobile keyboard covers the layout viewport. */
 export function watchMobileViewport(): () => void {
   if (!platform.mobile) return () => undefined;
@@ -59,6 +68,10 @@ export function watchMobileViewport(): () => void {
     const root = document.documentElement.style;
     root.setProperty("--app-height", `${viewport?.height ?? window.innerHeight}px`);
     root.setProperty("--app-top", `${viewport?.offsetTop ?? 0}px`);
+    // The keyboard replaces the home indicator's bottom inset.
+    document.documentElement.dataset.keyboard = String(
+      !!viewport && keyboardCovers(window.innerHeight, viewport.height, viewport.scale),
+    );
   };
   update();
   viewport?.addEventListener("resize", update);
@@ -70,5 +83,6 @@ export function watchMobileViewport(): () => void {
     window.removeEventListener("resize", update);
     document.documentElement.style.removeProperty("--app-height");
     document.documentElement.style.removeProperty("--app-top");
+    delete document.documentElement.dataset.keyboard;
   };
 }

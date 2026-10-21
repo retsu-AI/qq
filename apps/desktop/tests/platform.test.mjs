@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nativePlatform, platformFor } from "../src/lib/platform.ts";
+import { keyboardCovers, nativePlatform, platformFor } from "../src/lib/platform.ts";
+
+test("only an unzoomed, keyboard-sized shrink counts as a keyboard", () => {
+  assert.equal(keyboardCovers(812, 476, 1), true); // iOS keyboard
+  assert.equal(keyboardCovers(476, 476, 1), false); // Android resizes both
+  assert.equal(keyboardCovers(812, 790, 1), false); // browser toolbar
+  assert.equal(keyboardCovers(812, 406, 2), false); // pinch zoom
+});
 
 test("a browser preview is desktop without asking the native shell", async () => {
   const ask = () => assert.fail("must not ask outside Tauri");

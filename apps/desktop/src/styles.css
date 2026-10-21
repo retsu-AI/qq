@@ -11,6 +11,9 @@
     env(safe-area-inset-bottom) env(safe-area-inset-left);
   overflow: hidden;
 }
+:root[data-mobile="true"][data-keyboard="true"] #root {
+  padding-bottom: 0;
+}
 :root[data-mobile="true"] :is(button, [role="option"], [role="menuitem"], [role="menuitemradio"]) {
   min-height: 44px;
   min-width: 44px;
