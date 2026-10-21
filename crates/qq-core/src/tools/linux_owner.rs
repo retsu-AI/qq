@@ -41,6 +41,7 @@ impl LinuxOwner {
                 "native launch helper must be an absolute unprivileged executable",
             ));
         }
+        let launcher_len = metadata.len();
         for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
             if !directory.is_absolute() {
                 continue;
@@ -78,7 +79,10 @@ impl LinuxOwner {
                 return Ok(Self {
                     executable: path,
                     launcher,
-                    launcher_image: std::sync::Arc::new(launcher_image),
+                    launcher_image: std::sync::Arc::new(immutable_launcher(
+                        launcher_image,
+                        launcher_len,
+                    )?),
                 });
             }
         }
@@ -183,6 +187,39 @@ impl LinuxOwner {
             },
         ))
     }
+}
+
+fn immutable_launcher(source: File, length: u64) -> io::Result<File> {
+    use std::io::Read as _;
+    use std::os::unix::fs::{FileExt as _, PermissionsExt as _};
+    let flags = rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING;
+    let descriptor =
+        match rustix::fs::memfd_create("qq-native-helper", flags | rustix::fs::MemfdFlags::EXEC) {
+            // MFD_EXEC is newer than the pidfd/user-namespace baseline. Older
+            // kernels create executable memfds without the explicit flag.
+            Err(rustix::io::Errno::INVAL) => rustix::fs::memfd_create("qq-native-helper", flags)?,
+            descriptor => descriptor?,
+        };
+    let mut image = File::from(descriptor);
+    let bound = length
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("native helper image is too large"))?;
+    if std::io::copy(&mut source.take(bound), &mut image)? != length {
+        return Err(io::Error::other(
+            "native helper image changed during capture",
+        ));
+    }
+    let mut magic = [0; 4];
+    if image.read_at(&mut magic, 0)? != 4 || magic != *b"\x7fELF" {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "native launch helper must be a native ELF executable",
+        ));
+    }
+    image.set_permissions(std::fs::Permissions::from_mode(0o555))?;
+    image.rewind()?;
+    rustix::fs::fcntl_add_seals(&image, seals())?;
+    Ok(image)
 }
 
 fn no_file_capabilities(path: &std::path::Path) -> bool {
@@ -409,6 +446,19 @@ pub(super) async fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interpreted_launchers_are_not_native_helper_entry_points() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let script = root.path().join("launcher");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = LinuxOwner::discover(crate::command_owner::CommandLauncher::new(script))
+            .err()
+            .expect("the launcher must implement the helper in a native executable");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
 
     #[tokio::test]
     async fn startup_without_namespace_identity_cannot_report_confirmed_cleanup() {

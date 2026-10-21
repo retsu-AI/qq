@@ -32,6 +32,8 @@ const MAX_LIVE_OUTPUT_BYTES: usize = crate::tools::MAX_SHELL_OUTPUT_BYTES;
 
 /// Trusted entry point that runs QQ's native launch helper before any payload.
 /// Embedders may supply their own argument prefix calling `execute_native_launch`.
+/// Linux captures a sealed ELF image; the entry point must call the helper
+/// directly rather than delegate through a script or mutable executable path.
 #[derive(Debug, Clone)]
 pub struct CommandLauncher {
     pub executable: PathBuf,

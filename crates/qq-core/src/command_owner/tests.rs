@@ -21,55 +21,59 @@ pub(crate) fn launcher() -> super::CommandLauncher {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn replacing_the_launcher_path_cannot_replace_the_monitor() {
+async fn launcher_replacement_and_in_place_writes_cannot_replace_the_monitor() {
     use std::os::unix::fs::PermissionsExt as _;
-    let root = tempfile::tempdir().unwrap();
-    let workspace = tempfile::tempdir().unwrap();
-    let image = root.path().join("launcher");
-    std::fs::copy(launcher().executable, &image).unwrap();
-    let owner = CommandOwner::open(
-        root.path().join("owner"),
-        "unknown",
-        CommandLauncher::new(image.clone()),
-    )
-    .await
-    .unwrap();
-    std::fs::rename(&image, root.path().join("original")).unwrap();
-    std::fs::write(&image, "#!/bin/sh\nprintf escaped > escaped\n").unwrap();
-    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let id = ToolCallId::generate().unwrap();
-    owner
-        .submit(command(workspace.path(), id, "printf original"))
+    for replace_path in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let image = root.path().join("launcher");
+        std::fs::copy(launcher().executable, &image).unwrap();
+        let owner = CommandOwner::open(
+            root.path().join("owner"),
+            "unknown",
+            CommandLauncher::new(image.clone()),
+        )
         .await
         .unwrap();
-    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut after = 0;
-        loop {
-            let snapshot = match owner.wait(id, after).await {
-                Ok(snapshot) => snapshot,
-                Err(CommandOwnerError::Unavailable) => break None,
-                Err(error) => panic!("{error}"),
-            };
-            if matches!(
-                snapshot.status,
-                CommandStatus::Finished | CommandStatus::Lost
-            ) {
-                break Some(snapshot);
-            }
-            after = snapshot.version;
+        if replace_path {
+            std::fs::rename(&image, root.path().join("original")).unwrap();
         }
-    })
-    .await
-    .unwrap();
-    let shutdown = owner.shutdown().await;
-    assert!(
-        !workspace.path().join("escaped").exists(),
-        "the replacement launcher ran outside custody"
-    );
-    shutdown.unwrap();
-    let terminal = terminal.expect("the pinned launcher must execute normally");
-    assert_eq!(terminal.status, CommandStatus::Finished);
-    assert!(terminal.result.unwrap().text().contains("original"));
+        std::fs::write(&image, "#!/bin/sh\nprintf escaped > escaped\n").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let id = ToolCallId::generate().unwrap();
+        owner
+            .submit(command(workspace.path(), id, "printf original"))
+            .await
+            .unwrap();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut after = 0;
+            loop {
+                let snapshot = match owner.wait(id, after).await {
+                    Ok(snapshot) => snapshot,
+                    Err(CommandOwnerError::Unavailable) => break None,
+                    Err(error) => panic!("{error}"),
+                };
+                if matches!(
+                    snapshot.status,
+                    CommandStatus::Finished | CommandStatus::Lost
+                ) {
+                    break Some(snapshot);
+                }
+                after = snapshot.version;
+            }
+        })
+        .await
+        .unwrap();
+        let shutdown = owner.shutdown().await;
+        assert!(
+            !workspace.path().join("escaped").exists(),
+            "the replacement launcher ran outside custody"
+        );
+        shutdown.unwrap();
+        let terminal = terminal.expect("the pinned launcher must execute normally");
+        assert_eq!(terminal.status, CommandStatus::Finished);
+        assert!(terminal.result.unwrap().text().contains("original"));
+    }
 }
 
 #[cfg(target_os = "linux")]
