@@ -152,6 +152,73 @@ jobs:
       - name: Failed child cancellation blocks continuation
         run: bash .github/scripts/test-exact.sh sessions::tests::delegation::child_cancellation_persistence_failure_prevents_parent_continuation
 
+  native-command-owner:
+    name: native command owner (${{ matrix.os }})
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: command-owner-${{ matrix.os }}
+      - name: Native ownership, cancellation and durable observations
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+          fi
+          bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
+          bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command
+          bash .github/scripts/test-exact.sh command_owner::tests::admission_wait_cannot_renew_the_task_deadline
+          bash .github/scripts/test-exact.sh command_owner::tests::journal_read_failure_stops_admission_without_poisoning_expected_misses
+          bash .github/scripts/test-exact.sh command_owner::tests::explicit_cancellation_reaps_before_publishing_completion
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_stops_live_work_before_a_stalled_journal_is_released
+          bash .github/scripts/test-exact.sh command_owner::tests::recovery_marks_an_unconfirmed_command_lost_and_never_replays_it
+          bash .github/scripts/test-exact.sh command_owner::tests::owner_enforces_the_task_deadline_without_a_live_observer
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch
+          bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
+          bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
+          bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
+          bash .github/scripts/test-exact.sh command_owner::tests::unconfirmed_process_exit_blocks_owner_continuation
+          bash .github/scripts/test-exact.sh command_owner::tests::losing_the_cancel_response_does_not_abandon_committed_cancellation
+          bash .github/scripts/test-exact.sh command_owner::tests::shutdown_releases_the_journal_even_while_observer_handles_remain
+          bash .github/scripts/test-exact.sh command_owner::tests::dropping_the_shutdown_waiter_does_not_abandon_authority_release
+          bash .github/scripts/test-exact.sh command_owner::tests::an_expired_task_deadline_refuses_launch_before_any_process_exists
+          bash .github/scripts/test-exact.sh command_owner::tests::small_output_chunks_reach_the_durable_journal_without_omissions
+          bash .github/scripts/test-exact.sh command_owner::tests::a_stalled_output_write_cannot_extend_the_task_execution_deadline
+          bash .github/scripts/test-exact.sh tools::tests::dropped_durable_output_recording_is_not_a_clean_drain
+          bash .github/scripts/test-exact.sh tools::tests::stalled_process_receipt_cannot_delay_cancellation_or_timeout
+          bash .github/scripts/test-exact.sh command_owner::tests::a_stalled_journal_does_not_starve_other_workspace_operations
+          bash .github/scripts/test-exact.sh command_owner::tests::extreme_task_deadlines_never_stop_the_owner
+          bash .github/scripts/test-exact.sh command_owner::tests::implicit_owner_cleanup_closes_sqlite_off_the_async_worker
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_processes::descendants_stop_on_completion_cancellation_and_deadline
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_shared_state_is_refused_before_recovery_or_admission
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
+          fi
+      - name: Unix output and observer regressions
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh command_owner::tests::dropping_an_observer_does_not_cancel_or_repeat_a_command
+          bash .github/scripts/test-exact.sh command_owner::tests::completion_waits_for_descendants_that_closed_their_pipes
+          bash .github/scripts/test-exact.sh command_owner::tests::concurrent_retries_execute_once_and_conflict_does_not_stop_the_owner
+          bash .github/scripts/test-exact.sh command_owner::tests::owner_state_rejects_symlinked_directories_and_hardlinked_lock_files
+          bash .github/scripts/test-exact.sh command_owner::tests::journal_rejects_untrusted_ancestors_before_creating_state
+          bash .github/scripts/test-exact.sh command_owner::tests::control_dense_native_output_fits_the_durable_result_bound
+          bash .github/scripts/test-exact.sh command_owner::tests::live_output_is_durable_before_command_completion
+          bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound
+          bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
+      - name: Exercise the embedding caller
+        run: cargo run --locked -p qq-core --example command_owner
+
   release-size:
     name: release build size
     runs-on: ubuntu-latest

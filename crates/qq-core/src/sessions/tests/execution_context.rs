@@ -19,12 +19,7 @@ async fn command_receipt_is_durable_before_live_output_and_survives_reopen() {
         )
         .await;
         let release = harness.workspace_path.join("release");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &release,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        crate::tools::create_test_fifo(&release).await;
         let gate = std::fs::OpenOptions::new()
             .read(true)
             .write(true)

@@ -1057,7 +1057,13 @@ reattachment or justify signalling a persisted PID after a server restart.
 - A default timeout of 120 s, overridable per call with a positive
   `timeout_seconds` that fits a monotonic deadline. There is no ten-minute
   ceiling. The enclosing run budget still applies; command timeout and run
-  cancellation terminate the owned process group.
+  cancellation terminate the owned Unix process group or Windows job.
+- Windows starts commands suspended, assigns a job that forbids breakaway,
+  then resumes them. Completion, cancellation and timeout terminate the job
+  and confirm that it has no remaining processes before settling the tool.
+  An inherited outer job owns even suspended children during startup; its
+  handle closes on host exit. Trusted independent worker launchers must
+  explicitly break away from that outer job.
 - Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
   marked `bytes not captured` when exceeded) and streamed to clients as
   `ToolCallOutputDelta` events through the existing batching path so long

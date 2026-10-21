@@ -1,11 +1,12 @@
 pub(crate) mod ask;
-mod dispatch;
+pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
 mod matching;
+mod native_exit;
 pub(crate) mod network;
 pub mod output;
 pub(crate) mod process_context;
@@ -15,9 +16,12 @@ mod shell;
 mod specs;
 mod tree;
 pub(crate) mod walk;
+#[cfg(windows)]
+mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
+pub(crate) use shell::MAX_SHELL_OUTPUT_BYTES;
 #[cfg(unix)]
 pub(crate) use shell::ProcessGroupGuard;
 
@@ -128,7 +132,30 @@ use tokio::sync::mpsc;
 #[cfg(all(test, unix))]
 pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
-pub(crate) use shell::observe_shell_spawn;
+pub(crate) use shell::{limit_shell_read_chunks, observe_shell_spawn, observe_shell_termination};
+
+#[cfg(all(test, unix))]
+pub(crate) async fn create_test_fifo(path: &std::path::Path) {
+    let mut child = tokio::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the native FIFO fixture utility");
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status.expect("wait for the FIFO fixture utility"),
+        Err(_) => {
+            child
+                .kill()
+                .await
+                .expect("reap the timed-out FIFO fixture utility");
+            panic!("FIFO fixture creation timed out");
+        }
+    };
+    assert!(status.success(), "the native FIFO fixture utility failed");
+}
 
 #[cfg(all(test, unix))]
 pub(crate) const PANIC_SHELL_ARGUMENTS: &str = r#"{"command":"sleep 300"}"#;
@@ -4454,6 +4481,21 @@ mod tests {
         assert!(!cancelled.is_cancelled());
     }
 
+    #[tokio::test]
+    async fn dropped_durable_output_recording_is_not_a_clean_drain() {
+        let tasks = ToolTasks::default();
+        tasks
+            .set_output_recorder(|_, _| std::future::pending())
+            .unwrap();
+        let lease = tasks.enter();
+        let write = lease
+            .output_record(qq_protocol::ToolCallId::generate().unwrap(), b"checkpoint")
+            .unwrap();
+        drop(write);
+        drop(lease);
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedOutput));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_process_receipt_write_reaps_child_and_blocks_settlement() {
@@ -4499,6 +4541,66 @@ mod tests {
         let pid =
             rustix::process::Pid::from_raw(i32::try_from(spawned.await.unwrap()).unwrap()).unwrap();
         assert!(rustix::process::test_kill_process(pid).is_err());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn stalled_process_receipt_cannot_delay_cancellation_or_timeout() {
+        for expire in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace =
+                Workspace::open(&std::fs::canonicalize(directory.path()).unwrap()).unwrap();
+            let tasks = ToolTasks::default();
+            let cancelled = RunCancellation::new();
+            let (sender, spawned) = tokio::sync::oneshot::channel();
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let hook = std::sync::Mutex::new(Some((sender, gate)));
+            tasks
+                .set_process_recorder(move |_, receipt| {
+                    let (sender, gate) = hook.lock().unwrap().take().unwrap();
+                    sender.send(receipt.facts().pid).unwrap();
+                    async move {
+                        gate.await.unwrap();
+                        Ok(())
+                    }
+                })
+                .unwrap();
+            let execution = tokio::spawn(dispatch::execute_with_images(
+                workspace,
+                Arc::default(),
+                "shell".to_owned(),
+                PANIC_SHELL_ARGUMENTS.to_owned(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Some(qq_protocol::ToolCallId::generate().unwrap()),
+            ));
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+                .await
+                .unwrap()
+                .unwrap();
+            let stopped = shell::observe_shell_termination(pid);
+            if expire {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(121)).await;
+                tokio::time::resume();
+            } else {
+                cancelled.cancel();
+            }
+            let terminated = tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await;
+            release.send(()).unwrap();
+            let result = execution.await.unwrap();
+            tasks.drain().await.unwrap();
+            assert!(
+                matches!(terminated, Ok(Ok(()))),
+                "receipt persistence must not extend execution (timeout={expire})"
+            );
+            assert!(result.is_error);
+        }
     }
 
     #[cfg(any(unix, windows))]
@@ -4746,12 +4848,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
         let release = directory.path().join("release");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            &release,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        )
-        .unwrap();
+        crate::tools::create_test_fifo(&release).await;
         // Keep both ends open until completion so an input written just
         // before the shell opens its reader cannot disappear with the writer.
         let gate = fs::OpenOptions::new()

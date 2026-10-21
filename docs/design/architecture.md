@@ -1440,9 +1440,11 @@ Local tool ownership extends through blocking file work and shell termination
 and reap. A parent, or a replacement run in its session, cannot start another
 write while a supervised child is draining. Cancellation does not undo a native
 write already inside its atomic apply step. Unix shell process groups are killed
-on interruption; Windows explicitly terminates the owned child process. Detached
-or escaped processes and remote MCP effects are not proven undone by stopping
-QQ dispatch, and uncertain effects are never implicitly retried.
+before settling a command. Windows assigns each suspended command to a kernel
+job before resuming it, forbids breakaway, and confirms the job is empty after
+termination. Unix descendants that escape their process group and remote MCP
+effects are not proven undone by stopping QQ dispatch, and uncertain effects
+are never implicitly retried.
 
 Which model a child runs is decided at one choke point from the delegation
 roster. The root translates the configured `delegation` section (or, as sugar,

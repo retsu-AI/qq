@@ -162,14 +162,35 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
 
 #[cfg(target_os = "linux")]
 fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
-    use std::io::Read;
     let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
+    read_group_member_identity(file)
+}
+
+#[cfg(target_os = "linux")]
+fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i32, u64)>> {
+    use std::io::Read;
     let mut stat = Vec::new();
-    file.take(4097).read_to_end(&mut stat)?;
+    match file.take(4097).read_to_end(&mut stat) {
+        Ok(_) => {}
+        // procfs can retain an open inode after its task is reaped. That
+        // task is gone, even though opening stat succeeded moments earlier.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
     if stat.len() > 4096 {
         return Err(std::io::Error::other(
             "check group member stat exceeds bound",
@@ -193,6 +214,23 @@ fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
         .parse()
         .map_err(|_| malformed())?;
     Ok(Some((group, started)))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn an_exited_process_stat_does_not_fail_group_cleanup() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .env_clear()
+        .args(["-c", "read token"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stat = std::fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    assert_eq!(read_group_member_identity(stat).unwrap(), None);
 }
 
 #[cfg(target_os = "linux")]
@@ -374,7 +412,15 @@ pub(super) async fn run_process(
             tail: String::new(),
         });
     }
-    let mut child = match prepared.spawn(false) {
+    let mut child = match prepared
+        .spawn(
+            false,
+            &lease,
+            &ToolCancellation::new(cancellation.clone()),
+            deadline.into_std(),
+        )
+        .await
+    {
         Ok((child, _receipt)) => child,
         Err(error) => return Err(ProcessError::Spawn(error)),
     };
@@ -1017,7 +1063,8 @@ pub(super) async fn execute(
                 match result {
                     Ok(result) => break Completion::Process(result),
                     #[cfg(unix)]
-                    Err(ProcessError::Cleanup { .. }) => {
+                    Err(error @ ProcessError::Cleanup { .. }) => {
+                        tracing::error!(target: "qq::goal_check", error = %error, "completion check cleanup failed");
                         inner.failed.send_replace(true);
                         return;
                     }

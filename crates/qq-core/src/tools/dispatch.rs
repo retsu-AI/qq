@@ -3,8 +3,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[cfg(test)]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
@@ -40,28 +39,34 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 #[derive(Default)]
 struct ToolTaskState {
     process_recorder: OnceLock<ProcessRecorder>,
+    output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
+    unrecorded_output: AtomicBool,
     active: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
 }
 
-type ProcessRecordFuture = std::pin::Pin<
+pub(super) type RecordFuture = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>> + Send>,
 >;
 type ProcessRecorder = Box<
     dyn Fn(
             qq_protocol::ToolCallId,
             Box<super::process_context::ExecutionContextReceipt>,
-        ) -> ProcessRecordFuture
+        ) -> RecordFuture
         + Send
         + Sync,
 >;
 
+type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ToolDrainError {
+pub enum ToolDrainError {
     #[error("the command process receipt could not be persisted")]
     UnrecordedProcess,
+    #[error("command output could not be persisted")]
+    UnrecordedOutput,
     #[error("local shell process termination could not be confirmed")]
     UnconfirmedProcessExit,
 }
@@ -83,11 +88,26 @@ impl ToolTasks {
             .map_err(|_| ToolDrainError::UnrecordedProcess)
     }
 
+    pub(crate) fn set_output_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .output_recorder
+            .set(Box::new(move |id, chunk| Box::pin(recorder(id, chunk))))
+            .map_err(|_| ToolDrainError::UnrecordedOutput)
+    }
+
     pub(crate) fn check(&self) -> Result<(), ToolDrainError> {
         if self.0.unconfirmed_process_exit.load(Ordering::Acquire) {
             Err(ToolDrainError::UnconfirmedProcessExit)
         } else if self.0.unrecorded_process.load(Ordering::Acquire) {
             Err(ToolDrainError::UnrecordedProcess)
+        } else if self.0.unrecorded_output.load(Ordering::Acquire) {
+            Err(ToolDrainError::UnrecordedOutput)
         } else {
             Ok(())
         }
@@ -120,18 +140,48 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
-    pub(crate) async fn record_process(
+    /// Keep native startup and its child tracked if the awaiting task unwinds.
+    #[cfg(windows)]
+    pub(super) fn fork(&self) -> Self {
+        self.tasks.active.fetch_add(1, Ordering::AcqRel);
+        Self {
+            tasks: Arc::clone(&self.tasks),
+            process_pending: false,
+        }
+    }
+
+    pub(crate) fn record_process(
         &self,
         id: qq_protocol::ToolCallId,
         receipt: Box<super::process_context::ExecutionContextReceipt>,
-    ) -> Result<(), crate::sessions::SessionRuntimeError> {
-        if let Some(recorder) = self.tasks.process_recorder.get()
-            && let Err(error) = recorder(id, receipt).await
-        {
-            self.tasks.unrecorded_process.store(true, Ordering::Release);
-            return Err(error);
-        }
-        Ok(())
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.process_recorder.get() else {
+            return Box::pin(async { Ok(()) });
+        };
+        self.record(recorder(id, receipt), RecordKind::Process)
+    }
+
+    pub(super) fn output_record(
+        &self,
+        id: qq_protocol::ToolCallId,
+        bytes: &[u8],
+    ) -> Option<RecordFuture> {
+        let recorder = self.tasks.output_recorder.get()?;
+        Some(self.record(recorder(id, bytes.to_vec()), RecordKind::Output))
+    }
+
+    fn record(&self, write: RecordFuture, kind: RecordKind) -> RecordFuture {
+        let mut record = RecordGuard {
+            tasks: Arc::clone(&self.tasks),
+            completed: false,
+            kind,
+        };
+        Box::pin(async move {
+            let result = write.await;
+            record.completed = result.is_ok();
+            drop(record);
+            result
+        })
     }
 
     pub(crate) fn process_started(&mut self) {
@@ -139,6 +189,28 @@ impl ToolTaskLease {
     }
     pub(crate) fn process_reaped(&mut self) {
         self.process_pending = false;
+    }
+}
+
+enum RecordKind {
+    Process,
+    Output,
+}
+
+struct RecordGuard {
+    tasks: Arc<ToolTaskState>,
+    completed: bool,
+    kind: RecordKind,
+}
+impl Drop for RecordGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            let failed = match self.kind {
+                RecordKind::Process => &self.tasks.unrecorded_process,
+                RecordKind::Output => &self.tasks.unrecorded_output,
+            };
+            failed.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -365,7 +437,7 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
 /// model context; `ui_payload` is persisted for clients and never sent back
 /// to the model. Constructors are the one bounding boundary: they mask
 /// secrets, then bound the text to the tool's [`Bounds`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ResultDisposition {
     Observed,
     Refused,
@@ -374,7 +446,7 @@ pub(crate) enum ResultDisposition {
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
     pub(crate) disposition: ResultDisposition,
     /// Result identity before masking, output bounds or citations.
@@ -449,7 +521,7 @@ impl ReadSideOutput {
 /// A complete tool output awaiting storage: the text, its SHA-256 (the
 /// handle's digest), and the line the bounded text omits from so the marker
 /// can point at it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SpillRecord {
     pub(crate) text: String,
     pub(crate) digest: String,
