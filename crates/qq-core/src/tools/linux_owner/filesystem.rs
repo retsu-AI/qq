@@ -48,6 +48,14 @@ pub(super) fn prepare(
                 ));
             }
             let fd = workspace.root().as_fd().try_clone_to_owned()?;
+            // A descriptor into a host mqueue mount can dequeue messages even
+            // through a read-only mount, bypassing the new IPC namespace.
+            if rustix::fs::fstatfs(&fd)?.f_type == 0x1980_0202 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "host message-queue mounts cannot be granted to private execution",
+                ));
+            }
             rules.push(Directory {
                 fd: fd.as_raw_fd(),
                 path: grant.path.as_os_str().as_bytes().to_vec(),
@@ -86,6 +94,18 @@ pub(super) fn enforce(directories: Vec<Directory>) -> io::Result<()> {
         .add_rule(PathBeneath::new(
             std::fs::File::open("/dev/null")?,
             AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::Truncate,
+        ))
+        .map_err(io::Error::other)?;
+    // The mount belongs to this execution's private IPC namespace. Its root
+    // also authorizes the kernel's internal mq_open path into that namespace.
+    ruleset = ruleset
+        .add_rule(PathBeneath::new(
+            std::fs::File::open("/dev/mqueue")?,
+            AccessFs::ReadFile
+                | AccessFs::WriteFile
+                | AccessFs::ReadDir
+                | AccessFs::MakeReg
+                | AccessFs::RemoveFile,
         ))
         .map_err(io::Error::other)?;
     let status = ruleset.restrict_self().map_err(io::Error::other)?;

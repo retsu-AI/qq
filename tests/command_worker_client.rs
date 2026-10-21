@@ -150,3 +150,7 @@ mod network;
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/resources.rs"]
 mod resources;
+
+#[cfg(target_os = "linux")]
+#[path = "command_worker_client/kernel_isolation.rs"]
+mod kernel_isolation;

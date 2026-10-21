@@ -47,6 +47,9 @@ landlock.workspace = true
 goblin.workspace = true
 nix.workspace = true
 
+[target.'cfg(all(target_os = "linux", target_endian = "little", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))'.dependencies]
+seccompiler.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 subc-jobobject.workspace = true
 win32job.workspace = true

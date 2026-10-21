@@ -21,6 +21,7 @@ mod bootstrap;
 mod exec;
 mod filesystem;
 mod filesystem_root;
+mod kernel_isolation;
 mod network;
 mod resources;
 pub(crate) use exec::execute;
@@ -416,11 +417,13 @@ impl Startup {
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
         match read_pipe(&acknowledgement, 1).await?.as_slice() {
             b"g" => {}
-            kind @ (b"r" | b"l") => {
+            kind @ (b"r" | b"l" | b"k") => {
                 let context = if kind == b"r" {
                     "private filesystem"
-                } else {
+                } else if kind == b"l" {
                     "resource"
+                } else {
+                    "kernel isolation"
                 };
                 let length: [u8; 2] = read_pipe(&acknowledgement, 2)
                     .await?

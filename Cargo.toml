@@ -82,6 +82,7 @@ qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
+seccompiler = { version = "0.5", default-features = false }
 # reqwest 0.13.2 dropped the optional `webpki-roots` dependency (and with it
 # the implicit `webpki-roots` feature); the `rustls` feature verifies against
 # platform trust roots via rustls-platform-verifier instead.
