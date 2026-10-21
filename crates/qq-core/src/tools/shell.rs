@@ -961,21 +961,37 @@ impl ProcessGroupGuard {
     async fn confirm_stopped(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.killed_pgid {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-            loop {
-                match rustix::process::test_kill_process_group(pgid) {
-                    Err(rustix::io::Errno::SRCH) => return Ok(()),
-                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => {}
-                    Err(error) => return Err(error.into()),
-                    Ok(()) => {}
+            // Kernel teardown progresses in real time even when the task's
+            // Tokio clock is paused. Keep these short OS waits off runtime
+            // threads and separate from potentially stalled journal workers.
+            static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+                std::sync::OnceLock::new();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let permit = std::sync::Arc::clone(
+                SLOTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(16))),
+            )
+            .acquire_owned()
+            .await
+            .map_err(std::io::Error::other)?;
+            return tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                loop {
+                    match rustix::process::test_kill_process_group(pgid) {
+                        Err(rustix::io::Errno::SRCH) => return Ok(()),
+                        Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => {}
+                        Err(error) => return Err(error.into()),
+                        Ok(()) => {}
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(std::io::Error::other(
+                            "process group still exists after termination",
+                        ));
+                    }
+                    std::thread::park_timeout(std::time::Duration::from_millis(10));
                 }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(std::io::Error::other(
-                        "process group still exists after termination",
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
+            })
+            .await
+            .map_err(std::io::Error::other)?;
         }
         Ok(())
     }
