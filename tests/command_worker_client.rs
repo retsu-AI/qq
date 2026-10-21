@@ -128,3 +128,7 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
         0
     );
 }
+
+#[cfg(target_os = "linux")]
+#[path = "command_worker_client/goal_recovery.rs"]
+mod goal_recovery;
