@@ -107,6 +107,8 @@ tracing = "0.1"
 tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
 win-custody = "0.1.1"
+windows-permissions = "0.2.4"
+winapi-util = "0.1"
 
 [dependencies]
 clap.workspace = true

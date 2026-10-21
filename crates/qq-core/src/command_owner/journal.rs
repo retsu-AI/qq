@@ -19,6 +19,8 @@ struct JournalState {
     serial: Arc<tokio::sync::Semaphore>,
     connection: Mutex<Option<Connection>>,
     lock: Mutex<Option<File>>,
+    #[cfg(windows)]
+    directory: Mutex<Option<File>>,
     #[cfg(test)]
     cleanup: Mutex<Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>>,
 }
@@ -35,7 +37,16 @@ impl Drop for JournalState {
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
             .take();
-        if connection.is_none() && lock.is_none() {
+        #[cfg(windows)]
+        let directory = self
+            .directory
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let empty = connection.is_none() && lock.is_none();
+        #[cfg(windows)]
+        let empty = empty && directory.is_none();
+        if empty {
             return;
         }
         #[cfg(test)]
@@ -45,6 +56,8 @@ impl Drop for JournalState {
             // file lock until that I/O has finished, including implicit drops.
             drop(connection);
             drop(lock);
+            #[cfg(windows)]
+            drop(directory);
             #[cfg(test)]
             if let Some(observed) = observed {
                 let _ = observed.send(std::thread::current().id());
@@ -72,6 +85,12 @@ impl Journal {
     }
 
     fn open_blocking(directory: PathBuf) -> Result<Self, CommandOwnerError> {
+        // A private parent also protects the transport's sibling metadata.
+        // Check it before creating anything, and keep it pinned through open.
+        #[cfg(windows)]
+        let _parent = super::windows_state::directory(
+            directory.parent().ok_or(CommandOwnerError::PrivateState)?,
+        )?;
         if !directory.exists() {
             #[cfg(unix)]
             let mut builder = std::fs::DirBuilder::new();
@@ -96,6 +115,8 @@ impl Journal {
                 return Err(CommandOwnerError::PrivateState);
             }
         }
+        #[cfg(windows)]
+        let held_directory = super::windows_state::directory(&directory)?;
         let lock = private_file(&directory.join("owner.lock"))?;
         match lock.try_lock() {
             Ok(()) => {}
@@ -144,6 +165,8 @@ impl Journal {
             serial: Arc::new(tokio::sync::Semaphore::new(1)),
             connection: Mutex::new(Some(connection)),
             lock: Mutex::new(Some(lock)),
+            #[cfg(windows)]
+            directory: Mutex::new(Some(held_directory)),
             #[cfg(test)]
             cleanup: Mutex::new(None),
         })))
@@ -201,6 +224,14 @@ impl Journal {
             {
                 lock.unlock()?;
             }
+            #[cfg(windows)]
+            drop(
+                state
+                    .directory
+                    .lock()
+                    .map_err(|_| CommandOwnerError::Unavailable)?
+                    .take(),
+            );
             Ok(())
         })
         .await
@@ -481,6 +512,13 @@ fn private_file(path: &Path) -> Result<File, CommandOwnerError> {
             .mode(0o600)
             .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options
+            .custom_flags(super::windows_state::FILE_FLAG_OPEN_REPARSE_POINT)
+            .share_mode(super::windows_state::SHARE_READ_WRITE);
+    }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -496,5 +534,7 @@ fn private_file(path: &Path) -> Result<File, CommandOwnerError> {
             return Err(CommandOwnerError::PrivateState);
         }
     }
+    #[cfg(windows)]
+    super::windows_state::verify(&file, false)?;
     Ok(file)
 }

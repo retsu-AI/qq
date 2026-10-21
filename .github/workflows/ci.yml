@@ -192,6 +192,8 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::implicit_owner_cleanup_closes_sqlite_off_the_async_worker
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh command_owner::tests::windows_shared_state_is_refused_before_recovery_or_admission
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
+            bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
           fi
       - name: Unix output and observer regressions
         if: runner.os == 'macOS'

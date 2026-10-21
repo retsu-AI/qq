@@ -19,6 +19,8 @@ use crate::tools::{ToolOutput, ToolTasks, process_context::ExecutionContextRecei
 use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellation, ShellPolicy};
 
 mod journal;
+#[cfg(windows)]
+mod windows_state;
 use journal::Journal;
 
 pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;

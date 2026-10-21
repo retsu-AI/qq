@@ -925,7 +925,7 @@ async fn implicit_owner_cleanup_closes_sqlite_off_the_async_worker() {
 #[cfg(windows)]
 #[tokio::test]
 async fn windows_shared_state_is_refused_before_recovery_or_admission() {
-    for target in ["directory", "commands.sqlite3", "owner.lock"] {
+    for target in ["directory", "parent", "commands.sqlite3", "owner.lock"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("owner");
         let owner = CommandOwner::open(directory.clone(), "unknown")
@@ -933,12 +933,14 @@ async fn windows_shared_state_is_refused_before_recovery_or_admission() {
             .unwrap();
         owner.shutdown().await.unwrap();
         drop(owner);
-        let exposed = if target == "directory" {
+        let exposed = if target == "parent" {
+            root.path().to_owned()
+        } else if target == "directory" {
             directory.clone()
         } else {
             directory.join(target)
         };
-        let sddl = if target == "directory" {
+        let sddl = if matches!(target, "directory" | "parent") {
             "D:P(A;OICI;FA;;;WD)"
         } else {
             "D:P(A;;FA;;;WD)"
@@ -957,4 +959,58 @@ async fn windows_shared_state_is_refused_before_recovery_or_admission() {
             "shared {target} must be refused before opening the journal"
         );
     }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_hardlinked_journal_files_are_refused() {
+    for target in ["owner.lock", "commands.sqlite3"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("owner");
+        let owner = CommandOwner::open(directory.clone(), "unknown")
+            .await
+            .unwrap();
+        owner.shutdown().await.unwrap();
+        drop(owner);
+        std::fs::hard_link(directory.join(target), root.path().join("alias")).unwrap();
+        let reopened = CommandOwner::open(directory, "unknown").await;
+        let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
+        if let Ok(owner) = reopened {
+            owner.shutdown().await.unwrap();
+        }
+        assert!(refused, "hardlinked {target} must not become owner state");
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_junction_state_directories_are_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown")
+        .await
+        .unwrap();
+    owner.shutdown().await.unwrap();
+    drop(owner);
+    let alias = root.path().join("alias");
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&alias)
+            .arg(&directory)
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(status.success(), "create the native junction fixture");
+    let reopened = CommandOwner::open(alias, "unknown").await;
+    let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
+    if let Ok(owner) = reopened {
+        owner.shutdown().await.unwrap();
+    }
+    assert!(refused, "a directory junction must not become owner state");
 }

@@ -42,6 +42,8 @@ rustix = { workspace = true, features = ["fs", "event"] }
 
 [target.'cfg(windows)'.dependencies]
 win-custody.workspace = true
+windows-permissions.workspace = true
+winapi-util.workspace = true
 
 [build-dependencies]
 sha2.workspace = true
