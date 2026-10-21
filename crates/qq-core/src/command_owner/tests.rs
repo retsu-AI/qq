@@ -921,3 +921,40 @@ async fn implicit_owner_cleanup_closes_sqlite_off_the_async_worker() {
     assert!(!terminal.result.as_ref().unwrap().is_error());
     assert!(terminal.result.unwrap().text().contains("completed"));
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_shared_state_is_refused_before_recovery_or_admission() {
+    for target in ["directory", "commands.sqlite3", "owner.lock"] {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("owner");
+        let owner = CommandOwner::open(directory.clone(), "unknown")
+            .await
+            .unwrap();
+        owner.shutdown().await.unwrap();
+        drop(owner);
+        let exposed = if target == "directory" {
+            directory.clone()
+        } else {
+            directory.join(target)
+        };
+        let sddl = if target == "directory" {
+            "D:P(A;OICI;FA;;;WD)"
+        } else {
+            "D:P(A;;FA;;;WD)"
+        };
+        win_custody::SecurityDescriptor::from_sddl(sddl)
+            .unwrap()
+            .apply_to_tree(&exposed, true)
+            .unwrap();
+        let reopened = CommandOwner::open(directory, "unknown").await;
+        let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
+        if let Ok(owner) = reopened {
+            owner.shutdown().await.unwrap();
+        }
+        assert!(
+            refused,
+            "shared {target} must be refused before opening the journal"
+        );
+    }
+}

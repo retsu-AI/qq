@@ -40,6 +40,9 @@ url.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "event"] }
 
+[target.'cfg(windows)'.dependencies]
+win-custody.workspace = true
+
 [build-dependencies]
 sha2.workspace = true
 
