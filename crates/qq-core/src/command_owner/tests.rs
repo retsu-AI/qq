@@ -269,6 +269,60 @@ async fn admission_wait_cannot_renew_the_task_deadline() {
     assert!(terminal.result.unwrap().is_error());
 }
 
+#[tokio::test]
+async fn journal_read_failure_stops_admission_without_poisoning_expected_misses() {
+    for operation in ["snapshot", "submit"] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let directory = root.path().join("owner");
+        let owner = CommandOwner::open(directory.clone(), "unknown")
+            .await
+            .unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let request = command(workspace.path(), id, "echo completed");
+        assert!(matches!(
+            owner.snapshot(id).await,
+            Err(CommandOwnerError::NotFound)
+        ));
+        owner.submit(request.clone()).await.unwrap();
+        wait_finished(&owner, id, 0).await;
+        assert!(matches!(
+            owner
+                .submit(command(workspace.path(), id, "echo conflict"))
+                .await,
+            Err(CommandOwnerError::Conflict)
+        ));
+        owner.submit(request.clone()).await.unwrap();
+        tokio::task::spawn_blocking(move || {
+            Connection::open(directory.join("commands.sqlite3"))
+                .unwrap()
+                .execute_batch("DROP TABLE commands")
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        let read = match operation {
+            "snapshot" => owner.snapshot(id).await.map(|_| ()),
+            "submit" => owner.submit(request).await,
+            _ => unreachable!(),
+        };
+        let admission = owner
+            .submit(command(
+                workspace.path(),
+                ToolCallId::generate().unwrap(),
+                "echo forbidden",
+            ))
+            .await;
+        let stopped = owner.shutdown().await;
+        assert!(matches!(read, Err(CommandOwnerError::Sqlite(_))));
+        assert!(
+            matches!(admission, Err(CommandOwnerError::Unavailable)),
+            "{operation} must withdraw authority after losing durable state: {admission:?}"
+        );
+        assert!(stopped.is_err());
+    }
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn explicit_cancellation_reaps_before_publishing_completion() {

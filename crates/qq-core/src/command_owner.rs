@@ -241,7 +241,17 @@ impl CommandOwner {
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(CommandOwnerError::Invalid);
         }
-        if self.0.journal.existing(request.id, encoded.clone()).await? {
+        let existing = self
+            .0
+            .journal
+            .existing(request.id, encoded.clone())
+            .await
+            .inspect_err(|error| {
+                if !matches!(error, CommandOwnerError::Conflict) {
+                    self.failure();
+                }
+            })?;
+        if existing {
             return Ok(());
         }
         let slot = Arc::clone(&self.0.slots)
@@ -414,7 +424,11 @@ impl CommandOwner {
     }
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
-        self.0.journal.snapshot(id).await
+        self.0.journal.snapshot(id).await.inspect_err(|error| {
+            if !matches!(error, CommandOwnerError::NotFound) {
+                self.failure();
+            }
+        })
     }
 
     /// Wait for a committed transition without polling. Dropping this future
