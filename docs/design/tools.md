@@ -54,6 +54,26 @@ brokering, disk capacity, shared task resource budgets and concurrent writers st
 before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
+Trusted embedding hosts can import an explicit file selection with
+`TaskWorkspace::import` before compiling a runtime. The importer copies current
+bytes into fresh files in a new detached directory, bounds total logical bytes
+and entries (including generated parent directories), and refuses symlinks,
+reparse points, multiply linked files, special files and QQ/Git trust
+configuration. Parent traversal uses directory handles without following links.
+It checks held file identity, size and timestamps before and after each copy,
+and rejects observed source changes; this is not an atomic multi-file snapshot.
+Import does not execute Git, hooks or filters. Failed imports remove their new
+directory; an existing destination is never overwritten.
+
+The host compiles built-in tools against this detached path and uses its
+captured directory grant for native commands. Both paths then see the same task
+files. Task files persist after the import handle is dropped, and source files
+remain unchanged. The existing embedding example exercises a session in this
+tree. This opt-in primitive does not yet choose inputs for ordinary sessions,
+support source symlinks/hardlinks, bound subsequent output disk usage, protect
+new shell-created trust configuration, or publish changes back to the original
+checkout. Those remain necessary before Auto enablement.
+
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
 sockets. It works with host filesystem access or explicit file-content grants.

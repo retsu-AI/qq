@@ -236,6 +236,20 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
       - name: Exercise the embedding caller
         run: cargo run --locked -p qq-core --example command_owner
+      - name: Detached task workspace import and shared tool files
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_preserves_selected_bytes_without_host_aliases
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_hardlinks_and_cleans_partial_import
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_is_shared_by_builtin_tools_and_native_commands
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_links_special_files_and_preserves_executable_bits
+          else
+            bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_junctions_and_ambiguous_windows_names
+          fi
+          cargo run --locked -p qq-core --example embed
       - name: Private command transport and worker process
         shell: bash
         run: |
