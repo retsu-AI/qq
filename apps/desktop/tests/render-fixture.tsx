@@ -5,7 +5,8 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import { Navigation } from "../src/components/Navigation";
 import { configurePlatform, platform, watchMobileViewport } from "../src/lib/platform";
-import { PanelLeft } from "lucide-react";
+import { TitleBar, type Menu } from "../src/components/TitleBar";
+import { Welcome } from "../src/components/Welcome";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import type { Item, ProjectState } from "../src/lib/types";
@@ -24,6 +25,7 @@ const count = Math.min(
 );
 const running = new URLSearchParams(location.search).has("running");
 const baseline = new URLSearchParams(location.search).has("baseline");
+const welcome = new URLSearchParams(location.search).has("welcome");
 const baselinePath = "/src-tauri/target/qq-perf/baseline.tsx";
 const Baseline = lazy<
   ComponentType<{
@@ -308,6 +310,46 @@ if (new URLSearchParams(location.search).has("approval"))
       grant_label: "echo fixture",
     },
   });
+/** A menu bar with desktop-only items, to show what phones fold away. */
+function fixtureMenus(openSettings: () => void): Menu[] {
+  const none = () => undefined;
+  return [
+    {
+      label: "File",
+      mnemonic: "f",
+      items: [
+        { label: "New session", shortcut: "Ctrl N", onSelect: none },
+        { label: "Open project…", desktopOnly: true, onSelect: none },
+        "separator",
+        { label: "Settings…", shortcut: "Ctrl ,", onSelect: openSettings },
+      ],
+    },
+    {
+      label: "Edit",
+      mnemonic: "e",
+      items: [
+        { label: "Undo", desktopOnly: true, onSelect: none },
+        { label: "Paste", desktopOnly: true, onSelect: none },
+      ],
+    },
+    {
+      label: "View",
+      mnemonic: "v",
+      items: [
+        { label: "System theme", checked: true, onSelect: none },
+        { label: "Dark theme", checked: false, onSelect: none },
+        "separator",
+        { label: "Zoom in", desktopOnly: true, onSelect: none },
+      ],
+    },
+    {
+      label: "Help",
+      mnemonic: "h",
+      items: [{ label: "About QQ", onSelect: none }],
+    },
+  ];
+}
+
 function Fixture() {
   const [navigationOpen, setNavigationOpen] = useState(!platform.mobile);
   const [commands, setCommands] = useState<string[]>([]);
@@ -405,13 +447,18 @@ function Fixture() {
           project={project}
         />
         <main className="flex min-w-0 flex-1 flex-col">
-          {platform.mobile && <header className="mobile-titlebar flex shrink-0 items-center border-b border-line bg-sidebar">
-            <button aria-label="Show sidebar" onClick={() => setNavigationOpen(true)} className="flex items-center justify-center">
-              <PanelLeft className="h-5 w-5" />
-            </button>
-            <span className="px-2">QQ</span>
-          </header>}
-          {baseline ? (
+          {platform.mobile && (
+            <TitleBar
+              menus={fixtureMenus(() => setSettingsOpen(true))}
+              sidebarOpen={navigationOpen}
+              toggleSidebar={() => setNavigationOpen(!navigationOpen)}
+              back={null}
+              forward={null}
+            />
+          )}
+          {welcome ? (
+            <Welcome recents={[]} />
+          ) : baseline ? (
             <div data-baseline className="overflow-y-auto p-6">
               <Suspense fallback="Loading baseline">
                 <Baseline project={project} transcript={project.transcript!} />

@@ -273,14 +273,15 @@ export function App() {
       label: "Edit",
       mnemonic: "e",
       items: [
-        { label: "Undo", shortcut: "Ctrl Z", onSelect: () => edit("undo") },
-        { label: "Redo", shortcut: "Ctrl Y", onSelect: () => edit("redo") },
+        { label: "Undo", desktopOnly: true, shortcut: "Ctrl Z", onSelect: () => edit("undo") },
+        { label: "Redo", desktopOnly: true, shortcut: "Ctrl Y", onSelect: () => edit("redo") },
         "separator",
-        { label: "Cut", shortcut: "Ctrl X", onSelect: () => edit("cut") },
-        { label: "Copy", shortcut: "Ctrl C", onSelect: () => edit("copy") },
-        { label: "Paste", shortcut: "Ctrl V", onSelect: () => void paste() },
+        { label: "Cut", desktopOnly: true, shortcut: "Ctrl X", onSelect: () => edit("cut") },
+        { label: "Copy", desktopOnly: true, shortcut: "Ctrl C", onSelect: () => edit("copy") },
+        { label: "Paste", desktopOnly: true, shortcut: "Ctrl V", onSelect: () => void paste() },
         {
           label: "Select all",
+          desktopOnly: true,
           shortcut: "Ctrl A",
           onSelect: () => edit("selectAll"),
         },
@@ -304,6 +305,8 @@ export function App() {
       items: [
         {
           label: sidebarOpen ? "Hide sidebar" : "Show sidebar",
+          // Phones have the title bar button instead.
+          desktopOnly: true,
           shortcut: "Ctrl B",
           onSelect: toggleSidebar,
         },
@@ -343,9 +346,9 @@ export function App() {
           onSelect: theme("dark"),
         },
         "separator",
-        { label: "Zoom in", shortcut: "Ctrl +", onSelect: () => zoom(1) },
-        { label: "Zoom out", shortcut: "Ctrl -", onSelect: () => zoom(-1) },
-        { label: "Actual size", shortcut: "Ctrl 0", onSelect: () => zoom(0) },
+        { label: "Zoom in", desktopOnly: true, shortcut: "Ctrl +", onSelect: () => zoom(1) },
+        { label: "Zoom out", desktopOnly: true, shortcut: "Ctrl -", onSelect: () => zoom(-1) },
+        { label: "Actual size", desktopOnly: true, shortcut: "Ctrl 0", onSelect: () => zoom(0) },
       ],
     },
     {
@@ -355,6 +358,7 @@ export function App() {
         { label: "Documentation", onSelect: () => void openUrl(DOCS_URL) },
         {
           label: "Keyboard shortcuts",
+          desktopOnly: true,
           onSelect: () => setSettingsOpen(true),
         },
         { label: "Report an issue", onSelect: () => void openUrl(ISSUES_URL) },

@@ -12,7 +12,9 @@ No remote credential import or connection fallback is provided.
 
 For a credential-free phone preview, run `pnpm dev` and open
 `/tests/render.html?demo&platform=android` (or `platform=ios`) at 375×812.
-Omit `platform` for the desktop fixture at 1280×800. The native app obtains its
+Add `welcome` for the disconnected first screen, and use 1180×820 with
+`platform=ios` for the tablet sheets. Omit `platform` for the desktop fixture
+at 1280×800. The native app obtains its
 platform from `client_platform` before React mounts; viewport size never grants
 capabilities. Check the session drawer, Goal/Changes sheets, dialogs, composer
 and touch controls. A shorter preview viewport can simulate keyboard space,

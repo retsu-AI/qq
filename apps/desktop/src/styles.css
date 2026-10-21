@@ -11,7 +11,7 @@
     env(safe-area-inset-bottom) env(safe-area-inset-left);
   overflow: hidden;
 }
-:root[data-mobile="true"] :is(button, [role="option"], [role="menuitem"]) {
+:root[data-mobile="true"] :is(button, [role="option"], [role="menuitem"], [role="menuitemradio"]) {
   min-height: 44px;
   min-width: 44px;
   touch-action: manipulation;
@@ -71,18 +71,6 @@
     padding-top: max(16px, env(safe-area-inset-top));
     padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
-  :root[data-mobile="true"] dialog.mobile-panel {
-    position: fixed;
-    inset: 0;
-    z-index: 30;
-    width: 100%;
-    min-width: 0;
-    height: var(--app-height, 100dvh);
-    padding: env(safe-area-inset-top) env(safe-area-inset-right)
-      env(safe-area-inset-bottom) env(safe-area-inset-left);
-    border: 0;
-  }
-  :root[data-mobile="true"] dialog.mobile-panel[open] { display: flex; }
   :root[data-mobile="true"] .session-header {
     height: auto;
     min-height: 48px;
@@ -112,6 +100,37 @@
     padding-inline: 12px;
     overflow-x: hidden;
   }
+}
+/* Goal and Changes sheets: full screen on phones, a right-hand sheet on
+   tablets. After the phone dialog rule above, which has equal specificity. */
+:root[data-mobile="true"] dialog.mobile-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--app-height, 100dvh);
+  max-height: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border: 0;
+}
+:root[data-mobile="true"] dialog.mobile-panel[open] { display: flex; }
+.mobile-panel::backdrop { background: rgb(0 0 0 / 0.5); }
+@media (min-width: 1024px) {
+  :root[data-mobile="true"] dialog.mobile-panel {
+    inset: 0 0 0 auto;
+    width: min(460px, 50vw);
+    padding-left: 0;
+    border-left: 1px solid var(--border);
+  }
+}
+/* The folded phone menu can be taller than a landscape phone. */
+:root[data-mobile="true"] [role="menu"] {
+  max-height: calc(var(--app-height, 100dvh) - 64px);
+  overflow-y: auto;
 }
 
 /* Design tokens. Dark is the default; light follows the OS. */
