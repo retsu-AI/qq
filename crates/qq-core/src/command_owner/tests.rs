@@ -109,6 +109,10 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
         environment: crate::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         // Existing fixture roots may be reached through macOS's /var alias.
+        workspace_identity: crate::command_owner::NativeWorkspaceIdentity::capture(
+            &(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())),
+        )
+        .unwrap(),
         workspace: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
         tool: "shell".to_owned(),
         arguments: serde_json::json!({"command":script}).to_string(),
@@ -767,14 +771,11 @@ async fn a_missing_workspace_refuses_that_command_without_stopping_other_work() 
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
-    owner
-        .submit(command(
-            &workspace.path().join("missing"),
-            id,
-            "echo should-not-run",
-        ))
-        .await
-        .unwrap();
+    let missing = workspace.path().join("missing");
+    std::fs::create_dir(&missing).unwrap();
+    let request = command(&missing, id, "echo should-not-run");
+    std::fs::remove_dir(missing).unwrap();
+    owner.submit(request).await.unwrap();
     let result = owner.wait(id, 0).await;
     let next = ToolCallId::generate().unwrap();
     let next_admission = owner
@@ -1888,5 +1889,34 @@ async fn acknowledgement_saturation_does_not_delay_live_cancellation() {
     assert!(
         cancelled,
         "live revocation must bypass stalled acknowledgement writes"
+    );
+}
+
+#[tokio::test]
+async fn a_replaced_workspace_never_receives_the_admitted_command() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("workspace");
+    std::fs::create_dir(&path).unwrap();
+    let path = std::fs::canonicalize(path).unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let request = command(&path, id, "echo escaped>marker");
+    std::fs::rename(&path, root.path().join("original")).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    owner.submit(request).await.unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        !path.join("marker").exists(),
+        "a replacement directory must not receive an approved command"
+    );
+    let result = finished.result.unwrap();
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result
+            .text()
+            .contains("workspace directory identity changed")
     );
 }

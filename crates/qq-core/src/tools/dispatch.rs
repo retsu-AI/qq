@@ -451,10 +451,19 @@ pub(crate) async fn execute_with_images(
                     Ok(environment) => environment,
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
+                let held_workspace = workspace.clone();
+                let workspace_identity = match tokio::task::spawn_blocking(move || {
+                    crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())
+                }).await {
+                    Ok(Ok(identity)) => identity,
+                    Ok(Err(error)) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                    Err(error) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                };
                 let request = crate::command_owner::NativeCommand {
                     environment,
                     id,
                     workspace: workspace.path().to_owned(),
+                    workspace_identity,
                     tool: name,
                     arguments,
                     shell_policy: shell_policy.as_ref().clone(),

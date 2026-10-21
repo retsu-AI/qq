@@ -20,7 +20,9 @@ use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellat
 
 mod environment;
 mod journal;
+mod workspace_identity;
 pub use environment::NativeEnvironment;
+pub use workspace_identity::NativeWorkspaceIdentity;
 mod observer;
 pub(crate) use observer::observe;
 #[cfg(windows)]
@@ -100,6 +102,7 @@ pub struct NativeCommand {
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
+    pub workspace_identity: NativeWorkspaceIdentity,
     pub tool: String,
     pub arguments: String,
     pub shell_policy: ShellPolicy,
@@ -161,6 +164,8 @@ pub struct CommandSnapshot {
 pub enum CommandOwnerError {
     #[error("command observations were reclaimed after acknowledgement")]
     Retired,
+    #[error("workspace directory identity changed before command execution")]
+    WorkspaceChanged,
     #[error("command worker build {actual} differs from this QQ build {expected}")]
     IncompatibleBuild { expected: String, actual: String },
     #[error("another command owner holds this journal")]
@@ -492,8 +497,13 @@ impl CommandOwner {
         task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
         let path = request.workspace;
+        let expected_workspace = request.workspace_identity;
         let workspace = match blocking(move || {
-            crate::workspace::Workspace::open(&path).map_err(CommandOwnerError::Io)
+            let workspace = crate::workspace::Workspace::open(&path)?;
+            if NativeWorkspaceIdentity::held(workspace.root())? != expected_workspace {
+                return Err(CommandOwnerError::WorkspaceChanged);
+            }
+            Ok(workspace)
         })
         .await
         {
@@ -502,6 +512,11 @@ impl CommandOwner {
                 return Ok(ToolOutput::refused(format!(
                     "could not open command workspace: {error}"
                 )));
+            }
+            Err(CommandOwnerError::WorkspaceChanged) => {
+                return Ok(ToolOutput::refused(
+                    CommandOwnerError::WorkspaceChanged.to_string(),
+                ));
             }
             Err(error) => return Err(error),
         };

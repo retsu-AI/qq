@@ -27,11 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (root, workspace, workspace_path) = tokio::task::spawn_blocking(|| {
+    let (root, workspace, workspace_path, workspace_identity) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir()?;
         let workspace = tempfile::tempdir()?;
         let workspace_path = std::fs::canonicalize(workspace.path())?;
-        Ok::<_, std::io::Error>((root, workspace, workspace_path))
+        let workspace_identity =
+            qq_core::command_owner::NativeWorkspaceIdentity::capture(&workspace_path)?;
+        Ok::<_, std::io::Error>((root, workspace, workspace_path, workspace_identity))
     })
     .await??;
     let directory = root.path().join("owner");
@@ -46,6 +48,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .submit(NativeCommand {
             environment: qq_core::command_owner::NativeEnvironment::capture(&[])?,
             id,
+            workspace_identity,
             workspace: workspace_path,
             tool: "shell".to_owned(),
             arguments: r#"{"command":"echo owned"}"#.to_owned(),

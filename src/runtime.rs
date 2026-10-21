@@ -2984,7 +2984,7 @@ impl RuntimeHandler {
                     .config
                     .paths()
                     .data_dir()
-                    .join("command-owner-v2"),
+                    .join("command-owner-v3"),
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
                 crate::cli::BUILD_VERSION,
             )?));

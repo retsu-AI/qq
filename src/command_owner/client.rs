@@ -229,7 +229,7 @@ impl CommandWorker {
                 .0
                 .http
                 .post(format!(
-                    "http://{}/internal/command-owner/v2/{operation}",
+                    "http://{}/internal/command-owner/v3/{operation}",
                     connection.address()
                 ))
                 .bearer_auth(connection.expose_bearer_token())

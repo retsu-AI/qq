@@ -201,7 +201,7 @@ async fn real_cli_returns_piped_output_while_its_command_worker_remains_alive() 
         "SELECT id FROM tool_calls WHERE state='completed'",
     );
     let worker = calls(
-        &data.join("command-owner-v2/commands/commands.sqlite3"),
+        &data.join("command-owner-v3/commands/commands.sqlite3"),
         "SELECT id FROM commands WHERE status='finished'",
     );
     assert_eq!(session.len(), 1);
