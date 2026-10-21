@@ -69,7 +69,7 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
     for ending in ["completion", "cancellation", "deadline"] {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        let owner = CommandOwner::open(root.path().join("owner"), "unknown", super::launcher())
             .await
             .unwrap();
         let id = ToolCallId::generate().unwrap();

@@ -37,7 +37,12 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
         }
         ReserveOutcome::Reserved(reservation) => reservation,
     };
-    let owner = CommandOwner::open(directory.join("commands"), env!("QQ_SOURCE_REVISION")).await?;
+    let owner = CommandOwner::open(
+        directory.join("commands"),
+        env!("QQ_SOURCE_REVISION"),
+        qq_core::command_owner::CommandLauncher::new(std::env::current_exe()?),
+    )
+    .await?;
     let mut server = match reservation.start_command_owner(owner.clone()) {
         Ok(server) => server,
         Err(error) => {

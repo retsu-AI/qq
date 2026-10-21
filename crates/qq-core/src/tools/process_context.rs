@@ -47,6 +47,7 @@ pub(crate) struct ExecutionContextFacts {
     pub(crate) locale: Locale,
     pub(crate) cwd: CwdIdentity,
     pub(crate) verdict: ExecutionVerdict,
+    /// Host process owning this invocation; native backends may run the payload in descendants.
     pub(crate) pid: u32,
 }
 
@@ -212,10 +213,32 @@ pub(crate) struct PreparedLaunch {
     receipt: ExecutionContextReceipt,
     _cwd: Option<cap_std::fs::Dir>,
     #[cfg(target_os = "linux")]
-    _image: Option<std::fs::File>,
+    _image: Option<(std::fs::File, String)>,
+    #[cfg(target_os = "linux")]
+    startup: Option<super::linux_owner::Startup>,
 }
 
 impl PreparedLaunch {
+    #[cfg(target_os = "linux")]
+    pub(super) fn owned_linux(
+        mut self,
+        owner: &super::linux_owner::LinuxOwner,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                self._image.as_ref(),
+            )
+            .map_err(PreparationError::Custody)?;
+        self.command = Some(command);
+        self.startup = Some(startup);
+        Ok(self)
+    }
     /// Only stream/process supervision settings may change after verification.
     pub(crate) async fn spawn(
         &mut self,
@@ -254,10 +277,16 @@ impl PreparedLaunch {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         let child = {
             let _ = process;
             command.spawn()?
+        };
+        #[cfg(target_os = "linux")]
+        let child = if let Some(startup) = self.startup.take() {
+            super::linux_owner::spawn(command, startup, process, cancelled, deadline).await?
+        } else {
+            command.spawn()?.into()
         };
         #[cfg(windows)]
         let child = super::windows_job::spawn(
@@ -281,6 +310,9 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
+    #[cfg(target_os = "linux")]
+    #[error("could not establish Linux command custody: {0}")]
+    Custody(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -415,7 +447,7 @@ pub(super) fn prepare(
                     ));
                     command.args(&args.args);
                     command.as_std_mut().arg0(&args.program);
-                    image = Some(bound);
+                    image = Some((bound, args.program.clone()));
                     ExecutionVerdict::VerifiedRead {
                         family,
                         sealed_image_sha256: hash,
@@ -461,6 +493,8 @@ pub(super) fn prepare(
         _cwd: Some(directory),
         #[cfg(target_os = "linux")]
         _image: image,
+        #[cfg(target_os = "linux")]
+        startup: None,
     })
 }
 

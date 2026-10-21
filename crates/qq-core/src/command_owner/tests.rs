@@ -6,6 +6,19 @@ use super::*;
 #[cfg(windows)]
 mod windows_processes;
 
+pub(crate) fn launcher() -> super::CommandLauncher {
+    let binary = std::env::current_exe().unwrap();
+    super::CommandLauncher::new(
+        binary
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples")
+            .join(format!("command_owner{}", std::env::consts::EXE_SUFFIX)),
+    )
+}
+
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
         id,
@@ -34,7 +47,9 @@ async fn wait_finished(owner: &CommandOwner, id: ToolCallId, mut version: u64) -
     .expect("the native command must finish")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// Linux PIDs are private to each command namespace. The real-worker tests use
+// kernel peer credentials and pidfds to check those descendants from the host.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn completion_waits_for_descendants_that_closed_their_pipes() {
     use std::io::Write as _;
@@ -47,7 +62,7 @@ async fn completion_waits_for_descendants_that_closed_their_pipes() {
         .write(true)
         .open(release)
         .unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -100,7 +115,7 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
         .write(true)
         .open(start_path)
         .unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -146,7 +161,7 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
     );
     owner.shutdown().await.unwrap();
     drop(owner);
-    let reopened = CommandOwner::open(root.path().join("owner"), "unknown")
+    let reopened = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let durable = reopened.snapshot(id).await.unwrap();
@@ -162,11 +177,11 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
 async fn the_journal_has_one_owner_and_rejects_id_reuse() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     assert!(matches!(
-        CommandOwner::open(root.path().join("owner"), "unknown").await,
+        CommandOwner::open(root.path().join("owner"), "unknown", launcher()).await,
         Err(CommandOwnerError::Busy)
     ));
     let id = ToolCallId::generate().unwrap();
@@ -184,7 +199,7 @@ async fn the_journal_has_one_owner_and_rejects_id_reuse() {
 async fn dropping_admission_waiter_does_not_abandon_a_committed_command() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -234,7 +249,7 @@ async fn dropping_admission_waiter_does_not_abandon_a_committed_command() {
 async fn admission_wait_cannot_renew_the_task_deadline() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -275,7 +290,7 @@ async fn journal_read_failure_stops_admission_without_poisoning_expected_misses(
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let directory = root.path().join("owner");
-        let owner = CommandOwner::open(directory.clone(), "unknown")
+        let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
             .await
             .unwrap();
         let id = ToolCallId::generate().unwrap();
@@ -341,7 +356,7 @@ async fn journal_rejects_untrusted_ancestors_before_creating_state() {
         nested.join("owner"),
         shared.join("alias/owner"),
     ] {
-        let opened = CommandOwner::open(directory.clone(), "unknown").await;
+        let opened = CommandOwner::open(directory.clone(), "unknown", launcher()).await;
         let rejected = matches!(opened, Err(CommandOwnerError::PrivateState));
         if let Ok(owner) = opened {
             owner.shutdown().await.unwrap();
@@ -360,7 +375,7 @@ async fn journal_rejects_untrusted_ancestors_before_creating_state() {
         shared.join("sticky-owner"),
         root.path().join("trusted-alias/owner"),
     ] {
-        CommandOwner::open(directory, "unknown")
+        CommandOwner::open(directory, "unknown", launcher())
             .await
             .unwrap()
             .shutdown()
@@ -374,7 +389,7 @@ async fn journal_rejects_untrusted_ancestors_before_creating_state() {
 async fn explicit_cancellation_reaps_before_publishing_completion() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -411,7 +426,7 @@ async fn explicit_cancellation_reaps_before_publishing_completion() {
 async fn concurrent_retries_execute_once_and_conflict_does_not_stop_the_owner() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -461,7 +476,9 @@ async fn recovery_marks_an_unconfirmed_command_lost_and_never_replays_it() {
     let released = journal.observe_cleanup();
     drop(journal);
     released.await.unwrap();
-    let owner = CommandOwner::open(directory, "unknown").await.unwrap();
+    let owner = CommandOwner::open(directory, "unknown", launcher())
+        .await
+        .unwrap();
     let recovered = owner.snapshot(id).await.unwrap();
     assert_eq!(recovered.status, CommandStatus::Lost);
     owner.submit(request).await.unwrap();
@@ -478,18 +495,18 @@ async fn owner_state_rejects_symlinked_directories_and_hardlinked_lock_files() {
     let alias = root.path().join("alias");
     std::os::unix::fs::symlink(&real, &alias).unwrap();
     assert!(matches!(
-        CommandOwner::open(alias, "unknown").await,
+        CommandOwner::open(alias, "unknown", launcher()).await,
         Err(CommandOwnerError::PrivateState)
     ));
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     owner.shutdown().await.unwrap();
     drop(owner);
     std::fs::hard_link(directory.join("owner.lock"), root.path().join("other-lock")).unwrap();
     assert!(matches!(
-        CommandOwner::open(directory, "unknown").await,
+        CommandOwner::open(directory, "unknown", launcher()).await,
         Err(CommandOwnerError::PrivateState)
     ));
 }
@@ -499,7 +516,7 @@ async fn owner_state_rejects_symlinked_directories_and_hardlinked_lock_files() {
 async fn owner_enforces_the_task_deadline_without_a_live_observer() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -547,7 +564,7 @@ async fn owner_enforces_the_task_deadline_without_a_live_observer() {
 async fn cancellation_before_admission_prevents_a_late_launch() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -568,7 +585,7 @@ async fn cancellation_before_admission_prevents_a_late_launch() {
 async fn a_missing_workspace_refuses_that_command_without_stopping_other_work() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -597,7 +614,7 @@ async fn a_missing_workspace_refuses_that_command_without_stopping_other_work() 
 async fn unsupported_journal_version_is_preserved_and_refused() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -608,7 +625,7 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
     db.pragma_update(None, "user_version", 4).unwrap();
     drop(db);
     assert!(matches!(
-        CommandOwner::open(directory.clone(), "unknown").await,
+        CommandOwner::open(directory.clone(), "unknown", launcher()).await,
         Err(CommandOwnerError::Schema(4))
     ));
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
@@ -626,7 +643,7 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
 async fn exhausted_execution_slots_refuse_admission_without_poisoning_the_owner() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let slots = owner
@@ -660,7 +677,7 @@ async fn exhausted_execution_slots_refuse_admission_without_poisoning_the_owner(
 async fn unconfirmed_process_exit_blocks_owner_continuation() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let spawned =
@@ -701,7 +718,7 @@ async fn unconfirmed_process_exit_blocks_owner_continuation() {
 async fn control_dense_native_output_fits_the_durable_result_bound() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -733,7 +750,7 @@ async fn live_output_is_durable_before_command_completion() {
         .write(true)
         .open(gate_path)
         .unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -768,7 +785,7 @@ async fn live_output_is_durable_before_command_completion() {
 async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -817,7 +834,7 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
 async fn escaped_valid_arguments_fit_the_owner_transport_bound() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -841,11 +858,11 @@ async fn escaped_valid_arguments_fit_the_owner_transport_bound() {
 async fn shutdown_releases_the_journal_even_while_observer_handles_remain() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     owner.shutdown().await.unwrap();
-    let reopened = CommandOwner::open(directory, "unknown").await;
+    let reopened = CommandOwner::open(directory, "unknown", launcher()).await;
     assert!(
         reopened.is_ok(),
         "a stopped owner must not retain authority through stale handles"
@@ -862,7 +879,7 @@ async fn shutdown_releases_the_journal_even_while_observer_handles_remain() {
 async fn dropping_the_shutdown_waiter_does_not_abandon_authority_release() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     let slots = owner
@@ -887,7 +904,9 @@ async fn dropping_the_shutdown_waiter_does_not_abandon_authority_release() {
         "shutdown must finish after its caller disconnects"
     );
     assert!(terminal.unwrap().unwrap().as_ref().unwrap().is_ok());
-    let next = CommandOwner::open(directory, "unknown").await.unwrap();
+    let next = CommandOwner::open(directory, "unknown", launcher())
+        .await
+        .unwrap();
     next.shutdown().await.unwrap();
 }
 
@@ -895,7 +914,7 @@ async fn dropping_the_shutdown_waiter_does_not_abandon_authority_release() {
 async fn an_expired_task_deadline_refuses_launch_before_any_process_exists() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -917,7 +936,7 @@ async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
     let workspace = tempfile::tempdir().unwrap();
     let canonical = std::fs::canonicalize(workspace.path()).unwrap();
     crate::tools::limit_shell_read_chunks(&canonical, 1);
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let db = Connection::open(root.path().join("owner/commands.sqlite3")).unwrap();
@@ -957,7 +976,7 @@ async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
 async fn cancellation_stops_live_work_before_a_stalled_journal_is_released() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -1009,7 +1028,7 @@ async fn cancellation_stops_live_work_before_a_stalled_journal_is_released() {
 async fn a_stalled_output_write_cannot_extend_the_task_execution_deadline() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -1059,7 +1078,7 @@ async fn utf8_split_across_native_reads_is_preserved_in_durable_output() {
     let workspace = tempfile::tempdir().unwrap();
     let canonical = std::fs::canonicalize(workspace.path()).unwrap();
     crate::tools::limit_shell_read_chunks(&canonical, 1);
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -1122,7 +1141,7 @@ async fn a_stalled_journal_does_not_starve_other_workspace_operations() {
 async fn extreme_task_deadlines_never_stop_the_owner() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
     let id = ToolCallId::generate().unwrap();
@@ -1154,7 +1173,7 @@ async fn implicit_owner_cleanup_closes_sqlite_off_the_async_worker() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     let closed = owner.0.journal.observe_cleanup();
@@ -1169,7 +1188,9 @@ async fn implicit_owner_cleanup_closes_sqlite_off_the_async_worker() {
         .unwrap()
         .unwrap();
     assert_ne!(cleanup_thread, std::thread::current().id());
-    let reopened = CommandOwner::open(directory, "unknown").await.unwrap();
+    let reopened = CommandOwner::open(directory, "unknown", launcher())
+        .await
+        .unwrap();
     let terminal = reopened.snapshot(id).await.unwrap();
     reopened.shutdown().await.unwrap();
     assert_eq!(terminal.status, CommandStatus::Finished);
@@ -1183,7 +1204,7 @@ async fn windows_shared_state_is_refused_before_recovery_or_admission() {
     for target in ["directory", "parent", "commands.sqlite3", "owner.lock"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("owner");
-        let owner = CommandOwner::open(directory.clone(), "unknown")
+        let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
             .await
             .unwrap();
         owner.shutdown().await.unwrap();
@@ -1204,7 +1225,7 @@ async fn windows_shared_state_is_refused_before_recovery_or_admission() {
             .unwrap()
             .apply_to_tree(&exposed, true)
             .unwrap();
-        let reopened = CommandOwner::open(directory, "unknown").await;
+        let reopened = CommandOwner::open(directory, "unknown", launcher()).await;
         let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
         if let Ok(owner) = reopened {
             owner.shutdown().await.unwrap();
@@ -1222,13 +1243,13 @@ async fn windows_hardlinked_journal_files_are_refused() {
     for target in ["owner.lock", "commands.sqlite3"] {
         let root = tempfile::tempdir().unwrap();
         let directory = root.path().join("owner");
-        let owner = CommandOwner::open(directory.clone(), "unknown")
+        let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
             .await
             .unwrap();
         owner.shutdown().await.unwrap();
         drop(owner);
         std::fs::hard_link(directory.join(target), root.path().join("alias")).unwrap();
-        let reopened = CommandOwner::open(directory, "unknown").await;
+        let reopened = CommandOwner::open(directory, "unknown", launcher()).await;
         let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
         if let Ok(owner) = reopened {
             owner.shutdown().await.unwrap();
@@ -1242,7 +1263,7 @@ async fn windows_hardlinked_journal_files_are_refused() {
 async fn windows_junction_state_directories_are_refused() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown")
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
         .await
         .unwrap();
     owner.shutdown().await.unwrap();
@@ -1262,7 +1283,7 @@ async fn windows_junction_state_directories_are_refused() {
     .unwrap()
     .unwrap();
     assert!(status.success(), "create the native junction fixture");
-    let reopened = CommandOwner::open(alias, "unknown").await;
+    let reopened = CommandOwner::open(alias, "unknown", launcher()).await;
     let refused = matches!(reopened, Err(CommandOwnerError::PrivateState));
     if let Ok(owner) = reopened {
         owner.shutdown().await.unwrap();

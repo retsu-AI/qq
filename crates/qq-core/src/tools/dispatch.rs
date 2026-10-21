@@ -38,6 +38,8 @@ pub(crate) struct ToolTasks(Arc<ToolTaskState>);
 
 #[derive(Default)]
 struct ToolTaskState {
+    #[cfg(target_os = "linux")]
+    linux_owner: Option<super::linux_owner::LinuxOwner>,
     process_recorder: OnceLock<ProcessRecorder>,
     output_recorder: OnceLock<OutputRecorder>,
     unrecorded_process: AtomicBool,
@@ -72,6 +74,15 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn owned_linux(
+        launcher: crate::command_owner::CommandLauncher,
+    ) -> std::io::Result<Self> {
+        Ok(Self(Arc::new(ToolTaskState {
+            linux_owner: Some(super::linux_owner::LinuxOwner::discover(launcher)?),
+            ..ToolTaskState::default()
+        })))
+    }
     pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
         F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
@@ -140,8 +151,12 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    #[cfg(target_os = "linux")]
+    pub(super) fn linux_owner(&self) -> Option<&super::linux_owner::LinuxOwner> {
+        self.tasks.linux_owner.as_ref()
+    }
     /// Keep native startup and its child tracked if the awaiting task unwinds.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     pub(super) fn fork(&self) -> Self {
         self.tasks.active.fetch_add(1, Ordering::AcqRel);
         Self {

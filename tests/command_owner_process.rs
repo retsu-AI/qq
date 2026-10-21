@@ -8,6 +8,10 @@ use tokio::{
     process::{Child, Command},
 };
 
+#[cfg(target_os = "linux")]
+#[path = "command_owner_process/linux_custody.rs"]
+mod linux_custody;
+
 async fn start(directory: &Path) -> (Child, ServerConnection) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_qq"));
     command.env_clear();

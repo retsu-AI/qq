@@ -30,6 +30,29 @@ const MAX_RETAINED: usize = 10_000;
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_LIVE_OUTPUT_BYTES: usize = crate::tools::MAX_SHELL_OUTPUT_BYTES;
 
+/// Trusted entry point that runs QQ's native launch helper before any payload.
+/// Embedders may supply their own argument prefix calling `execute_native_launch`.
+#[derive(Debug, Clone)]
+pub struct CommandLauncher {
+    pub executable: PathBuf,
+    pub arguments: Vec<std::ffi::OsString>,
+}
+
+impl CommandLauncher {
+    pub fn new(executable: PathBuf) -> Self {
+        Self {
+            executable,
+            arguments: vec!["_command-exec".into()],
+        }
+    }
+}
+
+/// Trusted Linux monitor/PID-1 entry point, called before starting a runtime.
+#[cfg(target_os = "linux")]
+pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
+    crate::tools::linux_owner::execute(encoded)
+}
+
 /// An authorized invocation. Its ID is an idempotency key, not a new attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -164,12 +187,21 @@ impl CommandOwner {
     pub async fn open(
         directory: PathBuf,
         source_revision: &str,
+        launcher: CommandLauncher,
     ) -> Result<Self, CommandOwnerError> {
         let journal = Journal::open(directory).await?;
         let (failed, _) = watch::channel(false);
         let (stopped, _) = watch::channel(None);
         let jobs = Arc::new(Mutex::new(HashMap::<ToolCallId, LiveCommand>::new()));
-        let tools = ToolTasks::default();
+        #[cfg(target_os = "linux")]
+        let tools =
+            blocking(move || ToolTasks::owned_linux(launcher).map_err(CommandOwnerError::Io))
+                .await?;
+        #[cfg(not(target_os = "linux"))]
+        let tools = {
+            let _ = launcher;
+            ToolTasks::default()
+        };
         let record_journal = journal.clone();
         let record_failed = failed.clone();
         let record_jobs = Arc::clone(&jobs);
@@ -721,4 +753,4 @@ async fn wait_before_output(id: ToolCallId) {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

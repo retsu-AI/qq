@@ -5,6 +5,8 @@ mod edit;
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_owner;
 mod matching;
 mod native_exit;
 pub(crate) mod network;

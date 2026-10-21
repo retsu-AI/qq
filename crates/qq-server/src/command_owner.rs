@@ -180,9 +180,25 @@ mod tests {
     use qq_core::command_owner::{CommandSnapshot, CommandStatus, NativeCommand};
     use qq_protocol::ToolCallId;
 
+    fn launcher() -> qq_core::command_owner::CommandLauncher {
+        let binary = std::env::current_exe().unwrap();
+        qq_core::command_owner::CommandLauncher::new(
+            binary
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("examples")
+                .join(format!(
+                    "command_owner_launcher{}",
+                    std::env::consts::EXE_SUFFIX
+                )),
+        )
+    }
+
     async fn fixture() -> (tempfile::TempDir, CommandOwner, ServerHandle) {
         let root = tempfile::tempdir().unwrap();
-        let owner = CommandOwner::open(root.path().join("journal"), "unknown")
+        let owner = CommandOwner::open(root.path().join("journal"), "unknown", launcher())
             .await
             .unwrap();
         let reservation = match crate::reserve(ServerOptions::for_command_owner(ServerPaths::new(
