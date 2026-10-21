@@ -938,3 +938,94 @@ async fn panic_cleanup_retains_native_results_and_their_spill_handles() {
     assert!(!saved.contains("not stored"));
     owner.shutdown().await.unwrap();
 }
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn native_result_context_exhaustion_settles_only_its_run_and_retains_the_result() {
+    use crate::command_owner::{CommandOwner, CommandOwnerError};
+    let state = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(
+        state.path().join("owner"),
+        "unknown",
+        crate::command_owner::tests::launcher(),
+    )
+    .await
+    .unwrap();
+    let mut harness = scripted_runs_harness_with_commands(ApprovalMode::Full, vec![vec![(
+        "shell", r#"{"command":"printf ready; read token < release; printf once >> counter; printf retained-result"}"#.to_owned(),
+    )]], None, None, Some(Arc::new(owner.clone()))).await;
+    let release = harness.workspace_path.join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let run = submit_prompt(&harness, "execute").await;
+    let events = collect_until(&mut harness.events, |event| matches!(event, SessionEvent::ToolCallOutputDelta { chunk, .. } if chunk.contains("ready"))).await;
+    let id = events
+        .iter()
+        .find_map(|event| match event.event {
+            SessionEvent::ToolCallOutputDelta { tool_call_id, .. } => Some(tool_call_id),
+            _ => None,
+        })
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .call_write(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE runs SET context_base_bytes=?2,context_increment_bytes=0 WHERE id=?1",
+                params![run.to_string(), MAX_CONTEXT_BYTES as u64],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let mut failed = harness.runtime.inner.failed.subscribe();
+    tokio::fs::write(release, b"go\n").await.unwrap();
+    let terminal = tokio::select! {
+        terminal = collect_until(&mut harness.events, finished_for(run)) => terminal,
+        () = async { let _ = failed.wait_for(|failed| *failed).await; } => panic!("a context-policy rejection must not fail the whole session runtime"),
+    };
+    assert!(
+        matches!(&terminal.last().unwrap().event, SessionEvent::RunFinished { outcome: RunOutcome::Failed { failure }, .. } if failure.kind == RunFailureKind::Policy)
+    );
+    let next = submit_prompt(&harness, "continue").await;
+    let terminal = collect_until(&mut harness.events, finished_for(next)).await;
+    assert!(matches!(
+        terminal.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    harness.runtime.shutdown().await.unwrap();
+    let saved: String = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT result FROM tool_calls WHERE id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        saved.contains("retained-result"),
+        "context admission must not discard the actual command result"
+    );
+    assert!(matches!(
+        owner.snapshot(id).await,
+        Err(CommandOwnerError::Retired)
+    ));
+    owner.shutdown().await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(harness.workspace_path.join("counter")).unwrap(),
+        "once"
+    );
+}

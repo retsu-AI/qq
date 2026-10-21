@@ -2931,10 +2931,18 @@ async fn execute_started_run(
                     )
                     .await
                 {
-                    Ok(_) => {
+                    Ok(commit) => {
                         resources.tools.take_native_result(id);
                         if let Some(acknowledgements) = &inner.native_ack {
                             acknowledgements.wake();
+                        }
+                        if commit.context_exhausted {
+                            let Ok(teardown) = resources.stop(&mut events).await else {
+                                inner.failed.send_replace(true);
+                                return;
+                            };
+                            finish_run(&inner, &claimed, context_budget_failure(), teardown).await;
+                            return;
                         }
                     }
                     Err(error) => {
@@ -3650,7 +3658,7 @@ pub(super) async fn persist_native_results(
             )
             .await
         {
-            Ok(event) => inner.notify(event.cursor),
+            Ok(commit) => inner.notify(commit.event.cursor),
             Err(error) => return Err(error),
         }
         if let Some(acknowledgements) = &inner.native_ack {

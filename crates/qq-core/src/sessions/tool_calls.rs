@@ -129,6 +129,14 @@ pub(super) fn record_tool_process(
     Ok(())
 }
 
+/// Native results remain durable even when they cannot enter model context.
+/// An exhausted completion requires run settlement before another model turn.
+#[derive(Debug)]
+pub(super) struct ToolCallCommit {
+    pub(super) event: SessionEventEnvelope,
+    pub(super) context_exhausted: bool,
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "one persisted row update; bundling the columns adds nothing"
@@ -145,7 +153,7 @@ pub(super) fn finish_tool_call(
     spill: Option<crate::tools::SpillRecord>,
     execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
     native_owner: Option<StoreId>,
-) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+) -> Result<ToolCallCommit, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
         .query_row(
@@ -173,13 +181,17 @@ pub(super) fn finish_tool_call(
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
-    reserve_tool_result_capacity(
+    let context_exhausted = match reserve_tool_result_capacity(
         &transaction,
         identity.run_id,
         &provider_call_id,
         &result,
         first_result_in_turn,
-    )?;
+    ) {
+        Ok(()) => false,
+        Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
+        Err(error) => return Err(error),
+    };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };
     let display_json = display.as_ref().map(serde_json::to_string).transpose()?;
@@ -250,7 +262,10 @@ pub(super) fn finish_tool_call(
         SessionEvent::ToolCallFinished { tool_call },
     )?;
     transaction.commit()?;
-    Ok(event)
+    Ok(ToolCallCommit {
+        event,
+        context_exhausted,
+    })
 }
 
 /// Writes one complete output under its call. Past the per-session cap, the

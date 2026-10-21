@@ -1152,7 +1152,9 @@ acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
 Sessions bind the original worker journal before submission and commit an
 acknowledgement intent with the actual terminal result. Only then can worker
-observations be reclaimed. Pending intents survive interruption and session
+observations be reclaimed. A native result that exceeds remaining context capacity
+is still saved; that run ends with a context-policy failure before another
+model turn. Pending intents survive interruption and session
 pruning; reopening and later tool results retry a bounded batch. A generic
 interrupted result does not acknowledge an unobserved worker result. Cancellation
 teardown saves the actual terminal worker result even when its event waiter was
