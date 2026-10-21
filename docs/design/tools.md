@@ -1045,8 +1045,10 @@ Deferred).
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).
-- A default timeout (120 s, capped per call) that kills the whole process
-  group, as does run cancellation.
+- A default timeout of 120 s, overridable per call with a positive
+  `timeout_seconds` that fits a monotonic deadline. There is no ten-minute
+  ceiling. The enclosing run budget still applies; command timeout and run
+  cancellation terminate the owned process group.
 - Combined stdout+stderr captured head+tail within 128 KiB (a capture cap,
   marked `bytes not captured` when exceeded) and streamed to clients as
   `ToolCallOutputDelta` events through the existing batching path so long

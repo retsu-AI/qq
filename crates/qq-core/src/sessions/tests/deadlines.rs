@@ -883,7 +883,7 @@ impl Provider for DeadlineProvider {
                 ProviderEvent::ToolCallStarted { id: "sleep".to_owned(), name: "shell".to_owned() },
                 ProviderEvent::ToolCallArgumentsDelta {
                     id: "sleep".to_owned(),
-                    json: serde_json::json!({"command": "sleep 30; printf late > late.txt", "timeout_seconds": 40}).to_string(),
+                    json: serde_json::json!({"command": "sleep 30; printf late > late.txt", "timeout_seconds": 1800}).to_string(),
                 },
                 ProviderEvent::ToolCallCompleted { id: "sleep".to_owned() },
                 ProviderEvent::Completed { usage: None },

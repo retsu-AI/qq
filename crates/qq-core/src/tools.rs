@@ -3374,7 +3374,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
+            "c49f264b9a5f25da5eb8d90201b177402fae079fcb44043c5d4082b0900e3166"
         );
     }
 
@@ -4674,6 +4674,79 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn shell_accepts_a_build_deadline_longer_than_ten_minutes() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"printf build-finished","timeout_seconds":1800}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("build-finished"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_build_survives_the_old_ten_minute_ceiling() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let release = directory.path().join("release");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &release,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        // Keep both ends open until completion so an input written just
+        // before the shell opens its reader cannot disappear with the writer.
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)
+            .unwrap();
+        let (output, mut chunks) = mpsc::channel(8);
+        let cancellation = RunCancellation::new();
+        let execution = tokio::spawn(run_shell_tool(
+            workspace,
+            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800}"#,
+            cancellation.clone(),
+            Some(output),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut observed = String::new();
+            while !observed.contains("ready") {
+                observed.push_str(&chunks.recv().await.expect("command reached its gate"));
+            }
+        })
+        .await
+        .expect("command started");
+
+        // Move the deadline clock past ten minutes while the real native
+        // process remains blocked on an explicit input, not a fixed sleep.
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(601)).await;
+        tokio::time::resume();
+        let mut writer = gate.try_clone().unwrap();
+        tokio::task::spawn_blocking(move || {
+            writer.write_all(b"continue\n").unwrap();
+        })
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution).await;
+        cancellation.cancel();
+        let result = result.expect("released command completed").unwrap();
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("build-finished"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn shell_rejects_empty_commands_and_out_of_range_timeouts() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -4681,7 +4754,7 @@ mod tests {
         for arguments in [
             r#"{"command":"   "}"#,
             r#"{"command":"true","timeout_seconds":0}"#,
-            r#"{"command":"true","timeout_seconds":601}"#,
+            r#"{"command":"true","timeout_seconds":18446744073709551615}"#,
         ] {
             let result =
                 run_shell_tool(workspace.clone(), arguments, RunCancellation::new(), None).await;
