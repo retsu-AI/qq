@@ -29,6 +29,7 @@ mod mcp;
 mod output;
 mod plan;
 mod runtime;
+mod workspaces;
 
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -141,6 +142,7 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
                 return Ok(error.exit_code());
             }
         }
+        Some(cli::Command::Workspace { command }) => workspaces::run(command).await?,
         Some(cli::Command::Serve {
             bind,
             allow_origins,

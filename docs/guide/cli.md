@@ -83,6 +83,27 @@ changes on bare resume require supplying an objective explicitly.
 The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
 [Headless](headless.md#qq-serve--a-persistent-server).
 
+## `qq workspace …`
+
+Browse an already running local server from any directory, without loading
+configuration from the directory where you launched the client:
+
+```sh
+qq workspace list
+qq workspace list --limit 20
+qq workspace list --after STORE_ID:WORKSPACE_ID
+qq workspace show WORKSPACE_ID
+```
+
+`list` prints a JSON page with `store_id`, `workspaces`, and `next`. Use the
+`store_id` and `workspace_id` in `next` as the colon-separated `--after`
+cursor; `null` means there are no more pages. Page limits are 1–100.
+`show` prints a bounded workspace snapshot by ID. Neither command registers
+a directory, changes grants, starts an agent, or starts a server. Paths in
+the output belong to the server and need not exist on the client machine.
+Desktop and mobile clients can call the same catalog through
+`SessionClient::workspaces` on their selected server connection.
+
 ## `qq goal …`
 
 Manage a session goal through an already running `qq serve`. Every operation

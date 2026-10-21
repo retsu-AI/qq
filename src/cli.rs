@@ -97,6 +97,12 @@ pub enum Command {
         command: GoalCommand,
     },
 
+    /// Browse registered workspaces on the running server, from any directory.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
+
     /// Run the user-scoped QQ server in the foreground.
     Serve {
         /// Loopback address to bind. Port 0 selects an available port.
@@ -156,6 +162,21 @@ pub enum Command {
 
     /// Print the version with the compatibility contracts this build speaks.
     Version,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Print one page of registered server roots as JSON. Paths belong to the server.
+    List {
+        /// Continue from STORE_ID:WORKSPACE_ID (the previous page's next cursor).
+        #[arg(long)]
+        after: Option<qq_protocol::WorkspaceCatalogCursor>,
+        /// Workspaces per page, between 1 and 100.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=100))]
+        limit: u16,
+    },
+    /// Inspect an existing workspace by ID; does not open or register a directory.
+    Show { workspace: qq_protocol::WorkspaceId },
 }
 
 #[derive(Debug, Subcommand)]

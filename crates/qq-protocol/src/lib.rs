@@ -79,7 +79,8 @@ pub use sessions::{
 
 mod workspaces;
 pub use workspaces::{
-    MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
+    MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogCursorError,
+    WorkspaceCatalogRequest,
 };
 
 pub const PROTOCOL_VERSION: u16 = 38;
