@@ -139,6 +139,18 @@ impl LinuxOwner {
         if isolated_network {
             network::prepare()?;
         }
+        let resources = match native.map(|native| native.resources) {
+            None | Some(crate::command_owner::NativeResources::Host) => None,
+            Some(crate::command_owner::NativeResources::Limited { limits }) => {
+                let root = self.launcher.cgroup_root.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "resource enforcement requires an explicitly delegated cgroup root",
+                    )
+                })?;
+                Some((root, limits))
+            }
+        };
         let filesystem = native
             .map(|native| &native.filesystem)
             .filter(|scope| scope.is_restricted())
@@ -154,24 +166,15 @@ impl LinuxOwner {
                 filesystem_root::prepare(directories, cwd_path, command)
             })
             .transpose()?;
-        let resource_scope = native
-            .map(|native| native.resources)
-            .unwrap_or(crate::command_owner::NativeResources::Host);
-        let (resource_group, resource_fd) = match resource_scope {
-            crate::command_owner::NativeResources::Host => (None, None),
-            crate::command_owner::NativeResources::Limited { limits } => {
+        let (resource_group, resource_fd) = match resources {
+            None => (None, None),
+            Some((root, limits)) => {
                 if filesystem.is_none() {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "resource enforcement requires a private filesystem root",
                     ));
                 }
-                let root = self.launcher.cgroup_root.as_ref().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "resource enforcement requires an explicitly delegated cgroup root",
-                    )
-                })?;
                 for directory in &filesystem.as_ref().expect("checked filesystem").directories {
                     if directory.writable {
                         resources::reject_writable_controller(&File::open(format!(
