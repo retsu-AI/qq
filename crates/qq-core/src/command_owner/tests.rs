@@ -120,9 +120,12 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[tokio::test]
 async fn adding_a_library_to_a_mutable_runpath_cannot_change_the_captured_helper() {
+    use std::os::unix::ffi::OsStringExt as _;
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let executable = root.path().join("helper");
+    let executable = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"helper-\xff".to_vec()));
     std::fs::copy(launcher().executable, &executable).unwrap();
     let bytes = std::fs::read(&executable).unwrap();
     let elf = goblin::elf::Elf::parse(&bytes).unwrap();

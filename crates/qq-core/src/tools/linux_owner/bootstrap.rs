@@ -5,7 +5,10 @@ use std::{
     ffi::OsString,
     fs::File,
     io::{self, Read as _, Seek as _},
-    os::unix::fs::MetadataExt as _,
+    os::unix::{
+        ffi::{OsStrExt as _, OsStringExt as _},
+        fs::MetadataExt as _,
+    },
     path::{Path, PathBuf},
 };
 
@@ -86,8 +89,12 @@ fn search_paths(elf: &Elf<'_>, origin: &Path) -> Vec<PathBuf> {
         .chain(elf.runpaths.iter())
         .flat_map(|list| list.split(':'))
         .filter_map(|path| {
-            let origin = origin.parent()?.to_str()?;
-            let expanded = path.replace("${ORIGIN}", origin).replace("$ORIGIN", origin);
+            let expanded = if path.contains("${ORIGIN}") || path.contains("$ORIGIN") {
+                let origin = origin.parent()?.to_str()?;
+                path.replace("${ORIGIN}", origin).replace("$ORIGIN", origin)
+            } else {
+                path.to_owned()
+            };
             if expanded.contains('$') {
                 return None;
             }
@@ -208,22 +215,24 @@ impl Bootstrap {
         }
         let mut preload = Vec::new();
         for path in libraries.values().filter(|path| **path != loader) {
-            let path = path
-                .to_str()
-                .ok_or_else(|| refused("native bootstrap dependency path must be UTF-8"))?;
+            let path = path.as_os_str().as_bytes();
             if path
-                .bytes()
+                .iter()
+                .copied()
                 .any(|byte| byte == b':' || byte.is_ascii_whitespace())
             {
                 return Err(refused(
                     "native bootstrap dependency path contains a loader separator",
                 ));
             }
-            preload.push(path);
+            if !preload.is_empty() {
+                preload.push(b':');
+            }
+            preload.extend_from_slice(path);
         }
         Ok(Self {
             loader: Some(loader),
-            preload: preload.join(":").into(),
+            preload: OsString::from_vec(preload),
         })
     }
 
