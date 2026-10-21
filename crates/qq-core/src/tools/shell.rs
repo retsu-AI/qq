@@ -382,7 +382,7 @@ pub(super) async fn run_shell(
         if let Some(owner) = &linux_owner {
             return prepared.owned_linux(owner);
         }
-        Ok(prepared)
+        Ok::<_, super::process_context::PreparationError>(prepared)
     })
     .await
     {
