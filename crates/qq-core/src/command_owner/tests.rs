@@ -323,6 +323,52 @@ async fn journal_read_failure_stops_admission_without_poisoning_expected_misses(
     }
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn journal_rejects_untrusted_ancestors_before_creating_state() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let root = tempfile::tempdir().unwrap();
+    let shared = root.path().join("shared");
+    let nested = shared.join("private");
+    let safe = root.path().join("safe");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&safe).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o700)).unwrap();
+    symlink(&safe, shared.join("alias")).unwrap();
+    for directory in [
+        shared.join("owner"),
+        nested.join("owner"),
+        shared.join("alias/owner"),
+    ] {
+        let opened = CommandOwner::open(directory.clone(), "unknown").await;
+        let rejected = matches!(opened, Err(CommandOwnerError::PrivateState));
+        if let Ok(owner) = opened {
+            owner.shutdown().await.unwrap();
+        }
+        assert!(rejected, "unsafe ancestry must be refused: {directory:?}");
+        assert!(
+            !directory.exists(),
+            "validation must precede state creation"
+        );
+    }
+    // A trusted symlink and a sticky shared directory cannot be replaced by
+    // another UID. Both remain usable, including macOS's /var temp alias.
+    symlink(&safe, root.path().join("trusted-alias")).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    for directory in [
+        shared.join("sticky-owner"),
+        root.path().join("trusted-alias/owner"),
+    ] {
+        CommandOwner::open(directory, "unknown")
+            .await
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
+    }
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn explicit_cancellation_reaps_before_publishing_completion() {

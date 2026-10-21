@@ -210,6 +210,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::completion_waits_for_descendants_that_closed_their_pipes
           bash .github/scripts/test-exact.sh command_owner::tests::concurrent_retries_execute_once_and_conflict_does_not_stop_the_owner
           bash .github/scripts/test-exact.sh command_owner::tests::owner_state_rejects_symlinked_directories_and_hardlinked_lock_files
+          bash .github/scripts/test-exact.sh command_owner::tests::journal_rejects_untrusted_ancestors_before_creating_state
           bash .github/scripts/test-exact.sh command_owner::tests::control_dense_native_output_fits_the_durable_result_bound
           bash .github/scripts/test-exact.sh command_owner::tests::live_output_is_durable_before_command_completion
           bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound

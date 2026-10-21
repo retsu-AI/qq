@@ -85,6 +85,13 @@ impl Journal {
     }
 
     fn open_blocking(directory: PathBuf) -> Result<Self, CommandOwnerError> {
+        #[cfg(unix)]
+        let directory = trusted_parent(directory.parent().ok_or(CommandOwnerError::PrivateState)?)?
+            .join(
+                directory
+                    .file_name()
+                    .ok_or(CommandOwnerError::PrivateState)?,
+            );
         // A private parent also protects the transport's sibling metadata.
         // Check it before creating anything, and keep it pinned through open.
         #[cfg(windows)]
@@ -492,6 +499,58 @@ fn rendered_output(bytes: &[u8], terminal: bool) -> String {
         }
     }
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+// SQLite reopens pathnames, including its WAL and shared-memory files. Every
+// ancestor must therefore prevent another UID from replacing a checked entry.
+// Resolve trusted symlinks one component at a time; canonicalizing first would
+// conceal a symlink reached through an attacker-controlled directory.
+#[cfg(unix)]
+fn trusted_parent(path: &Path) -> Result<PathBuf, CommandOwnerError> {
+    use std::{os::unix::fs::MetadataExt as _, path::Component};
+    if !path.is_absolute() {
+        return Err(CommandOwnerError::PrivateState);
+    }
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Normal(_) => resolved.push(component),
+            _ => return Err(CommandOwnerError::PrivateState),
+        }
+        let metadata = std::fs::symlink_metadata(&resolved)?;
+        if metadata.file_type().is_symlink() {
+            if !trusted_uid(metadata.uid()) {
+                return Err(CommandOwnerError::PrivateState);
+            }
+            resolved = std::fs::canonicalize(&resolved)?;
+            // Check from the root down so each entry's parent is already
+            // protected when the entry itself is inspected.
+            for ancestor in resolved.ancestors().collect::<Vec<_>>().into_iter().rev() {
+                trusted_directory(&std::fs::symlink_metadata(ancestor)?)?;
+            }
+        } else {
+            trusted_directory(&metadata)?;
+        }
+    }
+    Ok(resolved)
+}
+
+#[cfg(unix)]
+fn trusted_directory(metadata: &std::fs::Metadata) -> Result<(), CommandOwnerError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mode = metadata.mode();
+    if !metadata.is_dir()
+        || !trusted_uid(metadata.uid())
+        || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+    {
+        return Err(CommandOwnerError::PrivateState);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn trusted_uid(uid: u32) -> bool {
+    uid == 0 || uid == rustix::process::getuid().as_raw()
 }
 
 fn private_file(path: &Path) -> Result<File, CommandOwnerError> {
