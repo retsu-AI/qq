@@ -796,11 +796,11 @@ async fn unsupported_journal_version_is_preserved_and_refused() {
     owner.shutdown().await.unwrap();
     drop(owner);
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
-    db.pragma_update(None, "user_version", 4).unwrap();
+    db.pragma_update(None, "user_version", 5).unwrap();
     drop(db);
     assert!(matches!(
         CommandOwner::open(directory.clone(), "unknown", launcher()).await,
-        Err(CommandOwnerError::Schema(4))
+        Err(CommandOwnerError::Schema(5))
     ));
     let db = Connection::open(directory.join("commands.sqlite3")).unwrap();
     let count: u64 = db
@@ -1585,5 +1585,206 @@ async fn captured_environment_controls_execution_without_persisting_values_in_th
             NativeEnvironment::from_values([("SECRET".to_owned(), value.clone().into())]).unwrap()
         )
         .contains(&value)
+    );
+}
+
+#[tokio::test]
+async fn acknowledged_results_release_capacity_without_replaying_retired_commands() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let original = command(workspace.path(), id, "echo once>>counter");
+    owner.submit(original.clone()).await.unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    let text = finished.result.unwrap().text().to_owned();
+    // The consumer's retained copy outlives reclamation of worker observations.
+    let retained_path = root.path().join("consumer.sqlite3");
+    let retained = Connection::open(&retained_path).unwrap();
+    retained
+        .execute_batch("PRAGMA synchronous=FULL; CREATE TABLE observed(result TEXT NOT NULL);")
+        .unwrap();
+    retained
+        .execute("INSERT INTO observed VALUES (?1)", [text.clone()])
+        .unwrap();
+    drop(retained);
+    let seed_directory = directory.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut connection = Connection::open(seed_directory.join("commands.sqlite3"))?;
+        let tx = connection.transaction()?;
+        for n in 1..MAX_RETAINED {
+            let fixture_id = ToolCallId::from_bytes((n as u128).to_le_bytes());
+            tx.execute(
+                "INSERT INTO commands(id,request,status) VALUES (?1,NULL,'lost')",
+                [fixture_id.to_string()],
+            )?;
+        }
+        tx.commit()?;
+        Ok::<_, rusqlite::Error>(())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    owner.acknowledge(vec![id]).await.unwrap();
+    let next = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(workspace.path(), next, "echo new>>counter"))
+        .await
+        .unwrap();
+    assert!(
+        !wait_finished(&owner, next, 0)
+            .await
+            .result
+            .unwrap()
+            .is_error()
+    );
+    owner.acknowledge(vec![next]).await.unwrap();
+    let replay = owner.submit(original.clone()).await;
+    if replay.is_ok() {
+        let _ = wait_finished(&owner, id, 0).await;
+    }
+    owner.shutdown().await.unwrap();
+    drop(owner);
+    let owner = CommandOwner::open(directory, "unknown", launcher())
+        .await
+        .unwrap();
+    let after_restart = owner.submit(original.clone()).await;
+    let observation = owner.snapshot(id).await;
+    let mut changed = original;
+    changed.arguments = r#"{"command":"echo forbidden>>counter"}"#.to_owned();
+    let changed = owner.submit(changed).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        matches!(replay, Err(CommandOwnerError::Retired)),
+        "{replay:?}"
+    );
+    assert!(matches!(after_restart, Err(CommandOwnerError::Retired)));
+    assert!(matches!(observation, Err(CommandOwnerError::Retired)));
+    assert!(matches!(changed, Err(CommandOwnerError::Conflict)));
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("counter"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["once", "new"]
+    );
+    let retained = Connection::open(retained_path).unwrap();
+    assert_eq!(
+        retained
+            .query_row("SELECT result FROM observed", [], |row| row
+                .get::<_, String>(0))
+            .unwrap(),
+        text
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn acknowledgement_is_bounded_atomic_and_never_discards_running_work() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let completed = ToolCallId::generate().unwrap();
+    owner.cancel(completed).await.unwrap();
+    let path = workspace.path().join("release");
+    crate::tools::create_test_fifo(&path).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    let running = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(
+            workspace.path(),
+            running,
+            "printf ready; read token < release",
+        ))
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut after = 0;
+        loop {
+            let snapshot = owner.wait(running, after).await.unwrap();
+            if snapshot.output.contains("ready") {
+                break;
+            }
+            after = snapshot.version;
+        }
+    })
+    .await
+    .unwrap();
+    for ids in [
+        vec![],
+        vec![completed; 129],
+        vec![completed, running],
+        vec![completed, ToolCallId::generate().unwrap()],
+    ] {
+        assert!(owner.acknowledge(ids).await.is_err());
+        assert_eq!(
+            owner.snapshot(completed).await.unwrap().status,
+            CommandStatus::Finished
+        );
+        assert_eq!(
+            owner.snapshot(running).await.unwrap().status,
+            CommandStatus::Running
+        );
+    }
+    owner.cancel(running).await.unwrap();
+    let _ = wait_finished(&owner, running, 0).await;
+    owner.acknowledge(vec![completed, running]).await.unwrap();
+    owner.acknowledge(vec![completed, running]).await.unwrap();
+    owner.cancel(completed).await.unwrap();
+    let late = owner
+        .submit(command(
+            workspace.path(),
+            completed,
+            "echo forbidden>escaped",
+        ))
+        .await;
+    let state = owner.snapshot(completed).await;
+    owner.shutdown().await.unwrap();
+    assert!(matches!(late, Err(CommandOwnerError::Retired)));
+    assert!(matches!(state, Err(CommandOwnerError::Retired)));
+    assert!(!workspace.path().join("escaped").exists());
+}
+
+#[tokio::test]
+async fn acknowledgement_migration_preserves_the_journal_identity_and_results() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let identity = owner.store_id();
+    let id = ToolCallId::generate().unwrap();
+    owner.cancel(id).await.unwrap();
+    let result = owner.snapshot(id).await.unwrap();
+    owner.shutdown().await.unwrap();
+    drop(owner);
+    let connection = Connection::open(directory.join("commands.sqlite3")).unwrap();
+    connection
+        .execute_batch("DROP TABLE retired_commands; PRAGMA user_version=3;")
+        .unwrap();
+    drop(connection);
+    let reopened = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    assert_eq!(reopened.store_id(), identity);
+    assert_eq!(reopened.snapshot(id).await.unwrap(), result);
+    reopened.acknowledge(vec![id]).await.unwrap();
+    reopened.shutdown().await.unwrap();
+    drop(reopened);
+    let connection = Connection::open(directory.join("commands.sqlite3")).unwrap();
+    assert_eq!(
+        connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, u64>(0))
+            .unwrap(),
+        4
     );
 }

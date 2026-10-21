@@ -75,6 +75,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     assert_eq!(reopened.snapshot(id).await?, snapshot);
+    // This finite example now discards its observations deliberately. A host
+    // retaining task history saves the result before acknowledging it.
+    reopened.acknowledge(vec![id]).await?;
+    assert!(matches!(
+        reopened.snapshot(id).await,
+        Err(qq_core::command_owner::CommandOwnerError::Retired)
+    ));
     reopened.shutdown().await?;
     drop(reopened);
     tokio::task::spawn_blocking(move || {

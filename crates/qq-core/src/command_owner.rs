@@ -124,6 +124,8 @@ pub struct CommandSnapshot {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandOwnerError {
+    #[error("command observations were reclaimed after acknowledgement")]
+    Retired,
     #[error("another command owner holds this journal")]
     Busy,
     #[error("command owner state is not private or is not a regular file")]
@@ -313,7 +315,10 @@ impl CommandOwner {
             .existing(request.id, encoded.clone())
             .await
             .inspect_err(|error| {
-                if !matches!(error, CommandOwnerError::Conflict) {
+                if !matches!(
+                    error,
+                    CommandOwnerError::Conflict | CommandOwnerError::Retired
+                ) {
                     self.failure();
                 }
             })?;
@@ -356,8 +361,8 @@ impl CommandOwner {
                     let _ = reply.send(Ok(()));
                     guard.completed = true;
                 }
-                Err(CommandOwnerError::Conflict) => {
-                    let _ = reply.send(Err(CommandOwnerError::Conflict));
+                Err(error @ (CommandOwnerError::Conflict | CommandOwnerError::Retired)) => {
+                    let _ = reply.send(Err(error));
                     guard.completed = true;
                 }
                 Err(CommandOwnerError::Full) => {
@@ -492,7 +497,10 @@ impl CommandOwner {
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
         self.0.journal.snapshot(id).await.inspect_err(|error| {
-            if !matches!(error, CommandOwnerError::NotFound) {
+            if !matches!(
+                error,
+                CommandOwnerError::NotFound | CommandOwnerError::Retired
+            ) {
                 self.failure();
             }
         })
@@ -575,6 +583,16 @@ impl CommandOwner {
             drop(slot);
         });
         applied.await.map_err(|_| CommandOwnerError::Unavailable)?
+    }
+
+    /// Discard terminal observations only after the consumer has saved or deliberately
+    /// discarded them. A compact record continues to prevent repeated execution.
+    pub async fn acknowledge(&self, ids: Vec<ToolCallId>) -> Result<(), CommandOwnerError> {
+        self.available()?;
+        if ids.is_empty() || ids.len() > 128 {
+            return Err(CommandOwnerError::Invalid);
+        }
+        self.0.journal.acknowledge(ids).await
     }
 
     pub async fn shutdown(&self) -> Result<(), CommandOwnerError> {
