@@ -76,6 +76,13 @@ const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 pub type CommandFuture =
     Pin<Box<dyn Future<Output = Result<CommandReceipt, ServerHandlerError>> + Send + 'static>>;
+pub type WorkspaceCatalogFuture = Pin<
+    Box<
+        dyn Future<Output = Result<qq_protocol::WorkspaceCatalog, ServerHandlerError>>
+            + Send
+            + 'static,
+    >,
+>;
 pub type SnapshotFuture =
     Pin<Box<dyn Future<Output = Result<WorkspaceSnapshot, ServerHandlerError>> + Send + 'static>>;
 pub type ModelsFuture = Pin<
@@ -95,6 +102,13 @@ pub type DelegationFuture =
 /// Root-supplied application seam for durable session requests.
 pub trait ServerHandler: Send + Sync + 'static {
     fn command(&self, _request: CommandRequest) -> CommandFuture {
+        Box::pin(async { Err(ServerHandlerError::Unavailable) })
+    }
+
+    fn workspace_catalog(
+        &self,
+        _request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> WorkspaceCatalogFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
@@ -736,6 +750,7 @@ fn router(
     router
         .route("/v1/health", get(health))
         .route("/v1/capabilities", post(capabilities))
+        .route("/v1/workspaces/list", post(workspace_catalog))
         .route("/v1/workspaces/snapshot", post(workspace_snapshot))
         .route("/v1/models", post(models))
         .route(
@@ -976,6 +991,30 @@ fn server_capabilities(
             max_roster_entries: qq_core::MAX_DELEGATION_ROSTER,
             max_depth_ceiling: qq_core::MAX_CHILD_DEPTH_CEILING,
         }),
+    }
+}
+
+async fn workspace_catalog(
+    State(state): State<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (_permit, request) =
+        match decode_bounded::<qq_protocol::WorkspaceCatalogRequest>(&state, body) {
+            Ok(decoded) => decoded,
+            Err((status, message)) => return api_error(status, message),
+        };
+    if request.limit == 0 || request.limit > qq_protocol::MAX_WORKSPACE_PAGE {
+        return api_error(StatusCode::BAD_REQUEST, "invalid page limit");
+    }
+    match state.handler.workspace_catalog(request).await {
+        Ok(catalog)
+            if serde_json::to_vec(&catalog)
+                .is_ok_and(|json| json.len() <= qq_protocol::MAX_SNAPSHOT_BYTES) =>
+        {
+            Json(catalog).into_response()
+        }
+        Ok(_) => handler_error_response(ServerHandlerError::Internal),
+        Err(error) => handler_error_response(error),
     }
 }
 
@@ -3217,5 +3256,36 @@ mod tests {
             read_connection(&permission_paths).unwrap_err(),
             ServerError::InsecurePermissions { .. }
         ));
+    }
+    #[tokio::test]
+    async fn workspace_catalog_requires_authentication_and_a_registered_handler() {
+        let directory = TestDirectory::new();
+        let StartOutcome::Started(server) = start(
+            unavailable_handler(),
+            test_identity(),
+            ServerOptions::new(directory.paths()),
+        )
+        .await
+        .unwrap() else {
+            panic!("expected a new server")
+        };
+        let http = reqwest::Client::new();
+        let url = server.connection().endpoint("/v1/workspaces/list");
+        let response = http
+            .post(url.clone())
+            .json(&serde_json::json!({"after": null, "limit": 2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = http
+            .post(url)
+            .bearer_auth(server.connection().expose_bearer_token())
+            .json(&serde_json::json!({"after": null, "limit": 2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        server.shutdown().await.unwrap();
     }
 }

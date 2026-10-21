@@ -137,8 +137,15 @@ summary's cursor and omitted when empty, so a client knows a session is
 waiting or answering without loading its body or having seen the request
 event.
 
+Authenticated `POST /v1/workspaces/list` returns a bounded page of registered
+workspace IDs and server-side paths, qualified by the persistent store ID.
+Its `after` cursor includes that store ID; a cursor from another store is
+rejected. Clients use these identities to select a workspace without mapping
+its path onto the client machine. Listing neither registers a directory nor
+changes permission grants.
+
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v37/`; the `v17`–`v36` directories are
+`crates/qq-protocol/tests/fixtures/v38/`; the `v17`–`v37` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -2216,7 +2223,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v31/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v38/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

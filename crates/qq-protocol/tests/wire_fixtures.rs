@@ -210,7 +210,45 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 38);
+    let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
+        store_id: StoreId::from_bytes([1; 16]),
+        workspace_id: WorkspaceId::from_bytes([2; 16]),
+    };
+    check(
+        "workspace_catalog_request_first",
+        &qq_protocol::WorkspaceCatalogRequest {
+            after: None,
+            limit: 2,
+        },
+    );
+    check(
+        "workspace_catalog_request_next",
+        &qq_protocol::WorkspaceCatalogRequest {
+            after: Some(catalog_cursor),
+            limit: 2,
+        },
+    );
+    check(
+        "workspace_catalog_page",
+        &qq_protocol::WorkspaceCatalog {
+            store_id: catalog_cursor.store_id,
+            workspaces: vec![qq_protocol::WorkspaceSummary {
+                id: catalog_cursor.workspace_id,
+                path: "/srv/api".to_owned(),
+            }],
+            next: Some(catalog_cursor),
+        },
+    );
+    check(
+        "workspace_catalog_empty",
+        &qq_protocol::WorkspaceCatalog {
+            store_id: catalog_cursor.store_id,
+            workspaces: Vec::new(),
+            next: None,
+        },
+    );
+
     check(
         "outcome_paused_no_progress",
         &RunOutcome::Paused {
@@ -1375,7 +1413,11 @@ fn historical_fixtures_still_decode() {
                 })
             }
             // The prefix selects the type exactly as the golden test named it.
-            if name == "command_acknowledge_check_interruption" {
+            if name.starts_with("workspace_catalog_request") {
+                decode::<qq_protocol::WorkspaceCatalogRequest>(&path, &stored);
+            } else if name.starts_with("workspace_catalog_") {
+                decode::<qq_protocol::WorkspaceCatalog>(&path, &stored);
+            } else if name == "command_acknowledge_check_interruption" {
                 decode::<SessionCommand>(&path, &stored);
             } else if name == "event_check_interruption_changed" {
                 decode::<SessionEvent>(&path, &stored);

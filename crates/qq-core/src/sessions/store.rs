@@ -986,6 +986,17 @@ impl Store {
         .await
     }
 
+    pub(super) async fn workspace_catalog(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> Result<qq_protocol::WorkspaceCatalog, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            snapshots::load_workspace_catalog(connection, store_id, request)
+        })
+        .await
+    }
+
     pub(super) async fn snapshot(
         &self,
         request: SnapshotRequest,

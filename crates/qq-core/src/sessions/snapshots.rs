@@ -765,3 +765,40 @@ pub fn run_cost(usage: TokenUsage, pricing: &ModelPricing) -> Option<u64> {
         )?;
     u64::try_from(total).ok()
 }
+
+/// Keyset pagination is bounded and stays on the store's blocking worker.
+pub(super) fn load_workspace_catalog(
+    connection: &mut Connection,
+    store_id: StoreId,
+    request: qq_protocol::WorkspaceCatalogRequest,
+) -> Result<qq_protocol::WorkspaceCatalog, SessionRuntimeError> {
+    let after = request.after.map(|cursor| cursor.workspace_id.to_string());
+    let mut statement = connection.prepare(
+        "SELECT id, path FROM workspaces WHERE (?1 IS NULL OR id > ?1) ORDER BY id LIMIT ?2",
+    )?;
+    let rows = statement
+        .query_map(params![after, u32::from(request.limit) + 1], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_more = rows.len() > usize::from(request.limit);
+    let workspaces = rows
+        .into_iter()
+        .take(usize::from(request.limit))
+        .map(|(id, path)| {
+            Ok(WorkspaceSummary {
+                id: parse_id(&id)?,
+                path,
+            })
+        })
+        .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+    let next = has_more.then(|| qq_protocol::WorkspaceCatalogCursor {
+        store_id,
+        workspace_id: workspaces.last().expect("a nonempty bounded page").id,
+    });
+    Ok(qq_protocol::WorkspaceCatalog {
+        store_id,
+        workspaces,
+        next,
+    })
+}

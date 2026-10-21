@@ -1095,6 +1095,26 @@ impl SessionRuntime {
         self.inner.store.capture_side_context(session_id).await
     }
 
+    /// Discover registered roots without interpreting a client-side directory.
+    pub async fn workspace_catalog(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> Result<qq_protocol::WorkspaceCatalog, SessionRuntimeError> {
+        if *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if request.limit == 0 || request.limit > qq_protocol::MAX_WORKSPACE_PAGE {
+            return Err(SessionRuntimeError::InvalidPageLimit);
+        }
+        if request
+            .after
+            .is_some_and(|after| after.store_id != self.inner.store.store_id())
+        {
+            return Err(SessionRuntimeError::CursorStoreMismatch);
+        }
+        self.inner.store.workspace_catalog(request).await
+    }
+
     pub async fn snapshot(
         &self,
         request: SnapshotRequest,
