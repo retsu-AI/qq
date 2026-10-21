@@ -24,6 +24,8 @@ pub(super) struct Packet {
     pub cwd_fd: i32,
     pub image_fd: Option<i32>,
     pub namespace_program: Vec<u8>,
+    pub namespace_arguments: Vec<Vec<u8>>,
+    pub namespace_fd: i32,
     pub launcher_program: Vec<u8>,
     pub launcher_fd: i32,
     pub launcher_arguments: Vec<Vec<u8>>,
@@ -145,6 +147,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     let packet: Packet = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
     nix::unistd::close(packet.launcher_fd)?;
+    nix::unistd::close(packet.namespace_fd)?;
     let image = packet.image_fd.map(|fd| inherited(fd, false)).transpose()?;
     nix::unistd::close(packet.cwd_fd)?;
     let program = image.as_ref().map_or_else(
@@ -269,6 +272,12 @@ fn monitor(fields: &str) -> io::Result<u8> {
     live(File::open(format!("/proc/self/fd/{owner_fd}/stat"))?)?;
     let error = std::process::Command::new(std::ffi::OsString::from_vec(packet.namespace_program))
         .env_clear()
+        .args(
+            packet
+                .namespace_arguments
+                .into_iter()
+                .map(std::ffi::OsString::from_vec),
+        )
         .args([
             "--user",
             "--map-current-user",

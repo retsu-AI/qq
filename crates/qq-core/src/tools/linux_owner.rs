@@ -8,8 +8,10 @@ use std::{
         fd::{AsFd as _, AsRawFd as _},
         unix::{ffi::OsStrExt as _, fs::MetadataExt as _},
     },
-    path::PathBuf,
 };
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use command_fds::CommandFdExt as _;
 
@@ -19,7 +21,10 @@ pub(crate) use exec::execute;
 
 #[derive(Clone)]
 pub(super) struct LinuxOwner {
+    #[cfg(test)]
     executable: PathBuf,
+    namespace_image: std::sync::Arc<File>,
+    namespace_bootstrap: bootstrap::Bootstrap,
     launcher: crate::command_owner::CommandLauncher,
     launcher_image: std::sync::Arc<File>,
     bootstrap: bootstrap::Bootstrap,
@@ -88,8 +93,14 @@ impl LinuxOwner {
                     })
                 })
             }) {
+                let Ok((namespace_image, namespace_bootstrap)) = capture_namespace(&path) else {
+                    continue;
+                };
                 return Ok(Self {
+                    #[cfg(test)]
                     executable: path,
+                    namespace_image: std::sync::Arc::new(namespace_image),
+                    namespace_bootstrap,
                     launcher,
                     launcher_image: std::sync::Arc::new(launcher_image),
                     bootstrap,
@@ -116,6 +127,11 @@ impl LinuxOwner {
         let (gate_child, gate) = pipe()?;
         let (acknowledgement, ack_child) = pipe()?;
         let mut descriptors = Vec::new();
+        let namespace_image = self.namespace_image.as_fd().try_clone_to_owned()?;
+        let namespace_fd = namespace_image.as_raw_fd();
+        let (namespace_program, namespace_arguments) = self
+            .namespace_bootstrap
+            .invocation(format!("/proc/self/fd/{namespace_fd}").into());
         let launcher_image = self.launcher_image.as_fd().try_clone_to_owned()?;
         let launcher_fd = launcher_image.as_raw_fd();
         let (program, argv0, image_fd) = if let Some((image, argv0)) = image {
@@ -153,7 +169,12 @@ impl LinuxOwner {
                 .collect(),
             cwd_fd: cwd.as_raw_fd(),
             image_fd,
-            namespace_program: self.executable.as_os_str().as_bytes().to_vec(),
+            namespace_program: namespace_program.as_bytes().to_vec(),
+            namespace_arguments: namespace_arguments
+                .iter()
+                .map(|arg| arg.as_bytes().to_vec())
+                .collect(),
+            namespace_fd,
             launcher_program: launcher_program.as_bytes().to_vec(),
             launcher_fd,
             launcher_arguments: launcher_arguments
@@ -182,6 +203,7 @@ impl LinuxOwner {
             .kill_on_drop(true);
         wrapped.current_dir(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
         descriptors.extend([
+            namespace_image,
             launcher_image,
             cwd,
             owner.into(),
@@ -199,6 +221,17 @@ impl LinuxOwner {
             },
         ))
     }
+}
+
+// The root-owned executable itself can still name a mutable ELF interpreter or
+// dependency search path. Seal the image and resolve the same protected closure
+// as the monitor; never execute a script before the PID namespace exists.
+fn capture_namespace(path: &std::path::Path) -> io::Result<(File, bootstrap::Bootstrap)> {
+    let source = File::open(path)?;
+    let length = source.metadata()?.len();
+    let mut image = immutable_launcher(source, length)?;
+    let bootstrap = bootstrap::Bootstrap::capture(&mut image, path)?;
+    Ok((image, bootstrap))
 }
 
 fn immutable_launcher(source: File, length: u64) -> io::Result<File> {
@@ -523,6 +556,15 @@ mod tests {
                 std::fs::copy(elf.interpreter.unwrap(), root.path().join("mutable-loader"))
                     .unwrap();
             }
+            let namespace = capture_namespace(&executable);
+            assert!(
+                namespace.is_err(),
+                "unshare must reject mutable loader/dependency paths"
+            );
+            assert_eq!(
+                namespace.err().unwrap().kind(),
+                io::ErrorKind::PermissionDenied
+            );
             let captured =
                 LinuxOwner::discover(crate::command_owner::CommandLauncher::new(executable));
             assert!(
@@ -543,6 +585,13 @@ mod tests {
         let script = root.path().join("launcher");
         std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            capture_namespace(&script)
+                .err()
+                .expect("unshare cannot be a script")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         let error = LinuxOwner::discover(crate::command_owner::CommandLauncher::new(script))
             .err()
             .expect("the launcher must implement the helper in a native executable");
@@ -557,7 +606,7 @@ mod tests {
         // This launcher exits before supplying an identity. Reaping the monitor
         // alone cannot prove whether it created a namespace before stopping.
         let owner = LinuxOwner::discover(crate::command_owner::CommandLauncher {
-            executable: PathBuf::from("/bin/sh"),
+            executable: std::path::PathBuf::from("/bin/sh"),
             arguments: vec!["-c".into(), "exit 0".into()],
         })
         .unwrap();

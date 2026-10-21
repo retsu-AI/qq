@@ -1051,7 +1051,8 @@ proof of completion. Completion must retain the same process identity, and
 an interrupted result cannot erase it. A receipt alone does not support
 reattachment or justify signalling a persisted PID after a server restart.
 
-The Linux custody helper is a sealed native executable. Dynamic GNU helpers
+The Linux custody helper and the selected `unshare` bootstrap are sealed native
+executables. Scripts are refused before namespace creation. Dynamic GNU helpers
 start through a protected root-owned glibc loader with an explicitly resolved
 root-owned dependency closure; mutable search directories cannot substitute
 libraries on subsequent starts. Bootstrap loader auditing/filter modules and
