@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let sessions = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
         Arc::new(Loader(loaded)),
     )
     .await?;
