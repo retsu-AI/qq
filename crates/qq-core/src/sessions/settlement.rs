@@ -1183,6 +1183,15 @@ pub(super) fn recover_interrupted_runs_except(
     observed: &[RunId],
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    // This connection owns admission as well as recovery. The transient owner
+    // set lets steering distinguish observation from a live model executor.
+    for run in observed {
+        transaction.execute(
+            "INSERT OR IGNORE INTO temp.native_observation_runs(run_id) VALUES (?1)",
+            [run.to_string()],
+        )?;
+    }
+
     // Routing may already have billed while the main model was unstarted.
     // Interrupt these reservations instead of silently dispatching twice.
     let mut statement = transaction.prepare(
@@ -1355,15 +1364,27 @@ pub(super) fn recover_running_run(
         output: None,
         purpose: SessionPurpose::Task,
     };
-    Ok(settle_run(
-        transaction,
-        store_id,
-        &claimed,
-        RunOutcome::Interrupted,
-        None,
-        SettlementCause::Recovery,
-    )?
-    .unwrap_or_default())
+    if run_is_settled(transaction, identity.run_id)? {
+        return Ok(Vec::new());
+    }
+    let mut events = Vec::new();
+    supersede_pending_steering(transaction, store_id, identity, now_ms(), &mut events)?;
+    events.extend(
+        settle_run(
+            transaction,
+            store_id,
+            &claimed,
+            RunOutcome::Interrupted,
+            None,
+            SettlementCause::Recovery,
+        )?
+        .unwrap_or_default(),
+    );
+    transaction.execute(
+        "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
+        [identity.run_id.to_string()],
+    )?;
+    Ok(events)
 }
 
 pub(super) fn cancellation_wins(

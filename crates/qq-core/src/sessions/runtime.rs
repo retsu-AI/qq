@@ -1267,6 +1267,15 @@ impl SessionRuntime {
         }))
     }
 
+    /// Whether this run was inherited for command observation without a model executor.
+    #[must_use]
+    pub fn is_recovered_run(&self, run: RunId) -> bool {
+        self.inner
+            .native_recovery
+            .get()
+            .is_some_and(|recovery| recovery.contains(run))
+    }
+
     /// Wait for this session's commands inherited from the previous coordinator.
     /// Other sessions and ordinary live runs are unaffected. No effects replay
     /// and the worker keeps the original invocation's deadline.

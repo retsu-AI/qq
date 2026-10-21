@@ -154,9 +154,11 @@ history. The model and profile come from this invocation. The stored approval
 mode is preserved unless you explicitly pass `--approval`. New sessions
 default to Auto. Every exit prints the id you need.
 
-When reopening after a coordinator crash, it waits for that session's inherited native commands and includes their
-saved results before starting the new prompt. Commands keep their original
-deadlines and are not executed again.
+When reopening after a coordinator crash, it waits for that session's inherited
+native commands and includes their saved results before starting the new
+prompt. Commands keep their original deadlines and are not executed again.
+Ctrl-C during this wait cancels and drains the inherited run, pauses its owning
+goal, and exits with status 130.
 
 ### Steering from a pipe
 

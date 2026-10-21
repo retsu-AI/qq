@@ -1163,7 +1163,10 @@ An invocation bound before admission is fenced with durable cancellation if
 its journal entry is absent, preventing a delayed admission from starting it.
 No command is submitted again and its original deadline remains in force.
 Explicit CLI resume waits for inherited commands; queued prompts start only
-after their results are saved. The interrupted model run then settles rather
+after their results are saved. Interrupting that wait cancels and drains the
+inherited run and pauses its owning live goal. Observation-only recovered runs
+reject steering; queued pre-crash steering is published as superseded when the
+run settles. The interrupted model run then settles rather
 than being silently redispatched. Automatic task continuation is separate.
 Unavailable or replaced workers leave their observations unacknowledged.
 A native result that exceeds remaining context capacity

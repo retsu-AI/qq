@@ -116,6 +116,9 @@ pub(in crate::sessions) fn open_database(
              PRAGMA synchronous = FULL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
+             CREATE TEMP TABLE native_observation_runs (
+                 run_id TEXT PRIMARY KEY
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS metadata (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL

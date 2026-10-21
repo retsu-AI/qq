@@ -316,6 +316,17 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             assert_ne!(observed.status, CommandStatus::Finished);
             version = observed.version;
         }
+        store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SteerRun {
+                    run_id: run,
+                    input: vec![InputPart::text("steering recorded before the crash")],
+                    interrupt: false,
+                },
+            )
+            .await
+            .unwrap();
         store.close().await.unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut options = SessionRuntimeOptions::new(database);
@@ -342,6 +353,22 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         assert!(
             futures_util::poll!(barrier.as_mut()).is_pending(),
             "explicit resume must wait for the original invocation"
+        );
+        assert!(
+            matches!(
+                reopened
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::SteerRun {
+                            run_id: run,
+                            input: vec![InputPart::text("this run has no model executor")],
+                            interrupt: true,
+                        }
+                    )
+                    .await,
+                Err(SessionRuntimeError::RunNotSteerable)
+            ),
+            "observation alone cannot consume steering"
         );
         let queued = if cancel {
             if matches!(completion, Completion::Shutdown) {
@@ -401,6 +428,15 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         );
         wait_for_recovery(&reopened, run).await;
         barrier.await.unwrap();
+        let superseded: (u64,u64) = reopened.inner.store.call(Priority::Control, move |connection| {
+            Ok((connection.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND steering=1 AND state='queued'", [run.to_string()], |row| row.get(0))?,
+                connection.query_row("SELECT COUNT(*) FROM events WHERE json_extract(envelope_json,'$.run_id')=?1 AND json_extract(envelope_json,'$.event.type')='steering_superseded'", [run.to_string()], |row| row.get(0))?))
+        }).await.unwrap();
+        assert_eq!(
+            superseded,
+            (0, 1),
+            "pre-crash steering must be visibly superseded"
+        );
         let (state, result): (String, String) = reopened
             .inner
             .store
