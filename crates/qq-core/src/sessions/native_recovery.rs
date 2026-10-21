@@ -1,28 +1,23 @@
-//! Import terminal observations from the journal bound before command admission.
+//! Reattach observations to the journal bound before command admission.
 use super::*;
-use crate::command_owner::{CommandStatus, NativeCommandService, lost_output};
+use crate::command_owner::{
+    CommandOwnerError, CommandSnapshot, CommandStatus, NativeCommandService, lost_output,
+};
 use futures_util::stream;
 
 // Matches the worker journal retention bound, including completed observations.
 const MAX_PENDING: i64 = 10_000;
-const OBSERVERS: usize = 32;
 const STARTUP_OBSERVATION: Duration = Duration::from_secs(2);
 
-struct PendingNative {
+pub(super) struct PendingNative {
     id: ToolCallId,
     owner: StoreId,
-    identity: RunIdentity,
+    pub(super) identity: RunIdentity,
     tool: String,
 }
 
-pub(super) async fn recover_terminal(
-    store: &Store,
-    service: Option<&Arc<dyn NativeCommandService>>,
-) -> Result<Vec<EventCursor>, SessionRuntimeError> {
-    let Some(service) = service else {
-        return Ok(Vec::new());
-    };
-    let pending = store
+pub(super) async fn pending(store: &Store) -> Result<Vec<PendingNative>, SessionRuntimeError> {
+    store
         .call(store::Priority::Control, |connection| {
             let mut statement = connection.prepare(
                 "SELECT t.id,n.owner_id,s.workspace_id,r.session_id,r.id,r.command_id,r.kind,
@@ -68,77 +63,247 @@ pub(super) async fn recover_terminal(
             })
             .collect::<Result<Vec<_>, SessionRuntimeError>>()
         })
-        .await?;
-    if pending.is_empty() {
-        return Ok(Vec::new());
+        .await
+}
+
+async fn save_terminal(
+    store: &Store,
+    pending: PendingNative,
+    snapshot: CommandSnapshot,
+    owner: StoreId,
+) -> Result<EventCursor, SessionRuntimeError> {
+    if snapshot.id != pending.id {
+        return Err(SessionRuntimeError::CONSTRAINT);
     }
-    // Observation cannot hold server startup behind an unavailable worker.
-    // No admission, cancellation, PID signalling or command replay occurs here.
-    let deadline = tokio::time::Instant::now() + STARTUP_OBSERVATION;
-    let owner = match tokio::time::timeout_at(deadline, service.identity()).await {
-        Ok(Ok(owner)) => owner,
-        Ok(Err(error)) => {
-            tracing::warn!(target: "qq::command_owner", %error, "could not identify worker during result recovery");
-            return Ok(Vec::new());
-        }
-        Err(_) => return Ok(Vec::new()),
-    };
-    let mut observations = stream::iter(pending)
-        .map(|pending| async move {
-            let snapshot = if pending.owner == owner && tokio::time::Instant::now() < deadline {
-                tokio::time::timeout_at(deadline, service.wait(pending.id, 0))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-            } else {
-                None
-            };
-            (pending, snapshot)
-        })
-        .buffer_unordered(OBSERVERS);
-    let mut cursors = Vec::new();
-    while let Some((pending, snapshot)) = observations.next().await {
-        let Some(snapshot) = snapshot else {
-            continue;
-        };
-        if snapshot.id != pending.id {
+    let result = match snapshot.status {
+        CommandStatus::Finished => snapshot
+            .result
+            .ok_or(SessionRuntimeError::CONSTRAINT)?
+            .into_output(),
+        CommandStatus::Lost => lost_output(&snapshot.output),
+        CommandStatus::Queued | CommandStatus::Running => {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
-        let result = match snapshot.status {
-            CommandStatus::Finished => snapshot
-                .result
-                .ok_or(SessionRuntimeError::CONSTRAINT)?
-                .into_output(),
-            CommandStatus::Lost => lost_output(&snapshot.output),
-            CommandStatus::Queued | CommandStatus::Running => continue,
+    };
+    let result = crate::cite_spill(result, &pending.tool, pending.id, true);
+    if let Some(receipt) = snapshot.process {
+        store
+            .record_tool_process(pending.identity, pending.id, receipt.into_context())
+            .await?;
+    }
+    let store_id = store.store_id();
+    let commit = store
+        .call_write(store::Priority::AwaitControl, move |connection| {
+            tool_calls::finish_tool_call(
+                connection,
+                store_id,
+                pending.identity,
+                pending.id,
+                result.model_text,
+                result.is_error,
+                result.file_states,
+                result.ui_payload,
+                result.spill,
+                result.execution_context,
+                Some(owner),
+            )
+        })
+        .await?;
+    // Interruption recovery settles the model run before scheduling resumes;
+    // even a context-exhausted command result is retained without a model turn.
+    Ok(commit.event.cursor)
+}
+
+/// Owns only the bounded set of invocations recovered at startup. Dropping
+/// observation never cancels a command; explicit run cancellation still does.
+#[derive(Debug)]
+pub(super) struct Observer {
+    task: tokio::task::JoinHandle<()>,
+    runs: std::collections::HashSet<RunId>,
+}
+
+impl Observer {
+    pub(super) fn contains(&self, run: RunId) -> bool {
+        self.runs.contains(&run)
+    }
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+pub(super) fn start(
+    inner: &Arc<runtime::SessionRuntimeInner>,
+    pending: Vec<PendingNative>,
+) -> Observer {
+    let service = Arc::clone(
+        inner
+            .native_commands
+            .as_ref()
+            .expect("native recovery service"),
+    );
+    let mut remaining = HashMap::<RunId, usize>::new();
+    let mut receivers = HashMap::new();
+    {
+        let mut registrations = inner
+            .cancellations
+            .lock()
+            .expect("run cancellation registry");
+        for pending in &pending {
+            *remaining.entry(pending.identity.run_id).or_default() += 1;
+            receivers.entry(pending.identity.run_id).or_insert_with(|| {
+                let (sender, receiver) = watch::channel(false);
+                registrations.insert(pending.identity.run_id, sender);
+                receiver
+            });
+        }
+    }
+    let work = pending
+        .into_iter()
+        .map(|pending| {
+            let cancellation = receivers[&pending.identity.run_id].clone();
+            (pending, cancellation)
+        })
+        .collect::<Vec<_>>();
+    let store = inner.store.clone();
+    let failed = inner.failed.clone();
+    let settlements = inner.settlements.clone();
+    let inner = Arc::downgrade(inner);
+    let runs = remaining.keys().copied().collect();
+    let observation = async move {
+        let mut observations = stream::iter(work)
+            .map(|(pending, cancellation)| {
+                let store = store.clone();
+                let service = Arc::clone(&service);
+                async move {
+                    let identity = pending.identity;
+                    let result = observe_existing(&store, &service, pending, cancellation).await;
+                    (identity, result)
+                }
+            })
+            .buffer_unordered(crate::command_owner::MAX_ACTIVE as usize);
+        while let Some((identity, result)) = observations.next().await {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            match result {
+                Ok(cursor) => {
+                    inner.notify(cursor);
+                    if let Some(ack) = &inner.native_ack {
+                        ack.wake();
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(target: "qq::command_owner", %error, "could not recover a native command observation");
+                }
+            }
+            let left = remaining
+                .get_mut(&identity.run_id)
+                .expect("pending recovered run");
+            *left -= 1;
+            if *left != 0 {
+                continue;
+            }
+            let store_id = store.store_id();
+            let settled = store
+                .call_write(store::Priority::AwaitControl, move |connection| {
+                    let transaction = store::begin_unit(connection)?;
+                    let events = settlement::recover_running_run(&transaction, store_id, identity)?;
+                    deliveries::deliver_orphaned_answers(&transaction, now_ms())?;
+                    transaction.commit()?;
+                    Ok(events)
+                })
+                .await;
+            match settled {
+                Ok(events) => {
+                    for event in events {
+                        inner.notify(event.cursor);
+                    }
+                }
+                Err(_) => {
+                    inner.failed.send_replace(true);
+                }
+            }
+            inner
+                .cancellations
+                .lock()
+                .expect("run cancellation registry")
+                .remove(&identity.run_id);
+            inner
+                .settlements
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+            let _ = inner.schedule.try_send(());
+        }
+    };
+    let task = tokio::spawn(async move {
+        if AssertUnwindSafe(observation).catch_unwind().await.is_err() {
+            failed.send_replace(true);
+            settlements.send_modify(|generation| *generation = generation.wrapping_add(1));
+        }
+    });
+    Observer { task, runs }
+}
+
+async fn observe_existing(
+    store: &Store,
+    service: &Arc<dyn NativeCommandService>,
+    pending: PendingNative,
+    mut cancellation: watch::Receiver<bool>,
+) -> Result<EventCursor, SessionRuntimeError> {
+    let owner = tokio::time::timeout(STARTUP_OBSERVATION, service.identity())
+        .await
+        .map_err(|_| SessionRuntimeError::Unavailable)?
+        .map_err(|_| SessionRuntimeError::Unavailable)?;
+    if owner != pending.owner {
+        return Err(SessionRuntimeError::Unavailable);
+    }
+    let mut stopping = store
+        .cancellation_requested(pending.identity.run_id)
+        .await?;
+    if stopping {
+        service
+            .cancel(pending.id)
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
+    }
+    let mut version = 0;
+    loop {
+        let snapshot = tokio::select! {
+            biased;
+            cancelled = async { cancellation.wait_for(|cancelled| *cancelled).await.map(|_| ()) }, if !stopping => {
+                cancelled.map_err(|_| SessionRuntimeError::Unavailable)?;
+                service.cancel(pending.id).await.map_err(|_| SessionRuntimeError::Unavailable)?;
+                stopping = true;
+                continue;
+            }
+            snapshot = service.wait(pending.id, version) => match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(CommandOwnerError::NotFound) if !stopping => {
+                    // The coordinator can die after binding but before durable
+                    // admission. Fence any delayed submission with the same ID.
+                    service.cancel(pending.id).await.map_err(|_| SessionRuntimeError::Unavailable)?;
+                    stopping = true;
+                    continue;
+                }
+                Err(_) => return Err(SessionRuntimeError::Unavailable),
+            },
         };
-        let result = crate::cite_spill(result, &pending.tool, pending.id, true);
+        if snapshot.id != pending.id || snapshot.version < version {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        version = snapshot.version;
+        if matches!(
+            snapshot.status,
+            CommandStatus::Finished | CommandStatus::Lost
+        ) {
+            return save_terminal(store, pending, snapshot, owner).await;
+        }
         if let Some(receipt) = snapshot.process {
             store
                 .record_tool_process(pending.identity, pending.id, receipt.into_context())
                 .await?;
         }
-        let store_id = store.store_id();
-        let commit = store
-            .call_write(store::Priority::AwaitControl, move |connection| {
-                tool_calls::finish_tool_call(
-                    connection,
-                    store_id,
-                    pending.identity,
-                    pending.id,
-                    result.model_text,
-                    result.is_error,
-                    result.file_states,
-                    result.ui_payload,
-                    result.spill,
-                    result.execution_context,
-                    Some(owner),
-                )
-            })
-            .await?;
-        // Interruption recovery settles the model run before scheduling resumes;
-        // even a context-exhausted command result is retained without a model turn.
-        cursors.push(commit.event.cursor);
     }
-    Ok(cursors)
 }

@@ -1120,9 +1120,9 @@ pub(super) fn execute_command(
                 }
                 Err(error) => return Err(SessionRuntimeError::InvalidInput(error)),
             }
-            let (session_id, status, stored_outcome, kind) = transaction
+            let (session_id, status, stored_outcome, kind, observation_only) = transaction
                 .query_row(
-                    "SELECT session_id, status, outcome_json, kind FROM runs WHERE id = ?1",
+                    "SELECT session_id, status, outcome_json, kind, EXISTS(SELECT 1 FROM temp.native_observation_runs WHERE run_id=runs.id) FROM runs WHERE id = ?1",
                     [run_id.to_string()],
                     |row| {
                         Ok((
@@ -1130,6 +1130,7 @@ pub(super) fn execute_command(
                             row.get::<_, String>(1)?,
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, bool>(4)?,
                         ))
                     },
                 )
@@ -1156,7 +1157,10 @@ pub(super) fn execute_command(
                 // Only an executing prompt run has a boundary to steer at. A
                 // queued run has not started: the client submits a new prompt
                 // or cancels instead. Compaction runs take no user input.
-                if status != "running" || parse_run_kind(&kind)? != RunKind::Prompt {
+                if observation_only
+                    || status != "running"
+                    || parse_run_kind(&kind)? != RunKind::Prompt
+                {
                     return Err(SessionRuntimeError::RunNotSteerable);
                 }
                 let pending: u16 = transaction.query_row(

@@ -580,6 +580,7 @@ pub(super) struct SessionRuntimeInner {
     pub(super) approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     pub(super) native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     pub(super) native_ack: Option<super::native_ack::Acknowledgements>,
+    native_recovery: std::sync::OnceLock<super::native_recovery::Observer>,
     pub(super) permits: Arc<Semaphore>,
     pub(super) side_permits: Arc<Semaphore>,
     pub(super) side_tasks: AtomicUsize,
@@ -728,10 +729,25 @@ impl SessionRuntime {
         }
         let side_limits = options.side_query_limits.resolve()?;
         let store = Store::open(options.database_path).await?;
-        let mut recovered =
-            super::native_recovery::recover_terminal(&store, options.native_commands.as_ref())
-                .await?;
-        recovered.extend(store.recover_interrupted_runs().await?);
+        let pending = if options.native_commands.is_some() {
+            super::native_recovery::pending(&store).await?
+        } else {
+            Vec::new()
+        };
+        let observed = pending
+            .iter()
+            .map(|pending| pending.identity.run_id)
+            .collect::<Vec<_>>();
+        let recovery_store_id = store.store_id();
+        let recovered = store
+            .call_write(store::Priority::AwaitControl, move |connection| {
+                settlement::recover_interrupted_runs_except(
+                    connection,
+                    recovery_store_id,
+                    &observed,
+                )
+            })
+            .await?;
         let store_id = store.store_id();
         store
             .call_write(store::Priority::AwaitControl, move |connection| {
@@ -767,6 +783,7 @@ impl SessionRuntime {
         });
         let inner = Arc::new(SessionRuntimeInner {
             native_ack,
+            native_recovery: std::sync::OnceLock::new(),
             store,
             loader,
             grant_authority: options.grant_authority,
@@ -799,6 +816,12 @@ impl SessionRuntime {
             lifecycle: RwLock::new(()),
             draining: AtomicBool::new(false),
         });
+        if !pending.is_empty() {
+            inner
+                .native_recovery
+                .set(super::native_recovery::start(&inner, pending))
+                .expect("native recovery starts once");
+        }
         for cursor in recovered {
             inner.notify(cursor);
         }
@@ -1242,6 +1265,53 @@ impl SessionRuntime {
                 }
             }
         }))
+    }
+
+    /// Whether this run was inherited for command observation without a model executor.
+    #[must_use]
+    pub fn is_recovered_run(&self, run: RunId) -> bool {
+        self.inner
+            .native_recovery
+            .get()
+            .is_some_and(|recovery| recovery.contains(run))
+    }
+
+    /// Wait for this session's commands inherited from the previous coordinator.
+    /// Other sessions and ordinary live runs are unaffected. No effects replay
+    /// and the worker keeps the original invocation's deadline.
+    pub async fn await_recovered_commands(
+        &self,
+        workspace: WorkspaceId,
+        session: SessionId,
+    ) -> Result<(), SessionRuntimeError> {
+        let Some(recovery) = self.inner.native_recovery.get() else {
+            return Ok(());
+        };
+        let mut settlements = self.inner.settlements.subscribe();
+        loop {
+            let active =
+                self.inner
+                    .store
+                    .call(store::Priority::Control, move |connection| {
+                        let run = connection.query_row(
+                    "SELECT active_run_id FROM sessions WHERE id=?1 AND workspace_id=?2",
+                    params![session.to_string(), workspace.to_string()],
+                    |row| row.get::<_, Option<String>>(0),
+                ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
+                        run.map(|run| parse_id::<RunId>(&run)).transpose()
+                    })
+                    .await?;
+            if active.is_none_or(|run| !recovery.contains(run)) {
+                return Ok(());
+            }
+            if *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+                return Err(SessionRuntimeError::Unavailable);
+            }
+            settlements
+                .changed()
+                .await
+                .map_err(|_| SessionRuntimeError::Unavailable)?;
+        }
     }
 
     /// Stops accepting commands and new run claims, durably cancels every
