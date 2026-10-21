@@ -223,7 +223,9 @@ impl CommandWorker {
     ) -> Result<T, CommandOwnerError> {
         let mut retried = false;
         let mut uncertain = false;
-        loop {
+        let capacity_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let mut capacity_delay = Duration::from_millis(10);
+        'request: loop {
             let connection = self.connection().await?;
             let response = self
                 .0
@@ -262,6 +264,20 @@ impl CommandWorker {
                 self.forget(&connection)?;
                 continue;
             }
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                && matches!(operation, "cancel" | "wait")
+            {
+                let remaining =
+                    capacity_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if !remaining.is_zero() {
+                    // These idempotent controls were not admitted by the
+                    // transport. A burst must not abandon a live command.
+                    // lint: allow(sleep) production transport backoff, not a test wait.
+                    tokio::time::sleep(capacity_delay.min(remaining)).await;
+                    capacity_delay = (capacity_delay * 2).min(Duration::from_millis(250));
+                    continue;
+                }
+            }
             if !response.status().is_success() {
                 if uncertain && operation == "submit" {
                     return Err(io_error(
@@ -277,7 +293,20 @@ impl CommandWorker {
                 });
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await.map_err(io_error)? {
+            loop {
+                let chunk = match response.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(error) => {
+                        if retried {
+                            return Err(io_error(error));
+                        }
+                        uncertain = true;
+                        retried = true;
+                        self.forget(&connection)?;
+                        continue 'request;
+                    }
+                };
                 if bytes.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
                     return Err(io_error("native command response exceeds its bound"));
                 }
@@ -317,3 +346,7 @@ impl NativeCommandService for CommandWorker {
 fn io_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> CommandOwnerError {
     CommandOwnerError::Io(std::io::Error::other(error))
 }
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;
