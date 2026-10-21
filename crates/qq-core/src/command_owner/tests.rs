@@ -3,6 +3,9 @@ use std::path::Path;
 
 use super::*;
 
+#[cfg(windows)]
+mod windows_processes;
+
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
         id,
