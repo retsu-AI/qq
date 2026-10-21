@@ -109,9 +109,13 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
         request.arguments = serde_json::json!({
             "program": std::env::current_exe().unwrap(),
             "args": ["--exact", "command_owner::tests::windows_processes::fixture_parent",
-                     "--nocapture", "--skip", format!("qq-custody:{}", listener.local_addr().unwrap())]
+                     "--nocapture", "--skip", format!("qq-custody:{}", listener.local_addr().unwrap())],
+            "env": ["SYSTEMROOT", "WINDIR"]
         })
         .to_string();
+        // Winsock provider paths use these platform variables. Preserve the
+        // explicit environment grant the previous PowerShell fixture needed.
+        request.shell_policy.env_allowlist = ["SYSTEMROOT".to_owned(), "WINDIR".to_owned()].into();
         if ending == "deadline" {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -122,10 +126,15 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
         let mut processes = FixtureProcesses(Vec::new());
         let mut controls = Vec::new();
         for _ in 0..2 {
-            let (mut control, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
-                .await
-                .unwrap()
-                .unwrap();
+            let accepted = tokio::time::timeout(Duration::from_secs(15), listener.accept()).await;
+            let (mut control, _) = match accepted {
+                Ok(accepted) => accepted.unwrap(),
+                Err(error) => panic!(
+                    "{ending}: {error}; connected={}; command={:?}",
+                    controls.len(),
+                    owner.snapshot(id).await
+                ),
+            };
             let mut label = [0];
             let mut pid = [0; 4];
             control.read_exact(&mut label).await.unwrap();
