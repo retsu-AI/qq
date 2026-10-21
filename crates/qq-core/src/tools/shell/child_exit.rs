@@ -15,7 +15,7 @@ impl ChildExit {
 
     pub(super) async fn wait(
         &mut self,
-        child: &mut tokio::process::Child,
+        child: &mut super::NativeChild,
         group: &mut super::ProcessGroupGuard,
     ) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]

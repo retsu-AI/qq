@@ -6,6 +6,7 @@ pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
 mod matching;
+mod native_exit;
 pub(crate) mod network;
 pub mod output;
 pub(crate) mod process_context;
@@ -15,6 +16,8 @@ mod shell;
 mod specs;
 mod tree;
 pub(crate) mod walk;
+#[cfg(windows)]
+mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};

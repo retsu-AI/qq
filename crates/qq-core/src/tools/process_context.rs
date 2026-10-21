@@ -208,20 +208,42 @@ pub(super) enum OwnedLaunch {
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
 pub(crate) struct PreparedLaunch {
-    command: tokio::process::Command,
+    command: Option<tokio::process::Command>,
     receipt: ExecutionContextReceipt,
-    _cwd: cap_std::fs::Dir,
+    _cwd: Option<cap_std::fs::Dir>,
     #[cfg(target_os = "linux")]
     _image: Option<std::fs::File>,
 }
 
 impl PreparedLaunch {
     /// Only stream/process supervision settings may change after verification.
-    pub(crate) fn spawn(
+    pub(crate) async fn spawn(
         &mut self,
         piped_stdin: bool,
-    ) -> std::io::Result<(tokio::process::Child, Option<Box<ExecutionContextReceipt>>)> {
-        self.command
+        process: &super::ToolTaskLease,
+        cancelled: &ToolCancellation,
+        deadline: Instant,
+    ) -> std::io::Result<(
+        super::shell::NativeChild,
+        Option<Box<ExecutionContextReceipt>>,
+    )> {
+        if cancelled.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "command startup was cancelled",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command startup timed out",
+            ));
+        }
+        let mut command = self
+            .command
+            .take()
+            .ok_or_else(|| std::io::Error::other("launch was already consumed"))?;
+        command
             .stdin(if piped_stdin {
                 std::process::Stdio::piped()
             } else {
@@ -231,8 +253,23 @@ impl PreparedLaunch {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
-        self.command.process_group(0);
-        let child = self.command.spawn()?;
+        command.process_group(0);
+        #[cfg(not(windows))]
+        let child = {
+            let _ = process;
+            command.spawn()?
+        };
+        #[cfg(windows)]
+        let child = super::windows_job::spawn(
+            command,
+            self._cwd
+                .take()
+                .ok_or_else(|| std::io::Error::other("launch directory was already consumed"))?,
+            process,
+            cancelled,
+            deadline,
+        )
+        .await?;
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.facts_mut().pid = pid;
@@ -419,9 +456,9 @@ pub(super) fn prepare(
         None => ExecutionContextReceipt::V1(facts),
     };
     Ok(PreparedLaunch {
-        command,
+        command: Some(command),
         receipt,
-        _cwd: directory,
+        _cwd: Some(directory),
         #[cfg(target_os = "linux")]
         _image: image,
     })
@@ -785,7 +822,14 @@ mod tests {
         assert!(
             cwd_runtime
                 .block_on(async {
-                    let (mut child, _) = cwd_bound.spawn(false)?;
+                    let (mut child, _) = cwd_bound
+                        .spawn(
+                            false,
+                            &super::super::dispatch::ToolTasks::default().enter(),
+                            &cancelled,
+                            Instant::now() + std::time::Duration::from_secs(5),
+                        )
+                        .await?;
                     child.wait().await
                 })
                 .unwrap()
@@ -808,7 +852,14 @@ mod tests {
         assert!(
             runtime
                 .block_on(async {
-                    let (mut child, _) = prepared.spawn(false)?;
+                    let (mut child, _) = prepared
+                        .spawn(
+                            false,
+                            &super::super::dispatch::ToolTasks::default().enter(),
+                            &cancelled,
+                            Instant::now() + std::time::Duration::from_secs(5),
+                        )
+                        .await?;
                     child.wait().await
                 })
                 .unwrap()

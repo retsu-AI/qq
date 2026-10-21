@@ -374,7 +374,15 @@ pub(super) async fn run_process(
             tail: String::new(),
         });
     }
-    let mut child = match prepared.spawn(false) {
+    let mut child = match prepared
+        .spawn(
+            false,
+            &lease,
+            &ToolCancellation::new(cancellation.clone()),
+            deadline.into_std(),
+        )
+        .await
+    {
         Ok((child, _receipt)) => child,
         Err(error) => return Err(ProcessError::Spawn(error)),
     };

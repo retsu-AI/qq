@@ -4,6 +4,11 @@ use tokio::{io::AsyncReadExt, sync::mpsc};
 
 mod child_exit;
 
+#[cfg(windows)]
+pub(crate) type NativeChild = super::windows_job::Child;
+#[cfg(not(windows))]
+pub(crate) type NativeChild = tokio::process::Child;
+
 use crate::{
     runtime::{BASE_ENV, BuiltinPreference, MAX_SHELL_ENV_NAMES, ShellPolicy, builtin_alternative},
     workspace::Workspace,
@@ -396,14 +401,24 @@ pub(super) async fn run_shell(
             return ToolOutput::refused(format!("could not observe command exits: {error}"));
         }
     };
-    let (mut child, receipt) = match prepared.spawn(stdin_text.is_some()) {
+    let (mut child, receipt) = match prepared
+        .spawn(
+            stdin_text.is_some(),
+            process,
+            cancelled,
+            preparation_deadline,
+        )
+        .await
+    {
         Ok(started) => started,
+        Err(error) if cancelled.is_cancelled() => {
+            return ToolOutput::interrupted(error.to_string());
+        }
         Err(error) => return ToolOutput::refused(format!("could not start the command: {error}")),
     };
     process.process_started();
-    // The child leads its own process group (pgid == pid); the guard kills the
-    // entire group on every abnormal exit path — timeout, cancellation, and
-    // this future being dropped mid-flight — so no descendant is orphaned.
+    // Unix commands lead their own process group. Windows children own a
+    // kernel job which follows descendants across process-group changes.
     let mut guard = ProcessGroupGuard::new(child.id());
     #[cfg(all(test, unix))]
     {
@@ -711,7 +726,7 @@ pub(super) async fn run_shell(
 }
 
 async fn stop_shell(
-    child: &mut tokio::process::Child,
+    child: &mut NativeChild,
     guard: &mut ProcessGroupGuard,
     process: &mut super::ToolTaskLease,
 ) -> Result<(), String> {
@@ -961,37 +976,15 @@ impl ProcessGroupGuard {
     async fn confirm_stopped(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.killed_pgid {
-            // Kernel teardown progresses in real time even when the task's
-            // Tokio clock is paused. Keep these short OS waits off runtime
-            // threads and separate from potentially stalled journal workers.
-            static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
-                std::sync::OnceLock::new();
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-            let permit = std::sync::Arc::clone(
-                SLOTS.get_or_init(|| std::sync::Arc::new(tokio::sync::Semaphore::new(16))),
-            )
-            .acquire_owned()
-            .await
-            .map_err(std::io::Error::other)?;
-            return tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                loop {
-                    match rustix::process::test_kill_process_group(pgid) {
-                        Err(rustix::io::Errno::SRCH) => return Ok(()),
-                        Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => {}
-                        Err(error) => return Err(error.into()),
-                        Ok(()) => {}
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        return Err(std::io::Error::other(
-                            "process group still exists after termination",
-                        ));
-                    }
-                    std::thread::park_timeout(std::time::Duration::from_millis(10));
+            return super::native_exit::confirm(move || {
+                match rustix::process::test_kill_process_group(pgid) {
+                    Err(rustix::io::Errno::SRCH) => Ok(true),
+                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
+                    Err(error) => Err(error.into()),
+                    Ok(()) => Ok(false),
                 }
             })
-            .await
-            .map_err(std::io::Error::other)?;
+            .await;
         }
         Ok(())
     }

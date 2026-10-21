@@ -140,6 +140,16 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    /// Keep native startup and its child tracked if the awaiting task unwinds.
+    #[cfg(windows)]
+    pub(super) fn fork(&self) -> Self {
+        self.tasks.active.fetch_add(1, Ordering::AcqRel);
+        Self {
+            tasks: Arc::clone(&self.tasks),
+            process_pending: false,
+        }
+    }
+
     pub(crate) fn record_process(
         &self,
         id: qq_protocol::ToolCallId,

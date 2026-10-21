@@ -41,6 +41,8 @@ url.workspace = true
 rustix = { workspace = true, features = ["fs", "event"] }
 
 [target.'cfg(windows)'.dependencies]
+subc-jobobject.workspace = true
+win32job.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true
 winapi-util.workspace = true
