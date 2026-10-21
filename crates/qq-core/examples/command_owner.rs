@@ -8,8 +8,25 @@ use qq_core::{
 };
 use qq_protocol::ToolCallId;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
+        let code = qq_core::command_owner::execute_native_launch(
+            std::env::args_os()
+                .nth(2)
+                .ok_or("missing native launch descriptors")?
+                .to_str()
+                .ok_or("invalid native launch descriptors")?,
+        )?;
+        std::process::exit(i32::from(code));
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (root, workspace, workspace_path) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir()?;
         let workspace = tempfile::tempdir()?;
@@ -18,7 +35,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await??;
     let directory = root.path().join("owner");
-    let owner = CommandOwner::open(directory.clone(), "unknown").await?;
+    let owner = CommandOwner::open(
+        directory.clone(),
+        "unknown",
+        qq_core::command_owner::CommandLauncher::new(std::env::current_exe()?),
+    )
+    .await?;
     let id = ToolCallId::generate()?;
     owner
         .submit(NativeCommand {
@@ -45,7 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", result.text());
     owner.shutdown().await?;
     drop(owner);
-    let reopened = CommandOwner::open(directory, "unknown").await?;
+    let reopened = CommandOwner::open(
+        directory,
+        "unknown",
+        qq_core::command_owner::CommandLauncher::new(std::env::current_exe()?),
+    )
+    .await?;
     assert_eq!(reopened.snapshot(id).await?, snapshot);
     reopened.shutdown().await?;
     drop(reopened);

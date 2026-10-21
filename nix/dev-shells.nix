@@ -54,6 +54,7 @@
           ninja
           pkg-config
         ])
+        ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ]
         ++ lib.optionals pkgs.stdenv.isLinux (
           with pkgs.llvmPackages;
           [

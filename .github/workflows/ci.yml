@@ -52,6 +52,19 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Native Linux namespace support
+        run: |
+          if ! command -v patchelf >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y patchelf
+          fi
+          # The disposable runner must exercise the native backend. Production
+          # hosts refuse execution when their kernel policy forbids namespaces.
+          if test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" != 0; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --version
+          unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- /bin/true
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions

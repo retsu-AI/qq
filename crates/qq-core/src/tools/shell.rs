@@ -6,7 +6,9 @@ mod child_exit;
 
 #[cfg(windows)]
 pub(crate) type NativeChild = super::windows_job::Child;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub(crate) type NativeChild = super::linux_owner::Child;
+#[cfg(not(any(windows, target_os = "linux")))]
 pub(crate) type NativeChild = tokio::process::Child;
 
 use crate::{
@@ -363,9 +365,11 @@ pub(super) async fn run_shell(
     };
     let preparation_cancelled = cancelled.clone();
     let preparation_workspace = workspace.clone();
+    #[cfg(target_os = "linux")]
+    let linux_owner = process.linux_owner().cloned();
     let mut prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        super::process_context::prepare(
+        let prepared = super::process_context::prepare(
             preparation_workspace,
             owned,
             approved_read_images,
@@ -373,7 +377,12 @@ pub(super) async fn run_shell(
             call_id,
             &preparation_cancelled,
             preparation_deadline,
-        )
+        )?;
+        #[cfg(target_os = "linux")]
+        if let Some(owner) = &linux_owner {
+            return prepared.owned_linux(owner);
+        }
+        Ok::<_, super::process_context::PreparationError>(prepared)
     })
     .await
     {

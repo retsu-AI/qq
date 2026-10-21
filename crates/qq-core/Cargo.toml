@@ -38,7 +38,12 @@ tree-sitter-bash.workspace = true
 url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "event"] }
+rustix = { workspace = true, features = ["fs", "event", "pipe", "thread"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+command-fds.workspace = true
+goblin.workspace = true
+nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 subc-jobobject.workspace = true

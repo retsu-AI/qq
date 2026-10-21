@@ -79,13 +79,17 @@ mod tests {
             .open(&release)
             .unwrap();
         let mut exit = super::ChildExit::new().unwrap();
-        let mut child = tokio::process::Command::new("/bin/sh")
+        let child = tokio::process::Command::new("/bin/sh")
             .args(["-c", "exec >/dev/null 2>&1; read token < release; exit 7"])
             .current_dir(root.path())
             .process_group(0)
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        #[cfg(not(target_os = "linux"))]
+        let mut child = child;
+        #[cfg(target_os = "linux")]
+        let mut child: super::super::NativeChild = child.into();
         let mut group = super::super::ProcessGroupGuard::new(child.id());
         let mut interrupted = Box::pin(exit.wait(&mut child, &mut group));
         assert!(futures_util::poll!(interrupted.as_mut()).is_pending());

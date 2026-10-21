@@ -31,6 +31,24 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
+        return match std::env::args_os()
+            .nth(2)
+            .ok_or_else(|| io::Error::other("missing native launch descriptors"))
+            .and_then(|encoded| {
+                let encoded = encoded
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("invalid native launch descriptors"))?;
+                qq_core::command_owner::execute_native_launch(encoded)
+            }) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("native launch: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let logging_enabled = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
         Ok(enabled) => enabled,
         Err(error) => {

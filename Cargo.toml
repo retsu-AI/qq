@@ -63,6 +63,7 @@ directories = "6"
 futures-core = "0.3"
 futures-util = "0.3"
 getrandom = "0.3"
+goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hmac = "0.12"
 http-body = "1"
 httpdate = "1"
@@ -111,6 +112,8 @@ windows-permissions = "0.2.4"
 winapi-util = "0.1"
 subc-jobobject = "0.2.2"
 win32job = "2.0.3"
+command-fds = "0.3.3"
+nix = { version = "0.31", default-features = false }
 
 [dependencies]
 clap.workspace = true
