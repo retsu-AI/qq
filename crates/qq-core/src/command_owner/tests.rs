@@ -117,6 +117,41 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_payload_with_a_missing_interpreter_is_a_launch_refusal() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let program = workspace.path().join("broken");
+    std::fs::write(&program, "#!/qq-nonexistent-interpreter\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "unused");
+    request.tool = "exec".to_owned();
+    request.arguments = serde_json::json!({"program":"./broken"}).to_string();
+    owner.submit(request).await.unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    let result = terminal.result.unwrap().0;
+    assert_eq!(
+        result.disposition,
+        crate::tools::dispatch::ResultDisposition::Refused
+    );
+    assert!(
+        result.model_text.contains("could not start the command"),
+        "{}",
+        result.model_text
+    );
+    assert!(
+        terminal.process.is_none(),
+        "a failed payload must not record a started command"
+    );
+}
+
 async fn wait_finished(owner: &CommandOwner, id: ToolCallId, mut version: u64) -> CommandSnapshot {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -863,6 +898,75 @@ async fn live_output_is_durable_before_command_completion() {
     );
     assert_eq!(snapshot.status, CommandStatus::Running);
     assert!(snapshot.process.is_some());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn owned_payload_retains_the_workers_host_supplementary_groups() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let gate_path = workspace.path().join("release");
+    crate::tools::create_test_fifo(&gate_path).await;
+    let gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(gate_path)
+        .unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(
+            workspace.path(),
+            id,
+            "printf ready; read token < release",
+        ))
+        .await
+        .unwrap();
+    let live = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut version = 0;
+        loop {
+            let snapshot = owner.wait(id, version).await.unwrap();
+            if snapshot.output.contains("ready") {
+                break snapshot;
+            }
+            version = snapshot.version;
+        }
+    })
+    .await
+    .unwrap();
+    let monitor = live.process.unwrap().0.facts().pid;
+    let groups = tokio::task::spawn_blocking(move || {
+        fn only_child(pid: u32) -> u32 {
+            let children =
+                std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
+            let children = children.split_whitespace().collect::<Vec<_>>();
+            assert_eq!(children.len(), 1);
+            children[0].parse().unwrap()
+        }
+        fn groups(process: &str) -> String {
+            std::fs::read_to_string(format!("/proc/{process}/status"))
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("Groups:"))
+                .unwrap()
+                .to_owned()
+        }
+        // Read through host procfs, whose IDs are not obscured by gid_map.
+        let payload = only_child(only_child(monitor));
+        (groups("self"), groups(&payload.to_string()))
+    })
+    .await;
+    owner.cancel(id).await.unwrap();
+    let _ = wait_finished(&owner, id, live.version).await;
+    owner.shutdown().await.unwrap();
+    drop(gate);
+    let (worker, payload) = groups.unwrap();
+    assert_eq!(
+        payload, worker,
+        "namespace custody must preserve host group credentials"
+    );
 }
 
 #[cfg(any(unix, windows))]

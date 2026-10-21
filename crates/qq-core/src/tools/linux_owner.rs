@@ -301,8 +301,16 @@ impl Startup {
             ));
         }
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
-        if read_pipe(&acknowledgement, 1).await? != b"g" {
-            return Err(io::Error::other("native launch was not acknowledged"));
+        match read_pipe(&acknowledgement, 1).await?.as_slice() {
+            b"g" => {}
+            b"e" => {
+                let error: [u8; 4] = read_pipe(&acknowledgement, 4)
+                    .await?
+                    .try_into()
+                    .map_err(|_| io::Error::other("invalid payload launch error"))?;
+                return Err(io::Error::from_raw_os_error(i32::from_le_bytes(error)));
+            }
+            _ => return Err(io::Error::other("native launch was not acknowledged")),
         }
         child.status_pipe = Some(acknowledgement.into_inner());
         Ok(())

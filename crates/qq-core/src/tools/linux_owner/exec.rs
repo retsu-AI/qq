@@ -174,10 +174,22 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     live(monitor)?;
     live(owner)?;
-    ack.write_all(b"g")?;
     // PID 1 remains trusted: commands retain ordinary signal/reaping semantics.
     // Exiting PID 1 makes the kernel kill every remaining namespace member.
-    let child = command.spawn()?;
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            ack.write_all(b"e")?;
+            ack.write_all(
+                &error
+                    .raw_os_error()
+                    .unwrap_or(rustix::io::Errno::IO.raw_os_error())
+                    .to_le_bytes(),
+            )?;
+            return Err(error);
+        }
+    };
+    ack.write_all(b"g")?;
     let leader = i32::try_from(child.id()).map_err(io::Error::other)?;
     drop(image);
     loop {
