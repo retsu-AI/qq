@@ -56,7 +56,32 @@ async fn finished(
     connection: &ServerConnection,
     id: ToolCallId,
 ) -> CommandSnapshot {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // A clean Linux build captures its executable hash before launch. Keep
+    // preparation separate from the command's five-second completion guard;
+    // debug executables and shared CI CPUs are substantially slower to hash.
+    wait_for(
+        client,
+        connection,
+        id,
+        Duration::from_secs(30),
+        |snapshot| snapshot.process.is_some() || snapshot.status == CommandStatus::Finished,
+    )
+    .await;
+    wait_for(client, connection, id, Duration::from_secs(5), |snapshot| {
+        snapshot.status == CommandStatus::Finished
+    })
+    .await
+}
+
+async fn wait_for(
+    client: &reqwest::Client,
+    connection: &ServerConnection,
+    id: ToolCallId,
+    budget: Duration,
+    ready: impl Fn(&CommandSnapshot) -> bool,
+) -> CommandSnapshot {
+    let mut last = None;
+    let result = tokio::time::timeout(budget, async {
         let mut after = 0;
         loop {
             let response = client
@@ -71,14 +96,16 @@ async fn finished(
                 .unwrap();
             assert_eq!(response.status(), reqwest::StatusCode::OK);
             let snapshot: CommandSnapshot = response.json().await.unwrap();
-            if snapshot.status == CommandStatus::Finished {
+            if ready(&snapshot) {
                 break snapshot;
             }
+            assert_ne!(snapshot.status, CommandStatus::Lost);
             after = snapshot.version;
+            last = Some(snapshot);
         }
     })
-    .await
-    .unwrap()
+    .await;
+    result.unwrap_or_else(|_| panic!("command did not reach its expected state; last: {last:?}"))
 }
 
 #[tokio::test]
@@ -98,7 +125,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
         id,
         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
         tool: "shell".to_owned(),
-        arguments: r#"{"command":"echo once >> count"}"#.to_owned(),
+        arguments: r#"{"command":"echo once>>count"}"#.to_owned(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         not_after_ms: None,
@@ -185,6 +212,14 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
             .status()
             .is_success()
     );
+    wait_for(
+        &client,
+        &connection,
+        id,
+        Duration::from_secs(30),
+        |snapshot| snapshot.process.is_some() || snapshot.status == CommandStatus::Finished,
+    )
+    .await;
     let running = tokio::time::timeout(Duration::from_secs(5), async {
         let mut after = 0;
         loop {
