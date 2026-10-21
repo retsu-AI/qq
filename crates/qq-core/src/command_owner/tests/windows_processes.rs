@@ -122,6 +122,9 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
                 .unwrap();
             request.not_after_ms = Some(u64::try_from(now.as_millis()).unwrap() + 60_000);
         }
+        request.environment =
+            crate::command_owner::NativeEnvironment::capture(&request.shell_policy.env_allowlist)
+                .unwrap();
         owner.submit(request).await.unwrap();
         let mut processes = FixtureProcesses(Vec::new());
         let mut controls = Vec::new();

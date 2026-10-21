@@ -23,9 +23,9 @@ use crate::{
     ServerReservation, api_error,
 };
 
-const PREFIX: &str = "/internal/command-owner/v1";
-const HEALTH_PATH: &str = "/internal/command-owner/v1/health";
-const MAX_REQUEST_BYTES: usize = 256 * 1024;
+const PREFIX: &str = "/internal/command-owner/v2";
+const HEALTH_PATH: &str = "/internal/command-owner/v2/health";
+const MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
 impl ServerReservation {
     /// Starts only the command-owner transport. The caller retains ownership
@@ -88,8 +88,8 @@ async fn admit(State(state): State<OwnerState>, request: Request, next: Next) ->
         return next.run(request).await;
     }
     let slots = match request.uri().path() {
-        "/internal/command-owner/v1/wait" => state.waits,
-        "/internal/command-owner/v1/cancel" => state.cancellations,
+        "/internal/command-owner/v2/wait" => state.waits,
+        "/internal/command-owner/v2/cancel" => state.cancellations,
         _ => state.requests,
     };
     let Ok(permit) = slots.try_acquire_owned() else {
@@ -240,6 +240,7 @@ mod tests {
             .build()
             .unwrap();
         let request = NativeCommand {
+            environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
             id: ToolCallId::generate().unwrap(),
             workspace: std::fs::canonicalize(workspace.path()).unwrap(),
             tool: "shell".to_owned(),
@@ -248,7 +249,7 @@ mod tests {
             approved_images: Vec::new(),
             not_after_ms: None,
         };
-        let base = format!("http://{}/internal/command-owner/v1", connection.address());
+        let base = format!("http://{}/internal/command-owner/v2", connection.address());
         let response = client
             .post(format!("{base}/submit"))
             .bearer_auth(connection.expose_bearer_token())
@@ -326,6 +327,7 @@ mod tests {
         let id = ToolCallId::generate().unwrap();
         owner
             .submit(NativeCommand {
+                environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                 id,
                 workspace: std::fs::canonicalize(workspace.path()).unwrap(),
                 tool: "shell".to_owned(),

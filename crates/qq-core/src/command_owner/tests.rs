@@ -106,6 +106,7 @@ async fn owned_commands_preserve_signal_and_numeric_exit_statuses() {
 
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
+        environment: crate::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         // Existing fixture roots may be reached through macOS's /var alias.
         workspace: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
@@ -643,7 +644,7 @@ async fn recovery_marks_an_unconfirmed_command_lost_and_never_replays_it() {
     let id = ToolCallId::generate().unwrap();
     let request = command(workspace.path(), id, "echo should-not-replay");
     journal
-        .admit(id, serde_json::to_string(&request).unwrap())
+        .admit(id, request.identity().unwrap())
         .await
         .unwrap();
     let released = journal.observe_cleanup();
@@ -1531,4 +1532,54 @@ async fn windows_junction_state_directories_are_refused() {
         owner.shutdown().await.unwrap();
     }
     assert!(refused, "a directory junction must not become owner state");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn captured_environment_controls_execution_without_persisting_values_in_the_request() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let name = format!("QQ_FROZEN_{}", id);
+    assert!(std::env::var_os(&name).is_none());
+    let value = format!("private-value-{id}");
+    let mut request = command(workspace.path(), id, "unused");
+    request.environment =
+        NativeEnvironment::from_values([(name.clone(), value.clone().into())]).unwrap();
+    request.shell_policy.env_allowlist = vec![name.clone()].into();
+    request.arguments =
+        serde_json::json!({"command":format!("printf '%s|' \"${{{name}-missing}}\" \"HOME=${{HOME-missing}}\""),"env":[name]})
+            .to_string();
+    owner.submit(request.clone()).await.unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    owner.submit(request.clone()).await.unwrap();
+    request.environment = NativeEnvironment::from_values([(name, "changed".into())]).unwrap();
+    assert!(matches!(
+        owner.submit(request).await,
+        Err(CommandOwnerError::Conflict)
+    ));
+    owner.shutdown().await.unwrap();
+    let result = finished.result.unwrap();
+    assert!(result.text().contains(&value));
+    assert!(result.text().contains("HOME=missing"));
+    let connection = Connection::open(directory.join("commands.sqlite3")).unwrap();
+    let persisted: String = connection
+        .query_row(
+            "SELECT request FROM commands WHERE id=?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!persisted.contains(&value));
+    assert!(
+        !format!(
+            "{:?}",
+            NativeEnvironment::from_values([("SECRET".to_owned(), value.clone().into())]).unwrap()
+        )
+        .contains(&value)
+    );
 }

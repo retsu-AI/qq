@@ -54,6 +54,7 @@ mod tests {
         let call = ToolCallId::generate().unwrap();
         let arguments = r#"{"program":"true","args":[]}"#;
         let result = crate::tools::dispatch::execute_with_images(
+            None,
             plan.workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
