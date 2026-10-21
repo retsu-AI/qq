@@ -82,9 +82,20 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
              $ready=[Threading.EventWaitHandle]::OpenExisting('{ready}'); \
              [void]$ready.Set(); [void]$stop.WaitOne(30000)"
         ));
+        // Windows PowerShell's .NET Framework spawner inherits handles beyond
+        // the redirected standard streams. Clear inheritance on the parent's
+        // capture pipes so the descendant cannot keep QQ waiting for EOF.
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); \
+             Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
+               public static class QQHandles {{ \
+               [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); \
+               [DllImport(\"kernel32.dll\", SetLastError=true)] \
+               public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags); }}'; \
+             foreach ($n in @(-10,-11,-12)) {{ \
+               if (-not [QQHandles]::SetHandleInformation([QQHandles]::GetStdHandle($n),1,0)) \
+                 {{ throw 'could not prevent inherited capture pipes' }} }}; \
              $release=[Threading.EventWaitHandle]::new($false,'ManualReset','{release}'); \
              $ready=[Threading.EventWaitHandle]::new($false,'ManualReset','{ready}'); \
              $stop=[Threading.EventWaitHandle]::new($false,'ManualReset','{stop}'); \
@@ -161,7 +172,19 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
                 .all(|process| process.exit_code().unwrap().is_none())
         );
         match ending {
-            "completion" => release_parent(&release).await,
+            "completion" => {
+                release_parent(&release).await;
+                processes = tokio::task::spawn_blocking(move || {
+                    assert_eq!(
+                        processes.0[0].wait(Some(Duration::from_secs(5))).unwrap(),
+                        WaitOutcome::Signaled,
+                        "the fixture parent must exit before testing descendant cleanup"
+                    );
+                    processes
+                })
+                .await
+                .unwrap();
+            }
             "cancellation" => owner.cancel(id).await.unwrap(),
             "deadline" => {
                 tokio::time::pause();
