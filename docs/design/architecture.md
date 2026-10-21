@@ -203,6 +203,13 @@ xtask/
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
   the network, the clock, or rendering state.
+  `SessionClient::workspaces` discovers registered roots through authenticated
+  `POST /v1/workspaces/list`, without resolving a path on the client machine.
+  Pages contain the persistent store ID, workspace IDs and host-side display
+  paths; continuation cursors belong to that store. Clients must qualify a
+  workspace by its server connection and store/workspace IDs, rather than
+  merge entries by path. Listing is metadata-only and does not register roots,
+  load project configuration, or authorize execution.
   Views retain the observed foreground run identity across idle summaries,
   keeping late identified internal completions out of attention and draft
   handoff. Body snapshots preserve observed timing and priced-turn ordinals;

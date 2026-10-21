@@ -3112,6 +3112,19 @@ impl ServerHandler for RuntimeHandler {
         })
     }
 
+    fn workspace_catalog(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> qq_server::WorkspaceCatalogFuture {
+        let runtime = self.durable.clone();
+        Box::pin(async move {
+            runtime
+                .workspace_catalog(request)
+                .await
+                .map_err(map_session_runtime_error)
+        })
+    }
+
     fn snapshot(&self, request: SnapshotRequest) -> SnapshotFuture {
         let runtime = self.durable.clone();
         Box::pin(async move {

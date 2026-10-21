@@ -4410,7 +4410,8 @@ mod tests {
         // decode as `retired`.
         // Version 37 makes Ask human-only per call and moves write-child
         // supervision out of the public approval modes.
-        assert_eq!(crate::PROTOCOL_VERSION, 37);
+        // Version 38 adds store-qualified workspace discovery.
+        assert_eq!(crate::PROTOCOL_VERSION, 38);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

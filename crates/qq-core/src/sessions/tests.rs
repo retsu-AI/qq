@@ -8924,3 +8924,105 @@ async fn side_cancel_of_an_unknown_id_is_a_typed_not_found() {
         .await;
     assert_eq!(result, Err(SessionRuntimeError::SideQuestionNotFound));
 }
+
+#[tokio::test]
+async fn workspace_catalog_pages_registered_roots_and_preserves_identity_after_restart() {
+    use qq_protocol::{WorkspaceCatalogCursor, WorkspaceCatalogRequest};
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let empty = runtime
+        .workspace_catalog(WorkspaceCatalogRequest::default())
+        .await
+        .unwrap();
+    assert!(empty.workspaces.is_empty());
+    assert_eq!(empty.next, None);
+    assert_eq!(empty.store_id, runtime.store_id());
+    let mut expected = Vec::new();
+    for name in ["api", "frontend", "worker"] {
+        let path = directory.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        let (id, _) = resolve_workspace(&runtime, &path).await;
+        expected.push(WorkspaceSummary {
+            id,
+            path: std::fs::canonicalize(&path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        });
+    }
+    expected.sort_by_key(|workspace| workspace.id);
+    let first = runtime
+        .workspace_catalog(WorkspaceCatalogRequest {
+            after: None,
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.workspaces, expected[..2]);
+    let cursor = first.next.unwrap();
+    assert_eq!(
+        cursor,
+        WorkspaceCatalogCursor {
+            store_id: runtime.store_id(),
+            workspace_id: expected[1].id
+        }
+    );
+    for limit in [0, qq_protocol::MAX_WORKSPACE_PAGE + 1] {
+        assert!(matches!(
+            runtime
+                .workspace_catalog(WorkspaceCatalogRequest { after: None, limit })
+                .await,
+            Err(SessionRuntimeError::InvalidPageLimit)
+        ));
+    }
+    let foreign = WorkspaceCatalogCursor {
+        store_id: StoreId::generate().unwrap(),
+        ..cursor
+    };
+    assert!(matches!(
+        runtime
+            .workspace_catalog(WorkspaceCatalogRequest {
+                after: Some(foreign),
+                limit: 2
+            })
+            .await,
+        Err(SessionRuntimeError::CursorStoreMismatch)
+    ));
+    let store_id = runtime.store_id();
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+    // Listing metadata neither opens a root nor depends on its availability.
+    std::fs::remove_dir(directory.path().join("worker")).unwrap();
+    let reopened = SessionRuntime::open(
+        SessionRuntimeOptions::new(database),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let second = reopened
+        .workspace_catalog(WorkspaceCatalogRequest {
+            after: Some(cursor),
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.store_id, store_id);
+    assert_eq!(second.workspaces, expected[2..]);
+    assert_eq!(second.next, None);
+    assert_eq!(
+        reopened
+            .workspace_catalog(WorkspaceCatalogRequest::default())
+            .await
+            .unwrap()
+            .workspaces,
+        expected
+    );
+    reopened.shutdown().await.unwrap();
+}
