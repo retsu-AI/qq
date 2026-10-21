@@ -52,7 +52,11 @@ pub(crate) async fn observe(
         }
         submitted = &mut submitted => submitted,
     };
-    if let Err(error) = submitted {
+    // A successful concurrent cancellation owns durable worker state even if
+    // admission was refused. Observe it and save its result before reclamation.
+    if let Err(error) = submitted
+        && !stopping
+    {
         if matches!(
             error,
             CommandOwnerError::Invalid

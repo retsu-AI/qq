@@ -81,6 +81,83 @@ async fn cancellation_during_cold_admission_keeps_submission_progressing() {
     tasks.drain().await.unwrap();
 }
 
+#[tokio::test]
+async fn cancelled_refused_admission_retains_its_terminal_result_for_reclamation() {
+    use crate::tools::dispatch::ToolCancellation;
+
+    struct Full {
+        owner: CommandOwner,
+        cancellation: RunCancellation,
+    }
+    impl NativeCommandService for Full {
+        fn identity(&self) -> NativeCommandFuture<StoreId> {
+            self.owner.identity()
+        }
+        fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            NativeCommandService::acknowledge(&self.owner, ids)
+        }
+        fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
+            let cancellation = self.cancellation.clone();
+            Box::pin(async move {
+                cancellation.cancel();
+                tokio::task::yield_now().await;
+                Err(CommandOwnerError::Full)
+            })
+        }
+        fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
+            NativeCommandService::cancel(&self.owner, id)
+        }
+        fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
+            NativeCommandService::wait(&self.owner, id, after)
+        }
+    }
+    let root = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let cancellation = RunCancellation::new();
+    let service = Arc::new(Full {
+        owner: owner.clone(),
+        cancellation: cancellation.clone(),
+    });
+    let bindings = Arc::new(Mutex::new(Vec::new()));
+    let recorded = bindings.clone();
+    let tasks = ToolTasks::default();
+    tasks
+        .set_native_recorder(move |id, owner| {
+            recorded.lock().unwrap().push((id, owner));
+            async { Ok(()) }
+        })
+        .unwrap();
+    let mut lease = tasks.enter();
+    let result = observer::observe(
+        service,
+        command(root.path(), id, "echo damage > unexpected"),
+        &ToolCancellation::new(cancellation),
+        None,
+        &mut lease,
+    )
+    .await;
+    assert_eq!(result.native_owner, Some(owner.store_id()));
+    assert!(result.model_text.contains("cancelled before admission"));
+    assert_eq!(
+        *bindings.lock().unwrap(),
+        vec![(id, Some(owner.store_id()))]
+    );
+    assert!(!root.path().join("unexpected").exists());
+    drop(lease);
+    tasks.drain().await.unwrap();
+    assert_eq!(tasks.drain_native_results(), vec![(id, result)]);
+    // A session can acknowledge only after saving this returned result.
+    owner.acknowledge(vec![id]).await.unwrap();
+    assert!(matches!(
+        owner.wait(id, 0).await,
+        Err(CommandOwnerError::Retired)
+    ));
+    owner.shutdown().await.unwrap();
+}
+
 #[cfg(windows)]
 mod windows_processes;
 
