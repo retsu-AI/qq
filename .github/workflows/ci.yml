@@ -251,6 +251,15 @@ jobs:
             bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_junctions_and_ambiguous_windows_names
           fi
           cargo run --locked -p qq-core --example embed
+      - name: Persisted native task authority
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_never_falls_back_without_a_command_service
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_rejects_unregistered_workspaces_before_provider_execution
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_replaced_task_directory_is_refused_before_provider_execution
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_conflicting_registration_does_not_replace_stored_authority
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_corrupt_or_empty_persisted_policy_never_restores_host_authority
       - name: Private command transport and worker process
         shell: bash
         run: |

@@ -487,6 +487,9 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
+    /// Host-authorized task workspaces. Registrations persist and are inherited
+    /// by all sessions/children using the store; an empty list restores them.
+    pub native_scopes: Vec<crate::command_owner::NativeCommandScope>,
     /// Execute approved shell/exec calls through this trusted service.
     pub native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     pub database_path: PathBuf,
@@ -527,6 +530,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("grant_authority", &self.grant_authority.is_some())
             .field("approval_reviewer", &self.approval_reviewer.is_some())
             .field("native_commands", &self.native_commands.is_some())
+            .field("native_scopes", &self.native_scopes.len())
             .finish()
     }
 }
@@ -537,6 +541,7 @@ impl SessionRuntimeOptions {
         Self {
             database_path,
             native_commands: None,
+            native_scopes: Vec::new(),
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -574,6 +579,7 @@ pub struct SessionRuntime {
 }
 
 pub(super) struct SessionRuntimeInner {
+    pub(super) native_scopes: Option<Arc<super::native_scope::NativeScopes>>,
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
     pub(super) grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
@@ -729,6 +735,7 @@ impl SessionRuntime {
         }
         let side_limits = options.side_query_limits.resolve()?;
         let store = Store::open(options.database_path).await?;
+        let native_scopes = super::native_scope::load(&store, options.native_scopes).await?;
         let pending = if options.native_commands.is_some() {
             super::native_recovery::pending(&store).await?
         } else {
@@ -782,6 +789,7 @@ impl SessionRuntime {
             super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
         });
         let inner = Arc::new(SessionRuntimeInner {
+            native_scopes,
             native_ack,
             native_recovery: std::sync::OnceLock::new(),
             store,
@@ -1686,6 +1694,8 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error("invalid native execution scope: {reason}")]
+    InvalidNativeScope { reason: String },
     #[error("goal identity or revision conflicts with the current goal")]
     GoalConflict {
         current: Option<qq_protocol::GoalIdentity>,

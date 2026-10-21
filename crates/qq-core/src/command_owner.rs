@@ -23,6 +23,8 @@ mod filesystem;
 pub use filesystem::{NativeDirectoryGrant, NativeFilesystem};
 mod resources;
 pub use resources::{NativeResourceLimits, NativeResources};
+mod scope;
+pub use scope::NativeCommandScope;
 mod journal;
 mod workspace_identity;
 pub use environment::NativeEnvironment;

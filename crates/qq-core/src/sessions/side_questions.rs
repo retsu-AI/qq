@@ -464,7 +464,8 @@ impl SessionRuntime {
             id,
         };
         let deadline = started + limits.duration();
-        let tool_tasks = crate::tools::ToolTasks::default();
+        let tool_tasks =
+            crate::tools::ToolTasks::default().with_native_scopes(self.inner.native_scopes.clone());
         // Whether a provider request may have been sent and not committed:
         // its spend is then unknown rather than the last committed total.
         let in_flight = AtomicBool::new(false);

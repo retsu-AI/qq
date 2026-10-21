@@ -2,7 +2,10 @@
 use futures_util::StreamExt;
 use qq_core::*;
 use qq_core::{
-    command_owner::NativeDirectoryGrant,
+    command_owner::{
+        NativeCommandScope, NativeDirectoryGrant, NativeNetwork, NativeResourceLimits,
+        NativeResources,
+    },
     task_workspace::{TaskWorkspace, TaskWorkspaceLimits},
 };
 use qq_protocol::*;
@@ -48,11 +51,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace.clone(),
     )
     .await?;
-    let sessions = SessionRuntime::open(
-        SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
-        Arc::new(Loader(loaded)),
-    )
-    .await?;
+    let mut session_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+    session_options.native_scopes.push(NativeCommandScope {
+        workspace: detached.directory_grant(),
+        read_only: vec![],
+        network: NativeNetwork::Isolated,
+        resources: NativeResources::Limited {
+            limits: NativeResourceLimits {
+                memory_bytes: 128 * 1024 * 1024,
+                max_processes: 32,
+                cpu_millicores: 500,
+            },
+        },
+    });
+    let sessions = SessionRuntime::open(session_options, Arc::new(Loader(loaded))).await?;
     let command = |command| sessions.command(CommandId::generate().expect("command id"), command);
     let resolved = command(SessionCommand::ResolveWorkspace {
         path: workspace.to_string_lossy().into_owned(),

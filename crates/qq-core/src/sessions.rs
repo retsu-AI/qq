@@ -69,6 +69,7 @@ pub use goals::GoalValidationError;
 mod in_run_compaction;
 mod native_ack;
 mod native_recovery;
+pub(crate) mod native_scope;
 mod projection;
 mod runtime;
 mod scheduler;

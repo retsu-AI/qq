@@ -29,6 +29,7 @@ mod goals;
 mod loop_guard;
 mod migrations;
 mod native_recovery;
+mod native_scope;
 mod nonblocking;
 mod progress;
 mod projection;
@@ -1471,6 +1472,7 @@ async fn approval_harness_with_clocks(
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
