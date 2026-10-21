@@ -114,6 +114,8 @@ pub enum CommandOwnerError {
     Shutdown(#[source] Arc<CommandOwnerError>),
 }
 
+/// Executions retain ownership after observers disconnect. Implicit disposal
+/// closes the journal asynchronously; await `shutdown` before immediate reuse.
 #[derive(Clone)]
 pub struct CommandOwner(Arc<OwnerState>);
 

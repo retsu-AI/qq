@@ -270,7 +270,9 @@ async fn recovery_marks_an_unconfirmed_command_lost_and_never_replays_it() {
         .admit(id, serde_json::to_string(&request).unwrap())
         .await
         .unwrap();
+    let released = journal.observe_cleanup();
     drop(journal);
+    released.await.unwrap();
     let owner = CommandOwner::open(directory, "unknown").await.unwrap();
     let recovered = owner.snapshot(id).await.unwrap();
     assert_eq!(recovered.status, CommandStatus::Lost);
@@ -890,4 +892,32 @@ async fn extreme_task_deadlines_never_stop_the_owner() {
     owner.shutdown().await.unwrap();
     assert!(!finished.result.as_ref().unwrap().is_error());
     assert!(finished.result.unwrap().text().contains("still-available"));
+}
+
+#[tokio::test]
+async fn implicit_owner_cleanup_closes_sqlite_off_the_async_worker() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown")
+        .await
+        .unwrap();
+    let closed = owner.0.journal.observe_cleanup();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(workspace.path(), id, "echo completed"))
+        .await
+        .unwrap();
+    drop(owner);
+    let cleanup_thread = tokio::time::timeout(std::time::Duration::from_secs(5), closed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(cleanup_thread, std::thread::current().id());
+    let reopened = CommandOwner::open(directory, "unknown").await.unwrap();
+    let terminal = reopened.snapshot(id).await.unwrap();
+    reopened.shutdown().await.unwrap();
+    assert_eq!(terminal.status, CommandStatus::Finished);
+    assert!(!terminal.result.as_ref().unwrap().is_error());
+    assert!(terminal.result.unwrap().text().contains("completed"));
 }

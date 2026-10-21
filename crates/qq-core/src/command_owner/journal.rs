@@ -19,6 +19,43 @@ struct JournalState {
     serial: Arc<tokio::sync::Semaphore>,
     connection: Mutex<Option<Connection>>,
     lock: Mutex<Option<File>>,
+    #[cfg(test)]
+    cleanup: Mutex<Option<tokio::sync::oneshot::Sender<std::thread::ThreadId>>>,
+}
+
+impl Drop for JournalState {
+    fn drop(&mut self) {
+        let connection = self
+            .connection
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        let lock = self
+            .lock
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if connection.is_none() && lock.is_none() {
+            return;
+        }
+        #[cfg(test)]
+        let observed = self.cleanup.get_mut().unwrap().take();
+        let close = move || {
+            // SQLite may checkpoint the WAL while closing. Keep the exclusive
+            // file lock until that I/O has finished, including implicit drops.
+            drop(connection);
+            drop(lock);
+            #[cfg(test)]
+            if let Some(observed) = observed {
+                let _ = observed.send(std::thread::current().id());
+            }
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(close));
+        } else {
+            close();
+        }
+    }
 }
 
 struct StoredSnapshot {
@@ -107,7 +144,16 @@ impl Journal {
             serial: Arc::new(tokio::sync::Semaphore::new(1)),
             connection: Mutex::new(Some(connection)),
             lock: Mutex::new(Some(lock)),
+            #[cfg(test)]
+            cleanup: Mutex::new(None),
         })))
+    }
+
+    #[cfg(test)]
+    pub(super) fn observe_cleanup(&self) -> tokio::sync::oneshot::Receiver<std::thread::ThreadId> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        assert!(self.0.cleanup.lock().unwrap().replace(sender).is_none());
+        receiver
     }
 
     async fn call<T: Send + 'static>(
