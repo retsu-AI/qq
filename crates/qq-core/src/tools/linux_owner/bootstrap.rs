@@ -219,10 +219,10 @@ impl Bootstrap {
             if path
                 .iter()
                 .copied()
-                .any(|byte| byte == b':' || byte.is_ascii_whitespace())
+                .any(|byte| byte == b':' || byte == b'$' || byte.is_ascii_whitespace())
             {
                 return Err(refused(
-                    "native bootstrap dependency path contains a loader separator",
+                    "native bootstrap dependency path contains a loader token or separator",
                 ));
             }
             if !preload.is_empty() {
