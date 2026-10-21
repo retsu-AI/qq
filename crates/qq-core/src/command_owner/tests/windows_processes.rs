@@ -97,16 +97,18 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
              $child=[Diagnostics.Process]::new(); $child.StartInfo=$info; [void]$child.Start(); \
              if (-not $ready.WaitOne(10000)) {{ throw 'child not ready' }}; \
              [Console]::WriteLine(('parent:{{0}} child:{{1}}' -f $PID,$child.Id)); \
-             if (-not $release.WaitOne(20000)) {{ throw 'parent not released' }}"
+             if (-not $release.WaitOne(20000)) {{ throw 'parent not released' }}; \
+             [Environment]::Exit(0)"
         );
-        let mut request = command(
-            workspace.path(),
-            id,
-            &format!(
-                "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
-                encoded(&script)
-            ),
-        );
+        let mut request = command(workspace.path(), id, "unused");
+        // Observe this parent directly: cmd.exe can wait for console children
+        // after the script exits, hiding the normal-exit boundary under test.
+        request.tool = "exec".to_owned();
+        request.arguments = serde_json::json!({
+            "program":"powershell.exe",
+            "args":["-NoProfile","-NonInteractive","-Command",script]
+        })
+        .to_string();
         // Windows PowerShell's CLR needs the ordinary Windows runtime/profile
         // paths. Grant them explicitly rather than changing QQ's cleared env.
         let environment = [
