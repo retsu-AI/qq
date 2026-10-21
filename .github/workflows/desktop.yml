@@ -100,6 +100,9 @@ jobs:
             echo 'The mobile build must not link host engine, auth or configuration crates.'
             exit 1
           fi
+      # The desktop job's clippy never compiles the `cfg(mobile)` entry point.
+      - name: Clippy (Android)
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib -- -D warnings
       - name: Build debug APK (no engine sidecar or distribution keys)
         run: pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
       - uses: actions/upload-artifact@v4

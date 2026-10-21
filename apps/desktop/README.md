@@ -35,6 +35,10 @@ rustup target add aarch64-linux-android
 pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
 ```
 
+For live reload on an emulator or device, run `pnpm tauri android dev`. The
+CLI sets `TAURI_DEV_HOST`, Vite listens on that address, and the app's Rust side
+fetches the pages from it, so cleartext traffic stays disabled in the APK.
+
 The debug APK is for local development and is not an app-store release. It
 bundles no engine and connects to no server. No host-loopback emulator exception
 or token is shipped. The desktop workflow verifies the Android dependency graph
