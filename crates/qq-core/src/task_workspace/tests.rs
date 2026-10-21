@@ -211,12 +211,13 @@ fn detached_task_workspace_refuses_links_special_files_and_preserves_executable_
     fs::write(fixture.source.path.join("real/input"), "data").unwrap();
     symlink("real", fixture.source.path.join("parent-link")).unwrap();
     assert!(fixture.import(&["parent-link/input"], 1024).is_err());
-    rustix::fs::mkfifoat(
-        rustix::fs::CWD,
-        fixture.source.path.join("pipe"),
-        rustix::fs::Mode::RUSR,
-    )
-    .unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(fixture.source.path.join("pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(matches!(
         fixture.import(&["pipe"], 1024),
         Err(TaskWorkspaceError::UnsupportedFile(_))
