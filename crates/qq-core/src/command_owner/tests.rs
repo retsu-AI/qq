@@ -230,6 +230,45 @@ async fn dropping_admission_waiter_does_not_abandon_a_committed_command() {
     assert!(completed.result.unwrap().text().contains("completed"));
 }
 
+#[tokio::test]
+async fn admission_wait_cannot_renew_the_task_deadline() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let (entered, admitting) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    ADMISSION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered,
+        release: gate,
+    });
+    let mut request = command(workspace.path(), id, "echo forbidden>expired-effect");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    request.not_after_ms = Some(u64::try_from(now.as_millis()).unwrap() + 60_000);
+    let submitting_owner = owner.clone();
+    let submit = tokio::spawn(async move { submitting_owner.submit(request).await });
+    admitting.await.unwrap();
+    // Advance elapsed time without advancing wall time: the same discrepancy
+    // as a wall-clock rollback while admission is waiting on durable storage.
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    release.send(()).unwrap();
+    submit.await.unwrap().unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        !workspace.path().join("expired-effect").exists(),
+        "admission must not reset an expired authority deadline"
+    );
+    assert!(terminal.result.unwrap().is_error());
+}
+
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn explicit_cancellation_reaps_before_publishing_completion() {

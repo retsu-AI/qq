@@ -236,7 +236,7 @@ impl CommandOwner {
         {
             return Err(CommandOwnerError::Invalid);
         }
-        request.not_after_ms.map(monotonic_deadline).transpose()?;
+        let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = serde_json::to_string(&request)?;
         if encoded.len() > MAX_REQUEST_BYTES {
             return Err(CommandOwnerError::Invalid);
@@ -313,7 +313,9 @@ impl CommandOwner {
                         cancellation.cancel();
                     }
                     let _ = reply.send(Ok(()));
-                    let result = owner.execute(request, images, cancellation).await;
+                    let result = owner
+                        .execute(request, images, cancellation, task_deadline)
+                        .await;
                     match result {
                         Ok(result) if !*owner.0.failed.borrow() => {
                             match owner.0.journal.finished(id, result).await {
@@ -357,6 +359,7 @@ impl CommandOwner {
         request: NativeCommand,
         images: ApprovedReadImages,
         cancellation: RunCancellation,
+        task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
         let path = request.workspace;
         let workspace = match blocking(move || {
@@ -376,17 +379,6 @@ impl CommandOwner {
         if cancelled {
             cancellation.cancel();
         }
-        let task_deadline = match request.not_after_ms.map(monotonic_deadline).transpose() {
-            Ok(deadline) => deadline,
-            // A clock change between admission and execution must remain a
-            // per-command refusal, rather than cancelling unrelated commands.
-            Err(CommandOwnerError::Invalid) => {
-                return Ok(ToolOutput::refused(
-                    "command deadline cannot be represented on this platform",
-                ));
-            }
-            Err(error) => return Err(error),
-        };
         if task_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
             cancellation.cancel();
         }
