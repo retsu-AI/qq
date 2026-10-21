@@ -273,6 +273,7 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
         arguments: serde_json::json!({"command":script}).to_string(),
         shell_policy: ShellPolicy::default(),
         approved_images: Vec::new(),
+        network: crate::command_owner::NativeNetwork::Host,
         filesystem: crate::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     }
@@ -2261,32 +2262,40 @@ async fn an_owned_build_uses_its_frozen_task_deadline_without_a_two_minute_cap()
 
 #[cfg(not(target_os = "linux"))]
 #[tokio::test]
-async fn filesystem_scope_never_falls_back_to_an_unrestricted_platform_launcher() {
+async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
-    let mut request = command(
-        workspace.path(),
-        ToolCallId::generate().unwrap(),
-        "echo forbidden>ran",
-    );
-    request.filesystem = NativeFilesystem::Restricted {
-        read_only: Vec::new(),
-        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
-    };
-    let id = request.id;
-    owner.submit(request).await.unwrap();
-    let result = wait_finished(&owner, id, 0).await.result.unwrap();
+    for (network, expected) in [
+        (NativeNetwork::Host, "filesystem"),
+        (NativeNetwork::Isolated, "network"),
+    ] {
+        let mut request = command(
+            workspace.path(),
+            ToolCallId::generate().unwrap(),
+            "echo forbidden>ran",
+        );
+        request.network = network;
+        if network == NativeNetwork::Host {
+            request.filesystem = NativeFilesystem::Restricted {
+                read_only: Vec::new(),
+                read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+            };
+        }
+        let id = request.id;
+        owner.submit(request).await.unwrap();
+        let result = wait_finished(&owner, id, 0).await.result.unwrap();
+        assert!(result.is_error());
+        assert!(
+            result
+                .text()
+                .contains(&format!("{expected} enforcement is unavailable")),
+            "{}",
+            result.text()
+        );
+        assert!(!workspace.path().join("ran").exists());
+    }
     owner.shutdown().await.unwrap();
-    assert!(result.is_error());
-    assert!(
-        result
-            .text()
-            .contains("filesystem enforcement is unavailable"),
-        "{}",
-        result.text()
-    );
-    assert!(!workspace.path().join("ran").exists());
 }

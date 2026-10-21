@@ -35,6 +35,17 @@ brokering, resources and concurrent writers still require further enforcement
 before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
+`NativeNetwork::Isolated` separately requests a Linux network namespace with
+no host interfaces, plus Landlock restrictions on pathname and abstract Unix
+sockets. It works with host filesystem access or explicit file-content grants.
+Loopback is not enabled in this initial offline backend; authorized egress and
+private local services still need implementation. Pipe and unnamed socket-pair
+IPC remain usable. The helper closes ambient inherited descriptors before
+spawning any payload, including unrestricted payloads; only standard streams
+and the helper's owned launch descriptors survive the cleanup, with helper
+handles closed on payload exec. Network authority is part of the persisted
+request identity. Unsupported backends refuse isolation explicitly.
+
 ## The Tool Loop
 
 A run is a loop owned by `qq-core`:

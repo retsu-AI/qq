@@ -208,6 +208,7 @@ pub(super) enum OwnedLaunch {
 pub(crate) struct NativeExecution {
     pub environment: crate::command_owner::NativeEnvironment,
     pub filesystem: crate::command_owner::NativeFilesystem,
+    pub network: crate::command_owner::NativeNetwork,
 }
 
 /// The command and its capabilities are prepared together. Keeping this value
@@ -228,7 +229,7 @@ impl PreparedLaunch {
     pub(super) fn owned_linux(
         mut self,
         owner: &super::linux_owner::LinuxOwner,
-        filesystem: Option<&crate::command_owner::NativeFilesystem>,
+        native: Option<&NativeExecution>,
     ) -> Result<Self, PreparationError> {
         let command = self
             .command
@@ -239,7 +240,7 @@ impl PreparedLaunch {
                 command,
                 self._cwd.as_ref().expect("prepared cwd is held"),
                 self._image.as_ref(),
-                filesystem,
+                native,
             )
             .map_err(PreparationError::Custody)?;
         self.command = Some(command);
@@ -317,6 +318,8 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
+    #[error("network enforcement is unavailable for this command launcher")]
+    NetworkUnavailable,
     #[error("filesystem enforcement is unavailable for this command launcher")]
     FilesystemUnavailable,
     #[cfg(target_os = "linux")]
