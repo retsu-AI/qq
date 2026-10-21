@@ -1,10 +1,13 @@
 use super::*;
-use base64::Engine as _;
-use std::time::Duration;
-use win_custody::{Process, ProcessAccess, WaitOutcome};
+use std::{
+    io::{Read as _, Write as _},
+    time::Duration,
+};
+use tokio::io::AsyncReadExt as _;
+use win_custody::{Launch, Process, ProcessAccess, WaitOutcome};
 
-// Cleanup uses handles opened while the parent is blocked and its children
-// are alive, never a PID recovered from a terminal command or journal.
+// Cleanup uses handles opened while the fixture is blocked and alive, never
+// a PID recovered from a terminal command or journal.
 struct FixtureProcesses(Vec<Process>);
 
 impl Drop for FixtureProcesses {
@@ -33,35 +36,62 @@ impl FixtureProcesses {
     }
 }
 
-fn encoded(script: &str) -> String {
-    base64::engine::general_purpose::STANDARD.encode(
-        script
-            .encode_utf16()
-            .flat_map(u16::to_le_bytes)
-            .collect::<Vec<_>>(),
-    )
+fn fixture_address() -> Option<String> {
+    std::env::args().find_map(|arg| arg.strip_prefix("qq-custody:").map(str::to_owned))
 }
 
-async fn release_parent(name: &str) {
-    let executable = std::path::PathBuf::from(std::env::var_os("SYSTEMROOT").unwrap())
-        .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let script = format!(
-        "$ErrorActionPreference='Stop'; [void][Threading.EventWaitHandle]::OpenExisting('{name}').Set()"
+fn connect_fixture(label: u8) -> std::net::TcpStream {
+    let mut stream = std::net::TcpStream::connect(fixture_address().unwrap()).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .unwrap();
+    stream.write_all(&[label]).unwrap();
+    stream.write_all(&std::process::id().to_le_bytes()).unwrap();
+    stream
+}
+
+// Inert under normal libtest execution. Run the Rust fixture directly instead
+// of compiling C# inside a cold PowerShell process on the native runner.
+#[test]
+fn fixture_parent() {
+    let Some(address) = fixture_address() else {
+        return;
+    };
+    // Inherit only NUL handles, excluding the parent's capture pipes even
+    // though those handles are also inheritable in this process.
+    let null = win_custody::null_device().unwrap();
+    let child = Launch::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "command_owner::tests::windows_processes::fixture_descendant",
+            "--nocapture",
+            "--skip",
+        ])
+        .arg(format!("qq-custody:{address}"))
+        .stdin(&null)
+        .stdout(&null)
+        .stderr(&null)
+        .spawn()
+        .unwrap();
+    let mut control = connect_fixture(b'p');
+    let mut token = [0];
+    if control.read_exact(&mut token).is_ok() && token == *b'e' {
+        // Exit with the descendant alive and all its capture pipes closed.
+        // The command owner must terminate the job, not this fixture.
+        std::process::exit(0);
+    }
+    assert_eq!(
+        child.wait(Some(Duration::from_secs(30))).unwrap(),
+        WaitOutcome::Signaled
     );
-    let status = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(executable)
-            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
-            .arg(encoded(&script))
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(status.success());
+}
+
+#[test]
+fn fixture_descendant() {
+    if fixture_address().is_some() {
+        let mut control = connect_fixture(b'c');
+        let _ = control.read_exact(&mut [0]);
+    }
 }
 
 #[tokio::test]
@@ -69,75 +99,19 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
     for ending in ["completion", "cancellation", "deadline"] {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let owner = CommandOwner::open(root.path().join("owner"), "unknown", super::launcher())
             .await
             .unwrap();
         let id = ToolCallId::generate().unwrap();
-        let release = format!("Local\\qq-parent-{id}");
-        let ready = format!("Local\\qq-ready-{id}");
-        let stop = format!("Local\\qq-child-{id}");
-        let child = encoded(&format!(
-            "$ErrorActionPreference='Stop'; \
-             $stop=[Threading.EventWaitHandle]::OpenExisting('{stop}'); \
-             $ready=[Threading.EventWaitHandle]::OpenExisting('{ready}'); \
-             [void]$ready.Set(); [void]$stop.WaitOne(30000)"
-        ));
-        // PowerShell 7 compiles this small helper in-process. Clear inheritance
-        // on the parent's capture pipes before creating the descendant, rather
-        // than letting redirected stdio conceal other inherited pipe handles.
-        let script = format!(
-            "$ErrorActionPreference='Stop'; \
-             [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); \
-             [Console]::WriteLine('stage:loading-helper'); \
-             Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
-               public static class QQHandles {{ \
-               [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); \
-               [DllImport(\"kernel32.dll\", SetLastError=true)] \
-               public static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags); }}'; \
-             foreach ($n in @(-10,-11,-12)) {{ \
-               if (-not [QQHandles]::SetHandleInformation([QQHandles]::GetStdHandle($n),1,0)) \
-                 {{ throw 'could not prevent inherited capture pipes' }} }}; \
-             [Console]::WriteLine('stage:starting-child'); \
-             $release=[Threading.EventWaitHandle]::new($false,'ManualReset','{release}'); \
-             $ready=[Threading.EventWaitHandle]::new($false,'ManualReset','{ready}'); \
-             $stop=[Threading.EventWaitHandle]::new($false,'ManualReset','{stop}'); \
-             $exe=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName; \
-             $info=[Diagnostics.ProcessStartInfo]::new(); \
-             $info.FileName=$exe; \
-             $info.Arguments='-NoProfile -NonInteractive -EncodedCommand {child}'; \
-             $info.UseShellExecute=$false; $info.CreateNoWindow=$true; \
-             $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true; \
-             $child=[Diagnostics.Process]::new(); $child.StartInfo=$info; [void]$child.Start(); \
-             [Console]::WriteLine('stage:waiting-child'); \
-             if (-not $ready.WaitOne(10000)) {{ throw 'child not ready' }}; \
-             [Console]::WriteLine(('parent:{{0}} child:{{1}}' -f $PID,$child.Id)); \
-             if (-not $release.WaitOne(20000)) {{ throw 'parent not released' }}; \
-             [Environment]::Exit(0)"
-        );
         let mut request = command(workspace.path(), id, "unused");
-        // Observe this parent directly: cmd.exe can wait for console children
-        // after the script exits, hiding the normal-exit boundary under test.
         request.tool = "exec".to_owned();
         request.arguments = serde_json::json!({
-            "program":"pwsh.exe",
-            "args":["-NoProfile","-NonInteractive","-Command",script]
+            "program": std::env::current_exe().unwrap(),
+            "args": ["--exact", "command_owner::tests::windows_processes::fixture_parent",
+                     "--nocapture", "--skip", format!("qq-custody:{}", listener.local_addr().unwrap())]
         })
         .to_string();
-        // Grant the fixture its runtime/profile paths explicitly rather than
-        // changing QQ's cleared environment.
-        let environment = [
-            "SYSTEMROOT",
-            "WINDIR",
-            "USERPROFILE",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "TEMP",
-            "TMP",
-        ];
-        request.shell_policy.env_allowlist = environment.map(String::from).into();
-        let mut arguments: serde_json::Value = serde_json::from_str(&request.arguments).unwrap();
-        arguments["env"] = serde_json::json!(environment);
-        request.arguments = arguments.to_string();
         if ending == "deadline" {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -145,46 +119,37 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
             request.not_after_ms = Some(u64::try_from(now.as_millis()).unwrap() + 60_000);
         }
         owner.submit(request).await.unwrap();
-        let mut last_output = String::new();
-        let running = tokio::time::timeout(Duration::from_secs(15), async {
-            let mut after = 0;
-            loop {
-                let snapshot = owner.wait(id, after).await.unwrap();
-                if snapshot.output.contains("child:") && snapshot.output.ends_with('\n') {
-                    break snapshot;
-                }
-                assert_ne!(snapshot.status, CommandStatus::Finished, "{snapshot:?}");
-                last_output = snapshot.output;
-                after = snapshot.version;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("descendant handshake timed out; output: {last_output:?}"));
         let mut processes = FixtureProcesses(Vec::new());
-        let identities = running
-            .output
-            .lines()
-            .find(|line| line.starts_with("parent:"))
-            .unwrap();
-        for field in identities.split_whitespace() {
-            let (_, pid) = field.split_once(':').unwrap();
-            processes
-                .0
-                .push(Process::open(pid.parse().unwrap(), ProcessAccess::Terminate).unwrap());
+        let mut controls = Vec::new();
+        for _ in 0..2 {
+            let (mut control, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut label = [0];
+            let mut pid = [0; 4];
+            control.read_exact(&mut label).await.unwrap();
+            control.read_exact(&mut pid).await.unwrap();
+            assert!(matches!(label, [b'p' | b'c']));
+            let process = Process::open(u32::from_le_bytes(pid), ProcessAccess::Terminate).unwrap();
+            assert!(process.exit_code().unwrap().is_none());
+            processes.0.push(process);
+            controls.push((label[0], control));
         }
-        assert_eq!(processes.0.len(), 2);
-        assert!(
-            processes
-                .0
-                .iter()
-                .all(|process| process.exit_code().unwrap().is_none())
-        );
+        assert_ne!(controls[0].0, controls[1].0);
+        let parent = controls
+            .iter()
+            .position(|(label, _)| *label == b'p')
+            .unwrap();
         match ending {
             "completion" => {
-                release_parent(&release).await;
+                use tokio::io::AsyncWriteExt as _;
+                controls[parent].1.write_all(b"e").await.unwrap();
                 processes = tokio::task::spawn_blocking(move || {
                     assert_eq!(
-                        processes.0[0].wait(Some(Duration::from_secs(5))).unwrap(),
+                        processes.0[parent]
+                            .wait(Some(Duration::from_secs(5)))
+                            .unwrap(),
                         WaitOutcome::Signaled,
                         "the fixture parent must exit before testing descendant cleanup"
                     );
@@ -201,7 +166,7 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
             }
             _ => unreachable!(),
         }
-        let terminal = wait_finished(&owner, id, running.version).await;
+        let terminal = wait_finished(&owner, id, 0).await;
         let stopped = processes
             .0
             .iter()
