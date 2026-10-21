@@ -84,13 +84,17 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
         ));
         let script = format!(
             "$ErrorActionPreference='Stop'; \
+             [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); \
              $release=[Threading.EventWaitHandle]::new($false,'ManualReset','{release}'); \
              $ready=[Threading.EventWaitHandle]::new($false,'ManualReset','{ready}'); \
              $stop=[Threading.EventWaitHandle]::new($false,'ManualReset','{stop}'); \
              $exe=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName; \
-             $child=Start-Process -FilePath $exe \
-               -ArgumentList @('-NoProfile','-NonInteractive','-EncodedCommand','{child}') \
-               -RedirectStandardOutput child.stdout -RedirectStandardError child.stderr -PassThru; \
+             $info=[Diagnostics.ProcessStartInfo]::new(); \
+             $info.FileName=$exe; \
+             $info.Arguments='-NoProfile -NonInteractive -EncodedCommand {child}'; \
+             $info.UseShellExecute=$false; $info.CreateNoWindow=$true; \
+             $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true; \
+             $child=[Diagnostics.Process]::new(); $child.StartInfo=$info; [void]$child.Start(); \
              if (-not $ready.WaitOne(10000)) {{ throw 'child not ready' }}; \
              [Console]::WriteLine(('parent:{{0}} child:{{1}}' -f $PID,$child.Id)); \
              if (-not $release.WaitOne(20000)) {{ throw 'parent not released' }}"
@@ -125,6 +129,7 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
             request.not_after_ms = Some(u64::try_from(now.as_millis()).unwrap() + 60_000);
         }
         owner.submit(request).await.unwrap();
+        let mut last_output = String::new();
         let running = tokio::time::timeout(Duration::from_secs(15), async {
             let mut after = 0;
             loop {
@@ -133,11 +138,12 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
                     break snapshot;
                 }
                 assert_ne!(snapshot.status, CommandStatus::Finished, "{snapshot:?}");
+                last_output = snapshot.output;
                 after = snapshot.version;
             }
         })
         .await
-        .unwrap();
+        .unwrap_or_else(|_| panic!("descendant handshake timed out; output: {last_output:?}"));
         let mut processes = FixtureProcesses(Vec::new());
         for field in running.output.split_whitespace() {
             let (_, pid) = field.split_once(':').unwrap();
