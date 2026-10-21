@@ -213,7 +213,7 @@ impl BuiltInTool {
             ),
             Self::Shell => ToolSpec::new(
                 "shell",
-                "Run one shell command in the workspace via `sh -c`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Timeout 120 s by default; the process group is killed on timeout or cancel.",
+                "Run one shell command in the workspace via `sh -c`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The process group is killed on timeout or cancel.",
                 json!({
                     "type": "object",
                     "properties": {

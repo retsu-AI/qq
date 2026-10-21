@@ -499,29 +499,28 @@ pub(crate) async fn execute_with_images(
                 (_, Some(exec)) => Launch::Exec(exec),
                 (None, None) => unreachable!("one launch shape was parsed"),
             };
-            let timeout = launch
-                .timeout_seconds()
-                .unwrap_or(super::shell::DEFAULT_SHELL_TIMEOUT_SECS);
-            let call_deadline = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()
-                .and_then(|now| u64::try_from(now.as_millis()).ok())
-                .and_then(|now| {
-                    timeout
-                        .checked_mul(1000)
-                        .and_then(|duration| now.checked_add(duration))
-                });
-            let Some(call_deadline) = call_deadline.filter(|_| timeout > 0) else {
-                return ToolOutput::refused(
-                    "timeout_seconds must be positive and fit a command deadline",
-                );
-            };
-            // Freeze before preparation/connection so retries cannot renew it.
-            Some(if deadline_ms == 0 {
-                call_deadline
-            } else {
-                deadline_ms.min(call_deadline)
-            })
+            let task_deadline = (deadline_ms != 0).then_some(deadline_ms);
+            match launch.timeout_seconds() {
+                None => task_deadline,
+                Some(timeout) => {
+                    let call_deadline = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|now| u64::try_from(now.as_millis()).ok())
+                        .and_then(|now| {
+                            timeout
+                                .checked_mul(1000)
+                                .and_then(|duration| now.checked_add(duration))
+                        });
+                    let Some(call_deadline) = call_deadline.filter(|_| timeout > 0) else {
+                        return ToolOutput::refused(
+                            "timeout_seconds must be positive and fit a command deadline",
+                        );
+                    };
+                    // Freeze before preparation/connection so retries cannot renew it.
+                    Some(task_deadline.map_or(call_deadline, |task| task.min(call_deadline)))
+                }
+            }
         } else {
             None
         };

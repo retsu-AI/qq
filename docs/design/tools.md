@@ -1074,18 +1074,22 @@ path.
 The session waits for journal changes and persists the process receipt before
 forwarding output. Explicit cancellation reaches the worker and waits for
 confirmed completion. Losing the coordinator leaves the worker and its
-command running; restarting QQ does not yet reconcile or resume that unfinished
-session. macOS retains local execution until independent custody qualifies.
+command running; reopening reconciles its original journal and retains its
+terminal result before the session continues. An active durable goal can then
+schedule its successor within its remaining shared budget. macOS retains local
+execution until independent custody qualifies.
 This worker integration provides process ownership, not filesystem, network,
 credential or resource isolation.
 
 `shell` runs one command via `tokio::process::Command` with:
 
 - Working directory pinned to the workspace (or a contained subdirectory).
-- A default timeout of 120 s, overridable per call with a positive
-  `timeout_seconds` that fits a monotonic deadline. There is no ten-minute
-  ceiling. The enclosing run budget still applies; command timeout and run
-  cancellation terminate the owned Unix process group or Windows job.
+- The task's remaining time governs running commands. An explicit positive
+  `timeout_seconds` can impose an earlier deadline; omitting it adds no command
+  runtime cap. Native admission freezes the earlier deadline before preparation
+  and transport, so retries cannot renew it. Preparation without an explicit
+  timeout remains bounded at 120 seconds. Command timeout and task cancellation
+  terminate the owned Unix process group or Windows job.
 - Windows starts commands suspended, assigns a job that forbids breakaway,
   then resumes them. Completion, cancellation and timeout terminate the job
   and confirm that it has no remaining processes before settling the tool.

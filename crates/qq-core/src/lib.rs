@@ -9368,12 +9368,13 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
+        // Task-owned command deadlines update the shell description as well.
         // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "c49f264b9a5f25da5eb8d90201b177402fae079fcb44043c5d4082b0900e3166"
+            "6f5ee886cbf2c09329fd373d88e1cb2091c8929a0fcb1f5de7e2ee2abfc7017f"
         );
         let spawn = specs.last().unwrap();
         assert!(
