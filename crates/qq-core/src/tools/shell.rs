@@ -306,7 +306,7 @@ enum ShellOutcome {
     reason = "process identity, producer, image approvals and supervision are distinct capabilities"
 )]
 pub(super) async fn run_shell(
-    environment: Option<std::sync::Arc<crate::command_owner::NativeEnvironment>>,
+    native: Option<std::sync::Arc<super::process_context::NativeExecution>>,
     workspace: &Workspace,
     policy: &ShellPolicy,
     approved_read_images: std::sync::Arc<crate::runtime::ApprovedReadImages>,
@@ -380,7 +380,7 @@ pub(super) async fn run_shell(
     let mut prepared = match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let prepared = super::process_context::prepare(
-            environment.as_deref(),
+            native.as_ref().map(|native| &native.environment),
             preparation_workspace,
             owned,
             approved_read_images,
@@ -391,7 +391,13 @@ pub(super) async fn run_shell(
         )?;
         #[cfg(target_os = "linux")]
         if let Some(owner) = &linux_owner {
-            return prepared.owned_linux(owner);
+            return prepared.owned_linux(owner, native.as_ref().map(|native| &native.filesystem));
+        }
+        if native
+            .as_ref()
+            .is_some_and(|native| native.filesystem.is_restricted())
+        {
+            return Err(super::process_context::PreparationError::FilesystemUnavailable);
         }
         Ok::<_, super::process_context::PreparationError>(prepared)
     })

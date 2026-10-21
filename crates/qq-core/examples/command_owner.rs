@@ -54,6 +54,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             arguments: r#"{"command":"echo owned"}"#.to_owned(),
             shell_policy: ShellPolicy::default(),
             approved_images: Vec::new(),
+            filesystem: qq_core::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         })
         .await?;

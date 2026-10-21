@@ -1,4 +1,5 @@
-//! Kernel lifetime custody. This does not restrict filesystem or network access.
+//! Kernel lifetime custody and explicit filesystem restrictions.
+//! Network and resource containment are separate, unfinished boundaries.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -17,6 +18,7 @@ use command_fds::CommandFdExt as _;
 
 mod bootstrap;
 mod exec;
+mod filesystem;
 pub(crate) use exec::execute;
 
 #[derive(Clone)]
@@ -119,6 +121,7 @@ impl LinuxOwner {
         command: tokio::process::Command,
         cwd: &cap_std::fs::Dir,
         image: Option<&(File, String)>,
+        filesystem: Option<&crate::command_owner::NativeFilesystem>,
     ) -> io::Result<(tokio::process::Command, Startup)> {
         let command = command.as_std();
         let cwd = cwd.as_fd().try_clone_to_owned()?;
@@ -127,6 +130,14 @@ impl LinuxOwner {
         let (gate_child, gate) = pipe()?;
         let (acknowledgement, ack_child) = pipe()?;
         let mut descriptors = Vec::new();
+        let filesystem = filesystem
+            .filter(|scope| scope.is_restricted())
+            .map(|scope| {
+                let (rules, fds) = filesystem::prepare(scope)?;
+                descriptors.extend(fds);
+                Ok::<_, io::Error>(rules)
+            })
+            .transpose()?;
         let namespace_image = self.namespace_image.as_fd().try_clone_to_owned()?;
         let namespace_fd = namespace_image.as_raw_fd();
         let (namespace_program, namespace_arguments) = self
@@ -155,6 +166,7 @@ impl LinuxOwner {
             .invocation(format!("/proc/self/fd/{launcher_fd}").into());
         launcher_arguments.extend(self.launcher.arguments.iter().cloned());
         let packet = exec::Packet {
+            filesystem,
             program: program.as_bytes().to_vec(),
             argv0: argv0.as_bytes().to_vec(),
             arguments: command
@@ -611,7 +623,7 @@ mod tests {
         })
         .unwrap();
         let (command, startup) = owner
-            .wrap(tokio::process::Command::new("/bin/true"), &cwd, None)
+            .wrap(tokio::process::Command::new("/bin/true"), &cwd, None, None)
             .unwrap();
         let tasks = super::super::ToolTasks::default();
         let process = tasks.enter();
@@ -642,7 +654,7 @@ mod tests {
             .args(["-c", "printf executed > forbidden"]);
         let (mut command, startup) = LinuxOwner::discover(crate::command_owner::tests::launcher())
             .unwrap()
-            .wrap(command, &cwd, None)
+            .wrap(command, &cwd, None, None)
             .unwrap();
         drop(startup);
         let _ = command.output().await.unwrap();
@@ -665,7 +677,7 @@ mod tests {
             let (mut command, startup) =
                 LinuxOwner::discover(crate::command_owner::tests::launcher())
                     .unwrap()
-                    .wrap(payload, &cwd, None)
+                    .wrap(payload, &cwd, None, None)
                     .unwrap();
             command
                 .stdout(std::process::Stdio::null())
@@ -724,7 +736,7 @@ mod tests {
         ]);
         let (mut command, startup) = LinuxOwner::discover(crate::command_owner::tests::launcher())
             .unwrap()
-            .wrap(command, &cwd, None)
+            .wrap(command, &cwd, None, None)
             .unwrap();
         command
             .stdout(std::process::Stdio::piped())

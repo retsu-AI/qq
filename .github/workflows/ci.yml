@@ -185,6 +185,7 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
           fi
+          bash .github/scripts/test-exact.sh command_owner::tests::filesystem_scope_never_falls_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
           bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command
           bash .github/scripts/test-exact.sh command_owner::tests::admission_wait_cannot_renew_the_task_deadline

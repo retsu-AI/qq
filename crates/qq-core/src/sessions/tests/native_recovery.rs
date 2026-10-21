@@ -38,6 +38,7 @@ async fn reopen_preserves_completed_native_results_without_reexecuting_commands(
             shell_policy: crate::ShellPolicy::default(),
             approved_images: Vec::new(),
             environment: NativeEnvironment::capture(&[]).unwrap(),
+            filesystem: crate::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         })
         .await
@@ -303,6 +304,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
                 shell_policy: crate::ShellPolicy::default(),
                 approved_images: Vec::new(),
                 environment: NativeEnvironment::capture(&[]).unwrap(),
+                filesystem: crate::command_owner::NativeFilesystem::Host,
                 not_after_ms: None,
             })
             .await

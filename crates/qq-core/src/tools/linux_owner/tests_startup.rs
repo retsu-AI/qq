@@ -64,7 +64,7 @@ fn fixture_startup_owner() {
         .args(["-c", "printf executed > forbidden"]);
     let (mut command, startup) = LinuxOwner::discover(launcher)
         .unwrap()
-        .wrap(payload, &directory, None)
+        .wrap(payload, &directory, None, None)
         .unwrap();
     let mut child = command
         .as_std_mut()

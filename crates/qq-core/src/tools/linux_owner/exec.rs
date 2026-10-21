@@ -17,6 +17,7 @@ pub(super) const MAX_PACKET: u64 = 4 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Packet {
+    pub filesystem: Option<Vec<super::filesystem::Directory>>,
     pub program: Vec<u8>,
     pub arguments: Vec<Vec<u8>>,
     pub environment: Vec<(Vec<u8>, Vec<u8>)>,
@@ -32,7 +33,7 @@ pub(super) struct Packet {
     pub parent_pid: u32,
 }
 
-fn inherited(fd: i32, write: bool) -> io::Result<File> {
+pub(super) fn inherited(fd: i32, write: bool) -> io::Result<File> {
     let file = std::fs::OpenOptions::new()
         .read(!write)
         .write(write)
@@ -174,6 +175,9 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     protect_supervisor()?;
+    if let Some(filesystem) = packet.filesystem {
+        super::filesystem::enforce(filesystem)?;
+    }
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     live(monitor)?;
     live(owner)?;
