@@ -82,12 +82,13 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
              $ready=[Threading.EventWaitHandle]::OpenExisting('{ready}'); \
              [void]$ready.Set(); [void]$stop.WaitOne(30000)"
         ));
-        // Windows PowerShell's .NET Framework spawner inherits handles beyond
-        // the redirected standard streams. Clear inheritance on the parent's
-        // capture pipes so the descendant cannot keep QQ waiting for EOF.
+        // PowerShell 7 compiles this small helper in-process. Clear inheritance
+        // on the parent's capture pipes before creating the descendant, rather
+        // than letting redirected stdio conceal other inherited pipe handles.
         let script = format!(
             "$ErrorActionPreference='Stop'; \
              [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); \
+             [Console]::WriteLine('stage:loading-helper'); \
              Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
                public static class QQHandles {{ \
                [DllImport(\"kernel32.dll\")] public static extern IntPtr GetStdHandle(int n); \
@@ -96,6 +97,7 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
              foreach ($n in @(-10,-11,-12)) {{ \
                if (-not [QQHandles]::SetHandleInformation([QQHandles]::GetStdHandle($n),1,0)) \
                  {{ throw 'could not prevent inherited capture pipes' }} }}; \
+             [Console]::WriteLine('stage:starting-child'); \
              $release=[Threading.EventWaitHandle]::new($false,'ManualReset','{release}'); \
              $ready=[Threading.EventWaitHandle]::new($false,'ManualReset','{ready}'); \
              $stop=[Threading.EventWaitHandle]::new($false,'ManualReset','{stop}'); \
@@ -106,6 +108,7 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
              $info.UseShellExecute=$false; $info.CreateNoWindow=$true; \
              $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true; \
              $child=[Diagnostics.Process]::new(); $child.StartInfo=$info; [void]$child.Start(); \
+             [Console]::WriteLine('stage:waiting-child'); \
              if (-not $ready.WaitOne(10000)) {{ throw 'child not ready' }}; \
              [Console]::WriteLine(('parent:{{0}} child:{{1}}' -f $PID,$child.Id)); \
              if (-not $release.WaitOne(20000)) {{ throw 'parent not released' }}; \
@@ -116,12 +119,12 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
         // after the script exits, hiding the normal-exit boundary under test.
         request.tool = "exec".to_owned();
         request.arguments = serde_json::json!({
-            "program":"powershell.exe",
+            "program":"pwsh.exe",
             "args":["-NoProfile","-NonInteractive","-Command",script]
         })
         .to_string();
-        // Windows PowerShell's CLR needs the ordinary Windows runtime/profile
-        // paths. Grant them explicitly rather than changing QQ's cleared env.
+        // Grant the fixture its runtime/profile paths explicitly rather than
+        // changing QQ's cleared environment.
         let environment = [
             "SYSTEMROOT",
             "WINDIR",
@@ -158,7 +161,12 @@ async fn descendants_stop_on_completion_cancellation_and_deadline() {
         .await
         .unwrap_or_else(|_| panic!("descendant handshake timed out; output: {last_output:?}"));
         let mut processes = FixtureProcesses(Vec::new());
-        for field in running.output.split_whitespace() {
+        let identities = running
+            .output
+            .lines()
+            .find(|line| line.starts_with("parent:"))
+            .unwrap();
+        for field in identities.split_whitespace() {
             let (_, pid) = field.split_once(':').unwrap();
             processes
                 .0
