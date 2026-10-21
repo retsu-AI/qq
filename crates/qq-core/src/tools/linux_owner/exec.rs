@@ -25,6 +25,7 @@ pub(super) struct Packet {
     pub image_fd: Option<i32>,
     pub namespace_program: Vec<u8>,
     pub launcher_program: Vec<u8>,
+    pub launcher_fd: i32,
     pub launcher_arguments: Vec<Vec<u8>>,
     pub parent_pid: u32,
 }
@@ -143,6 +144,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         return Err(io::Error::other("native launch data exceeds limit"));
     }
     let packet: Packet = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    nix::unistd::close(packet.launcher_fd)?;
     let image = packet.image_fd.map(|fd| inherited(fd, false)).transpose()?;
     nix::unistd::close(packet.cwd_fd)?;
     let program = image.as_ref().map_or_else(
@@ -173,7 +175,6 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     live(monitor)?;
     live(owner)?;
     ack.write_all(b"g")?;
-    drop(ack);
     // PID 1 remains trusted: commands retain ordinary signal/reaping semantics.
     // Exiting PID 1 makes the kernel kill every remaining namespace member.
     let child = command.spawn()?;
@@ -182,6 +183,10 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     loop {
         match rustix::process::wait(rustix::process::WaitOptions::empty()) {
             Ok(Some((pid, status))) if pid.as_raw_nonzero().get() == leader => {
+                // The outer monitor's exit code cannot represent a signal or
+                // core dump. Report the original wait status through a private
+                // descriptor, then finish kernel namespace teardown as usual.
+                ack.write_all(&status.as_raw().to_le_bytes())?;
                 return Ok(status
                     .exit_status()
                     .unwrap_or_else(|| 128 + status.terminating_signal().unwrap_or(0))

@@ -10,11 +10,13 @@ use qq_protocol::ToolCallId;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "linux")]
-    if std::env::args().nth(1).as_deref() == Some("_command-exec") {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         let code = qq_core::command_owner::execute_native_launch(
-            &std::env::args()
+            std::env::args_os()
                 .nth(2)
-                .ok_or("missing native launch descriptors")?,
+                .ok_or("missing native launch descriptors")?
+                .to_str()
+                .ok_or("invalid native launch descriptors")?,
         )?;
         std::process::exit(i32::from(code));
     }

@@ -19,6 +19,87 @@ pub(crate) fn launcher() -> super::CommandLauncher {
     )
 }
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn replacing_the_launcher_path_cannot_replace_the_monitor() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let image = root.path().join("launcher");
+    std::fs::copy(launcher().executable, &image).unwrap();
+    let owner = CommandOwner::open(
+        root.path().join("owner"),
+        "unknown",
+        CommandLauncher::new(image.clone()),
+    )
+    .await
+    .unwrap();
+    std::fs::rename(&image, root.path().join("original")).unwrap();
+    std::fs::write(&image, "#!/bin/sh\nprintf escaped > escaped\n").unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let id = ToolCallId::generate().unwrap();
+    owner
+        .submit(command(workspace.path(), id, "printf original"))
+        .await
+        .unwrap();
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut after = 0;
+        loop {
+            let snapshot = match owner.wait(id, after).await {
+                Ok(snapshot) => snapshot,
+                Err(CommandOwnerError::Unavailable) => break None,
+                Err(error) => panic!("{error}"),
+            };
+            if matches!(
+                snapshot.status,
+                CommandStatus::Finished | CommandStatus::Lost
+            ) {
+                break Some(snapshot);
+            }
+            after = snapshot.version;
+        }
+    })
+    .await
+    .unwrap();
+    let shutdown = owner.shutdown().await;
+    assert!(
+        !workspace.path().join("escaped").exists(),
+        "the replacement launcher ran outside custody"
+    );
+    shutdown.unwrap();
+    let terminal = terminal.expect("the pinned launcher must execute normally");
+    assert_eq!(terminal.status, CommandStatus::Finished);
+    assert!(terminal.result.unwrap().text().contains("original"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn owned_commands_preserve_signal_and_numeric_exit_statuses() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    for (script, expected) in [
+        ("exit 143", "exit=143"),
+        ("kill -TERM $$", "exit=signal:15"),
+        ("kill -KILL $$", "exit=signal:9"),
+    ] {
+        let id = ToolCallId::generate().unwrap();
+        let mut request = command(workspace.path(), id, "unused");
+        request.tool = "exec".to_owned();
+        request.arguments =
+            serde_json::json!({"program":"/bin/sh", "args":["-c",script]}).to_string();
+        owner.submit(request).await.unwrap();
+        let terminal = wait_finished(&owner, id, 0).await;
+        assert!(
+            terminal.result.unwrap().text().contains(expected),
+            "missing {expected}"
+        );
+    }
+    owner.shutdown().await.unwrap();
+}
+
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
         id,

@@ -2,6 +2,23 @@ use super::*;
 use std::io::{Read as _, Write as _};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, unix::AsyncFd};
 
+#[test]
+fn native_helper_boots_from_a_non_utf8_install_path() {
+    use std::os::unix::ffi::OsStringExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let executable = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"qq-\xff".to_vec()));
+    std::fs::copy(env!("CARGO_BIN_EXE_qq"), &executable).unwrap();
+    let output = std::process::Command::new(executable)
+        .args(["_command-exec", "invalid"])
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.starts_with("native launch:"), "{error}");
+    assert!(!error.contains("panicked"));
+}
+
 fn fixture_socket() -> Option<std::path::PathBuf> {
     let arguments = std::env::args().collect::<Vec<_>>();
     let marker = arguments.windows(2).find_map(|pair| {
@@ -14,7 +31,7 @@ fn connect_fixture(label: u8) -> u8 {
     let socket = fixture_socket().unwrap();
     let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(Duration::from_secs(60)))
         .unwrap();
     stream.write_all(&[label]).unwrap();
     let mut release = [0];
@@ -157,7 +174,10 @@ async fn exercise_ending(ending: Ending) {
                     .as_millis(),
             )
             .unwrap()
-                + 3_000
+                // Include cold executable hashing and preparation on CI. The
+                // fixture stays blocked until this actual worker deadline;
+                // completion must still imply both processes have stopped.
+                + 30_000
         }),
     };
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -233,7 +253,18 @@ async fn exercise_ending(ending: Ending) {
         }
     }
     if !matches!(ending, Ending::Crash) {
-        let terminal = finished(&client, &connection, id).await;
+        let terminal = if matches!(ending, Ending::Deadline) {
+            wait_for(
+                &client,
+                &connection,
+                id,
+                Duration::from_secs(35),
+                |snapshot| snapshot.status == CommandStatus::Finished,
+            )
+            .await
+        } else {
+            finished(&client, &connection, id).await
+        };
         assert_eq!(terminal.status, CommandStatus::Finished);
         assert_eq!(
             terminal.result.as_ref().unwrap().is_error(),

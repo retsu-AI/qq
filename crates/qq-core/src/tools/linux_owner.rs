@@ -20,16 +20,21 @@ pub(crate) use exec::execute;
 pub(super) struct LinuxOwner {
     executable: PathBuf,
     launcher: crate::command_owner::CommandLauncher,
+    launcher_image: std::sync::Arc<File>,
 }
 
 impl LinuxOwner {
     pub(super) fn discover(launcher: crate::command_owner::CommandLauncher) -> io::Result<Self> {
-        let metadata = launcher.executable.metadata()?;
+        let launcher_image = File::open(&launcher.executable)?;
+        let metadata = launcher_image.metadata()?;
         if !launcher.executable.is_absolute()
             || !metadata.is_file()
             || metadata.mode() & 0o111 == 0
             || metadata.mode() & 0o6022 != 0
-            || !no_file_capabilities(&launcher.executable)
+            || !matches!(
+                rustix::fs::fgetxattr(&launcher_image, c"security.capability", &mut [0_u8; 0]),
+                Err(rustix::io::Errno::NODATA | rustix::io::Errno::NOTSUP)
+            )
         {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -73,6 +78,7 @@ impl LinuxOwner {
                 return Ok(Self {
                     executable: path,
                     launcher,
+                    launcher_image: std::sync::Arc::new(launcher_image),
                 });
             }
         }
@@ -96,6 +102,8 @@ impl LinuxOwner {
         let (gate_child, gate) = pipe()?;
         let (acknowledgement, ack_child) = pipe()?;
         let mut descriptors = Vec::new();
+        let launcher_image = self.launcher_image.as_fd().try_clone_to_owned()?;
+        let launcher_fd = launcher_image.as_raw_fd();
         let (program, argv0, image_fd) = if let Some((image, argv0)) = image {
             let image = image.as_fd().try_clone_to_owned()?;
             let fd = image.as_raw_fd();
@@ -128,7 +136,8 @@ impl LinuxOwner {
             cwd_fd: cwd.as_raw_fd(),
             image_fd,
             namespace_program: self.executable.as_os_str().as_bytes().to_vec(),
-            launcher_program: self.launcher.executable.as_os_str().as_bytes().to_vec(),
+            launcher_program: format!("/proc/self/fd/{launcher_fd}").into_bytes(),
+            launcher_fd,
             launcher_arguments: self
                 .launcher
                 .arguments
@@ -149,7 +158,7 @@ impl LinuxOwner {
             owner.as_raw_fd(),
             host_proc.as_raw_fd()
         );
-        let mut wrapped = tokio::process::Command::new(&self.launcher.executable);
+        let mut wrapped = tokio::process::Command::new(format!("/proc/self/fd/{launcher_fd}"));
         wrapped
             .env_clear()
             .args(&self.launcher.arguments)
@@ -157,6 +166,7 @@ impl LinuxOwner {
             .kill_on_drop(true);
         wrapped.current_dir(format!("/proc/self/fd/{}", cwd.as_raw_fd()));
         descriptors.extend([
+            launcher_image,
             cwd,
             owner.into(),
             host_proc.into(),
@@ -257,6 +267,7 @@ impl Startup {
         if read_pipe(&acknowledgement, 1).await? != b"g" {
             return Err(io::Error::other("native launch was not acknowledged"));
         }
+        child.status_pipe = Some(acknowledgement.into_inner());
         Ok(())
     }
 }
@@ -291,6 +302,8 @@ pub(crate) struct Child {
     inner: tokio::process::Child,
     namespace: Option<std::sync::Arc<std::os::fd::OwnedFd>>,
     namespace_observed: bool,
+    status_pipe: Option<File>,
+    reported_status: Option<std::process::ExitStatus>,
     lease: Option<super::dispatch::ToolTaskLease>,
 }
 impl From<tokio::process::Child> for Child {
@@ -299,6 +312,8 @@ impl From<tokio::process::Child> for Child {
             inner,
             namespace: None,
             namespace_observed: false,
+            status_pipe: None,
+            reported_status: None,
             lease: None,
         }
     }
@@ -328,6 +343,18 @@ impl Child {
             .await?;
         }
         let status = self.inner.wait().await?;
+        if let Some(pipe) = self.status_pipe.take() {
+            use std::os::unix::process::ExitStatusExt as _;
+            let mut raw = [0; 4];
+            match rustix::io::read(&pipe, &mut raw)? {
+                0 => {} // Cancellation can stop PID 1 before a payload exits.
+                4 => {
+                    self.reported_status =
+                        Some(std::process::ExitStatus::from_raw(i32::from_le_bytes(raw)))
+                }
+                _ => return Err(io::Error::other("incomplete native command exit status")),
+            }
+        }
         if let Some(lease) = &mut self.lease {
             if !self.namespace_observed {
                 // The monitor can exit during namespace setup, before the
@@ -337,7 +364,7 @@ impl Child {
             }
             lease.process_reaped();
         }
-        Ok(status)
+        Ok(self.reported_status.unwrap_or(status))
     }
 }
 
@@ -362,6 +389,8 @@ pub(super) async fn spawn(
         inner,
         namespace: None,
         namespace_observed: false,
+        status_pipe: None,
+        reported_status: None,
         lease: Some(lease),
     };
     let authorized = tokio::select! {
