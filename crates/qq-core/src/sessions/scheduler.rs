@@ -114,10 +114,25 @@ pub(super) async fn schedule_runs(
                         .catch_unwind()
                         .await;
                         if execution.is_err() {
-                            if resources.drain().await.is_err() {
-                                task_inner.failed.send_replace(true);
-                            } else {
-                                settle_panicked_execution(&task_inner, &panic_claimed).await;
+                            match resources.drain().await {
+                                Ok(mut teardown) => {
+                                    if execution::persist_native_results(
+                                        &task_inner,
+                                        &panic_claimed,
+                                        &mut teardown,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        task_inner.failed.send_replace(true);
+                                    } else {
+                                        settle_panicked_execution(&task_inner, &panic_claimed)
+                                            .await;
+                                    }
+                                }
+                                Err(_) => {
+                                    task_inner.failed.send_replace(true);
+                                }
                             }
                         }
                         drop(permit);

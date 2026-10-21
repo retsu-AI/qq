@@ -1826,14 +1826,14 @@ impl Store {
         .await
     }
 
-    pub(super) async fn record_native_owner(
+    pub(super) async fn set_native_owner(
         &self,
         identity: RunIdentity,
         id: ToolCallId,
-        owner: StoreId,
+        owner: Option<StoreId>,
     ) -> Result<(), SessionRuntimeError> {
         self.call_write(Priority::AwaitControl, move |connection| {
-            super::tool_calls::record_native_owner(connection, identity, id, owner)
+            super::tool_calls::set_native_owner(connection, identity, id, owner)
         })
         .await
     }

@@ -537,6 +537,7 @@ pub(super) async fn run_shell(
     // once per output chunk, and re-creating either per iteration would
     // re-register on each of them.
     let mut timeout = std::pin::pin!(tokio::time::sleep_until(deadline));
+    let cancellation = cancelled;
     let mut cancelled = std::pin::pin!(cancelled.cancelled());
 
     let outcome = loop {
@@ -636,6 +637,10 @@ pub(super) async fn run_shell(
         }
     };
 
+    let outcome = match outcome {
+        ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
+        outcome => outcome,
+    };
     let elapsed = started.elapsed();
     let mut result = async {
         match outcome {
@@ -685,9 +690,13 @@ pub(super) async fn run_shell(
                 if !content.ends_with('\n') {
                     content.push('\n');
                 }
-                content.push_str(&format!(
-                    "command timed out after {timeout_seconds} s; its process group was killed"
-                ));
+                if cancellation.timed_out() {
+                    content.push_str("command deadline expired; its process group was killed");
+                } else {
+                    content.push_str(&format!(
+                        "command timed out after {timeout_seconds} s; its process group was killed"
+                    ));
+                }
                 let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
                 result.result_digest = identity.finish(None, None, true);
                 result

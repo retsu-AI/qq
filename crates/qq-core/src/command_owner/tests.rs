@@ -804,7 +804,7 @@ async fn owner_enforces_the_task_deadline_without_a_live_observer() {
             .as_ref()
             .unwrap()
             .text()
-            .contains("cancelled")
+            .contains("exit=timeout")
     );
     owner.submit(request).await.unwrap();
     assert_eq!(owner.snapshot(id).await.unwrap(), terminal);
@@ -1996,5 +1996,59 @@ async fn a_replaced_workspace_never_receives_the_admitted_command() {
         result
             .text()
             .contains("workspace directory identity changed")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn worker_deadline_retains_timeout_output_instead_of_reporting_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let release = workspace.path().join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "printf ready; read token < release");
+    request.arguments =
+        r#"{"command":"printf ready; read token < release","timeout_seconds":3600}"#.to_owned();
+    request.not_after_ms = Some(
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60000,
+    );
+    owner.submit(request).await.unwrap();
+    let mut after = 0;
+    loop {
+        let observed = owner.wait(id, after).await.unwrap();
+        if observed.output.contains("ready") {
+            break;
+        }
+        after = observed.version;
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(61)).await;
+    tokio::time::resume();
+    let finished = wait_finished(&owner, id, after).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        finished.text().contains("exit=timeout"),
+        "{}",
+        finished.text()
+    );
+    assert!(
+        finished.text().contains("ready"),
+        "timeout output must be preserved"
     );
 }

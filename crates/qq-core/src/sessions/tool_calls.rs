@@ -63,13 +63,22 @@ pub(super) fn append_tool_call_output(
 }
 
 /// Binds an invocation to its stable worker journal before admission can have effects.
-pub(super) fn record_native_owner(
+pub(super) fn set_native_owner(
     connection: &mut Connection,
     identity: RunIdentity,
     id: ToolCallId,
-    owner: StoreId,
+    owner: Option<StoreId>,
 ) -> Result<(), SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let Some(owner) = owner else {
+        transaction.execute(
+            "DELETE FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0
+             AND EXISTS(SELECT 1 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running')",
+            params![id.to_string(), identity.run_id.to_string()],
+        )?;
+        transaction.commit()?;
+        return Ok(());
+    };
     let written = transaction.execute(
         "INSERT INTO native_command_owners(tool_call_id, owner_id)
          SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec')

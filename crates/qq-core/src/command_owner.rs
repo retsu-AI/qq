@@ -535,7 +535,7 @@ impl CommandOwner {
             cancellation.cancel();
         }
         if task_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
-            cancellation.cancel();
+            cancellation.expire();
         }
         let execution = crate::tools::dispatch::execute_with_images(
             Some(Arc::new(request.environment)),
@@ -562,7 +562,7 @@ impl CommandOwner {
         tokio::pin!(expired);
         let output = tokio::select! {
             biased;
-            () = &mut expired => { cancellation.cancel(); execution.await }
+            () = &mut expired => { cancellation.expire(); execution.await }
             output = &mut execution => output,
         };
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;

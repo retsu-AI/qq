@@ -844,6 +844,23 @@ async fn native_admission_refusals_do_not_poison_session_cleanup() {
         }
     ));
     harness.runtime.shutdown().await.unwrap();
+    let bindings: u64 = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            Ok(
+                connection.query_row("SELECT COUNT(*) FROM native_command_owners", [], |row| {
+                    row.get(0)
+                })?,
+            )
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        bindings, 0,
+        "definitive refusals must discard unadmitted owner bindings"
+    );
     let admissions = admissions.lock().unwrap();
     assert_eq!(admissions.len(), 2);
     for (request, received) in admissions.iter() {
@@ -854,4 +871,70 @@ async fn native_admission_refusals_do_not_poison_session_cleanup() {
         assert!(deadline >= started + timeout_ms);
         assert!(deadline <= received + timeout_ms);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn panic_cleanup_retains_native_results_and_their_spill_handles() {
+    use crate::command_owner::{CommandOwner, CommandOwnerError};
+    let state = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(
+        state.path().join("owner"),
+        "unknown",
+        crate::command_owner::tests::launcher(),
+    )
+    .await
+    .unwrap();
+    let mut harness = scripted_runs_harness_with_commands(
+        ApprovalMode::Full,
+        vec![vec![(
+            "shell",
+            r#"{"command":"printf ready; read token < release; seq 1 10000"}"#.to_owned(),
+        )]],
+        None,
+        None,
+        Some(Arc::new(owner.clone())),
+    )
+    .await;
+    let release = harness.workspace_path.join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let run = submit_prompt(&harness, "execute").await;
+    let events = collect_until(&mut harness.events, |event| matches!(event, SessionEvent::ToolCallOutputDelta { chunk, .. } if chunk.contains("ready"))).await;
+    let id = events
+        .iter()
+        .find_map(|event| match event.event {
+            SessionEvent::ToolCallOutputDelta { tool_call_id, .. } => Some(tool_call_id),
+            _ => None,
+        })
+        .unwrap();
+    execution::PANIC_NATIVE_FINISH.lock().unwrap().push(id);
+    tokio::fs::write(release, b"go\n").await.unwrap();
+    let terminal = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(matches!(
+        terminal.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Failed { .. },
+            ..
+        }
+    ));
+    harness.runtime.shutdown().await.unwrap();
+    assert!(matches!(
+        owner.snapshot(id).await,
+        Err(CommandOwnerError::Retired)
+    ));
+    let (saved, spilled): (String, bool) = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        Ok(connection.query_row("SELECT result, EXISTS(SELECT 1 FROM tool_spills WHERE tool_call_id=?1) FROM tool_calls WHERE id=?1", [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)))?)
+    }).await.unwrap();
+    assert!(spilled, "fixture must exercise a retained spill");
+    assert!(
+        saved.contains("full output t:shell:"),
+        "panic teardown must retain a usable spill handle"
+    );
+    assert!(!saved.contains("not stored"));
+    owner.shutdown().await.unwrap();
 }

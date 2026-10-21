@@ -22,10 +22,15 @@ pub(crate) async fn observe(
             Err(error) => return ToolOutput::unobserved(format!("could not identify native command owner: {error}")),
         }
     };
-    if let Err(error) = lease.record_native_owner(id, owner).await {
+    if let Err(error) = lease.set_native_owner(id, Some(owner)).await {
         return ToolOutput::unobserved(format!("could not persist native command owner: {error}"));
     }
     if cancelled.is_cancelled() {
+        if let Err(error) = lease.set_native_owner(id, None).await {
+            return ToolOutput::unobserved(format!(
+                "could not discard unadmitted native owner: {error}"
+            ));
+        }
         return ToolOutput::interrupted("tool execution was cancelled before submission");
     }
     // A lost admission response is not proof that no process started.
@@ -58,6 +63,11 @@ pub(crate) async fn observe(
         ) {
             // These are definitive admission refusals, not lost responses.
             lease.process_reaped();
+            if let Err(error) = lease.set_native_owner(id, None).await {
+                return ToolOutput::unobserved(format!(
+                    "could not discard unadmitted native owner: {error}"
+                ));
+            }
             return ToolOutput::refused(error.to_string());
         }
         return ToolOutput::unobserved(format!("could not submit native command: {error}"));

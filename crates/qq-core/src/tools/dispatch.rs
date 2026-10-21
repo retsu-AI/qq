@@ -66,8 +66,9 @@ type ProcessRecorder = Box<
         + Sync,
 >;
 
-type NativeRecorder =
-    Box<dyn Fn(qq_protocol::ToolCallId, qq_protocol::StoreId) -> RecordFuture + Send + Sync>;
+type NativeRecorder = Box<
+    dyn Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> RecordFuture + Send + Sync,
+>;
 
 type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
 
@@ -142,7 +143,7 @@ impl ToolTasks {
     }
     pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
-        F: Fn(qq_protocol::ToolCallId, qq_protocol::StoreId) -> Fut + Send + Sync + 'static,
+        F: Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
             + Send
             + 'static,
@@ -243,10 +244,10 @@ impl ToolTaskLease {
         }
     }
 
-    pub(crate) fn record_native_owner(
+    pub(crate) fn set_native_owner(
         &self,
         id: qq_protocol::ToolCallId,
-        owner: qq_protocol::StoreId,
+        owner: Option<qq_protocol::StoreId>,
     ) -> RecordFuture {
         let Some(recorder) = self.tasks.native_recorder.get() else {
             return Box::pin(async { Err(crate::sessions::SessionRuntimeError::Unavailable) });
@@ -353,6 +354,10 @@ impl ToolCancellation {
             run,
             call: Arc::new(CallCancellation::default()),
         }
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        self.run.timed_out()
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {

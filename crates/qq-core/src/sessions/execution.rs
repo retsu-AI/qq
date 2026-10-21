@@ -159,6 +159,9 @@ impl TeardownComplete {
 }
 
 #[cfg(test)]
+pub(super) static PANIC_NATIVE_FINISH: Mutex<Vec<ToolCallId>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
 static STOP_OBSERVERS: Mutex<Vec<(RunId, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
@@ -676,7 +679,7 @@ pub(super) async fn execute_run(
     let native_identity = claimed.identity;
     if let Err(error) = resources.tools.set_native_recorder(move |id, owner| {
         let store = native_store.clone();
-        async move { store.record_native_owner(native_identity, id, owner).await }
+        async move { store.set_native_owner(native_identity, id, owner).await }
     }) {
         finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
         return;
@@ -2878,6 +2881,18 @@ async fn execute_started_run(
                 if internal {
                     continue;
                 }
+                #[cfg(test)]
+                {
+                    let panic = {
+                        let mut calls = PANIC_NATIVE_FINISH.lock().unwrap();
+                        calls
+                            .iter()
+                            .position(|call| *call == id)
+                            .map(|index| calls.remove(index))
+                            .is_some()
+                    };
+                    assert!(!panic, "fixture panic before native result persistence");
+                }
                 // Any buffered live output flushes first so replay preserves
                 // the chunk-then-result order.
                 if let Err(error) = flush_pending_tool_output(
@@ -3595,16 +3610,31 @@ pub(super) async fn finish_run(
     finish_run_accounted(inner, claimed, outcome, None, teardown).await;
 }
 
-async fn finish_run_accounted(
+/// Preserve observations drained after their runtime event waiter disappeared.
+pub(super) async fn persist_native_results(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
-    outcome: RunOutcome,
-    accounting: Option<RunAccounting>,
-    mut teardown: TeardownComplete,
-) {
+    teardown: &mut TeardownComplete,
+) -> Result<(), SessionRuntimeError> {
     // The event waiter may have been dropped during cancellation. Its owned
     // observer still drains, and its actual result must precede run settlement.
     for (id, result) in std::mem::take(&mut teardown.0) {
+        let result = if result.spill.is_some() {
+            let run_id = claimed.identity.run_id;
+            let tool: String = inner
+                .store
+                .call(super::store::Priority::Control, move |connection| {
+                    Ok(connection.query_row(
+                        "SELECT name FROM tool_calls WHERE id=?1 AND run_id=?2",
+                        params![id.to_string(), run_id.to_string()],
+                        |row| row.get(0),
+                    )?)
+                })
+                .await?;
+            crate::cite_spill(result, &tool, id, true)
+        } else {
+            result
+        };
         match inner
             .store
             .finish_tool_call(
@@ -3621,14 +3651,28 @@ async fn finish_run_accounted(
             .await
         {
             Ok(event) => inner.notify(event.cursor),
-            Err(_) => {
-                inner.failed.send_replace(true);
-                return;
-            }
+            Err(error) => return Err(error),
         }
         if let Some(acknowledgements) = &inner.native_ack {
             acknowledgements.wake();
         }
+    }
+    Ok(())
+}
+
+async fn finish_run_accounted(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    outcome: RunOutcome,
+    accounting: Option<RunAccounting>,
+    mut teardown: TeardownComplete,
+) {
+    if persist_native_results(inner, claimed, &mut teardown)
+        .await
+        .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
     }
     if matches!(&outcome, RunOutcome::BudgetExhausted { exhaustion }
         if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
