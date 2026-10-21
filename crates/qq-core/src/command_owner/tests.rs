@@ -953,6 +953,58 @@ async fn small_output_chunks_reach_the_durable_journal_without_omissions() {
 
 #[cfg(any(unix, windows))]
 #[tokio::test]
+async fn cancellation_stops_live_work_before_a_stalled_journal_is_released() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown")
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    #[cfg(unix)]
+    let script = "printf ready; sleep 300";
+    #[cfg(windows)]
+    let script = "echo ready & for /L %i in (1,1,2147483647) do @rem waiting";
+    owner
+        .submit(command(workspace.path(), id, script))
+        .await
+        .unwrap();
+    let mut running = owner.wait(id, 0).await.unwrap();
+    while !running.output.contains("ready") {
+        running = owner.wait(id, running.version).await.unwrap();
+    }
+    let stopped =
+        crate::tools::observe_shell_termination(running.process.as_ref().unwrap().0.facts().pid);
+    let other = ToolCallId::generate().unwrap();
+    let (entered, blocked) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    ADMISSION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id: other,
+        entered,
+        release: gate,
+    });
+    let submitting_owner = owner.clone();
+    let request = command(workspace.path(), other, "echo independent");
+    let admission = tokio::spawn(async move { submitting_owner.submit(request).await });
+    blocked.await.unwrap();
+    let mut cancellation = Box::pin(owner.cancel(id));
+    assert!(futures_util::poll!(cancellation.as_mut()).is_pending());
+    let terminated = tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await;
+    release.send(()).unwrap();
+    admission.await.unwrap().unwrap();
+    cancellation.await.unwrap();
+    let terminal = wait_finished(&owner, id, running.version).await;
+    let independent = wait_finished(&owner, other, 0).await;
+    owner.shutdown().await.unwrap();
+    assert!(
+        matches!(terminated, Ok(Ok(()))),
+        "cancellation must reap live work while the journal is stalled"
+    );
+    assert!(terminal.result.unwrap().is_error());
+    assert!(!independent.result.unwrap().is_error());
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test]
 async fn a_stalled_output_write_cannot_extend_the_task_execution_deadline() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

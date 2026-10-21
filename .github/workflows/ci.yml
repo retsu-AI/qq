@@ -177,6 +177,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::admission_wait_cannot_renew_the_task_deadline
           bash .github/scripts/test-exact.sh command_owner::tests::journal_read_failure_stops_admission_without_poisoning_expected_misses
           bash .github/scripts/test-exact.sh command_owner::tests::explicit_cancellation_reaps_before_publishing_completion
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_stops_live_work_before_a_stalled_journal_is_released
           bash .github/scripts/test-exact.sh command_owner::tests::recovery_marks_an_unconfirmed_command_lost_and_never_replays_it
           bash .github/scripts/test-exact.sh command_owner::tests::owner_enforces_the_task_deadline_without_a_live_observer
           bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch

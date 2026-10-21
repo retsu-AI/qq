@@ -477,6 +477,9 @@ impl CommandOwner {
         // return between accepting a cancellation and its durable application.
         let lease = self.0.tools.enter();
         self.available()?;
+        // Revocation must not wait behind a stalled durable operation. The
+        // owned driver below still retains the write and its acknowledgement.
+        self.cancel_live(id);
         let (reply, applied) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         tokio::spawn(async move {
@@ -488,15 +491,8 @@ impl CommandOwner {
             let result = owner.0.journal.cancel(id).await;
             match &result {
                 Ok(()) => {
-                    if let Some(job) = owner
-                        .0
-                        .jobs
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .get(&id)
-                    {
-                        job.cancellation.cancel();
-                    }
+                    // Also cover admission registered after the initial stop.
+                    owner.cancel_live(id);
                     guard.completed = true;
                 }
                 Err(CommandOwnerError::Full) => guard.completed = true,
@@ -578,6 +574,19 @@ impl CommandOwner {
     }
     fn failure(&self) {
         fail(&self.0.failed, &self.0.jobs);
+    }
+
+    fn cancel_live(&self, id: ToolCallId) {
+        let cancellation = self
+            .0
+            .jobs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&id)
+            .map(|job| job.cancellation.clone());
+        if let Some(cancellation) = cancellation {
+            cancellation.cancel();
+        }
     }
 }
 
