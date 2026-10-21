@@ -169,6 +169,9 @@ jobs:
       - name: Native ownership, cancellation and durable observations
         shell: bash
         run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+          fi
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
           bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command
           bash .github/scripts/test-exact.sh command_owner::tests::explicit_cancellation_reaps_before_publishing_completion
@@ -201,7 +204,6 @@ jobs:
         run: |
           bash .github/scripts/test-exact.sh command_owner::tests::dropping_an_observer_does_not_cancel_or_repeat_a_command
           bash .github/scripts/test-exact.sh command_owner::tests::completion_waits_for_descendants_that_closed_their_pipes
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
           bash .github/scripts/test-exact.sh command_owner::tests::concurrent_retries_execute_once_and_conflict_does_not_stop_the_owner
           bash .github/scripts/test-exact.sh command_owner::tests::owner_state_rejects_symlinked_directories_and_hardlinked_lock_files
           bash .github/scripts/test-exact.sh command_owner::tests::control_dense_native_output_fits_the_durable_result_bound
