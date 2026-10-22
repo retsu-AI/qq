@@ -1431,7 +1431,9 @@ callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,
 checks the kernel-retained memory/process limits, and includes the trusted
-helper in that budget. It limits committed private memory and processes, not
+helper in that budget. Memory ceilings are rounded down to whole native pages
+before setting and verifying them; budgets smaller than one page are refused.
+It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default

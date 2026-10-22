@@ -24,7 +24,7 @@ pub(super) fn apply(
     let limits = win_custody::JobLimits::new()
         .kill_on_close(true)
         .active_processes(max_processes)
-        .job_memory(usize::try_from(memory_bytes).map_err(io::Error::other)?);
+        .job_memory(memory_limit(memory_bytes)?);
     let job = win_custody::Job::create(&limits)?;
     if job.limits()? != limits {
         return Err(io::Error::other(
@@ -39,6 +39,23 @@ pub(super) fn apply(
     // Nested job CPU rates are relative to the closest CPU-limited ancestor.
     // Keep the requested ceiling in machine-wide units, rounding down.
     Ok(cpu_rate)
+}
+
+/// Windows accounts committed memory in native pages. Round toward less
+/// authority before setting and verifying a byte budget, never up or to zero.
+pub(super) fn memory_limit(bytes: u64) -> io::Result<usize> {
+    let bytes = usize::try_from(bytes).map_err(io::Error::other)?;
+    let page = usize::try_from(winsafe::GetSystemInfo().dwPageSize).map_err(io::Error::other)?;
+    let remainder = bytes
+        .checked_rem(page)
+        .ok_or_else(|| io::Error::other("Windows reported a zero page size"))?;
+    let aligned = bytes - remainder;
+    if aligned == 0 {
+        return Err(io::Error::other(
+            "native memory budget is smaller than one page",
+        ));
+    }
+    Ok(aligned)
 }
 
 fn child_cpu_rate(cpu_percent: u32, cpu_parent_percent: Option<u32>) -> io::Result<Option<u32>> {
