@@ -321,3 +321,115 @@ mod tests {
         );
     }
 }
+
+/// The original worker attested terminal evidence. Save the tool observation
+/// and goal settlement together before making its journal reclaimable.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "persist one recovered invocation with its owner and receipt"
+)]
+pub(in crate::sessions) fn recover_result(
+    connection: &mut Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    id: ToolCallId,
+    mut result: crate::tools::ToolOutput,
+    receipt: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
+    owner: StoreId,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    let transaction = store::begin_unit(connection)?;
+    if identity.kind != RunKind::GoalCheck {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    let (state, previous, is_error, previous_context): (String,Option<String>,bool,Option<String>) = transaction.query_row(
+        "SELECT state,result,is_error,execution_context_json FROM tool_calls WHERE id=?1 AND run_id=?2",
+        params![id.to_string(),identity.run_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    )?;
+    if let Some(receipt) = receipt {
+        if result
+            .execution_context
+            .as_ref()
+            .is_some_and(|current| current != &receipt)
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        result.execution_context = Some(receipt);
+    }
+    let outcome = result.native_outcome;
+    let mut start = result.model_text.len().saturating_sub(OUTPUT_BYTES);
+    while !result.model_text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = result.model_text[start..].to_owned();
+    let mut events = Vec::new();
+    if state == "running" {
+        events.push(
+            tool_calls::finish_tool_call_in_transaction(
+                &transaction,
+                store_id,
+                identity,
+                id,
+                result.model_text,
+                result.is_error,
+                result.file_states,
+                result.ui_payload,
+                result.spill,
+                result.execution_context,
+                Some(owner),
+            )?
+            .event,
+        );
+    } else if !matches!(state.as_str(), "completed" | "failed")
+        || previous.as_deref() != Some(result.model_text.as_str())
+        || is_error != result.is_error
+        || previous_context
+            != result
+                .execution_context
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+    {
+        return Err(SessionRuntimeError::CONSTRAINT);
+    }
+    if let Some(outcome) = outcome {
+        let (captured, origin): (String,String) = transaction.query_row(
+            "SELECT goal_snapshot_json,origin_json FROM runs WHERE id=?1 AND session_id=?2 AND kind='goal_check'",
+            params![identity.run_id.to_string(),identity.session_id.to_string()], |row|Ok((row.get(0)?,row.get(1)?)),
+        )?;
+        if captured.len() > 64 * 1024 {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        let captured: qq_protocol::GoalSnapshot = serde_json::from_str(&captured)?;
+        let origin: qq_protocol::RunOrigin = serde_json::from_str(&origin)?;
+        if captured.session_id != identity.session_id
+            || origin
+                != (qq_protocol::RunOrigin::GoalCheck {
+                    goal_id: captured.goal_id,
+                    revision: captured.revision,
+                })
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        let deadline = captured.budget.deadline_ms;
+        let mut claim = settlement::recovery_claim(identity);
+        claim.origin = Some(origin);
+        claim.goal = Some(Arc::new(captured));
+        let outcome = match outcome {
+            crate::command_owner::NativeCommandOutcome::Exited { code } => {
+                ProcessOutcome::Exited { code }
+            }
+            crate::command_owner::NativeCommandOutcome::TimedOut => ProcessOutcome::TimedOut,
+            crate::command_owner::NativeCommandOutcome::Cancelled => ProcessOutcome::Cancelled,
+        };
+        events.extend(finish_in_transaction(
+            &transaction,
+            store_id,
+            &claim,
+            Completion::Process(ProcessResult { outcome, tail }),
+            deadline,
+            SettlementCause::Recovery,
+        )?);
+    }
+    transaction.commit()?;
+    Ok(events)
+}

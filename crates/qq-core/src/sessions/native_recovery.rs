@@ -14,6 +14,7 @@ pub(super) struct PendingNative {
     owner: StoreId,
     pub(super) identity: RunIdentity,
     tool: String,
+    workspace: std::path::PathBuf,
 }
 
 pub(super) async fn pending(store: &Store) -> Result<Vec<PendingNative>, SessionRuntimeError> {
@@ -21,10 +22,11 @@ pub(super) async fn pending(store: &Store) -> Result<Vec<PendingNative>, Session
         .call(store::Priority::Control, |connection| {
             let mut statement = connection.prepare(
                 "SELECT t.id,n.owner_id,s.workspace_id,r.session_id,r.id,r.command_id,r.kind,
-                    s.parent_id IS NOT NULL,t.name
+                    s.parent_id IS NOT NULL,t.name,w.path
              FROM native_command_owners n JOIN tool_calls t ON t.id=n.tool_call_id
              JOIN runs r ON r.id=t.run_id JOIN sessions s ON s.id=r.session_id
-             WHERE n.result_saved=0 AND t.state='running' AND r.status='running'
+             JOIN workspaces w ON w.id=s.workspace_id
+             WHERE n.result_saved=0 AND (t.state='running' OR (r.kind='goal_check' AND t.state IN ('completed','failed'))) AND r.status='running'
              ORDER BY r.created_at_ms,t.turn_ordinal,t.call_ordinal LIMIT ?1",
             )?;
             let rows = statement.query_map([MAX_PENDING], |row| {
@@ -38,14 +40,16 @@ pub(super) async fn pending(store: &Store) -> Result<Vec<PendingNative>, Session
                     row.get::<_, String>(6)?,
                     row.get::<_, bool>(7)?,
                     row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
                 ))
             })?;
             rows.map(|row| {
-                let (id, owner, workspace, session, run, command, kind, child, tool) = row?;
+                let (id, owner, workspace, session, run, command, kind, child, tool, path) = row?;
                 Ok(PendingNative {
                     id: parse_id(&id)?,
                     owner: parse_id(&owner)?,
                     tool,
+                    workspace: path.into(),
                     identity: RunIdentity {
                         workspace_id: parse_id(&workspace)?,
                         session_id: parse_id(&session)?,
@@ -86,6 +90,26 @@ async fn save_terminal(
         }
     };
     let result = crate::cite_spill(result, &pending.tool, pending.id, true);
+    if pending.identity.kind == RunKind::GoalCheck {
+        let store_id = store.store_id();
+        let events = store
+            .call_write(store::Priority::AwaitControl, move |connection| {
+                super::goal_check::recover_result(
+                    connection,
+                    store_id,
+                    pending.identity,
+                    pending.id,
+                    result,
+                    snapshot.process.map(|receipt| receipt.into_context()),
+                    owner,
+                )
+            })
+            .await?;
+        return events
+            .last()
+            .map(|event| event.cursor)
+            .ok_or(SessionRuntimeError::CONSTRAINT);
+    }
     if let Some(receipt) = snapshot.process {
         store
             .record_tool_process(pending.identity, pending.id, receipt.into_context())
@@ -170,6 +194,7 @@ pub(super) fn start(
     let store = inner.store.clone();
     let failed = inner.failed.clone();
     let settlements = inner.settlements.clone();
+    let native_scopes = inner.native_scopes.clone();
     let inner = Arc::downgrade(inner);
     let runs = remaining.keys().copied().collect();
     let observation = async move {
@@ -177,9 +202,11 @@ pub(super) fn start(
             .map(|(pending, cancellation)| {
                 let store = store.clone();
                 let service = Arc::clone(&service);
+                let scopes = native_scopes.clone();
                 async move {
                     let identity = pending.identity;
-                    let result = observe_existing(&store, &service, pending, cancellation).await;
+                    let result =
+                        observe_existing(&store, &service, pending, cancellation, scopes).await;
                     (identity, result)
                 }
             })
@@ -251,6 +278,7 @@ async fn observe_existing(
     service: &Arc<dyn NativeCommandService>,
     pending: PendingNative,
     mut cancellation: watch::Receiver<bool>,
+    scopes: Option<Arc<super::native_scope::NativeScopes>>,
 ) -> Result<EventCursor, SessionRuntimeError> {
     let owner = tokio::time::timeout(STARTUP_OBSERVATION, service.identity())
         .await
@@ -298,6 +326,13 @@ async fn observe_existing(
             snapshot.status,
             CommandStatus::Finished | CommandStatus::Lost
         ) {
+            if pending.identity.kind == RunKind::GoalCheck {
+                let scopes = scopes.as_ref().ok_or(SessionRuntimeError::Unavailable)?;
+                scopes
+                    .admit(&pending.workspace)
+                    .await
+                    .map_err(|reason| SessionRuntimeError::InvalidNativeScope { reason })?;
+            }
             return save_terminal(store, pending, snapshot, owner).await;
         }
         if let Some(receipt) = snapshot.process {

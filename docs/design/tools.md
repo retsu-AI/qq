@@ -88,9 +88,14 @@ filesystem, network and resource limits. Their invocation and owner identity are
 persisted before submission, and their result before goal settlement. Exact check
 authorization remains separate from ordinary shell grants. Exit, timeout and
 cancellation are typed worker evidence; output text cannot attest success. Missing
-services refuse the check instead of using the legacy host launcher. Startup still
-pauses interrupted checks for explicit recovery; automatic check reconciliation
-remains unfinished.
+services refuse the check instead of using the legacy host launcher. On restart,
+QQ observes the original worker journal without resubmitting the command or
+renewing check consent. Live checks retain workspace exclusion and wake the goal
+when their worker finishes. A terminal typed result and its original goal settle
+atomically before the worker may reclaim the observation. Cancellation, expired
+budgets and edited goals still take precedence. Unavailable or replaced workers,
+changed task roots, and missing terminal evidence retain the explicit interrupted
+check hold; legacy host checks still require manual recovery.
 
 Registrations persist in session-store metadata before recovery or scheduling.
 An empty registration list restores them on restart. Additional task roots may
