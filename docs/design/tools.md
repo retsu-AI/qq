@@ -55,7 +55,9 @@ before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
-`TaskWorkspace::import` before compiling a runtime. The importer copies current
+`TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
+source plan before compiling the task runtime. The task record retains that plan’s configured pack protections and
+restores them when publishing outputs. The importer copies current
 bytes into fresh files in a new detached directory, bounds total logical bytes
 and entries (including generated parent directories), and refuses symlinks,
 reparse points, multiply linked files, special files and QQ/Git trust
@@ -67,12 +69,27 @@ directory; an existing destination is never overwritten.
 
 The host compiles built-in tools against this detached path and uses its
 captured directory grant for native commands. Both paths then see the same task
-files. Task files persist after the import handle is dropped, and source files
-remain unchanged. The existing embedding example exercises a session in this
-tree. This opt-in primitive does not yet choose inputs for ordinary sessions,
-support source symlinks/hardlinks, bound subsequent output disk usage, protect
-new shell-created trust configuration, or publish changes back to the original
-checkout. Those remain necessary before Auto enablement.
+files. Task files persist after the import handle is dropped. After all task
+processes and children stop, `TaskWorkspace::publish` can return selected outputs
+to the source. It checks every output and expected source version before
+installing changes, rejects links and trust paths, and preserves unrelated
+source edits. Installs are atomic per file; later failures report earlier
+applies, and a saved baseline recognizes already-installed bytes on retry.
+The shared writer rechecks source bytes after staging and creates Unix temporary
+files with mode `0600`. On Windows, staging denies shared opens until it installs
+the destination access list (or a user-only list for a new file); the replacement
+protects that list from broader parent inheritance.
+A kernel lock at `.qq/task-publication.lock` serializes QQ publishers across
+server processes. Other editors need not honor that lock, so apply-time checks
+detect observed races rather than providing a filesystem-wide transaction.
+Serialized task records contain source authority and belong in trusted storage
+outside the writable task tree. The embedding example exercises the import,
+session edit and publication path.
+
+This primitive does not yet choose inputs or publish automatically for ordinary
+sessions, support source symlinks/hardlinks, bound subsequent output disk usage,
+or protect new shell-created trust configuration inside the task tree. Those
+remain necessary before Auto enablement.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,

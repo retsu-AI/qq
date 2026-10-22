@@ -1,19 +1,18 @@
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 
-use std::{
-    collections::BTreeMap,
-    io::Write as _,
-    sync::{
-        PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{collections::BTreeMap, sync::PoisonError};
 
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, WriteTarget, content_hash};
+use crate::workspace::{
+    ExpectedFile, FileState, FileStateUpdate, Workspace, WriteTarget, apply_atomically,
+    content_hash,
+};
+
+#[cfg(test)]
+pub(crate) use crate::workspace::hold_tool_apply;
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
@@ -25,18 +24,6 @@ pub(super) const MAX_EDIT_FILE_BYTES: u64 = MAX_READ_SCAN_BYTES;
 pub(super) const MAX_EDITS: usize = 32;
 /// Per-file side of the unified diff carried as the UI payload.
 pub(super) const MAX_DIFF_BYTES: usize = 256 * 1024;
-static TEMP_FILE_ORDINAL: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(test)]
-struct ApplyHook {
-    workspace: PathBuf,
-    entered: tokio::sync::oneshot::Sender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(test)]
-static APPLY_HOOKS: std::sync::Mutex<Vec<ApplyHook>> = std::sync::Mutex::new(Vec::new());
-
 #[cfg(test)]
 type PlannedHook = (PathBuf, Box<dyn FnOnce() + Send>);
 
@@ -51,23 +38,6 @@ fn on_edit_planned(workspace: &Path, hook: impl FnOnce() + Send + 'static) {
         .lock()
         .unwrap()
         .push((workspace.to_owned(), Box::new(hook)));
-}
-
-#[cfg(test)]
-pub(crate) fn hold_tool_apply(
-    workspace: &Path,
-) -> (
-    tokio::sync::oneshot::Receiver<()>,
-    std::sync::mpsc::Sender<()>,
-) {
-    let (entered, entered_rx) = tokio::sync::oneshot::channel();
-    let (release, release_rx) = std::sync::mpsc::channel();
-    APPLY_HOOKS.lock().unwrap().push(ApplyHook {
-        workspace: workspace.to_owned(),
-        entered,
-        release: release_rx,
-    });
-    (entered_rx, release)
 }
 
 #[derive(Deserialize)]
@@ -487,6 +457,10 @@ pub(super) fn edit_file(
             workspace,
             &file.target,
             file.text.as_bytes(),
+            Some(ExpectedFile {
+                bytes: &file.original.bytes,
+                permissions: &file.original.permissions,
+            }),
             Some(file.original.permissions.clone()),
         ) {
             drop(guard);
@@ -888,69 +862,6 @@ pub(super) fn read_editable(target: &WriteTarget) -> Result<EditableFile, String
         bytes,
         permissions: metadata.permissions(),
     })
-}
-
-/// Writes `bytes` to a temporary file in the target's directory through the
-/// workspace capability, preserves permissions when replacing an existing
-/// file, and renames into place so readers never observe a partial write.
-pub(super) fn apply_atomically(
-    workspace: &Workspace,
-    target: &WriteTarget,
-    bytes: &[u8],
-    permissions: Option<cap_std::fs::Permissions>,
-) -> Result<(), String> {
-    let temp_name = format!(
-        ".qq-apply-{}-{}.tmp",
-        std::process::id(),
-        TEMP_FILE_ORDINAL.fetch_add(1, Ordering::Relaxed),
-    );
-    let directory = &target.directory;
-    let target_name = &target.name;
-    workspace
-        .revalidate_write_target(target)
-        .map_err(|error| format!("could not validate write directory: {error}"))?;
-    let mut options = cap_std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    let mut temp = directory
-        .open_with(&temp_name, &options)
-        .map_err(|error| format!("could not create a temporary file: {error}"))?;
-    let written = temp
-        .write_all(bytes)
-        .and_then(|()| temp.sync_all())
-        .and_then(|()| match permissions {
-            Some(permissions) => temp.set_permissions(permissions),
-            None => Ok(()),
-        })
-        .map_err(|error| {
-            format!("could not write the temporary file or preserve its permissions: {error}")
-        });
-    drop(temp);
-    #[cfg(test)]
-    {
-        let hook = {
-            let mut hooks = APPLY_HOOKS.lock().unwrap();
-            hooks
-                .iter()
-                .position(|hook| hook.workspace == workspace.path())
-                .map(|index| hooks.remove(index))
-        };
-        if let Some(hook) = hook {
-            let _ = hook.entered.send(());
-            let _ = hook.release.recv();
-        }
-    }
-    let applied = written.and_then(|()| {
-        workspace
-            .revalidate_write_target(target)
-            .map_err(|error| format!("could not validate write directory: {error}"))?;
-        directory
-            .rename(&temp_name, directory, target_name)
-            .map_err(|error| format!("could not apply the change: {error}"))
-    });
-    if applied.is_err() {
-        let _ = directory.remove_file(&temp_name);
-    }
-    applied
 }
 
 #[cfg(test)]

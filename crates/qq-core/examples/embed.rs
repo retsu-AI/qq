@@ -2,11 +2,8 @@
 use futures_util::StreamExt;
 use qq_core::*;
 use qq_core::{
-    command_owner::{
-        NativeCommandScope, NativeDirectoryGrant, NativeNetwork, NativeResourceLimits,
-        NativeResources,
-    },
-    task_workspace::{TaskWorkspace, TaskWorkspaceLimits},
+    command_owner::{NativeCommandScope, NativeNetwork, NativeResourceLimits, NativeResources},
+    task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource},
 };
 use qq_protocol::*;
 use qq_provider::test_support::ScriptedProvider;
@@ -23,12 +20,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().canonicalize()?;
     let staged_root = root.clone();
-    let detached = tokio::task::spawn_blocking(move || {
+    let mut detached = tokio::task::spawn_blocking(move || {
         let source = staged_root.join("source");
         std::fs::create_dir(&source)?;
         std::fs::write(source.join("input.txt"), "local uncommitted bytes")?;
+        let source_runtime = qq_core::Runtime::new(
+            qq_provider::test_support::ScriptedProvider::new(vec![]),
+            "demo",
+            256,
+        )
+        .map_err(std::io::Error::other)?;
+        let source_plan = qq_core::plan::CompiledAgentPlan::compile_blocking(
+            qq_core::plan::AgentProfile::embedded(&source_runtime, source.clone()),
+        )
+        .map_err(std::io::Error::other)?;
         TaskWorkspace::import(
-            &NativeDirectoryGrant::capture(&source)?,
+            &TaskWorkspaceSource::from_plan(&source_plan)?,
             &staged_root.join("task"),
             &["input.txt".into()],
             TaskWorkspaceLimits {
@@ -132,10 +139,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::read_to_string(workspace.join("input.txt"))?,
             "local uncommitted bytes"
         );
-        std::fs::read_to_string(workspace.join("hello.txt"))
+        assert_eq!(
+            detached
+                .publish(&["hello.txt".into()])
+                .map_err(std::io::Error::other)?,
+            [std::path::PathBuf::from("hello.txt")]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("source/input.txt"))?,
+            "local uncommitted bytes"
+        );
+        std::fs::read_to_string(root.join("source/hello.txt"))
     })
     .await??;
     assert_eq!(text, "hello");
-    println!("completed: wrote hello.txt in the task workspace; source unchanged");
+    println!("completed: published hello.txt; source input unchanged");
     Ok(())
 }

@@ -3195,6 +3195,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn file_tools_preserve_human_changes_during_staging() {
+        for (name, existing) in [
+            ("write_file", false),
+            ("write_file", true),
+            ("edit_file", true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            if existing {
+                fs::write(directory.path().join("a"), "original").unwrap();
+            }
+            let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
+            let arguments = if name == "edit_file" {
+                json!({"edits":[{"path":"a","old":"original","new":"agent change"}]})
+            } else {
+                json!({"path":"a","content":"agent change", "if_hash":format!("h:{}", &content_hash(b"original")[..12])})
+            };
+            let (entered, release) = hold_tool_apply(workspace.path());
+            let operation = tokio::task::spawn_blocking(move || {
+                run_tool(
+                    &workspace,
+                    &FileState::default(),
+                    name,
+                    &arguments.to_string(),
+                )
+            });
+            entered.await.unwrap();
+            fs::write(directory.path().join("a"), "human change").unwrap();
+            release.send(()).unwrap();
+            let result = operation.await.unwrap();
+            assert!(result.is_error, "{name}: {}", result.model_text);
+            assert!(result.file_states.is_empty());
+            assert_eq!(
+                fs::read_to_string(directory.path().join("a")).unwrap(),
+                "human change"
+            );
+            assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qq-apply-")
+            }));
+        }
+    }
+
     #[test]
     fn dispatch_protects_policy_and_git_trust_files_without_blocking_ordinary_writes() {
         let directory = tempfile::tempdir().unwrap();
@@ -3220,6 +3266,7 @@ mod tests {
         for path in [
             ".qq/config.ron",
             ".qq/config.d/policy.ron",
+            ".qq/task-publication.lock",
             ".qq/packs/untrusted/pack.ron",
             "qq.ron",
             ".git",

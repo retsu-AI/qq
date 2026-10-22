@@ -1,4 +1,5 @@
 mod access;
+pub(crate) mod atomic_write;
 mod bounded_read;
 mod file_state;
 mod guidance;
@@ -9,6 +10,9 @@ pub mod skills;
 
 pub use access::WorkspacePathError;
 pub(crate) use access::{Workspace, WriteTarget, blocking_permits};
+#[cfg(test)]
+pub(crate) use atomic_write::hold_tool_apply;
+pub(crate) use atomic_write::{ExpectedFile, apply_atomically};
 pub(crate) use bounded_read::{BoundedReadError, read_bounded};
 pub(crate) use file_state::{FileState, FileStateUpdate, content_hash};
 #[cfg(test)]
