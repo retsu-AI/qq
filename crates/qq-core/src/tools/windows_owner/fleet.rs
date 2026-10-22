@@ -12,7 +12,6 @@ impl Fleet {
         let memory = winsafe::GlobalMemoryStatusEx().map_err(io::Error::other)?;
         let available = memory.ullAvailPhys.min(memory.ullAvailPageFile);
         let ceiling = available - available.div_ceil(4);
-        let ceiling = usize::try_from(ceiling).map_err(io::Error::other)?;
         if ceiling == 0 {
             return Err(io::Error::other("no memory available for native commands"));
         }
@@ -24,8 +23,9 @@ impl Fleet {
         Self::create(256 * 1024 * 1024, 4, CPU_PERCENT)
     }
 
-    fn create(memory_bytes: usize, processes: u32, cpu_percent: u32) -> io::Result<Self> {
+    fn create(memory_bytes: u64, processes: u32, cpu_percent: u32) -> io::Result<Self> {
         use firehazard::job::object::{self, limit};
+        let memory_bytes = super::resources::memory_limit(memory_bytes)?;
         let job = firehazard::create_job_object_w(None, ()).map_err(io::Error::from)?;
         let limits = object::ExtendedLimitInformation {
             basic_limit_information: object::BasicLimitInformation {
@@ -43,7 +43,15 @@ impl Fleet {
             || actual.basic_limit_information.active_process_limit != processes
             || actual.job_memory_limit != memory_bytes
         {
-            return Err(io::Error::other("Windows did not retain fleet limits"));
+            return Err(io::Error::other(format!(
+                "Windows did not retain fleet limits: flags {:?} expected {:?}, processes {} expected {}, memory {} expected {}",
+                actual.basic_limit_information.limit_flags,
+                limits.basic_limit_information.limit_flags,
+                actual.basic_limit_information.active_process_limit,
+                processes,
+                actual.job_memory_limit,
+                memory_bytes,
+            )));
         }
         let cpu = object::CpuRateControlInformation::from_cpu_rate(cpu_percent * 100, true, false);
         firehazard::set_information_job_object(&job, cpu).map_err(io::Error::from)?;
