@@ -19,6 +19,8 @@ use crate::tools::{ToolOutput, ToolTasks, process_context::ExecutionContextRecei
 use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellation, ShellPolicy};
 
 mod environment;
+mod filesystem;
+pub use filesystem::{NativeDirectoryGrant, NativeFilesystem};
 mod journal;
 mod workspace_identity;
 pub use environment::NativeEnvironment;
@@ -116,6 +118,9 @@ pub fn prepare_independent_worker() -> std::io::Result<()> {
 #[serde(deny_unknown_fields)]
 pub struct NativeCommand {
     pub environment: NativeEnvironment,
+    /// Explicit host authority. Host retains unrestricted filesystem access.
+    /// This is not inferred from the program, arguments, or a model decision.
+    pub filesystem: NativeFilesystem,
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
@@ -375,6 +380,10 @@ impl CommandOwner {
         {
             return Err(CommandOwnerError::Invalid);
         }
+        request
+            .filesystem
+            .validate()
+            .map_err(|_| CommandOwnerError::Invalid)?;
         let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = request.identity()?;
         if encoded.len() > MAX_REQUEST_BYTES {
@@ -557,7 +566,10 @@ impl CommandOwner {
             cancellation.expire();
         }
         let execution = crate::tools::dispatch::execute_with_images(
-            Some(Arc::new(request.environment)),
+            Some(Arc::new(crate::tools::process_context::NativeExecution {
+                environment: request.environment,
+                filesystem: request.filesystem,
+            })),
             workspace,
             Arc::default(),
             request.tool,

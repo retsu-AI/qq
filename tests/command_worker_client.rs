@@ -37,6 +37,7 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
             arguments: r#"{"command":"echo once>>counter"}"#.to_owned(),
             shell_policy: Default::default(),
             approved_images: Vec::new(),
+            filesystem: qq_core::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         };
         let (a, b) = tokio::join!(
@@ -109,6 +110,7 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
         arguments: r#"{"command":"echo forbidden>counter"}"#.to_owned(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
+        filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
     let result = client.submit(request).await;
@@ -132,3 +134,7 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/goal_recovery.rs"]
 mod goal_recovery;
+
+#[cfg(target_os = "linux")]
+#[path = "command_worker_client/filesystem.rs"]
+mod filesystem;

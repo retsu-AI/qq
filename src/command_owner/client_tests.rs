@@ -146,6 +146,7 @@ async fn retry_after_fault(operation: &'static str, fault: Fault) {
                         arguments: r#"{"command":"echo forbidden > escaped"}"#.to_owned(),
                         shell_policy: Default::default(),
                         approved_images: Vec::new(),
+                        filesystem: qq_core::command_owner::NativeFilesystem::Host,
                         not_after_ms: None,
                     })
                     .await

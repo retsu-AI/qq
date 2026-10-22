@@ -205,6 +205,11 @@ pub(super) enum OwnedLaunch {
     Exec(ExecArgs),
 }
 
+pub(crate) struct NativeExecution {
+    pub environment: crate::command_owner::NativeEnvironment,
+    pub filesystem: crate::command_owner::NativeFilesystem,
+}
+
 /// The command and its capabilities are prepared together. Keeping this value
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
@@ -223,6 +228,7 @@ impl PreparedLaunch {
     pub(super) fn owned_linux(
         mut self,
         owner: &super::linux_owner::LinuxOwner,
+        filesystem: Option<&crate::command_owner::NativeFilesystem>,
     ) -> Result<Self, PreparationError> {
         let command = self
             .command
@@ -233,6 +239,7 @@ impl PreparedLaunch {
                 command,
                 self._cwd.as_ref().expect("prepared cwd is held"),
                 self._image.as_ref(),
+                filesystem,
             )
             .map_err(PreparationError::Custody)?;
         self.command = Some(command);
@@ -310,6 +317,8 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
+    #[error("filesystem enforcement is unavailable for this command launcher")]
+    FilesystemUnavailable,
     #[cfg(target_os = "linux")]
     #[error("could not establish Linux command custody: {0}")]
     Custody(#[source] std::io::Error),

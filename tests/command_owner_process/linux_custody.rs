@@ -98,6 +98,7 @@ async fn command_cannot_read_its_supervisors_control_descriptors() {
         id, workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(&(std::fs::canonicalize(workspace.path()).unwrap())).unwrap(),
         workspace: std::fs::canonicalize(workspace.path()).unwrap(), tool: "exec".to_owned(),
         arguments: serde_json::json!({"program": std::env::current_exe().unwrap(), "args": ["--exact", "linux_custody::fixture_supervisor_privacy", "--nocapture", "--skip", format!("qq-custody-{id}")]}).to_string(),
+        filesystem: qq_core::command_owner::NativeFilesystem::Host,
         shell_policy: Default::default(), approved_images: Vec::new(), not_after_ms: None,
     };
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -173,6 +174,7 @@ async fn exercise_ending(ending: Ending) {
         .to_string(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
+        filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: matches!(ending, Ending::Deadline).then(|| {
             u64::try_from(
                 std::time::SystemTime::now()

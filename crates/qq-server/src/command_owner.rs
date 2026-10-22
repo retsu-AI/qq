@@ -269,6 +269,7 @@ mod tests {
             arguments: r#"{"command":"echo reconnected"}"#.to_owned(),
             shell_policy: Default::default(),
             approved_images: Vec::new(),
+            filesystem: qq_core::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         };
         let base = format!("http://{}/internal/command-owner/v3", connection.address());
@@ -382,6 +383,7 @@ mod tests {
                 .to_owned(),
                 shell_policy: Default::default(),
                 approved_images: Vec::new(),
+                filesystem: qq_core::command_owner::NativeFilesystem::Host,
                 not_after_ms: None,
             })
             .await

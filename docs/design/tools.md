@@ -12,6 +12,29 @@ tool layer that corrupts a checkout or loses history is a failure regardless
 of latency, but every safety mechanism here is chosen to avoid long-held
 locks, avoidable round trips, and interactive ceremony.
 
+## Native filesystem restriction primitive
+
+Trusted embedding hosts can attach `NativeFilesystem` to a `NativeCommand`.
+Its explicit read-only and read-write directory grants include captured native
+identities; grant replacement is refused. The request identity includes these
+grants, so retrying a call cannot widen its authority. Linux pins the granted
+directories and applies Landlock in the existing trusted PID-namespace helper
+before spawning the payload. Restrictions are inherited by scripts and children.
+The coordinator and independent worker retain their own authority.
+
+This path requires fully enforced Landlock ABI 9, including pathname Unix
+socket restrictions. Unsupported kernels and unimplemented platform backends
+refuse a requested restriction; they never fall back to host execution. The
+safe Rust `landlock` dependency supplies the kernel interface.
+
+This is a filesystem primitive, not a qualified Auto sandbox. The normal
+approval modes do not select it yet. Grants are additive and include existing
+inodes within a granted root: protecting policy files beneath a writable root,
+external hardlink aliases, file metadata mutations, network egress, credential
+brokering, resources and concurrent writers still require further enforcement
+before Auto enablement.
+No implicit home, toolchain, temporary or workspace roots are granted.
+
 ## The Tool Loop
 
 A run is a loop owned by `qq-core`:
