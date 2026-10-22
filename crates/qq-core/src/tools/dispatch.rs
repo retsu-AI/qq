@@ -132,6 +132,10 @@ impl ToolTasks {
         }
     }
 
+    pub(crate) fn has_native_scope(&self) -> bool {
+        self.1.is_some()
+    }
+
     pub(crate) fn with_native_commands(
         service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     ) -> Self {

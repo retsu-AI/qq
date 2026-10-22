@@ -70,6 +70,8 @@ pub(super) struct ProcessResult {
 
 #[derive(Debug, Error)]
 pub(super) enum ProcessError {
+    #[error("scoped completion checks require durable native command routing")]
+    ScopedExecutionUnavailable,
     #[cfg(not(unix))]
     #[error("completion-check process supervision is unavailable on this platform")]
     UnsupportedPlatform,
@@ -348,10 +350,34 @@ fn confirm_linux_group_exit(
     }
 }
 
+/// A scoped task must never reach the legacy host launcher. Durable check
+/// identities and terminal outcomes must be persisted before enabling this path.
+pub(super) async fn run_process(
+    workspace: PathBuf,
+    command: String,
+    deadline: tokio::time::Instant,
+    cancellation: RunCancellation,
+    producer: Arc<crate::ProcessProducer>,
+    resources: execution::RunResources,
+) -> Result<ProcessResult, ProcessError> {
+    if resources.has_native_scope() {
+        return Err(ProcessError::ScopedExecutionUnavailable);
+    }
+    run_host_process(
+        workspace,
+        command,
+        deadline,
+        cancellation,
+        producer,
+        resources,
+    )
+    .await
+}
+
 /// The caller holds workspace exclusion and has committed exact check
 /// authorization. This task retains process ownership until confirmed reap.
 #[cfg(unix)]
-pub(super) async fn run_process(
+async fn run_host_process(
     workspace: PathBuf,
     command: String,
     deadline: tokio::time::Instant,
@@ -1214,7 +1240,7 @@ pub(super) fn recover(
 }
 
 #[cfg(not(unix))]
-pub(super) async fn run_process(
+async fn run_host_process(
     _workspace: PathBuf,
     _command: String,
     _deadline: tokio::time::Instant,

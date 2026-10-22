@@ -183,6 +183,10 @@ impl RunResources {
         }
     }
 
+    pub(super) fn has_native_scope(&self) -> bool {
+        self.tools.has_native_scope()
+    }
+
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }
@@ -699,6 +703,22 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
         return;
     }
+    if let Some(scopes) = &inner.native_scopes
+        && let Err(message) = scopes.admit(Path::new(&claimed.workspace)).await
+    {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Configuration,
+                    message,
+                },
+            },
+        )
+        .await;
+        return;
+    }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
         Ok(true) => {}
         Ok(false) => {
@@ -863,20 +883,7 @@ pub(super) async fn execute_run(
         return;
     }
     if let Some(scopes) = &inner.native_scopes {
-        let checked = match scopes.get(loaded.plan.workspace_path()) {
-            Ok(scope) => {
-                let workspace = loaded.plan.workspace_handle();
-                tokio::task::spawn_blocking(move || {
-                    let identity =
-                        crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())?;
-                    scope.validate_workspace(workspace.path(), identity)
-                })
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|result| result.map_err(|error| error.to_string()))
-            }
-            Err(reason) => Err(reason),
-        };
+        let checked = scopes.validate_opened(loaded.plan.workspace_handle()).await;
         if let Err(message) = checked {
             finish_reserved_run(
                 &inner,

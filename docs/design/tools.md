@@ -81,8 +81,11 @@ shell/exec calls attach those limits to their durable command request; the
 workspace is their only writable filesystem root. Built-in mutation still uses
 the same opened workspace. Missing command services never cause scoped shell
 calls to use the local host fallback. Other workspaces and replaced task roots
-are refused before provider execution. Side-question built-in dispatch also
-checks registered workspace authority.
+are refused before loading project configuration, then the opened workspace is
+validated again afterward. Side questions use the same checks. Scoped goal
+completion checks currently refuse execution: their legacy host process launcher
+cannot bypass the registered scope. Durable native routing for these checks
+remains required.
 
 Registrations persist in session-store metadata before recovery or scheduling.
 An empty registration list restores them on restart. Additional task roots may

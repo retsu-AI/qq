@@ -194,6 +194,11 @@ async fn native_scope_rejects_unregistered_workspaces_before_provider_execution(
     let (_, observed) = run(&runtime, &other, None).await;
     runtime.shutdown().await.unwrap();
     assert!(provider.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        *provider.loads.lock().unwrap(),
+        0,
+        "an unauthorized root must not load project configuration"
+    );
     assert!(observed.iter().any(|event| matches!(&event.event,SessionEvent::RunFinished { outcome:RunOutcome::Failed { failure }, .. } if failure.message.contains("no registered native execution scope"))));
 }
 
@@ -240,6 +245,11 @@ async fn native_scope_replaced_task_directory_is_refused_before_provider_executi
     let (_, observed) = run(&runtime, &workspace, None).await;
     runtime.shutdown().await.unwrap();
     assert!(provider.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        *provider.loads.lock().unwrap(),
+        0,
+        "an unauthorized root must not load project configuration"
+    );
     assert!(observed.iter().any(|event| matches!(&event.event,SessionEvent::RunFinished { outcome:RunOutcome::Failed { failure }, .. } if failure.message.contains("native scope does not match"))));
 }
 
@@ -333,4 +343,34 @@ async fn native_scope_enforces_auto_session_commands_through_the_real_owner() {
         );
         assert!(result.contains("task"), "{result}");
     }
+}
+
+#[tokio::test]
+async fn native_scope_goal_check_never_falls_back_to_host_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    let workspace = path.join("task");
+    std::fs::create_dir(&workspace).unwrap();
+    let marker = workspace.join("host-execution");
+    let mut configuration = options(&path.join("sessions.sqlite3"));
+    configuration.native_scopes = vec![scope(&workspace)];
+    let runtime = SessionRuntime::open(configuration, loader()).await.unwrap();
+    let resources =
+        execution::RunResources::with_native_commands(None, runtime.inner.native_scopes.clone());
+    let result = crate::sessions::goal_check::run_process(
+        workspace,
+        "echo escaped > host-execution".into(),
+        tokio::time::Instant::now() + Duration::from_secs(10),
+        RunCancellation::new(),
+        Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
+        resources.clone(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a scoped check must not use the host process launcher"
+    );
+    assert!(!marker.exists(), "the host command executed before refusal");
+    resources.drain().await.unwrap();
+    runtime.shutdown().await.unwrap();
 }

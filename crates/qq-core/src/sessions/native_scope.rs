@@ -15,6 +15,43 @@ const KEY: &str = "native_command_scopes";
 pub(crate) struct NativeScopes(BTreeMap<PathBuf, Arc<NativeCommandScope>>);
 
 impl NativeScopes {
+    /// Reject an unregistered or replaced root before project code is loaded.
+    pub(crate) async fn admit(&self, path: &Path) -> Result<(), String> {
+        let scope = self.get(path)?;
+        let path = path.to_owned();
+        let permit = crate::workspace::blocking_permits()
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let identity = crate::command_owner::NativeWorkspaceIdentity::capture(&path)?;
+            scope.validate_workspace(&path, identity)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+    }
+
+    pub(crate) async fn validate_opened(
+        &self,
+        workspace: crate::workspace::Workspace,
+    ) -> Result<(), String> {
+        let scope = self.get(workspace.path())?;
+        let permit = crate::workspace::blocking_permits()
+            .acquire_owned()
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let identity = crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())?;
+            scope.validate_workspace(workspace.path(), identity)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+    }
+
     pub(crate) fn get(&self, path: &Path) -> Result<Arc<NativeCommandScope>, String> {
         self.0
             .get(path)

@@ -512,6 +512,14 @@ impl SessionRuntime {
                             return Err(SessionRuntimeError::SideQuestionCancelled);
                         }
                         let workspace = request.workspace.clone();
+                        if let Some(scopes) = &self.inner.native_scopes {
+                            scopes
+                                .admit(Path::new(&workspace))
+                                .await
+                                .map_err(|reason| SessionRuntimeError::InvalidNativeScope {
+                                    reason,
+                                })?;
+                        }
                         let loaded = self
                             .inner
                             .loader
@@ -520,6 +528,14 @@ impl SessionRuntime {
                             .map_err(|_| SessionRuntimeError::Unavailable)?;
                         if loaded.plan.workspace_path() != Path::new(&workspace) {
                             return Err(SessionRuntimeError::CONSTRAINT);
+                        }
+                        if let Some(scopes) = &self.inner.native_scopes {
+                            scopes
+                                .validate_opened(loaded.plan.workspace_handle())
+                                .await
+                                .map_err(|reason| SessionRuntimeError::InvalidNativeScope {
+                                    reason,
+                                })?;
                         }
                         let plan = loaded
                             .plan
