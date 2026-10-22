@@ -1237,7 +1237,8 @@ The macOS adapter starts a trusted helper before the payload. It closes ambient
 file descriptors and keeps an owner-liveness channel which payloads do not
 inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
-listing `/`; descendant file access uses the explicit directory grants.
+listing `/`; descendant file access and executable launches use the explicit
+directory grants.
 Descendants cannot call
 `setsid` or `setpgid`; the helper retains the group identity until terminating
 the group, including on owner disconnect. A terminal payload status is returned

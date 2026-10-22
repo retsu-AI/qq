@@ -402,7 +402,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
 
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
     let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process-exec process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
+        "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
     // dyld opens the root directory while resolving its shared cache. This
     // grants directory entries only, never reads of descendant file contents.
@@ -412,7 +412,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
         profile.push_str("(allow network*)\n");
     }
     match filesystem {
-        NativeFilesystem::Host => profile.push_str("(allow file*)\n"),
+        NativeFilesystem::Host => profile.push_str("(allow file* process-exec)\n"),
         NativeFilesystem::Restricted {
             read_only,
             read_write,
@@ -435,7 +435,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                 }
                 let quoted = serde_json::to_string(path).map_err(io::Error::other)?;
                 profile.push_str(&format!(
-                    "(allow file-read* file-map-executable {} (subpath {quoted}))\n",
+                    "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
                 ));
                 for ancestor in grant.path.ancestors().skip(1) {
