@@ -4,6 +4,7 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus, Scope,
 };
 use serde::{Deserialize, Serialize};
+use std::os::unix::ffi::OsStrExt as _;
 use std::{
     io,
     os::fd::{AsFd as _, AsRawFd as _, OwnedFd},
@@ -13,6 +14,7 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub(super) struct Directory {
     pub fd: i32,
+    pub path: Vec<u8>,
     pub writable: bool,
 }
 
@@ -48,6 +50,7 @@ pub(super) fn prepare(
             let fd = workspace.root().as_fd().try_clone_to_owned()?;
             rules.push(Directory {
                 fd: fd.as_raw_fd(),
+                path: grant.path.as_os_str().as_bytes().to_vec(),
                 writable,
             });
             descriptors.push(fd);
@@ -77,6 +80,14 @@ pub(super) fn enforce(directories: Vec<Directory>) -> io::Result<()> {
             .add_rule(PathBeneath::new(fd, access))
             .map_err(io::Error::other)?;
     }
+    // Standard subprocess APIs open /dev/null for unused stdin. The root
+    // builder exposes only the verified discard device, not the host /dev tree.
+    ruleset = ruleset
+        .add_rule(PathBeneath::new(
+            std::fs::File::open("/dev/null")?,
+            AccessFs::ReadFile | AccessFs::WriteFile | AccessFs::Truncate,
+        ))
+        .map_err(io::Error::other)?;
     let status = ruleset.restrict_self().map_err(io::Error::other)?;
     if status.ruleset != RulesetStatus::FullyEnforced {
         return Err(io::Error::new(

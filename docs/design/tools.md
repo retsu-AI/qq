@@ -18,9 +18,27 @@ Trusted embedding hosts can attach `NativeFilesystem` to a `NativeCommand`.
 Its explicit read-only and read-write directory grants include captured native
 identities; grant replacement is refused. The request identity includes these
 grants, so retrying a call cannot widen its authority. Linux pins the granted
-directories and applies Landlock in the existing trusted PID-namespace helper
-before spawning the payload. Restrictions are inherited by scripts and children.
-The coordinator and independent worker retain their own authority.
+directories and builds a private mount tree in the existing trusted
+PID-namespace helper. It reopens inputs in that namespace and checks them
+against the held descriptors, mounts read-only inputs read-only, then detaches
+the old host root. Landlock additionally limits file-content access. Scripts
+and children inherit both boundaries. The coordinator and independent worker
+retain their own authority.
+
+The runtime skeleton is a private 4 MiB tmpfs with 4,096 inodes. It contains
+only explicit directory mounts, runtime aliases into that tree, private procfs
+for helper startup, and a verified Linux discard device at `/dev/null`.
+Metadata changes outside writable roots are denied. Nested mounts are not
+implicitly imported; their roots need explicit grants. The held working
+directory's identity must survive reconstruction. Frozen PATH values remain
+unchanged; aliases provide access only to the already mapped tree.
+
+Only the trusted setup helper retains user-namespace capabilities while
+constructing this tree. Before payload execution it drops capabilities and
+sets no-new-privileges. The payload root sits below the detached namespace
+root, which makes Linux reject further user-namespace creation and prevents
+regaining mount authority to undo read-only mounts. Setup failures return a
+bounded refusal before the payload starts.
 
 This path requires fully enforced Landlock ABI 9, including pathname Unix
 socket restrictions. Unsupported kernels and unimplemented platform backends
@@ -30,7 +48,7 @@ safe Rust `landlock` dependency supplies the kernel interface.
 This is a filesystem primitive, not a qualified Auto sandbox. The normal
 approval modes do not select it yet. Grants are additive and include existing
 inodes within a granted root: protecting policy files beneath a writable root,
-external hardlink aliases, file metadata mutations, network egress, credential
+external hardlink aliases, authorized network egress, credential
 brokering, resources and concurrent writers still require further enforcement
 before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.

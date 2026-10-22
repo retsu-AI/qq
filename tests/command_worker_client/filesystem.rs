@@ -194,3 +194,272 @@ async fn filesystem_scope_rejects_replaced_grants_and_changed_authority_on_retry
     assert!(!workspace.join("ran").exists());
     assert!(matches!(retry, Err(super::CommandOwnerError::Conflict)));
 }
+
+#[tokio::test]
+async fn filesystem_scope_denies_metadata_changes_outside_writable_grants() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let input = root.path().join("read-only-input");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&input).unwrap();
+    for path in [root.path().join("outside"), input.join("value")] {
+        std::fs::write(&path, "retained").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::os::unix::fs::symlink("../outside", workspace.join("outside-link")).unwrap();
+    std::os::unix::fs::symlink(&input, workspace.join("input")).unwrap();
+    let client = worker(&root.path().join("owner"));
+    let mut observations = Vec::new();
+    for tool in ["shell", "exec"] {
+        let mut command = request(
+            &workspace,
+            tool,
+            "chmod 644 ../outside; chmod 644 outside-link; chmod 644 input/value; printf allowed > allowed; chmod 640 allowed; printf metadata-probe-finished",
+        );
+        if let NativeFilesystem::Restricted { read_only, .. } = &mut command.filesystem {
+            read_only.push(NativeDirectoryGrant::capture(&input).unwrap());
+        }
+        observations.push(finish(&client, command).await.result.unwrap());
+    }
+    client.stop_spawned().await;
+    for result in observations {
+        if result.is_error() {
+            assert!(
+                result
+                    .text()
+                    .contains("required Linux filesystem enforcement is unavailable"),
+                "{}",
+                result.text()
+            );
+        } else {
+            assert!(
+                result.text().contains("metadata-probe-finished"),
+                "{}",
+                result.text()
+            );
+            assert_eq!(
+                std::fs::metadata(workspace.join("allowed"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o640
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::metadata(root.path().join("outside"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "a confined command changed host metadata"
+    );
+    assert_eq!(
+        std::fs::metadata(input.join("value"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600,
+        "a confined command changed read-only input metadata"
+    );
+}
+
+#[test]
+fn capabilities_probe() {
+    if !std::env::args().any(|argument| argument == "qq-fs-capabilities") {
+        return;
+    }
+    let caps = rustix::thread::capabilities(None).unwrap();
+    assert!(caps.effective.is_empty());
+    assert!(caps.permitted.is_empty());
+    assert!(caps.inheritable.is_empty());
+    assert!(rustix::thread::no_new_privs().unwrap());
+    println!("payload-caps-empty");
+    let nested = std::process::Command::new("unshare")
+        .args(["--user", "--map-current-user", "--", "true"])
+        .output()
+        .unwrap();
+    println!("nested-userns={}", nested.status.success());
+}
+
+#[tokio::test]
+async fn filesystem_scope_drops_setup_capabilities_and_prevents_namespace_reentry() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let mut command = request(&workspace, "exec", "unused");
+    command.arguments = serde_json::json!({"program": executable, "args":["--exact", "filesystem::capabilities_probe", "--nocapture", "--skip", "qq-fs-capabilities"]}).to_string();
+    if let NativeFilesystem::Restricted { read_only, .. } = &mut command.filesystem {
+        read_only.push(NativeDirectoryGrant::capture(executable.parent().unwrap()).unwrap());
+    }
+    let client = worker(&root.path().join("owner"));
+    let scoped = finish(&client, command.clone()).await.result.unwrap();
+    command.id = ToolCallId::generate().unwrap();
+    command.filesystem = NativeFilesystem::Host;
+    let control = finish(&client, command).await.result.unwrap();
+    client.stop_spawned().await;
+    assert!(!control.is_error(), "{}", control.text());
+    assert!(
+        control.text().contains("payload-caps-empty"),
+        "{}",
+        control.text()
+    );
+    assert!(
+        control.text().contains("nested-userns=true"),
+        "{}",
+        control.text()
+    );
+    if scoped.is_error() {
+        assert!(
+            scoped
+                .text()
+                .contains("required Linux filesystem enforcement is unavailable"),
+            "{}",
+            scoped.text()
+        );
+    } else {
+        assert!(
+            scoped.text().contains("payload-caps-empty"),
+            "{}",
+            scoped.text()
+        );
+        assert!(
+            scoped.text().contains("nested-userns=false"),
+            "{}",
+            scoped.text()
+        );
+    }
+}
+
+#[tokio::test]
+async fn filesystem_scope_reports_helper_setup_refusal_without_running_payload() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut command = request(&workspace, "shell", "printf forbidden > ran");
+    // The helper has a fresh procfs for its PID namespace. A host-procfs grant
+    // must not silently bind that host filesystem into the command's root.
+    if let NativeFilesystem::Restricted { read_only, .. } = &mut command.filesystem {
+        read_only.push(NativeDirectoryGrant::capture(Path::new("/proc")).unwrap());
+    }
+    let client = worker(&root.path().join("owner"));
+    let result = finish(&client, command).await.result.unwrap();
+    client.stop_spawned().await;
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result.text().contains("private filesystem setup failed:")
+            || result
+                .text()
+                .contains("required Linux filesystem enforcement is unavailable"),
+        "{}",
+        result.text()
+    );
+    assert!(!workspace.join("ran").exists());
+}
+
+#[tokio::test]
+async fn filesystem_scope_preserves_writable_children_and_nested_working_directories() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let inputs = root.path().join("inputs");
+    let workspace = inputs.join("workspace");
+    std::fs::create_dir_all(workspace.join("nested")).unwrap();
+    std::fs::write(inputs.join("value"), "read-only-input").unwrap();
+    std::fs::set_permissions(inputs.join("value"), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut command = request(&workspace, "shell", "unused");
+    command.arguments = serde_json::json!({"command":"cat ../../value; printf forbidden > ../../value; chmod 644 ../../value; printf permitted > artifact; printf nested-finished", "cwd":"nested"}).to_string();
+    if let NativeFilesystem::Restricted { read_only, .. } = &mut command.filesystem {
+        read_only.push(NativeDirectoryGrant::capture(&inputs).unwrap());
+    }
+    let client = worker(&root.path().join("owner"));
+    let result = finish(&client, command).await.result.unwrap();
+    client.stop_spawned().await;
+    if result.is_error() {
+        assert!(
+            result
+                .text()
+                .contains("required Linux filesystem enforcement is unavailable"),
+            "{}",
+            result.text()
+        );
+    } else {
+        assert!(
+            result.text().contains("read-only-input"),
+            "{}",
+            result.text()
+        );
+        assert!(
+            result.text().contains("nested-finished"),
+            "{}",
+            result.text()
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("nested/artifact")).unwrap(),
+            "permitted"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(inputs.join("value")).unwrap(),
+        "read-only-input"
+    );
+    assert_eq!(
+        std::fs::metadata(inputs.join("value"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[tokio::test]
+async fn filesystem_scope_preserves_frozen_path_aliases_without_granting_their_parent() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let tools = workspace.join("tools");
+    let alias = root.path().join("tool-profile");
+    std::fs::create_dir_all(&tools).unwrap();
+    std::fs::write(
+        tools.join("private-probe"),
+        "#!/bin/sh\nprintf path-worked > artifact\nprintf alias-finished\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        tools.join("private-probe"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&tools, &alias).unwrap();
+    let mut command = request(&workspace, "exec", "unused");
+    command.environment =
+        NativeEnvironment::from_values([("PATH".to_owned(), alias.into_os_string())]).unwrap();
+    command.arguments = serde_json::json!({"program":"private-probe", "args":[]}).to_string();
+    let client = worker(&root.path().join("owner"));
+    let result = finish(&client, command).await.result.unwrap();
+    client.stop_spawned().await;
+    if result.is_error() {
+        assert!(
+            result
+                .text()
+                .contains("required Linux filesystem enforcement is unavailable"),
+            "{}",
+            result.text()
+        );
+    } else {
+        assert!(
+            result.text().contains("alias-finished"),
+            "{}",
+            result.text()
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("artifact")).unwrap(),
+            "path-worked"
+        );
+    }
+}
