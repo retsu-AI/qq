@@ -149,6 +149,150 @@ async fn open_session(
 }
 
 #[tokio::test]
+async fn publication_delivers_new_ignored_files_without_generated_directories() {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let path = &task.scope.workspace.path;
+    std::fs::write(path.join(".gitignore"), "*.local\n").unwrap();
+    std::fs::write(path.join("requested.local"), "requested output").unwrap();
+    std::fs::create_dir(path.join("target")).unwrap();
+    std::fs::write(path.join("target/build-cache"), "disposable").unwrap();
+    let (runtime, session) = open_session(
+        root.path(),
+        &source,
+        Arc::new(PublicationLoader {
+            protect_pack: false,
+        }),
+    )
+    .await;
+    task.publish(&runtime.inner, session).await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(source.join("requested.local"))
+            .ok()
+            .as_deref(),
+        Some("requested output")
+    );
+    assert!(!source.join("target").exists());
+    runtime.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn task_selection_never_blocks_reading_special_ignore_files() {
+    use std::{sync::mpsc::sync_channel, time::Duration};
+    for name in [".gitignore", ".ignore"] {
+        for inputs in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().canonicalize().unwrap();
+            let fifo = path.join(name);
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            std::fs::write(path.join("input.txt"), "input").unwrap();
+            let workspace = Workspace::open(&path).unwrap();
+            let (started, ready) = sync_channel(1);
+            let (finished, result) = sync_channel(1);
+            let thread = std::thread::spawn(move || {
+                started.send(()).unwrap();
+                finished
+                    .send(files(
+                        &workspace,
+                        TaskWorkspaceLimits {
+                            max_entries: 16,
+                            max_bytes: 1024,
+                        },
+                        inputs,
+                    ))
+                    .unwrap();
+            });
+            ready.recv_timeout(Duration::from_secs(15)).unwrap();
+            let (stalled, selected) = match result.recv_timeout(Duration::from_secs(1)) {
+                Ok(selected) => (false, selected),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Release the old blocking reader so the failing regression
+                    // still joins its thread and removes its temporary files.
+                    let writer = rustix::fs::open(
+                        &fifo,
+                        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
+                        rustix::fs::Mode::empty(),
+                    )
+                    .unwrap();
+                    drop(writer);
+                    (true, result.recv_timeout(Duration::from_secs(15)).unwrap())
+                }
+                Err(error) => panic!("selection worker stopped: {error}"),
+            };
+            thread.join().unwrap();
+            assert!(!stalled, "{name} blocked task selection (inputs={inputs})");
+            if inputs {
+                assert!(selected.unwrap().contains(&PathBuf::from("input.txt")));
+            } else {
+                assert!(selected.is_err(), "special outputs must be refused");
+            }
+        }
+    }
+}
+
+#[test]
+fn task_import_selection_keeps_dotfiles_and_nested_ignore_rules_with_bounds() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().canonicalize().unwrap();
+    std::fs::create_dir(path.join("nested")).unwrap();
+    std::fs::create_dir(path.join("target")).unwrap();
+    for (name, content) in [
+        (".gitignore", "*.local\n!keep.local\n"),
+        (".hidden", "dotfile"),
+        ("ignored.local", "ignored"),
+        ("keep.local", "kept"),
+        ("nested/.ignore", "drop.txt\n"),
+        ("nested/drop.txt", "ignored"),
+        ("nested/keep.txt", "kept"),
+        ("target/cache", "generated"),
+    ] {
+        std::fs::write(path.join(name), content).unwrap();
+    }
+    let workspace = Workspace::open(&path).unwrap();
+    let limits = TaskWorkspaceLimits {
+        max_entries: 32,
+        max_bytes: 1024,
+    };
+    let selected: BTreeSet<_> = files(&workspace, limits, true)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        selected,
+        [
+            ".gitignore",
+            ".hidden",
+            "keep.local",
+            "nested/.ignore",
+            "nested/keep.txt",
+            "target/cache"
+        ]
+        .map(PathBuf::from)
+        .into_iter()
+        .collect()
+    );
+    assert!(
+        files(
+            &workspace,
+            TaskWorkspaceLimits {
+                max_entries: 1,
+                ..limits
+            },
+            true
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn publication_rechecks_current_permission_before_installing_task_edits() {
     for (mode, protect_pack) in [
         (ApprovalMode::Auto, false),

@@ -335,8 +335,8 @@ impl Walker<'_> {
             Some(ListingLimits {
                 max_entries: 100_000,
                 max_bytes: 32 * 1024 * 1024,
-                deadline: self.budget.deadline,
-                cancelled: self.cancelled,
+                deadline: Some(self.budget.deadline),
+                cancelled: Some(self.cancelled),
                 #[cfg(test)]
                 observe: None,
             }),

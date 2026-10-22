@@ -108,6 +108,12 @@ backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
 child supervision requires it. Ask and Read-only retain their own rules.
 
+Task traversal reads bounded regular ignore files through directory capabilities;
+special files and symlinks cannot block ignore loading. New ignored output files
+are included in publication. New generated directories (`target`, `node_modules`,
+`dist`, `build`, `.venv`, `__pycache__`, `.git`) and the private task home remain
+excluded from automatic publication, while imported source paths remain selected.
+
 Completed runs publish after tools and children drain and recheck the session's
 current publication permission. Publication reloads trusted source configuration
 and retains both the imported and current configured-pack protections; a newly
@@ -118,6 +124,11 @@ changes are not published. Successive goal-origin runs reuse the same persisted
 private tree, retaining caches and unpublished files; ordinary prompts do not
 revive that goal tree. Compaction does not create task copies. Full retains host
 authority.
+
+Recovery of a running completion check restores its persisted run-bound scope
+and validates both source and task directory identities before accepting the
+worker result. A missing or replaced bound task never falls back to broader
+source authority; cancellation, budgets and unknown-execution holds still apply.
 
 Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original

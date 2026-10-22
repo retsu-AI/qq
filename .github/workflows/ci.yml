@@ -311,6 +311,11 @@ jobs:
       - name: Persisted native task authority
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::publication_delivers_new_ignored_files_without_generated_directories
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_import_selection_keeps_dotfiles_and_nested_ignore_rules_with_bounds
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_never_blocks_reading_special_ignore_files
+          fi
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_never_falls_back_without_a_command_service
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_rejects_unregistered_workspaces_before_provider_execution

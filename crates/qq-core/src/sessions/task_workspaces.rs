@@ -37,7 +37,7 @@ pub(super) enum TaskExecutionError {
     #[error(transparent)]
     Workspace(#[from] TaskWorkspaceError),
     #[error("task workspace traversal failed: {0}")]
-    Traverse(#[from] ignore::Error),
+    Traverse(#[from] crate::tools::walk::ListError),
     #[error("task record could not be encoded or decoded: {0}")]
     Codec(#[from] serde_json::Error),
     #[error(transparent)]
@@ -346,50 +346,68 @@ fn files(
     limits: TaskWorkspaceLimits,
     inputs: bool,
 ) -> Result<Vec<PathBuf>, TaskExecutionError> {
-    let root = workspace.path().to_owned();
-    let guard = workspace.clone();
-    let mut builder = ignore::WalkBuilder::new(&root);
-    builder
-        .hidden(false)
-        .parents(false)
-        .git_global(false)
-        .git_exclude(false)
-        .require_git(false)
-        .follow_links(false)
-        .filter_entry(move |entry| {
-            let Ok(relative) = entry.path().strip_prefix(guard.path()) else {
-                return false;
-            };
-            if relative.as_os_str().is_empty() || relative == Path::new(".qq") {
-                return true;
-            }
-            if relative.starts_with(PRIVATE_HOME) {
-                return false;
-            }
-            !inputs
-                || guard
-                    .check_write_path(&relative.to_string_lossy(), relative)
-                    .is_ok()
-        });
+    use crate::tools::walk::{
+        EntryKind, GENERATED_DIRECTORIES, IgnoreStack, ListingLimits, list_children_bounded,
+    };
+    let mut ignores = IgnoreStack::for_task_files(workspace, inputs);
+    let mut pending = vec![Some(".".to_owned())];
+    let mut visited = 0usize;
+    let mut path_bytes = 0usize;
     let mut selected = Vec::new();
-    for (index, entry) in builder.build().enumerate() {
-        if index > limits.max_entries {
-            return Err(TaskExecutionError::Invalid(
-                "task file selection exceeds its entry limit",
-            ));
-        }
-        let entry = entry?;
-        let Some(kind) = entry.file_type() else {
+    while let Some(directory) = pending.pop() {
+        let Some(directory) = directory else {
+            ignores.leave();
             continue;
         };
-        let relative = entry
-            .path()
-            .strip_prefix(&root)
-            .map_err(|_| TaskExecutionError::Invalid("task traversal escaped its root"))?;
-        if kind.is_file() {
-            selected.push(relative.to_owned());
-        } else if !inputs && !kind.is_dir() {
-            return Err(TaskWorkspaceError::UnsupportedFile(relative.to_owned()).into());
+        let mut unreadable = 0;
+        let children = list_children_bounded(
+            workspace,
+            &directory,
+            &mut ignores,
+            &mut unreadable,
+            Some(ListingLimits {
+                max_entries: limits.max_entries.saturating_sub(visited),
+                max_bytes: MAX_RECORD_BYTES.saturating_sub(path_bytes),
+                deadline: None,
+                cancelled: None,
+                #[cfg(test)]
+                observe: None,
+            }),
+        )?;
+        if unreadable != 0 {
+            return Err(TaskExecutionError::Invalid(
+                "task filenames must be Unicode",
+            ));
+        }
+        visited += children.len();
+        pending.push(None);
+        for child in children.into_iter().rev() {
+            path_bytes = path_bytes.saturating_add(child.path.len());
+            if path_bytes > MAX_RECORD_BYTES {
+                return Err(TaskExecutionError::Invalid(
+                    "task path selection exceeds its byte limit",
+                ));
+            }
+            let relative = PathBuf::from(&child.path);
+            if child.ignored
+                || relative.starts_with(PRIVATE_HOME)
+                || (!inputs
+                    && child.is_dir()
+                    && GENERATED_DIRECTORIES.contains(&child.name.as_str()))
+                || (inputs
+                    && relative != Path::new(".qq")
+                    && workspace.check_write_path(&child.path, &relative).is_err())
+            {
+                continue;
+            }
+            match child.kind {
+                EntryKind::Dir => pending.push(Some(child.path)),
+                EntryKind::File { .. } => selected.push(relative),
+                EntryKind::Symlink | EntryKind::Other if !inputs => {
+                    return Err(TaskWorkspaceError::UnsupportedFile(relative).into());
+                }
+                _ => {}
+            }
         }
     }
     Ok(selected)
@@ -434,37 +452,10 @@ pub(super) async fn side_scope(
         reason: reason.to_owned(),
     };
     for run in [active.as_ref(), parent.as_ref()].into_iter().flatten() {
-        let Some(owner) = read(&inner.store, format!("{RUN_PREFIX}{run}")).await? else {
-            continue;
-        };
-        let owner: RunId = owner.parse().map_err(|_| invalid("invalid task owner"))?;
-        let saved = read(&inner.store, format!("{RECORD_PREFIX}{owner}"))
-            .await?
-            .ok_or_else(|| invalid("active task record is missing"))?;
-        let record: TaskRecord = serde_json::from_str(&saved)?;
-        let grant = record.workspace.directory_grant();
-        if record.source.path != Path::new(source_path)
-            || grant.path != record.scope.workspace.path
-            || grant.identity != record.scope.workspace.identity
-        {
-            return Err(invalid("active task does not match the source project"));
+        let run = run.parse().map_err(|_| invalid("invalid task run"))?;
+        if let Some(scope) = scope_for_run(&inner.store, run, Path::new(source_path)).await? {
+            return Ok(Some(scope));
         }
-        let permit = crate::workspace::blocking_permits()
-            .acquire_owned()
-            .await
-            .map_err(|_| SessionRuntimeError::Unavailable)?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let identity = NativeWorkspaceIdentity::capture(&record.source.path)?;
-            if identity != record.source.identity {
-                return Err(io::Error::other("task source directory changed"));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|_| SessionRuntimeError::Unavailable)?
-        .map_err(|error: io::Error| invalid(&error.to_string()))?;
-        return Ok(Some(record.scope));
     }
     // A question may race the main run's task preparation. Do not inspect the
     // broader source project while an Auto task's scope is still being admitted.
@@ -475,6 +466,51 @@ pub(super) async fn side_scope(
         return Err(SessionRuntimeError::SideQuestionBusy);
     }
     Ok(None)
+}
+
+/// Restore only the authority already bound to this run. Missing or changed
+/// bound records are errors; they must never fall back to the source project.
+pub(super) async fn scope_for_run(
+    store: &Store,
+    run: RunId,
+    source_path: &Path,
+) -> Result<Option<NativeCommandScope>, SessionRuntimeError> {
+    let invalid = |reason: &str| SessionRuntimeError::InvalidNativeScope {
+        reason: reason.to_owned(),
+    };
+    let Some(owner) = read(store, format!("{RUN_PREFIX}{run}")).await? else {
+        return Ok(None);
+    };
+    let owner: RunId = owner.parse().map_err(|_| invalid("invalid task owner"))?;
+    let saved = read(store, format!("{RECORD_PREFIX}{owner}"))
+        .await?
+        .ok_or_else(|| invalid("bound task record is missing"))?;
+    let record: TaskRecord = serde_json::from_str(&saved)?;
+    let grant = record.workspace.directory_grant();
+    if record.source.path != source_path
+        || grant.path != record.scope.workspace.path
+        || grant.identity != record.scope.workspace.identity
+    {
+        return Err(invalid("bound task does not match the source project"));
+    }
+    let permit = crate::workspace::blocking_permits()
+        .acquire_owned()
+        .await
+        .map_err(|_| SessionRuntimeError::Unavailable)?;
+    let scope = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        if NativeWorkspaceIdentity::capture(&record.source.path)? != record.source.identity {
+            return Err(io::Error::other("task source directory changed"));
+        }
+        record
+            .scope
+            .validate_workspace(&grant.path, NativeWorkspaceIdentity::capture(&grant.path)?)?;
+        Ok(record.scope)
+    })
+    .await
+    .map_err(|_| SessionRuntimeError::Unavailable)?
+    .map_err(|error: io::Error| invalid(&error.to_string()))?;
+    Ok(Some(scope))
 }
 
 async fn read(store: &Store, key: String) -> Result<Option<String>, SessionRuntimeError> {
