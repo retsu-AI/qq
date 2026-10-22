@@ -123,6 +123,7 @@ async fn scoped_command_refuses_low_disk_space_before_launch() {
         read_only: vec![],
         read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
     };
+    request.network = NativeNetwork::Isolated;
     owner.submit(request).await.unwrap();
     let result = wait_finished(&owner, id, 0).await.result.unwrap();
     owner.shutdown().await.unwrap();
@@ -154,6 +155,7 @@ async fn scoped_command_checks_disk_space_on_every_writable_root() {
             NativeDirectoryGrant::capture(&output.path().canonicalize().unwrap()).unwrap(),
         ],
     };
+    request.network = NativeNetwork::Isolated;
     owner.submit(request).await.unwrap();
     let result = wait_finished(&owner, id, 0).await.result.unwrap();
     owner.shutdown().await.unwrap();
@@ -182,6 +184,7 @@ async fn scoped_command_checks_disk_space_on_the_worker_journal() {
         read_only: vec![],
         read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
     };
+    request.network = NativeNetwork::Isolated;
     owner.submit(request).await.unwrap();
     let result = wait_finished(&owner, id, 0).await.result.unwrap();
     owner.shutdown().await.unwrap();
