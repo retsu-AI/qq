@@ -62,11 +62,13 @@ impl NativeStorage {
     pub(crate) async fn capture(
         workspace: Workspace,
         filesystem: &NativeFilesystem,
+        journal: &std::path::Path,
     ) -> Result<Option<Self>, Pressure> {
         let NativeFilesystem::Restricted { read_write, .. } = filesystem else {
             return Ok(None);
         };
         let grants = read_write.clone();
+        let journal = journal.to_owned();
         let permit = crate::workspace::blocking_permits()
             .acquire_owned()
             .await
@@ -74,6 +76,10 @@ impl NativeStorage {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut roots = vec![workspace];
+            let journal = Workspace::open(&journal)?;
+            if !roots.iter().any(|saved| saved.path() == journal.path()) {
+                roots.push(journal);
+            }
             for grant in grants {
                 let root = Workspace::open(&grant.path)?;
                 if NativeWorkspaceIdentity::held(root.root())? != grant.identity {

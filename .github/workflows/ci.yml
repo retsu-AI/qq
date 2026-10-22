@@ -226,6 +226,9 @@ jobs:
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied
           fi
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_refuses_low_disk_space_before_launch
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_every_writable_root
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_the_worker_journal
           bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
           bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command

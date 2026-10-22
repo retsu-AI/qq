@@ -278,8 +278,8 @@ delegation separately; they do not prove successful containment.
 ### Disk-space safeguard
 
 Restricted native commands check available space on every declared writable
-root before launch and once per second while running. Checks also include the
-native helper's temporary storage on macOS/Windows and Windows' AppContainer
+root and the worker journal before launch and once per second while running.
+Checks also include the native helper's temporary storage on macOS/Windows and Windows' AppContainer
 profile storage, which can be on a different disk from task files. Each sampling
 pass batches its filesystem queries outside Tokio workers. Copying a trusted
 helper requires the reserve plus the image size; the macOS copy is bounded even
@@ -293,7 +293,7 @@ failed publication retains the private edits.
 This requires no volumes, administrator access or filesystem setup. It is a
 best-effort safeguard, not a quota: concurrent writers and writes between
 checks can overshoot the reserve. Host-authority native commands do not use
-this guard.
+this runtime reserve monitor.
 
 ## The Tool Loop
 
