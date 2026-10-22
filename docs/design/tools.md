@@ -215,9 +215,11 @@ Resource scope is required in the persisted command identity, so a retry cannot
 raise limits or remove them. Other native adapters explicitly refuse limited
 execution until implemented. Linux applies both invocation and worker-fleet
 ceilings; per-task aggregate budgets and writable disk capacity remain unfinished.
-The explicit-delegation native test exercises thread exhaustion, memory OOM,
-controller values, stale-group reclamation and cleanup after exit and cancellation. Ordinary CI without
-delegation tests refusal, not successful containment.
+The native resource test uses the production delegation bootstrap and exercises
+thread exhaustion, memory OOM, controller values, stale-group reclamation and
+cleanup after exit and cancellation. Positive qualification requires a supported
+kernel and working user-manager delegation. Refusal tests cover unavailable
+delegation separately; they do not prove successful containment.
 
 ## The Tool Loop
 

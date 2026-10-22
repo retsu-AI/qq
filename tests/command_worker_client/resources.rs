@@ -1,4 +1,4 @@
-//! Real aggregate resource exhaustion; run in an explicitly delegated cgroup.
+//! Real resource exhaustion through the production worker's delegation setup.
 use super::filesystem::{finish, request};
 use qq_core::command_owner::{
     CommandLauncher, CommandOwner, NativeDirectoryGrant, NativeResourceLimits, NativeResources,
@@ -63,11 +63,8 @@ fn resource_probe() {
 }
 
 #[tokio::test]
-#[ignore = "requires QQ_TEST_CGROUP_ROOT delegated with cpu, memory and pids controllers; exercised with systemd-run"]
 async fn delegated_resource_scope_bounds_native_tasks_and_memory_and_removes_groups() {
-    let delegation = std::path::PathBuf::from(
-        std::env::var_os("QQ_TEST_CGROUP_ROOT").expect("explicit delegated test root"),
-    );
+    let delegation = super::delegation::prepare().await.unwrap().path;
     // A dead owner may have left an empty cgroup after an abrupt stop.
     let mut exited = std::process::Command::new("true").spawn().unwrap();
     let old_owner = exited.id();

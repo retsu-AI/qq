@@ -2,6 +2,9 @@
 #![cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[path = "../src/command_owner/client.rs"]
 mod client;
+#[cfg(target_os = "linux")]
+#[path = "../src/command_owner/delegation.rs"]
+mod delegation;
 use qq_core::command_owner::{
     CommandOwnerError, CommandStatus, NativeCommand, NativeCommandService, NativeEnvironment,
 };
