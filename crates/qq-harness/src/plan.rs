@@ -50,6 +50,8 @@ impl Default for PlanCacheLimits {
 /// redacts the document.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PlanKey {
+    /// Logical project supplying configuration, separate from task files.
+    pub configuration_workspace: PathBuf,
     pub workspace: PathBuf,
     pub model: ModelSelection,
     pub profile: AgentProfileId,
@@ -105,6 +107,7 @@ impl std::fmt::Debug for PlanKey {
         formatter
             .debug_struct("PlanKey")
             .field("workspace", &self.workspace)
+            .field("configuration_workspace", &self.configuration_workspace)
             .field("model", &self.model)
             .field("profile", &self.profile)
             .field("explicit_config_path", &self.explicit_config_path)
@@ -637,6 +640,7 @@ mod tests {
 
     fn key(workspace: &Path, model: &str) -> PlanKey {
         PlanKey {
+            configuration_workspace: workspace.to_owned(),
             workspace: workspace.to_owned(),
             model: ModelSelection {
                 model_is_fallback: false,

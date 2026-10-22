@@ -273,6 +273,9 @@ impl RuntimeLoadProgress {
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLoadRequest {
+    /// Physical task files chosen by the trusted session owner. Configuration
+    /// continues to load from `workspace`; models and clients cannot set this.
+    pub execution_workspace: Option<crate::command_owner::NativeDirectoryGrant>,
     pub reasoning_effort: Option<qq_provider::ReasoningEffort>,
     pub workspace: String,
     pub model: ModelSelection,

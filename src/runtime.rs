@@ -1336,7 +1336,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None)
+        self.plan_with_lookup_progress(request, profile, None, None)
             .map(|(plan, _)| plan)
     }
 
@@ -1345,8 +1345,9 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: &qq_core::RuntimeLoadProgress,
+        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, Some(progress))
+        self.plan_with_lookup_progress(request, profile, Some(progress), execution_workspace)
             .map(|(plan, _)| plan)
     }
 
@@ -1357,7 +1358,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None)
+        self.plan_with_lookup_progress(request, profile, None, None)
     }
 
     fn plan_with_lookup_progress(
@@ -1365,12 +1366,35 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
+        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
-        let workspace = qq_config::canonical_working_directory(request.cwd())?;
+        let configuration_workspace = qq_config::canonical_working_directory(request.cwd())?;
+        let workspace = if let Some(grant) = execution_workspace {
+            let validate = || {
+                let canonical = std::fs::canonicalize(&grant.path)?;
+                if canonical != grant.path
+                    || qq_core::command_owner::NativeWorkspaceIdentity::capture(&canonical)?
+                        != grant.identity
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "task execution workspace changed",
+                    ));
+                }
+                Ok(canonical)
+            };
+            validate().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
+                path: grant.path.clone(),
+                source,
+            })?
+        } else {
+            configuration_workspace.clone()
+        };
         let key = PlanKey {
+            configuration_workspace,
             workspace: workspace.clone(),
             model: ModelSelection {
                 model_is_fallback: false,
@@ -1389,7 +1413,26 @@ impl RuntimeFactory {
             self.compile_generation(request, profile, &workspace, progress)
         });
         match lookup {
-            Ok(result) => Ok(result),
+            Ok((plan, lookup)) => {
+                if let Some(grant) = execution_workspace {
+                    let held = plan.workspace_identity().map_err(|source| {
+                        RuntimeBuildError::ExecutionWorkspace {
+                            path: grant.path.clone(),
+                            source,
+                        }
+                    })?;
+                    if plan.workspace_path() != grant.path || held != grant.identity {
+                        return Err(RuntimeBuildError::ExecutionWorkspace {
+                            path: grant.path.clone(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "compiled plan does not hold the admitted task workspace",
+                            ),
+                        });
+                    }
+                }
+                Ok((plan, lookup))
+            }
             Err(PlanCacheError::Compile(error)) => Err(error),
             Err(PlanCacheError::Capacity { .. }) => Err(RuntimeBuildError::PlanCacheFull),
             Err(PlanCacheError::ShutDown) => Err(RuntimeBuildError::PlanCacheShutDown),
@@ -2424,8 +2467,12 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan =
-                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
+                let plan = factory.plan_for_profile_with_progress(
+                    &load,
+                    &request.profile,
+                    &progress,
+                    request.execution_workspace.as_ref(),
+                )?;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;
@@ -3708,6 +3755,12 @@ fn preparation_phase(
 
 #[derive(Debug, Error)]
 pub enum RuntimeBuildError {
+    #[error("could not admit task execution workspace {path}: {source}")]
+    ExecutionWorkspace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("runtime preparation was cancelled")]
     PreparationCancelled,
     #[error(transparent)]
@@ -3782,7 +3835,7 @@ impl RuntimeBuildError {
     fn failure_kind(&self) -> RunFailureKind {
         match self {
             Self::Config(ConfigError::PolicyViolation { .. }) => RunFailureKind::Policy,
-            Self::Config(_) => RunFailureKind::Configuration,
+            Self::Config(_) | Self::ExecutionWorkspace { .. } => RunFailureKind::Configuration,
             Self::Auth(_) => RunFailureKind::Authentication,
             Self::Provider(error) => match error.kind() {
                 qq_provider::ProviderErrorKind::Configuration => {
@@ -5923,6 +5976,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_runtime_uses_detached_files_and_source_configuration() {
+        let fixture = RuntimeFixture::new();
+        let source = fixture.path("work").canonicalize().unwrap();
+        let task = fixture.path("task");
+        fs::create_dir(&task).unwrap();
+        let task = task.canonicalize().unwrap();
+        fs::create_dir(task.join(".qq")).unwrap();
+        fs::write(
+            task.join(".qq/config.ron"),
+            "invalid task-controlled configuration",
+        )
+        .unwrap();
+        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
+        let factory = fixture.factory();
+        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        let request = RuntimeLoadRequest {
+            execution_workspace: Some(grant),
+            workspace: source.to_string_lossy().into_owned(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+            reasoning_effort: None,
+        };
+        let loaded = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(loaded.plan.workspace_path(), task);
+        assert_eq!(loaded.resolved_model().route, "custom/host");
+        let other_source = fixture.path("other-source");
+        fs::create_dir_all(other_source.join(".qq")).unwrap();
+        fs::write(
+            other_source.join(".qq/config.ron"),
+            r#"(version:1,model:"custom/other")"#,
+        )
+        .unwrap();
+        factory
+            .inner
+            .config
+            .grant_pending_trust(&LoadRequest::new(other_source.canonicalize().unwrap()))
+            .unwrap();
+        let mut other_request = request.clone();
+        other_request.workspace = other_source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let other = RuntimeLoader::load(&factory, other_request).await.unwrap();
+        assert_eq!(other.plan.workspace_path(), task);
+        assert_eq!(
+            other.resolved_model().route,
+            "custom/other",
+            "a shared physical root must not reuse another project's configuration"
+        );
+        fs::rename(&task, fixture.path("held-task")).unwrap();
+        fs::create_dir(&task).unwrap();
+        let result = RuntimeLoader::load(&factory, request).await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    ..
+                })
+            ),
+            "replaced task roots must not use cached authority"
+        );
+    }
+
+    #[tokio::test]
     async fn session_model_fallback_resolves_config_but_explicit_pin_wins() {
         let fixture = RuntimeFixture::new();
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
@@ -5944,6 +6065,7 @@ mod tests {
             let loaded = RuntimeLoader::load(
                 &factory,
                 RuntimeLoadRequest {
+                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: workspace.display().to_string(),
                     model: ModelSelection {
@@ -6868,6 +6990,7 @@ mod tests {
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                execution_workspace: None,
                 reasoning_effort: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
@@ -8202,6 +8325,7 @@ mod tests {
         let workspace = qq_config::canonical_working_directory(request.cwd()).unwrap();
         let profile = AgentProfileId::default();
         let key = PlanKey {
+            configuration_workspace: workspace.clone(),
             workspace: workspace.clone(),
             model: ModelSelection::default(),
             profile: profile.clone(),
@@ -8936,8 +9060,12 @@ mod tests {
         });
         let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 1);
         let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
-        let result =
-            factory.plan_for_profile_with_progress(&request, &AgentProfileId::default(), &progress);
+        let result = factory.plan_for_profile_with_progress(
+            &request,
+            &AgentProfileId::default(),
+            &progress,
+            None,
+        );
         assert!(
             matches!(result, Err(RuntimeBuildError::PreparationCancelled)),
             "{result:?}"
@@ -8971,6 +9099,7 @@ mod tests {
             &fixture.request("invalid"),
             &AgentProfileId::default(),
             &progress,
+            None,
         );
         assert!(matches!(
             result,
@@ -8988,6 +9117,7 @@ mod tests {
             .factory()
             .load_with_progress(
                 RuntimeLoadRequest {
+                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: fixture.path("missing").to_string_lossy().into_owned(),
                     model: ModelSelection::default(),
