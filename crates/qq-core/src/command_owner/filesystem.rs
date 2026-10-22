@@ -31,7 +31,8 @@ impl NativeDirectoryGrant {
 /// Landlock before payload execution. Metadata writes outside writable roots
 /// are blocked too. A verified /dev/null supports standard subprocess I/O;
 /// no implicit home, toolchain, temporary or workspace roots are added.
-/// macOS applies a default-deny Seatbelt profile with these explicit roots.
+/// macOS applies a default-deny Seatbelt profile with these explicit roots;
+/// its loader baseline also permits listing the root directory itself.
 /// It does not create a private mount tree. Windows currently refuses restricted
 /// requests. Neither backend silently substitutes host access.
 /// This does not bound CPU/memory or broker credentials in readable inputs,

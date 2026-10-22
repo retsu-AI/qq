@@ -8,6 +8,7 @@ with tempfile.TemporaryDirectory(prefix="qq-loader-probe-") as directory:
     base = ["/bin", "/usr", "/System/Library", "/System/Cryptexes/OS", directory]
     candidates = [
         ("baseline", []),
+        ("root-directory", []),
         ("app-cryptex", ["/System/Cryptexes/App"]),
         ("preboot-cryptexes", ["/System/Volumes/Preboot/Cryptexes"]),
         ("preboot", ["/System/Volumes/Preboot"]),
@@ -16,6 +17,8 @@ with tempfile.TemporaryDirectory(prefix="qq-loader-probe-") as directory:
     ]
     for label, extra in candidates:
         profile = "(version 1)(deny default)(allow process-exec process-fork)(allow sysctl-read)"
+        if label == "root-directory":
+            profile += '(allow file-read-data (require-all (literal "/") (vnode-type DIRECTORY)))'
         roots = set()
         for root in base + extra:
             roots.add(root)

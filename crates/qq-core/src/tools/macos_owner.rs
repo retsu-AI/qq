@@ -404,6 +404,10 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(allow process-exec process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
+    // dyld opens the root directory while resolving its shared cache. This
+    // grants directory entries only, never reads of descendant file contents.
+    profile
+        .push_str("(allow file-read-data (require-all (literal \"/\") (vnode-type DIRECTORY)))\n");
     if network == NativeNetwork::Host {
         profile.push_str("(allow network*)\n");
     }
