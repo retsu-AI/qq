@@ -166,11 +166,8 @@ impl ToolGate for SessionToolGate {
                         biased;
                         changed = cancellation.changed() => {
                             let _ = changed;
-                            inner.remove_approval(call.id);
-                            return GateDecision::Deny {
-                                message: "The run stopped before this question was answered."
-                                    .to_owned(),
-                            };
+                            return cancelled_hold(&inner, &claimed, call.id,
+                                "The run stopped before this question was answered.").await;
                         }
                         result = &mut resolved => result.is_err(),
                         () = sleep_until_or_never(deadline) => true,
@@ -333,11 +330,8 @@ impl ToolGate for SessionToolGate {
                                 biased;
                                 changed = cancellation.changed() => {
                                     let _ = changed;
-                                    inner.remove_approval(call.id);
-                                    return GateDecision::Deny {
-                                        message: "The run stopped before this approval was resolved."
-                                            .to_owned(),
-                                    };
+                                    return cancelled_hold(&inner, &claimed, call.id,
+                                        "The run stopped before this approval was resolved.").await;
                                 }
                                 result = &mut resolved => break result.is_err(),
                                 () = sleep_until_or_never(goal_deadline) => break true,
@@ -449,14 +443,11 @@ impl ToolGate for SessionToolGate {
                             tokio::select! {
                                 biased;
                                 changed = cancellation.changed() => {
-                                    // Run cancellation or shutdown: leave the call
-                                    // awaiting so run completion interrupts it.
+                                    // The gate can observe cancellation before the
+                                    // session loop; retain an expired goal hold first.
                                     let _ = changed;
-                                    inner.remove_approval(call.id);
-                                    return GateDecision::Deny {
-                                        message: "The run stopped before this approval was resolved."
-                                            .to_owned(),
-                                    };
+                                    return cancelled_hold(&inner, &claimed, call.id,
+                                        "The run stopped before this approval was resolved.").await;
                                 }
                                 result = &mut resolved => break result.is_err(),
                                 () = sleep_until_or_never(deadline) => break true,
@@ -468,6 +459,25 @@ impl ToolGate for SessionToolGate {
                 }
             }
         })
+    }
+}
+
+// The gate and the session loop race on the same cancellation signal. Settle
+// an expired goal's unanswered hold before yielding a denied/interrupted call:
+// the outer loop can no longer find the awaiting row once it persists that call.
+async fn cancelled_hold(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    call: ToolCallId,
+    message: &str,
+) -> GateDecision {
+    let settled = expire_goal_hold(inner, claimed, true).await;
+    inner.remove_approval(call);
+    match settled {
+        Ok(()) => GateDecision::Deny {
+            message: message.to_owned(),
+        },
+        Err(error) => approval_persistence_failure(error),
     }
 }
 
