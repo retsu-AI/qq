@@ -1756,6 +1756,71 @@ async fn captured_environment_controls_execution_without_persisting_values_in_th
 }
 
 #[tokio::test]
+async fn refused_duplicate_cannot_remove_an_admitted_commands_cancellation() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let directory = root.path().join("owner");
+    let owner = CommandOwner::open(directory.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let reclaimed = ToolCallId::from_bytes([0; 16]);
+    tokio::task::spawn_blocking(move || {
+        let mut db = Connection::open(directory.join("commands.sqlite3")).unwrap();
+        let tx = db.transaction().unwrap();
+        for n in 0..MAX_RETAINED {
+            let id = ToolCallId::from_bytes((n as u128).to_le_bytes());
+            tx.execute(
+                "INSERT INTO commands(id,request,status) VALUES (?1,NULL,'lost')",
+                [id.to_string()],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+    })
+    .await
+    .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let hook = |hooks: &Mutex<Vec<AdmissionHook>>| {
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, gate) = tokio::sync::oneshot::channel();
+        hooks.lock().unwrap().push(AdmissionHook {
+            id,
+            entered,
+            release: gate,
+        });
+        (waiting, release)
+    };
+    let (refused, release_refused) = hook(&ADMISSION_RESULT_HOOKS);
+    let request = command(workspace.path(), id, "echo started; while :; do :; done");
+    let first_owner = owner.clone();
+    let first_request = request.clone();
+    let first = tokio::spawn(async move { first_owner.submit(first_request).await });
+    refused.await.unwrap();
+    let (registered, release_registered) = hook(&SUBMISSION_HOOKS);
+    let second_owner = owner.clone();
+    let second = tokio::spawn(async move { second_owner.submit(request).await });
+    registered.await.unwrap();
+    owner.acknowledge(vec![reclaimed]).await.unwrap();
+    let (committed, release_committed) = hook(&ADMISSION_HOOKS);
+    release_registered.send(()).unwrap();
+    committed.await.unwrap();
+    // The refused submission finishes after its duplicate has committed.
+    release_refused.send(()).unwrap();
+    assert!(matches!(first.await.unwrap(), Err(CommandOwnerError::Full)));
+    release_committed.send(()).unwrap();
+    let result = second.await.unwrap();
+    if result.is_err() {
+        let _ = owner.shutdown().await;
+    }
+    result.expect("a refused duplicate must preserve the admitted command's watcher");
+    owner.cancel(id).await.unwrap();
+    let finished = wait_finished(&owner, id, 0).await;
+    assert!(finished.result.unwrap().is_error());
+    assert!(owner.is_available());
+    owner.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn acknowledged_results_release_capacity_without_replaying_retired_commands() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
@@ -2017,6 +2082,8 @@ async fn acknowledgement_saturation_does_not_delay_live_cancellation() {
         LiveCommand {
             changed: watch::channel(0).0,
             cancellation: cancellation.clone(),
+            pending_admissions: 0,
+            admitted: true,
         },
     );
     let other = ToolCallId::generate().unwrap();
