@@ -95,7 +95,10 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             SessionCommand::CreateSession {
                 workspace_id,
                 parent_id: None,
-                model: ModelSelection::default(),
+                model: ModelSelection {
+                    model: Some("fake/model".to_owned()),
+                    ..ModelSelection::default()
+                },
                 approval_mode: ApprovalMode::default(),
                 profile: AgentProfileId::default(),
                 reasoning_effort: None,
