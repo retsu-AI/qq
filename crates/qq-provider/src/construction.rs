@@ -19,14 +19,10 @@ use crate::{
 
 pub(crate) const GOOGLE_MANTLE_UNSUPPORTED_MESSAGE: &str =
     "Google GenerateContent is not supported by Amazon Bedrock Mantle";
-const CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
-    "Codex authentication requires the OpenAI Responses protocol";
 const REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
     "request-time Codex authentication requires the OpenAI Responses protocol";
 const CODEX_BODY_REQUIRES_RESPONSES_MESSAGE: &str =
     "the Codex request body shape requires the OpenAI Responses protocol";
-const REQUEST_TIME_GOOGLE_API_KEY_REQUIRES_GOOGLE_MESSAGE: &str =
-    "request-time Google API-key authentication requires the Google GenerateContent protocol";
 const AUTHORIZER_WITH_AUTH_MESSAGE: &str =
     "internal request authorization cannot be combined with HTTP authentication";
 
@@ -264,25 +260,6 @@ fn resolve_http_auth(
                 authorizer: RequestAuthorizer::default(),
             }),
         },
-        (
-            HttpAuth::Codex {
-                access_token,
-                account_id,
-                is_fedramp,
-            },
-            None,
-        ) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::Static(ResponsesAuth::Codex {
-                    access_token,
-                    account_id,
-                    is_fedramp,
-                }),
-            )),
-            _ => Err(ProviderError::Configuration(
-                CODEX_REQUIRES_RESPONSES_MESSAGE.to_owned(),
-            )),
-        },
         (HttpAuth::RequestTimeBearer(credentials), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
                 ResponsesConstructionAuth::RequestTimeBearer(credentials),
@@ -299,15 +276,6 @@ fn resolve_http_auth(
                 auth: GoogleAuth::NoAuth,
                 authorizer: RequestAuthorizer::request_time_bearer(credentials),
             }),
-        },
-        (HttpAuth::RequestTimeGoogleApiKey(credentials), None) => match protocol {
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::NoAuth,
-                authorizer: RequestAuthorizer::request_time_google_api_key(credentials),
-            }),
-            _ => Err(ProviderError::Configuration(
-                REQUEST_TIME_GOOGLE_API_KEY_REQUIRES_GOOGLE_MESSAGE.to_owned(),
-            )),
         },
         (HttpAuth::RequestTimeCodex(credentials), None) => match protocol {
             HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
@@ -379,11 +347,6 @@ mod tests {
             HttpAuth::ApiKey("test-api-key".into()),
             HttpAuth::Bearer("test-bearer".into()),
             HttpAuth::Header("x-test-key".to_owned(), "test-value".into()),
-            HttpAuth::Codex {
-                access_token: "test-codex".into(),
-                account_id: "test-account".into(),
-                is_fedramp: false,
-            },
             HttpAuth::RequestTimeBearer(SharedRequestCredentialProvider::new(
                 StaticBearerCredentials,
             )),
@@ -420,11 +383,9 @@ mod tests {
                 reqwest::Client::new(),
                 spec(
                     protocol,
-                    HttpAuth::Codex {
-                        access_token: "codex-secret".into(),
-                        account_id: "account-secret".into(),
-                        is_fedramp: false,
-                    },
+                    HttpAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                        StaticCodexCredentials,
+                    )),
                 ),
             )
             .err()
@@ -432,8 +393,8 @@ mod tests {
 
             assert!(matches!(error, ProviderError::Configuration(_)));
             let rendered = format!("{error:?} {error}");
-            assert!(!rendered.contains("codex-secret"));
-            assert!(!rendered.contains("account-secret"));
+            assert!(!rendered.contains("test-codex"));
+            assert!(!rendered.contains("test-account"));
         }
     }
 

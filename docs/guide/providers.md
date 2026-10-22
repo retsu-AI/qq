@@ -20,7 +20,10 @@ of their models.
 | `bedrock-mantle` | AWS credential chain or `ApiKey` | as above | OpenAI/Anthropic wire protocols on Bedrock |
 
 Resolution order for a built-in: an explicit `api_key:` in `providers`, then
-the stored credential `PROVIDER/default`, then the environment variable.
+the stored credential `PROVIDER/PROFILE` (`PROVIDER/default` unless
+`profile:` is set), then the environment variable. For `xai`, a stored OAuth
+login takes the place of a stored API key. `openai-codex` uses only its stored
+ChatGPT login.
 
 ## Storing credentials
 

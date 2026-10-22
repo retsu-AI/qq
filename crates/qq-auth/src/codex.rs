@@ -1283,14 +1283,13 @@ fn map_request_credential_error(
     remedies: &MissingCredentialRemedies,
 ) -> RequestCredentialError {
     match error {
+        // Only the refresh path reaches here; login-only errors such as a
+        // denied authorization or a callback timeout cannot.
+        AuthError::Codex(CodexAuthError::TokenRequestRejected { .. }) => {
+            RequestCredentialError::RefreshRejected
+        }
         AuthError::Codex(
-            CodexAuthError::TokenRequestRejected { .. }
-            | CodexAuthError::AuthorizationDenied { .. },
-        ) => RequestCredentialError::RefreshRejected,
-        AuthError::Codex(
-            CodexAuthError::TokenRequestFailed { .. }
-            | CodexAuthError::TokenResponseInvalid { .. }
-            | CodexAuthError::CallbackTimedOut,
+            CodexAuthError::TokenRequestFailed { .. } | CodexAuthError::TokenResponseInvalid { .. },
         ) => RequestCredentialError::RefreshUnavailable,
         AuthError::StoredCredentialNotRegistered { .. }
         | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),

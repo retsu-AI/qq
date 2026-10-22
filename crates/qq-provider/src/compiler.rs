@@ -203,9 +203,9 @@ pub struct HttpProviderRecipe {
 }
 
 impl HttpProviderRecipe {
-    /// A recipe whose Responses body shape is the one its auth intent has
-    /// always implied: Codex for the Codex intents, standard otherwise. Use
-    /// [`Self::with_body_shape`] to choose it independently.
+    /// A recipe whose Responses body shape is the one its auth intent
+    /// implies: Codex for request-time Codex credentials, standard otherwise.
+    /// Use [`Self::with_body_shape`] to choose it independently.
     #[must_use]
     pub fn new(endpoint: EndpointSpec, protocol: HttpProtocol, auth: HttpAuth) -> Self {
         let body_shape = ResponsesBodyShape::implied_by(&auth);
@@ -245,17 +245,16 @@ pub enum ResponsesBodyShape {
 }
 
 impl ResponsesBodyShape {
-    /// The shape the auth intent implied before the shape was explicit.
+    /// The shape the auth intent implies before the shape is explicit.
     #[must_use]
     pub const fn implied_by(auth: &HttpAuth) -> Self {
         match auth {
-            HttpAuth::Codex { .. } | HttpAuth::RequestTimeCodex(_) => Self::Codex,
+            HttpAuth::RequestTimeCodex(_) => Self::Codex,
             HttpAuth::NoAuth
             | HttpAuth::ApiKey(_)
             | HttpAuth::Bearer(_)
             | HttpAuth::Header(..)
-            | HttpAuth::RequestTimeBearer(_)
-            | HttpAuth::RequestTimeGoogleApiKey(_) => Self::Standard,
+            | HttpAuth::RequestTimeBearer(_) => Self::Standard,
         }
     }
 }
@@ -342,11 +341,6 @@ pub enum HttpAuth {
     ApiKey(SecretLiteral),
     Bearer(SecretLiteral),
     Header(String, SecretLiteral),
-    Codex {
-        access_token: SecretLiteral,
-        account_id: SecretLiteral,
-        is_fedramp: bool,
-    },
     /// Bearer credentials resolved on each request.
     RequestTimeBearer(SharedRequestCredentialProvider),
     /// Codex credentials resolved on each request.
@@ -354,10 +348,6 @@ pub enum HttpAuth {
     /// This intent is valid only for OpenAI Responses. [`HttpProviderRecipe::new`]
     /// pairs it with [`ResponsesBodyShape::Codex`] unless another shape is set.
     RequestTimeCodex(SharedRequestCredentialProvider),
-    /// A Google API key resolved on each request and sent as
-    /// `x-goog-api-key`. Valid only for Google GenerateContent; credentials
-    /// come from [`crate::RequestCredential::google_api_key`].
-    RequestTimeGoogleApiKey(SharedRequestCredentialProvider),
 }
 
 #[cfg(test)]
@@ -407,61 +397,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn static_codex_auth_derives_headers_and_request_shape() {
-        let server = LoopbackServer::sse("data: {\"type\":\"response.completed\"}\n\n");
-        let provider = ProviderCompiler::new()
-            .unwrap()
-            .compile(ProviderRecipe::http(HttpProviderRecipe::new(
-                EndpointSpec::exact(
-                    format!("{}/backend-api/codex/responses", server.base_url),
-                    true,
-                ),
-                HttpProtocol::OpenAiResponses,
-                HttpAuth::Codex {
-                    access_token: "static-codex-access-token".into(),
-                    account_id: "static-workspace-id".into(),
-                    is_fedramp: false,
-                },
-            )))
-            .unwrap();
-
-        let events = provider
-            .stream(ModelRequest::new(
-                "gpt-test",
-                vec![Message::user("ping")],
-                128,
-            ))
-            .collect::<Vec<_>>()
-            .await;
-
-        assert!(matches!(
-            &events[..],
-            [Ok(ProviderEvent::Completed { usage: None })]
-        ));
-        let request = server.capture();
-        assert_eq!(
-            request.request_line(),
-            Some("POST /backend-api/codex/responses HTTP/1.1")
-        );
-        assert_eq!(
-            request.header("authorization"),
-            Some("Bearer static-codex-access-token")
-        );
-        assert_eq!(
-            request.header("chatgpt-account-id"),
-            Some("static-workspace-id")
-        );
-        assert_eq!(request.header("originator"), Some("qq"));
-        assert!(
-            !request
-                .json_body()
-                .as_object()
-                .unwrap()
-                .contains_key("max_output_tokens")
-        );
-    }
-
-    #[tokio::test]
     async fn request_time_codex_auth_omits_max_output_tokens() {
         let server = LoopbackServer::sse("data: {\"type\":\"response.completed\"}\n\n");
         let base_url = server.base_url.clone();
@@ -490,6 +425,10 @@ mod tests {
             Ok(ProviderEvent::Completed { usage: None })
         ));
         let request = server.capture();
+        assert_eq!(
+            request.request_line(),
+            Some("POST /backend-api/codex/responses HTTP/1.1")
+        );
         assert_eq!(
             request.header("authorization"),
             Some("Bearer codex-test-access-token")
@@ -737,11 +676,9 @@ mod tests {
             .compile(ProviderRecipe::http(HttpProviderRecipe::new(
                 EndpointSpec::exact("https://example.test/v1/chat/completions", false),
                 HttpProtocol::OpenAiChatCompletions,
-                HttpAuth::Codex {
-                    access_token: "test-access-token".into(),
-                    account_id: "test-account".into(),
-                    is_fedramp: false,
-                },
+                HttpAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                    StaticCodexCredentials,
+                )),
             )))
             .err()
             .expect("incompatible recipe must fail");
@@ -1006,89 +943,5 @@ mod tests {
                 "{name}: {error:?}"
             );
         }
-    }
-
-    struct StaticGoogleApiKey;
-
-    impl crate::RequestCredentialProvider for StaticGoogleApiKey {
-        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
-            Box::pin(async { crate::RequestCredential::google_api_key("google-request-time-key") })
-        }
-    }
-
-    #[tokio::test]
-    async fn google_accepts_request_time_api_keys_as_x_goog_api_key() {
-        let server = LoopbackServer::sse(concat!(
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},",
-            "\"finishReason\":\"STOP\"}]}\n\n"
-        ));
-        let provider = ProviderCompiler::new()
-            .unwrap()
-            .compile_for_canary(ProviderRecipe::http(HttpProviderRecipe::new(
-                EndpointSpec::base(format!("{}/v1beta", server.base_url), true),
-                HttpProtocol::GoogleGenerateContent,
-                HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
-                    StaticGoogleApiKey,
-                )),
-            )))
-            .unwrap();
-        let events = provider
-            .stream(ModelRequest::new(
-                "gemini-test",
-                vec![Message::user("ping")],
-                64,
-            ))
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            matches!(events.last(), Some(Ok(ProviderEvent::Completed { .. }))),
-            "{events:?}"
-        );
-        let request = server.capture();
-        assert_eq!(
-            request.header("x-goog-api-key"),
-            Some("google-request-time-key")
-        );
-        assert_eq!(request.header("authorization"), None);
-    }
-
-    #[test]
-    fn request_time_google_api_keys_are_rejected_outside_google_and_as_static_headers() {
-        for protocol in [
-            HttpProtocol::OpenAiResponses,
-            HttpProtocol::OpenAiChatCompletions,
-            HttpProtocol::AnthropicMessages,
-        ] {
-            let error = ProviderCompiler::new()
-                .unwrap()
-                .compile(ProviderRecipe::http(HttpProviderRecipe::new(
-                    EndpointSpec::exact("http://127.0.0.1:1/v1", true),
-                    protocol,
-                    HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
-                        StaticGoogleApiKey,
-                    )),
-                )))
-                .err()
-                .expect("Google API-key intent needs GenerateContent");
-            assert!(
-                matches!(error, ProviderError::Configuration(_)),
-                "{protocol:?}"
-            );
-        }
-        let error = ProviderCompiler::new()
-            .unwrap()
-            .compile(ProviderRecipe::http(
-                HttpProviderRecipe::new(
-                    EndpointSpec::base("http://127.0.0.1:1/v1beta", true),
-                    HttpProtocol::GoogleGenerateContent,
-                    HttpAuth::RequestTimeGoogleApiKey(SharedRequestCredentialProvider::new(
-                        StaticGoogleApiKey,
-                    )),
-                )
-                .with_headers(vec![("x-goog-api-key".to_owned(), "static".to_owned())]),
-            ))
-            .err()
-            .expect("a static x-goog-api-key must be rejected");
-        assert!(matches!(error, ProviderError::Configuration(_)));
     }
 }
