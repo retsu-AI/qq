@@ -173,7 +173,7 @@ async fn scoped_command_checks_disk_space_on_the_worker_journal() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let _workspace_space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
-    let journal = root.path().join("owner");
+    let journal = root.path().canonicalize().unwrap().join("owner");
     let owner = CommandOwner::open(journal.clone(), "unknown", launcher())
         .await
         .unwrap();
