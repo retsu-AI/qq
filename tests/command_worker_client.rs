@@ -67,11 +67,10 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
             }
         })
         .await;
-        let trace_preparation = std::env::var_os("QQ_TEST_PREPARATION_TRACE").is_some();
         // Capture the queued/running row and metadata-only phase trace before
         // stopping the worker, so a timeout does not destroy its evidence.
         #[cfg(target_os = "linux")]
-        let diagnostics = if finished.is_err() || trace_preparation {
+        let diagnostics = if finished.is_err() {
             let state = directory.clone();
             let logs = client.diagnostic_directory().join("qq/logs");
             let id = request.id;
@@ -114,9 +113,6 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
         };
         #[cfg(not(target_os = "linux"))]
         let diagnostics = String::new();
-        if trace_preparation {
-            eprintln!("[DEBUG-native-prepare] {diagnostics}");
-        }
         client.stop_spawned().await;
         let finished = finished.unwrap_or_else(|error| panic!(
             "initial command did not finish: {error}; replace_store={replace_store}; last={last:?}; {diagnostics}; counter={:?}",
