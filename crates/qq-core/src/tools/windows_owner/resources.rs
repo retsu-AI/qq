@@ -2,7 +2,10 @@
 use crate::command_owner::NativeResources;
 use std::io;
 
-pub(super) fn apply(policy: NativeResources) -> io::Result<Option<u32>> {
+pub(super) fn apply(
+    policy: NativeResources,
+    cpu_parent_percent: Option<u32>,
+) -> io::Result<Option<u32>> {
     policy.validate()?;
     let (memory_bytes, max_processes, cpu_percent) = match policy {
         NativeResources::Host => return Ok(None),
@@ -17,6 +20,7 @@ pub(super) fn apply(policy: NativeResources) -> io::Result<Option<u32>> {
             ));
         }
     };
+    let cpu_rate = child_cpu_rate(cpu_percent, cpu_parent_percent)?;
     let limits = win_custody::JobLimits::new()
         .kill_on_close(true)
         .active_processes(max_processes)
@@ -32,5 +36,43 @@ pub(super) fn apply(policy: NativeResources) -> io::Result<Option<u32>> {
     // handle lives only in this trusted helper until process exit; the outer
     // command job still owns cancellation, crashes and complete drain.
     job.assign_current_process()?;
-    Ok(Some(cpu_percent))
+    // Nested job CPU rates are relative to the closest CPU-limited ancestor.
+    // Keep the requested ceiling in machine-wide units, rounding down.
+    Ok(cpu_rate)
+}
+
+fn child_cpu_rate(cpu_percent: u32, cpu_parent_percent: Option<u32>) -> io::Result<Option<u32>> {
+    if !(1..=100).contains(&cpu_percent)
+        || cpu_parent_percent.is_some_and(|percent| !(1..=100).contains(&percent))
+    {
+        return Err(io::Error::other("invalid CPU policy"));
+    }
+    Ok(match cpu_parent_percent {
+        Some(parent) if cpu_percent >= parent => None,
+        Some(parent) => Some(cpu_percent * 100 / parent),
+        None => Some(cpu_percent),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_cpu_rates_never_exceed_the_requested_machine_share() {
+        assert_eq!(child_cpu_rate(90, Some(90)).unwrap(), None);
+        assert_eq!(child_cpu_rate(50, Some(90)).unwrap(), Some(55));
+        assert_eq!(child_cpu_rate(50, None).unwrap(), Some(50));
+        for parent in 1..=100 {
+            for requested in 1..=100 {
+                let rate = child_cpu_rate(requested, Some(parent))
+                    .unwrap()
+                    .unwrap_or(100);
+                assert!(rate > 0);
+                assert!(rate * parent <= requested * 100);
+            }
+        }
+        assert!(child_cpu_rate(1, Some(0)).is_err());
+        assert!(child_cpu_rate(101, None).is_err());
+    }
 }
