@@ -1298,6 +1298,15 @@ async fn owned_payload_retains_the_workers_host_supplementary_groups() {
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
+    let attempts = if cfg!(target_os = "macos") { 32 } else { 1 };
+    for _ in 0..attempts {
+        exercise_cancel_response_loss(false).await;
+        exercise_cancel_response_loss(true).await;
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn exercise_cancel_response_loss(wait_for_descendant: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
@@ -1311,7 +1320,11 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
             {
                 // Do not cancel a merely queued command: the live shell must
                 // already own a descendant when cancellation is committed.
-                request.arguments = r#"{"command":"sleep 300 & printf ready; wait"}"#.to_owned();
+                request.arguments = if wait_for_descendant {
+                    r#"{"command":"sleep 300 & printf ready; wait"}"#.to_owned()
+                } else {
+                    crate::tools::PANIC_SHELL_ARGUMENTS.to_owned()
+                };
             }
             #[cfg(windows)]
             {
@@ -1321,23 +1334,27 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
         })
         .await
         .unwrap();
-    let running = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        let mut version = 0;
-        loop {
-            let snapshot = owner.wait(id, version).await.unwrap();
-            #[cfg(unix)]
-            let ready = snapshot.output.contains("ready");
-            #[cfg(windows)]
-            let ready = snapshot.process.is_some();
-            if ready {
-                break snapshot;
+    let running = if !wait_for_descendant {
+        owner.wait(id, 0).await.unwrap()
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut version = 0;
+            loop {
+                let snapshot = owner.wait(id, version).await.unwrap();
+                #[cfg(unix)]
+                let ready = snapshot.output.contains("ready");
+                #[cfg(windows)]
+                let ready = snapshot.process.is_some();
+                if ready {
+                    break snapshot;
+                }
+                assert_ne!(snapshot.status, CommandStatus::Finished);
+                version = snapshot.version;
             }
-            assert_ne!(snapshot.status, CommandStatus::Finished);
-            version = snapshot.version;
-        }
-    })
-    .await
-    .expect("cancellation fixture must reach a live command");
+        })
+        .await
+        .expect("cancellation fixture must reach a live command")
+    };
     let (entered, committed) = tokio::sync::oneshot::channel();
     let (release, gate) = tokio::sync::oneshot::channel();
     CANCELLATION_HOOKS.lock().unwrap().push(AdmissionHook {

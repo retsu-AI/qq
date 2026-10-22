@@ -542,7 +542,8 @@ pub(super) fn prepare(
             facts,
             manifest: approvals.shared_entries(),
             policy_sha256: policy_digest(),
-            producer: producer.capture(cancelled, deadline),
+            producer: tracing::info_span!(target: "qq::diagnostic", "native_producer_identity")
+                .in_scope(|| producer.capture(cancelled, deadline)),
         }),
         None => ExecutionContextReceipt::V1(facts),
     };
