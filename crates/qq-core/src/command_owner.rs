@@ -587,6 +587,7 @@ impl CommandOwner {
         cancellation: RunCancellation,
         task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
+        use tracing::Instrument as _;
         let started = tokio::time::Instant::now();
         let tool = request.tool.clone();
         let path = request.workspace;
@@ -598,6 +599,7 @@ impl CommandOwner {
             }
             Ok(workspace)
         })
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_workspace"))
         .await
         {
             Ok(workspace) => workspace,
@@ -655,7 +657,8 @@ impl CommandOwner {
             Arc::new(images),
             Arc::clone(&self.0.producer),
             Some(request.id),
-        );
+        )
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_dispatch"));
         tokio::pin!(execution);
         let expired = async {
             match task_deadline {

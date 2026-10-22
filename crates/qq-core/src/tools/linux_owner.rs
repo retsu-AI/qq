@@ -382,9 +382,12 @@ impl Startup {
         cancelled: &super::dispatch::ToolCancellation,
         deadline: std::time::Instant,
     ) -> io::Result<()> {
+        use tracing::Instrument as _;
         child.resources = self.resources;
         let acknowledgement = tokio::io::unix::AsyncFd::new(self.acknowledgement)?;
-        let bytes = read_pipe(&acknowledgement, 4).await?;
+        let bytes = read_pipe(&acknowledgement, 4)
+            .instrument(tracing::info_span!(target: "qq::diagnostic", "native_namespace"))
+            .await?;
         let pid = i32::from_le_bytes(
             bytes
                 .try_into()
@@ -417,7 +420,8 @@ impl Startup {
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
         // Identity is now pinned, so cancellation can safely interrupt setup.
         let ready = tokio::select! {
-            result = read_pipe(&acknowledgement, 1) => result?,
+            result = read_pipe(&acknowledgement, 1)
+                .instrument(tracing::info_span!(target: "qq::diagnostic", "native_release")) => result?,
             () = cancelled.cancelled() => return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "command startup was cancelled after release",

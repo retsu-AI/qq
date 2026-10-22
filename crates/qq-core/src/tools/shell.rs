@@ -381,6 +381,7 @@ pub(super) async fn run_shell(
     let linux_owner = process.linux_owner().cloned();
     #[cfg(target_os = "macos")]
     let macos_owner = process.macos_owner().cloned();
+    use tracing::Instrument as _;
     let mut prepared =
         match tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -420,6 +421,7 @@ pub(super) async fn run_shell(
             }
             Ok::<_, super::process_context::PreparationError>(prepared)
         })
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
         .await
         {
             Ok(Ok(prepared)) => prepared,
@@ -453,6 +455,7 @@ pub(super) async fn run_shell(
             cancelled,
             preparation_deadline,
         )
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_start"))
         .await
     {
         Ok(started) => started,

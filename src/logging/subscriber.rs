@@ -104,7 +104,17 @@ impl Subscriber for DiagnosticSubscriber {
         metadata.target() == "qq::diagnostic"
             && matches!(
                 metadata.name(),
-                "run" | "turn" | "provider" | "tool" | "store"
+                "run"
+                    | "turn"
+                    | "provider"
+                    | "tool"
+                    | "store"
+                    | "native_workspace"
+                    | "native_dispatch"
+                    | "native_prepare"
+                    | "native_start"
+                    | "native_namespace"
+                    | "native_release"
             )
     }
     fn new_span(&self, attributes: &Attributes<'_>) -> Id {

@@ -41,9 +41,9 @@ stdout and stderr under the QQ state directory's `logs/qq-N.jsonl` (on Linux,
 `${XDG_STATE_HOME:-$HOME/.local/state}/qq/logs`). Platforms without a separate
 state directory use the platform local-data directory.
 
-Run, turn, provider, tool and store spans record numeric ordinals and timing,
-not prompts, model output, arguments/results, paths, credentials or arbitrary
-provider errors. Dependency tracing is excluded. This is a lossy diagnostic,
+Run, turn, provider, tool, store and native command startup spans record numeric
+ordinals and timing, not prompts, model output, arguments/results, paths,
+credentials or arbitrary provider errors. Dependency tracing is excluded. This is a lossy diagnostic,
 not an audit: queue pressure drops whole records, each file stops at 8 MiB,
 and abrupt termination can lose queued records. Sixteen exclusive files cap
 retention at 128 MiB. When all slots exist, remove old diagnostic files from

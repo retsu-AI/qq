@@ -67,10 +67,55 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
             }
         })
         .await;
-        // Keep the observed state in failures and clean up even on timeout.
+        // Capture the queued/running row and metadata-only phase trace before
+        // stopping the worker, so a timeout does not destroy its evidence.
+        #[cfg(target_os = "linux")]
+        let diagnostics = if finished.is_err() {
+            let state = directory.clone();
+            let logs = client.diagnostic_directory().join("qq/logs");
+            let id = request.id;
+            tokio::task::spawn_blocking(move || {
+                use std::io::Read as _;
+                let row = rusqlite::Connection::open_with_flags(
+                    state.join("commands/commands.sqlite3"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .and_then(|connection| {
+                    connection.query_row(
+                        "SELECT status,version,length(output),receipt IS NOT NULL FROM commands WHERE id=?1",
+                        [id.to_string()],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, u64>(1)?,
+                                row.get::<_, u64>(2)?,
+                                row.get::<_, bool>(3)?,
+                            ))
+                        },
+                    )
+                });
+                let mut report = format!("journal={row:?}");
+                if let Ok(entries) = std::fs::read_dir(logs) {
+                    for entry in entries.take(4).flatten() {
+                        if let Ok(file) = std::fs::File::open(entry.path()) {
+                            let mut text = String::new();
+                            let _ = file.take(16 * 1024).read_to_string(&mut text);
+                            report.push_str(&text);
+                        }
+                    }
+                }
+                report
+            })
+            .await
+            .unwrap()
+        } else {
+            String::new()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let diagnostics = String::new();
         client.stop_spawned().await;
         let finished = finished.unwrap_or_else(|error| panic!(
-            "initial command did not finish: {error}; replace_store={replace_store}; last={last:?}; counter={:?}",
+            "initial command did not finish: {error}; replace_store={replace_store}; last={last:?}; {diagnostics}; counter={:?}",
             std::fs::read_to_string(workspace.path().join("counter")),
         ));
         assert_eq!(finished.status, CommandStatus::Finished, "{finished:?}");
