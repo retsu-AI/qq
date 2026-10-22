@@ -1407,7 +1407,9 @@ supply kernel aggregate resource quotas on this backend.
 
 An explicit `NativeResources::Guarded` request starts the payload with
 `taskpolicy -b` and samples the pinned process group's physical footprint and
-thread count every 250 ms using Darwin process accounting. The existing owner
+thread count every 250 ms using Darwin process accounting. The same check reads
+XNU's system-wide memory-pressure level and stops guarded work at warning or
+critical pressure; query failures and unrecognized levels also refuse execution. The existing owner
 liveness thread performs these checks; no extra per-command thread is created.
 Excess use or unavailable accounting stops the owned group and retains captured
 output. These safeguards can overshoot, exclude charged file cache and omit
