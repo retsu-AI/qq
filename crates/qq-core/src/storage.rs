@@ -190,7 +190,7 @@ pub(crate) struct SpaceOverride(std::path::PathBuf);
 
 #[cfg(test)]
 impl SpaceOverride {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn set(&self, available: u64) {
         overrides()
             .lock()
