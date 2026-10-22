@@ -124,7 +124,11 @@ workspace is their only writable filesystem root. Built-in mutation still uses
 the same opened workspace. Missing command services never cause scoped shell
 calls to use the local host fallback. Other workspaces and replaced task roots
 are refused before loading project configuration, then the opened workspace is
-validated again afterward. Side questions use the same checks. Scoped goal
+validated again afterward. Side questions resolve an active run's trusted task
+record and inspect its private edits using the same identity checks, while
+configuration still comes from the source project. Missing task records and
+replaced roots are refused; an Auto run still preparing its task returns busy
+instead of inspecting the source project. Scoped goal
 completion checks use the durable native command service with the same registered
 filesystem, network and resource limits. Their invocation and owner identity are
 persisted before submission, and their result before goal settlement. Exact check

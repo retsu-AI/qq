@@ -68,6 +68,16 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
     } else {
         tool_reply("exec", arguments)
     }];
+    if auto && max_runs > 1 {
+        replies.push(tool_reply(
+            "read_file",
+            json!({"path":"executions"}).to_string(),
+        ));
+        replies.push(reply(vec![
+            json!({"type":"response.output_text.delta","delta":"inspected the running task"}),
+            completed(),
+        ]));
+    }
     if max_runs > 1 {
         replies.push(tool_reply("update_goal", json!({"status":{"type":"achieved","evidence":"the saved command produced the requested artifact; verify it independently"}}).to_string()));
         replies.push(reply(vec![
@@ -280,6 +290,58 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
     assert_eq!(current.budget, original_goal.budget);
     assert_eq!(current.status, GoalStatus::Active);
     let mut events = client.events(workspace_id, before.cursor).await.unwrap();
+    if auto && max_runs > 1 {
+        if before
+            .focused
+            .as_ref()
+            .unwrap()
+            .summary
+            .active_run_id
+            .is_none()
+        {
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::RunStarted { session, .. } = event.event
+                    && session.id == original_goal.session_id
+                {
+                    break;
+                }
+            }
+        }
+        assert!(!workspace.join("executions").exists());
+        let receipt = client
+            .command(
+                qq_protocol::CommandId::generate().unwrap(),
+                qq_protocol::SessionCommand::SubmitSideQuestion {
+                    session_id: original_goal.session_id,
+                    question: "read executions from the current task".into(),
+                    new_thread: true,
+                },
+            )
+            .await
+            .unwrap();
+        let qq_protocol::CommandOutcome::SideQuestionSubmitted {
+            side_question_id, ..
+        } = receipt.outcome
+        else {
+            panic!("side question must be admitted");
+        };
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if let SessionEvent::SideQuestionUpdated { side_question } = event.event
+                && side_question.id == side_question_id
+                && side_question.state != qq_protocol::SideQuestionState::Running
+            {
+                assert_eq!(
+                    side_question.state,
+                    qq_protocol::SideQuestionState::Completed
+                );
+                assert_eq!(side_question.answer, "inspected the running task");
+                break;
+            }
+        }
+        assert!(!workspace.join("executions").exists());
+    }
     if let Some(stream) = stream.as_mut() {
         stream.write_all(b"e").await.unwrap();
     } else {
@@ -390,11 +452,28 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();
-    assert_eq!(captured.len(), if max_runs > 1 { 3 } else { 1 });
+    assert_eq!(
+        captured.len(),
+        if auto && max_runs > 1 {
+            5
+        } else if max_runs > 1 {
+            3
+        } else {
+            1
+        }
+    );
     if max_runs > 1 {
+        let successor = if auto { 3 } else { 1 };
         assert!(
-            captured[1].body().contains("native-result"),
+            captured[successor].body().contains("native-result"),
             "the automatic successor must receive the original command result"
         );
+        if auto {
+            assert!(
+                captured[2].body().contains("read executions L1/1"),
+                "the side question must receive a successful read from the still-private tree: {}",
+                captured[2].body()
+            );
+        }
     }
 }

@@ -89,6 +89,65 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
     (root, source, execution)
 }
 
+async fn open_session(
+    root: &Path,
+    source: &Path,
+    loader: Arc<dyn RuntimeLoader>,
+) -> (SessionRuntime, SessionId) {
+    let control = root.join("control");
+    let policy = tokio::task::spawn_blocking(move || {
+        std::fs::create_dir(&control).unwrap();
+        TaskWorkspacePolicy {
+            directory: NativeDirectoryGrant::capture(&control).unwrap(),
+            read_only: vec![],
+            resources: NativeResources::Host,
+            limits: TaskWorkspaceLimits {
+                max_entries: 16,
+                max_bytes: 1024,
+            },
+        }
+    })
+    .await
+    .unwrap();
+    let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+    options.task_workspaces = Some(policy);
+    let runtime = SessionRuntime::open(options, loader).await.unwrap();
+    let resolved = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ResolveWorkspace {
+                path: source.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.outcome else {
+        panic!("workspace")
+    };
+    let created = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CreateSession {
+                workspace_id,
+                parent_id: None,
+                model: ModelSelection {
+                    model: Some("embedded/demo".to_owned()),
+                    ..ModelSelection::default()
+                },
+                approval_mode: ApprovalMode::Auto,
+                profile: AgentProfileId::default(),
+                reasoning_effort: None,
+                correlation: Correlation::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    (runtime, session_id)
+}
+
 #[tokio::test]
 async fn publication_rechecks_current_permission_before_installing_task_edits() {
     for (mode, protect_pack) in [
@@ -100,45 +159,12 @@ async fn publication_rechecks_current_permission_before_installing_task_edits() 
         let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
             .await
             .unwrap();
-        let runtime = SessionRuntime::open(
-            SessionRuntimeOptions::new(root.path().join("sessions.sqlite3")),
+        let (runtime, session_id) = open_session(
+            root.path(),
+            &source,
             Arc::new(PublicationLoader { protect_pack }),
         )
-        .await
-        .unwrap();
-        let resolved = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::ResolveWorkspace {
-                    path: source.to_string_lossy().into_owned(),
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.outcome else {
-            panic!("workspace")
-        };
-        let created = runtime
-            .command(
-                CommandId::generate().unwrap(),
-                SessionCommand::CreateSession {
-                    workspace_id,
-                    parent_id: None,
-                    model: ModelSelection {
-                        model: Some("embedded/demo".to_owned()),
-                        ..ModelSelection::default()
-                    },
-                    approval_mode: ApprovalMode::Auto,
-                    profile: AgentProfileId::default(),
-                    reasoning_effort: None,
-                    correlation: Correlation::default(),
-                },
-            )
-            .await
-            .unwrap();
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
+        .await;
         runtime
             .command(
                 CommandId::generate().unwrap(),
@@ -171,4 +197,226 @@ async fn publication_rechecks_current_permission_before_installing_task_edits() 
         .unwrap();
         runtime.shutdown().await.unwrap();
     }
+}
+
+struct SideFileLoader;
+impl RuntimeLoader for SideFileLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        Box::pin(async move {
+            struct EchoRead;
+            impl qq_provider::Provider for EchoRead {
+                fn stream(
+                    &self,
+                    request: qq_provider::ModelRequest,
+                ) -> qq_provider::ProviderStream {
+                    use qq_provider::ProviderEvent;
+                    let result = request.messages().iter().rev().find_map(|message| {
+                        message.content().iter().find_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                            _ => None,
+                        })
+                    });
+                    let events = if let Some(text) = result {
+                        vec![
+                            ProviderEvent::OutputTextDelta { text },
+                            ProviderEvent::Completed {
+                                usage: Some(qq_provider::ProviderUsage {
+                                    input_tokens: 1,
+                                    output_tokens: 1,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                }),
+                            },
+                        ]
+                    } else {
+                        vec![
+                            ProviderEvent::ToolCallStarted {
+                                id: "read".into(),
+                                name: "read_file".into(),
+                            },
+                            ProviderEvent::ToolCallArgumentsDelta {
+                                id: "read".into(),
+                                json: r#"{"path":"vendor/policy.md"}"#.into(),
+                            },
+                            ProviderEvent::ToolCallCompleted { id: "read".into() },
+                            ProviderEvent::Completed {
+                                usage: Some(qq_provider::ProviderUsage {
+                                    input_tokens: 1,
+                                    output_tokens: 1,
+                                    cache_read_input_tokens: 0,
+                                    cache_write_input_tokens: 0,
+                                    reasoning_tokens: None,
+                                }),
+                            },
+                        ]
+                    };
+                    Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))
+                }
+            }
+            let runtime = crate::Runtime::new(EchoRead, "demo", 256).unwrap();
+            let workspace = request
+                .execution_workspace
+                .map_or_else(|| PathBuf::from(request.workspace), |grant| grant.path);
+            Ok(
+                LoadedRuntime::from_runtime(runtime, request.profile, workspace)
+                    .await
+                    .expect("side fixture plan compiles"),
+            )
+        })
+    }
+}
+
+#[tokio::test]
+async fn side_question_reads_active_private_task_edits() {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (runtime, session) = open_session(root.path(), &source, Arc::new(SideFileLoader)).await;
+    let record = encode(&task.record.lock().unwrap()).unwrap();
+    let owner = task.owner;
+    runtime.inner.store.call_write(Priority::AwaitControl, move |connection| {
+        connection.execute(
+            "INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms) VALUES(?1,?2,?1,?1,?1,'running',0)",
+            params![owner.to_string(), session.to_string()],
+        )?;
+        connection.execute("UPDATE sessions SET active_run_id=?1 WHERE id=?2", params![owner.to_string(), session.to_string()])?;
+        for (key, value) in [
+            (format!("{RUN_PREFIX}{owner}"), owner.to_string()),
+            (format!("{RECORD_PREFIX}{owner}"), record),
+        ] {
+            connection.execute("INSERT INTO metadata(key,value) VALUES(?1,?2)", params![key,value])?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let answer = runtime
+        .answer_side_question(
+            session,
+            "read the current file".into(),
+            RunCancellation::new(),
+        )
+        .await
+        .unwrap();
+    assert!(answer.text.contains("agent edit"), "{}", answer.text);
+    assert!(!answer.text.contains("original"), "{}", answer.text);
+    assert_eq!(
+        std::fs::read_to_string(source.join("vendor/policy.md")).unwrap(),
+        "original"
+    );
+    runtime
+        .inner
+        .store
+        .call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "DELETE FROM metadata WHERE key=?1",
+                [format!("{RECORD_PREFIX}{owner}")],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let missing = runtime
+        .answer_side_question(
+            session,
+            "inspect with missing record".into(),
+            RunCancellation::new(),
+        )
+        .await;
+    assert!(
+        matches!(missing, Err(SessionRuntimeError::InvalidNativeScope { .. })),
+        "{missing:?}"
+    );
+    let record = encode(&task.record.lock().unwrap()).unwrap();
+    save(
+        &runtime.inner.store,
+        format!("{RECORD_PREFIX}{owner}"),
+        record,
+    )
+    .await
+    .unwrap();
+    runtime
+        .inner
+        .store
+        .call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "DELETE FROM metadata WHERE key=?1",
+                [format!("{RUN_PREFIX}{owner}")],
+            )?;
+            connection.execute(
+                "UPDATE sessions SET active_run_id=NULL, preparing_run_id=?1 WHERE id=?2",
+                params![owner.to_string(), session.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let pending = runtime
+        .answer_side_question(
+            session,
+            "inspect while preparing".into(),
+            RunCancellation::new(),
+        )
+        .await;
+    assert!(
+        matches!(pending, Err(SessionRuntimeError::SideQuestionBusy)),
+        "{pending:?}"
+    );
+    save(
+        &runtime.inner.store,
+        format!("{RUN_PREFIX}{owner}"),
+        owner.to_string(),
+    )
+    .await
+    .unwrap();
+    runtime
+        .inner
+        .store
+        .call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "UPDATE sessions SET active_run_id=?1, preparing_run_id=NULL WHERE id=?2",
+                params![owner.to_string(), session.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let task_path = task.scope.workspace.path.clone();
+    let retained = root.path().join("retained");
+    tokio::task::spawn_blocking(move || {
+        std::fs::rename(&task_path, &retained).unwrap();
+        std::fs::create_dir(&task_path).unwrap();
+        std::fs::create_dir(task_path.join("vendor")).unwrap();
+        std::fs::write(task_path.join("vendor/policy.md"), "replacement").unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        runtime
+            .answer_side_question(
+                session,
+                "inspect a replaced task root".into(),
+                RunCancellation::new()
+            )
+            .await,
+        Err(SessionRuntimeError::InvalidNativeScope { .. })
+    ));
+    // These fixture rows represent the already-running main run; no executor
+    // owns them. Retire them before asking shutdown to drain actual work.
+    runtime
+        .inner
+        .store
+        .call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "UPDATE sessions SET active_run_id=NULL WHERE id=?1",
+                [session.to_string()],
+            )?;
+            connection.execute(
+                "UPDATE runs SET status='completed' WHERE id=?1",
+                [owner.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    runtime.shutdown().await.unwrap();
 }

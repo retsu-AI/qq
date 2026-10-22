@@ -403,6 +403,70 @@ pub(super) fn is_bound(connection: &Connection, run: RunId) -> Result<bool, rusq
     )
 }
 
+/// Resolve live inspection authority from trusted run records, never from the
+/// model or the source project. No active task means ordinary source inspection.
+pub(super) async fn side_scope(
+    inner: &SessionRuntimeInner,
+    session: SessionId,
+    source_path: &str,
+) -> Result<Option<NativeCommandScope>, SessionRuntimeError> {
+    let (active, parent, mode): (Option<String>, Option<String>, String) = inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            Ok(connection.query_row(
+                "SELECT COALESCE(active_run_id, preparing_run_id), owner_run_id, approval_mode FROM sessions WHERE id=?1",
+                [session.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?)
+        })
+        .await?;
+    let invalid = |reason: &str| SessionRuntimeError::InvalidNativeScope {
+        reason: reason.to_owned(),
+    };
+    for run in [active.as_ref(), parent.as_ref()].into_iter().flatten() {
+        let Some(owner) = read(&inner.store, format!("{RUN_PREFIX}{run}")).await? else {
+            continue;
+        };
+        let owner: RunId = owner.parse().map_err(|_| invalid("invalid task owner"))?;
+        let saved = read(&inner.store, format!("{RECORD_PREFIX}{owner}"))
+            .await?
+            .ok_or_else(|| invalid("active task record is missing"))?;
+        let record: TaskRecord = serde_json::from_str(&saved)?;
+        let grant = record.workspace.directory_grant();
+        if record.source.path != Path::new(source_path)
+            || grant.path != record.scope.workspace.path
+            || grant.identity != record.scope.workspace.identity
+        {
+            return Err(invalid("active task does not match the source project"));
+        }
+        let permit = crate::workspace::blocking_permits()
+            .acquire_owned()
+            .await
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let identity = NativeWorkspaceIdentity::capture(&record.source.path)?;
+            if identity != record.source.identity {
+                return Err(io::Error::other("task source directory changed"));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| SessionRuntimeError::Unavailable)?
+        .map_err(|error: io::Error| invalid(&error.to_string()))?;
+        return Ok(Some(record.scope));
+    }
+    // A question may race the main run's task preparation. Do not inspect the
+    // broader source project while an Auto task's scope is still being admitted.
+    if active.is_some()
+        && inner.task_workspaces.is_some()
+        && parse_approval_mode(&mode)? == ApprovalMode::Auto
+    {
+        return Err(SessionRuntimeError::SideQuestionBusy);
+    }
+    Ok(None)
+}
+
 async fn read(store: &Store, key: String) -> Result<Option<String>, SessionRuntimeError> {
     store.call(Priority::AwaitControl, move |connection| {
         let saved: Option<Option<String>> = connection.query_row(
