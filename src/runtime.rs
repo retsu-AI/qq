@@ -3068,7 +3068,7 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        #[cfg(any(target_os = "linux", windows))]
         let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
             Some(Arc::new(crate::command_owner::client::CommandWorker::new(
                 factory
@@ -3080,7 +3080,7 @@ impl RuntimeHandler {
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
                 crate::cli::BUILD_VERSION,
             )?));
-        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        #[cfg(not(any(target_os = "linux", windows)))]
         let commands = None;
         Self::open_with_commands(factory, approval_timeout, commands).await
     }
@@ -3113,10 +3113,9 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Enable ordinary Auto containment only after its native backend is
-        // qualified. Other platforms retain their existing permission behavior
-        // until their adapters implement the same resource contract.
-        #[cfg(target_os = "linux")]
+        // Native backends share task ownership and publication. Resource policy
+        // names the actual backend guarantee: kernel limits or sampled safeguards.
+        #[cfg(any(target_os = "linux", windows))]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3428,7 +3427,7 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
@@ -3442,18 +3441,8 @@ fn task_workspace_policy(
         }
         builder.create(directory)?;
         let directory = directory.canonicalize()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = std::fs::metadata(&directory)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "task control directory must be private and owned by this user",
-                ));
-            }
-        }
+        let directory_grant =
+            qq_core::command_owner::NativeDirectoryGrant::capture_private(&directory)?;
         let mut read_only = std::collections::BTreeSet::new();
         #[cfg(unix)]
         for candidate in [
@@ -3478,12 +3467,18 @@ fn task_workspace_policy(
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(windows)]
+        read_only.insert(std::fs::canonicalize(
+            std::env::var_os("SYSTEMROOT")
+                .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable"))?,
+        )?);
         Ok(qq_core::TaskWorkspacePolicy {
-            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
+            directory: directory_grant,
             read_only: read_only
                 .into_iter()
                 .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
                 .collect::<Result<_, _>>()?,
+            #[cfg(target_os = "linux")]
             resources: qq_core::command_owner::NativeResources::Limited {
                 limits: qq_core::command_owner::NativeResourceLimits {
                     memory_bytes: 4 * 1024 * 1024 * 1024,
@@ -3493,6 +3488,12 @@ fn task_workspace_policy(
                         .saturating_mul(1000)
                         .min(1_000_000),
                 },
+            },
+            #[cfg(windows)]
+            resources: qq_core::command_owner::NativeResources::Committed {
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_processes: 512,
+                cpu_percent: 90,
             },
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
@@ -9889,3 +9890,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "runtime/windows_auto_tests.rs"]
+mod windows_auto_tests;
