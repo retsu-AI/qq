@@ -226,6 +226,7 @@ jobs:
         if: failure() && runner.os == 'macOS'
         shell: bash
         run: |
+          python3 .github/scripts/macos-loader-probe.py
           /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
           python3 - <<'PYTHON'
           import json

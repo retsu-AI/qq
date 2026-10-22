@@ -54,6 +54,7 @@ async fn fixture_command(
     tool: &str,
     isolated: bool,
     restricted: bool,
+    additional_read_only: &[std::path::PathBuf],
 ) -> qq_core::command_owner::CommandResult {
     let root = tempfile::tempdir().unwrap();
     let worker = client::CommandWorker::new(
@@ -77,6 +78,10 @@ async fn fixture_command(
             let path = std::fs::canonicalize(path).unwrap();
             read_only.push(qq_core::command_owner::NativeDirectoryGrant::capture(&path).unwrap());
         }
+    }
+    for path in additional_read_only {
+        let path = path.canonicalize().unwrap();
+        read_only.push(qq_core::command_owner::NativeDirectoryGrant::capture(&path).unwrap());
     }
     let request = NativeCommand {
         id: ToolCallId::generate().unwrap(),
@@ -129,7 +134,7 @@ fn probe(mode: &str) -> serde_json::Value {
 #[tokio::test]
 async fn payload_cannot_leave_the_owned_process_group() {
     let root = tempfile::tempdir().unwrap();
-    let result = fixture_command(root.path(), probe("groups"), "exec", false, false).await;
+    let result = fixture_command(root.path(), probe("groups"), "exec", false, false, &[]).await;
     assert!(!result.is_error(), "{}", result.text());
     assert_eq!(
         std::fs::read_to_string(root.path().join("probe-result")).unwrap(),
@@ -147,7 +152,7 @@ async fn isolated_network_denies_tcp_and_host_unix_sockets() {
         tcp.local_addr().unwrap().to_string(),
     )
     .unwrap();
-    let result = fixture_command(root.path(), probe("network"), "exec", true, false).await;
+    let result = fixture_command(root.path(), probe("network"), "exec", true, false, &[]).await;
     assert!(!result.is_error(), "{}", result.text());
     assert_eq!(
         std::fs::read_to_string(root.path().join("probe-result")).unwrap(),
@@ -166,7 +171,8 @@ async fn inherited_file_authority_is_closed_before_payload_execution() {
         inherited.as_raw_fd().to_string(),
     )
     .unwrap();
-    let result = fixture_command(root.path(), probe("descriptors"), "exec", false, false).await;
+    let result =
+        fixture_command(root.path(), probe("descriptors"), "exec", false, false, &[]).await;
     assert!(!result.is_error(), "{}", result.text());
     assert_eq!(
         std::fs::read_to_string(root.path().join("probe-result")).unwrap(),
@@ -182,9 +188,15 @@ async fn restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_w
     let secret = root.path().canonicalize().unwrap().join("secret");
     std::fs::write(&secret, "host-secret").unwrap();
     std::os::unix::fs::symlink(&secret, workspace.join("alias")).unwrap();
+    let read_only = root.path().canonicalize().unwrap().join("read-only");
+    std::fs::create_dir(&read_only).unwrap();
+    let shared = read_only.join("shared");
+    std::fs::write(&shared, "read-only-input").unwrap();
     let command = format!(
-        "printf task > allowed; if cat alias; then exit 91; fi; if printf overwritten > '{}'; then exit 92; fi; printf denied",
-        secret.display()
+        "printf task > allowed; /bin/ln allowed writable-link || exit 94; if cat alias; then exit 91; fi; if printf overwritten > '{}'; then exit 92; fi; cat '{}' > imported; if /bin/ln '{}' linked; then if printf changed > linked; then exit 93; fi; fi; printf denied",
+        secret.display(),
+        shared.display(),
+        shared.display()
     );
     let result = fixture_command(
         &workspace,
@@ -192,12 +204,20 @@ async fn restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_w
         "shell",
         true,
         true,
+        std::slice::from_ref(&read_only),
     )
     .await;
     assert!(!result.is_error(), "{}", result.text());
     assert_eq!(std::fs::read_to_string(secret).unwrap(), "host-secret");
+    assert_eq!(std::fs::read_to_string(shared).unwrap(), "read-only-input");
     assert_eq!(
-        std::fs::read_to_string(workspace.join("allowed")).unwrap(),
-        "task"
+        std::fs::read_to_string(workspace.join("imported")).unwrap(),
+        "read-only-input"
     );
+    for name in ["allowed", "writable-link"] {
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(name)).unwrap(),
+            "task"
+        );
+    }
 }
