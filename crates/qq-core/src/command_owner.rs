@@ -659,13 +659,16 @@ impl CommandOwner {
         if let Some(pressure) = pressure {
             return Ok(ToolOutput::refused(pressure.to_string()));
         }
-        let guarded_storage =
-            match crate::storage::NativeStorage::capture(workspace.clone(), &request.filesystem)
-                .await
-            {
-                Ok(storage) => storage,
-                Err(pressure) => return Ok(ToolOutput::refused(pressure.to_string())),
-            };
+        let guarded_storage = match crate::storage::NativeStorage::capture(
+            workspace.clone(),
+            &request.filesystem,
+            self.0.journal.storage_path(),
+        )
+        .await
+        {
+            Ok(storage) => storage,
+            Err(pressure) => return Ok(ToolOutput::refused(pressure.to_string())),
+        };
         let pressure = async move {
             match guarded_storage {
                 Some(storage) => storage.watch().await,
