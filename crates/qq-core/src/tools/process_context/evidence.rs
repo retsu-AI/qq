@@ -112,7 +112,7 @@ mod tests {
                 context_id: ToolCallId::generate().unwrap(),
                 arguments_sha256: ContentHash::from_bytes([1; 32]),
                 manifest_sha256: images.digest(),
-                base_env_present: ((1_u16 << crate::BASE_ENV.len()) - 1) as u8,
+                base_env_present: (1_u16 << crate::BASE_ENV.len()) - 1,
                 requested_env: false,
                 locale: Locale::C,
                 cwd: CwdIdentity::HeldDirectory {
