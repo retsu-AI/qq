@@ -216,6 +216,8 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
             cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+            cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
+            cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output: test'
           fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
