@@ -183,6 +183,10 @@ impl RunResources {
         }
     }
 
+    pub(super) fn native_tools(&self) -> crate::tools::ToolTasks {
+        self.tools.clone()
+    }
+
     pub(super) fn has_native_scope(&self) -> bool {
         self.tools.has_native_scope()
     }

@@ -261,6 +261,7 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_conflicting_registration_does_not_replace_stored_authority
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_corrupt_or_empty_persisted_policy_never_restores_host_authority
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_goal_check_never_falls_back_to_host_execution
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check::scoped_goal_check_uses_durable_service_and_typed_success
       - name: Private command transport and worker process
         shell: bash
         run: |

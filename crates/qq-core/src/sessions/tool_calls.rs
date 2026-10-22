@@ -181,16 +181,22 @@ pub(super) fn finish_tool_call(
     // The display payload is deliberately absent from the capacity check: it
     // never enters model context, so it cannot crowd the context budget. The
     // provider call id does enter the next ToolResult block and is counted.
-    let context_exhausted = match reserve_tool_result_capacity(
-        &transaction,
-        identity.run_id,
-        &provider_call_id,
-        &result,
-        first_result_in_turn,
-    ) {
-        Ok(()) => false,
-        Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
-        Err(error) => return Err(error),
+    // Completion checks have no provider turn. Their bounded result is audit
+    // evidence; only the goal notice may enter a later model context.
+    let context_exhausted = if identity.kind == RunKind::GoalCheck {
+        false
+    } else {
+        match reserve_tool_result_capacity(
+            &transaction,
+            identity.run_id,
+            &provider_call_id,
+            &result,
+            first_result_in_turn,
+        ) {
+            Ok(()) => false,
+            Err(SessionRuntimeError::OutputTooLarge) if native_owner.is_some() => true,
+            Err(error) => return Err(error),
+        }
     };
     let now = now_ms();
     let state = if is_error { "failed" } else { "completed" };

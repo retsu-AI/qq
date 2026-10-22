@@ -182,6 +182,16 @@ impl ProcessReceipt {
     }
 }
 
+/// Terminal process evidence, separate from the text shown to the model.
+/// `None` on a result means execution was refused or could not be observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeCommandOutcome {
+    Exited { code: Option<i32> },
+    TimedOut,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CommandResult(ToolOutput);
@@ -189,6 +199,10 @@ pub struct CommandResult(ToolOutput);
 impl CommandResult {
     pub(crate) fn into_output(self) -> ToolOutput {
         self.0
+    }
+
+    pub fn outcome(&self) -> Option<NativeCommandOutcome> {
+        self.0.native_outcome
     }
 
     pub fn text(&self) -> &str {
