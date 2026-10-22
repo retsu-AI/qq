@@ -6028,6 +6028,19 @@ mod tests {
             "custom/other",
             "a shared physical root must not reuse another project's configuration"
         );
+        #[cfg(windows)]
+        let factory = {
+            // Windows directory capabilities pin their names while cached.
+            // First prove replacement is refused, then release those handles
+            // to exercise admission against the saved identity after replacement.
+            let error = fs::rename(&task, fixture.path("held-task")).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            drop(loaded);
+            drop(other);
+            factory.shutdown_plans();
+            drop(factory);
+            fixture.factory()
+        };
         fs::rename(&task, fixture.path("held-task")).unwrap();
         fs::create_dir(&task).unwrap();
         let result = RuntimeLoader::load(&factory, request).await;
