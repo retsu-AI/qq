@@ -187,6 +187,8 @@ jobs:
             cargo build --locked -p qq-server --example command_owner_launcher
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
           fi
           bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
@@ -201,6 +203,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
+          bash .github/scripts/test-exact.sh command_owner::tests::refused_duplicate_cannot_remove_an_admitted_commands_cancellation
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_migration_preserves_the_journal_identity_and_results
           bash .github/scripts/test-exact.sh command_owner::tests::accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdown
           bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
