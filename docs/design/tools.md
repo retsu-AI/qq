@@ -41,19 +41,27 @@ root, which makes Linux reject further user-namespace creation and prevents
 regaining mount authority to undo read-only mounts. Setup failures return a
 bounded refusal before the payload starts.
 
-This path requires fully enforced Landlock ABI 9, including pathname Unix
-socket restrictions. Unsupported kernels and unimplemented platform backends
-refuse a requested restriction; they never fall back to host execution. The
-safe Rust `landlock` dependency supplies the kernel interface.
+This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
+restrictions are available, an additional Landlock rule denies host socket
+connections. Otherwise a seccomp filter denies creation of addressable Unix
+sockets and datagram/sequence-packet pairs, while preserving connected stream
+pairs (including close-on-exec and nonblocking variants). Stream pairs cannot
+be retargeted to host services. The filter also denies io_uring entry points,
+which could otherwise create sockets outside socket(2). On this older-kernel
+path, local abstract Unix listeners are unavailable; subprocess stream-pair
+communication still works. Unsupported required enforcement and unimplemented
+platform backends refuse execution. The safe Rust `landlock` and `seccompiler`
+dependencies supply the kernel interfaces.
 
-The binary creates detached task scopes for ordinary Auto runs and their
-children. Built-ins use the private task tree; native commands receive its
+On Linux, the binary creates detached task scopes for ordinary Auto runs and
+their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
-Unsupported required native restrictions fail closed. Linux is the first
-integrated backend; macOS resource limits and Windows containment remain
-unfinished. Authorized network egress, credential brokering, per-task aggregate
+Unsupported requested native restrictions fail closed. Default Auto integration
+is enabled on Linux first. Other platforms retain their existing permission
+behavior until macOS resource limits and Windows containment are implemented
+and qualified. Authorized network egress, credential brokering, per-task aggregate
 resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 

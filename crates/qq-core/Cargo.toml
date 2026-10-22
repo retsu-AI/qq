@@ -72,6 +72,9 @@ axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["net"] }
+
 [[bench]]
 name = "tool_dispatch"
 harness = false

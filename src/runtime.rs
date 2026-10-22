@@ -3113,6 +3113,10 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
+        // Enable ordinary Auto containment only after its native backend is
+        // qualified. Other platforms retain their existing permission behavior
+        // until their adapters implement the same resource contract.
+        #[cfg(target_os = "linux")]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3422,6 +3426,7 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
+#[cfg(target_os = "linux")]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {

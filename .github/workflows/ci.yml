@@ -65,6 +65,10 @@ jobs:
           fi
           unshare --version
           unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- /bin/true
+          # Hosted runners do not necessarily have an interactive login. Start
+          # their existing user manager so native tests exercise delegation.
+          sudo systemctl start "user@$(id -u).service"
+          test -S "/run/user/$(id -u)/bus"
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
