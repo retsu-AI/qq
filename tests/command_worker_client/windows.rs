@@ -150,6 +150,7 @@ fn payload_probe() {
         }
         "processes" => {
             let mut children = Vec::new();
+            let mut refusal = None;
             for _ in 0..6 {
                 match std::process::Command::new(std::env::current_exe().unwrap())
                     .args([
@@ -162,7 +163,10 @@ fn payload_probe() {
                     .spawn()
                 {
                     Ok(child) => children.push(child),
-                    Err(_) => break,
+                    Err(error) => {
+                        refusal = Some(error);
+                        break;
+                    }
                 }
             }
             let count = children.len();
@@ -170,7 +174,10 @@ fn payload_probe() {
                 let _ = child.kill();
                 child.wait().unwrap();
             }
-            assert_eq!(count, 2, "four-process job includes the helper and payload");
+            assert_eq!(
+                count, 2,
+                "four-process job includes the helper and payload; spawn refusal: {refusal:?}"
+            );
         }
         "child" => loop {
             std::thread::park();
