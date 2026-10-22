@@ -529,7 +529,10 @@ impl RuntimeFactory {
         if self.is_isolated_tui_qa() {
             vec![Self::isolated_tui_qa_model_option(snapshot)]
         } else {
-            self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+            self.model_options_with_discovery(
+                &CatalogSource::from(snapshot),
+                &self.cached_model_discovery(snapshot.providers()),
+            )
         }
     }
 
@@ -543,7 +546,10 @@ impl RuntimeFactory {
                 .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
                 .unwrap_or_default();
         }
-        self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+        self.model_options_with_discovery(
+            &CatalogSource::from(snapshot),
+            &self.cached_model_discovery(snapshot.providers()),
+        )
     }
 
     /// Built-in providers the policy admits that have no resolvable
@@ -672,11 +678,27 @@ impl RuntimeFactory {
             Ok(records) => records.into_iter().map(|record| record.name).collect(),
             Err(_) => BTreeSet::new(),
         };
+        let discovered = self.cached_model_discovery(snapshot.providers());
         self.model_options_with_discovery_impl(
             &CatalogSource::from(snapshot),
-            &BTreeMap::new(),
+            &discovered,
             RouteAdmission::CredentialPresent(&registered),
         )
+    }
+
+    fn cached_model_discovery(
+        &self,
+        providers: &BTreeMap<String, ProviderConfig>,
+    ) -> BTreeMap<String, Vec<DiscoveredModel>> {
+        providers
+            .iter()
+            .filter_map(|(id, provider)| {
+                self.inner
+                    .discovery
+                    .cached(id, provider, &self.inner.credentials)
+                    .map(|models| (id.clone(), models))
+            })
+            .collect()
     }
 
     fn model_options_with_discovery_impl(
@@ -702,12 +724,11 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
-                if provider.kind().discovery().is_authoritative()
-                    && !metadata.explicitly_configured()
-                    && discovered
-                        .get(provider_id)
-                        .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
-                {
+                if !model_in_catalog(
+                    provider,
+                    model_id,
+                    discovered.get(provider_id).map(Vec::as_slice),
+                ) {
                     continue;
                 }
                 if options.len() >= MAX_MODEL_OPTIONS {
@@ -767,6 +788,8 @@ impl RuntimeFactory {
             && !options
                 .iter()
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
+            && allowed.is_none_or(|allowed| allowed.iter().any(|id| id == route.provider()))
+            && !denied.iter().any(|id| id == route.provider())
             && let Some(provider) = snapshot.providers.get(route.provider())
             && admitted(route.provider(), provider)
         {
@@ -1091,9 +1114,6 @@ impl RuntimeFactory {
         let mut load =
             self.request_for_workspace(&workspace, request.selection.max_output_tokens)?;
         let mut overrides = load.overrides().clone();
-        if let Some(model) = &request.selection.model {
-            overrides = overrides.with_model(model.clone());
-        }
         if let Some(organization) = &request.selection.organization {
             overrides = overrides.with_organization(organization.clone());
         }
@@ -1180,9 +1200,13 @@ impl RuntimeFactory {
     /// rejected by the configuration load that produced `snapshot`; this
     /// adds the authentication check that gates the served list and the
     /// model-id membership check against the builtin catalog union the
-    /// cached discovery list. The default-API fallback for unknown model
-    /// ids never applies on this path.
-    fn validate_spawn_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+    /// cached discovery list, or the workspace's configured route. A requested
+    /// selection cannot add itself to that list.
+    fn validate_spawn_snapshot(
+        &self,
+        snapshot: &ConfigSnapshot,
+        workspace: &str,
+    ) -> Result<(), RuntimeBuildError> {
         let provider_id = snapshot.model().provider();
         let model_id = snapshot.model().model();
         let provider = snapshot
@@ -1194,23 +1218,27 @@ impl RuntimeFactory {
                 provider_id.to_owned(),
             ));
         }
-        if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured() || !provider.kind().discovery().is_authoritative()
-        }) {
+        let cached = self
+            .inner
+            .discovery
+            .cached(provider_id, provider, &self.inner.credentials);
+        if model_in_catalog(provider, model_id, cached.as_deref()) {
             return Ok(());
         }
-        let discovered =
+        let configured =
+            self.load_for_client(&self.request_for_workspace(Path::new(workspace), None)?)?;
+        if configured.model() == Some(snapshot.model()) {
+            return Ok(());
+        }
+        // Only an unknown route needs fresh discovery. A known fallback
+        // route must not be invalidated by a different snapshot fetched
+        // during admission itself.
+        let discovered = cached.or_else(|| {
             self.inner
                 .discovery
-                .discover(provider_id, provider, &self.inner.credentials);
-        if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured()
-                || !provider.kind().discovery().is_authoritative()
-                || discovered.is_none()
-        }) || discovered
-            .as_ref()
-            .is_some_and(|models| models.iter().any(|model| model.id == model_id))
-        {
+                .discover(provider_id, provider, &self.inner.credentials)
+        });
+        if model_in_catalog(provider, model_id, discovered.as_deref()) {
             return Ok(());
         }
         Err(RuntimeBuildError::UnknownModel {
@@ -1234,19 +1262,20 @@ impl RuntimeFactory {
                 kind: error.failure_kind(),
                 message: error.to_string(),
             })?;
-        self.validate_spawn_snapshot(&snapshot).map_err(|error| {
-            let mut message = error.to_string();
-            if matches!(error, RuntimeBuildError::UnknownModel { .. })
-                && let Some(routes) = self.served_route_hint(&snapshot)
-            {
-                message.push_str("; available routes: ");
-                message.push_str(&routes);
-            }
-            RuntimeLoadError {
-                kind: error.failure_kind(),
-                message,
-            }
-        })
+        self.validate_spawn_snapshot(&snapshot, workspace)
+            .map_err(|error| {
+                let mut message = error.to_string();
+                if matches!(error, RuntimeBuildError::UnknownModel { .. })
+                    && let Some(routes) = self.served_route_hint(&snapshot)
+                {
+                    message.push_str("; available routes: ");
+                    message.push_str(&routes);
+                }
+                RuntimeLoadError {
+                    kind: error.failure_kind(),
+                    message,
+                }
+            })
     }
 
     /// A short listing of the selected provider's served routes for
@@ -1259,16 +1288,9 @@ impl RuntimeFactory {
         if let Some(discovered) =
             self.inner
                 .discovery
-                .discover(provider_id, provider, &self.inner.credentials)
+                .cached(provider_id, provider, &self.inner.credentials)
         {
-            if provider.kind().discovery().is_authoritative() {
-                ids.retain(|id| {
-                    provider
-                        .models()
-                        .get(id)
-                        .is_some_and(|model| model.explicitly_configured())
-                });
-            }
+            ids.retain(|id| model_in_catalog(provider, id, Some(&discovered)));
             ids.extend(discovered.into_iter().map(|model| model.id));
         }
         if ids.is_empty() || ids.len() > MAX_LISTED_ROUTES {
@@ -2149,9 +2171,19 @@ fn effective_provider_api(
     }
 }
 
-/// Which input the AWS default credential chain would pick up from this
-/// process's environment, named for a human, without calling AWS. `None`
-/// means the chain has nothing local to start from (IMDS is not probed).
+/// Shared membership rule for discovery, delegation and spawn admission.
+fn model_in_catalog(
+    provider: &ProviderConfig,
+    model: &str,
+    discovered: Option<&[DiscoveredModel]>,
+) -> bool {
+    provider.models().get(model).is_some_and(|metadata| {
+        metadata.explicitly_configured()
+            || !provider.kind().discovery().is_authoritative()
+            || discovered.is_none()
+    }) || discovered.is_some_and(|models| models.iter().any(|candidate| candidate.id == model))
+}
+
 /// How a model catalog admits a provider's routes.
 #[derive(Clone, Copy)]
 enum RouteAdmission<'a> {
@@ -2214,6 +2246,8 @@ fn environment_variable_set(variable: &str) -> bool {
     std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
+/// Which input the AWS default credential chain would pick up locally,
+/// without calling AWS or probing IMDS.
 pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
         && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
@@ -5863,6 +5897,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_catalog_selection_does_not_advertise_an_unadmitted_route() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+            version: 1, model: "custom/selected",
+            providers: {"custom": Custom(
+                connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                models: {"known": (name: "Known")},
+            )},
+        )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let catalog_factory = factory.clone();
+        let catalog_workspace = workspace.display().to_string();
+        let models = tokio::task::spawn_blocking(move || {
+            catalog_factory.models_for(&ModelCatalogRequest {
+                workspace: catalog_workspace,
+                selection: ModelSelection {
+                    model: Some("custom/typo".to_owned()),
+                    ..ModelSelection::default()
+                },
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!models.iter().any(|model| model.model == "typo"));
+        assert!(models.iter().any(|model| model.model == "selected"));
+        for model in models {
+            validate_route(
+                &factory,
+                &workspace,
+                model.selection.model.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            validate_route(&factory, &workspace, "custom/typo")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_validation_names_each_failed_check() {
         let fixture = RuntimeFixture::new();
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
@@ -6222,6 +6304,15 @@ mod tests {
             .await
             .unwrap();
         server.join().unwrap();
+
+        let snapshot = factory
+            .snapshot_for_selection(&workspace.display().to_string(), &ModelSelection::default())
+            .unwrap();
+        let routes = factory.model_options_for_plan(&snapshot);
+        assert!(
+            routes.iter().any(|model| model.model == "live-model"),
+            "{routes:?}"
+        );
 
         // The endpoint is gone: a second validation can only succeed from
         // the warm cache, proving no network round trip is required.
