@@ -54,15 +54,17 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux, the binary creates detached task scopes for ordinary Auto runs and
+On Linux and Windows, the binary creates detached task scopes for ordinary Auto runs and
 their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-is enabled on Linux first. Other platforms retain their existing permission
-behavior until macOS resource limits and Windows containment are implemented
-and qualified. Authorized network egress, credential brokering, per-task aggregate
+uses kernel resource limits on Linux and committed-memory/process jobs with a
+payload CPU cap on Windows. Windows defaults to 4 GiB committed memory,
+512 processes (including the helper) and 90% of all logical processors for the
+payload tree. macOS default Auto containment remains unfinished. Authorized
+network egress, credential brokering, per-task aggregate
 resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
@@ -155,8 +157,8 @@ Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution and
-default Windows Auto containment remain unavailable and fail closed. Source
+non-goal task continuation is unfinished. macOS limited-resource execution
+remains unavailable and fails closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
 
@@ -1437,7 +1439,9 @@ It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
-Windows Auto integration is unfinished.
+Windows Auto uses this adapter with detached task files, checked copy-based
+publication and a private cache retained for goal continuation. Control-root
+owner and ACL validation runs before admitting task authority.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
