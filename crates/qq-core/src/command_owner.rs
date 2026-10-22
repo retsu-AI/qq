@@ -613,6 +613,22 @@ impl CommandOwner {
             }
             Err(error) => return Err(error),
         };
+        let guarded_workspace = match &request.filesystem {
+            NativeFilesystem::Restricted { .. } => {
+                if let Err(pressure) = crate::storage::check(workspace.clone(), 0).await {
+                    return Ok(ToolOutput::refused(pressure.to_string()));
+                }
+                Some(workspace.clone())
+            }
+            NativeFilesystem::Host => None,
+        };
+        let pressure = async move {
+            match guarded_workspace {
+                Some(workspace) => crate::storage::watch(workspace).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(pressure);
         let cancelled = self.0.journal.cancel_requested(request.id).await?;
         if cancelled {
             cancellation.cancel();
@@ -651,6 +667,11 @@ impl CommandOwner {
         let mut output = tokio::select! {
             biased;
             () = &mut expired => { cancellation.expire(); execution.await }
+            pressure = &mut pressure => {
+                cancellation.cancel();
+                // Reap the native process tree before recording a terminal result.
+                execution.await.stopped_for_storage(&pressure.to_string())
+            }
             output = &mut execution => output,
         };
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;

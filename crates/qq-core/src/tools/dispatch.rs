@@ -840,6 +840,22 @@ impl ToolOutput {
         result
     }
 
+    pub(crate) fn stopped_for_storage(mut self, reason: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"qq-storage-stop-v1");
+        digest.update(self.result_digest);
+        digest.update(reason.as_bytes());
+        self.result_digest = digest.finalize().into();
+        self.model_text = bound_text(
+            format!("{reason}\n{}", self.model_text),
+            &Bounds::DEFAULT,
+            None,
+        )
+        .text;
+        self.is_error = true;
+        self
+    }
+
     /// Normalize worker expiry before the shell's capture loop has a result.
     pub(crate) fn expired_before_capture(self, tool: &str, elapsed: std::time::Duration) -> Self {
         let content = super::output::Header::new(tool, None)

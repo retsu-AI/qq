@@ -5397,7 +5397,18 @@ mod tests {
             .expect("cancellation must remain live with a full output queue")
             .unwrap();
         assert!(result.is_error);
-        assert_eq!(result.model_text, "tool execution was cancelled");
+        assert!(result.model_text.starts_with("shell exit=cancelled "));
+        assert!(
+            result
+                .model_text
+                .contains("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        );
+        assert!(
+            result
+                .model_text
+                .ends_with("tool execution was cancelled; its process group was killed")
+        );
+        assert!(result.model_text.len() <= shell::SHELL_BOUNDS.max_bytes);
         assert_eq!(result.disposition, ResultDisposition::Interrupted);
     }
 

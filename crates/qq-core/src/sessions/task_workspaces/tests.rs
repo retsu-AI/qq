@@ -199,6 +199,138 @@ async fn publication_rechecks_current_permission_before_installing_task_edits() 
     }
 }
 
+#[tokio::test]
+async fn publication_preserves_private_edits_when_source_disk_is_low() {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (runtime, session_id) = open_session(
+        root.path(),
+        &source,
+        Arc::new(PublicationLoader {
+            protect_pack: false,
+        }),
+    )
+    .await;
+    let _space = crate::storage::SpaceOverride::new(&source, 0);
+    let error = task
+        .clone()
+        .publish(&runtime.inner, session_id)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        TaskExecutionError::Storage(crate::storage::Pressure::Low { .. })
+    ));
+    assert_eq!(
+        std::fs::read_to_string(source.join("vendor/policy.md")).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        std::fs::read_to_string(task.scope.workspace.path.join("vendor/policy.md")).unwrap(),
+        "agent edit"
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+struct DiskPressureLoader;
+impl RuntimeLoader for DiskPressureLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        Box::pin(async move {
+            struct FillWorkspace(PathBuf);
+            impl qq_provider::Provider for FillWorkspace {
+                fn stream(&self, _: qq_provider::ModelRequest) -> qq_provider::ProviderStream {
+                    let path = self.0.clone();
+                    Box::pin(futures_util::stream::once(async move {
+                        let _space = tokio::task::spawn_blocking(move || {
+                            std::fs::write(path.join("vendor/policy.md"), "retained edit").unwrap();
+                            crate::storage::SpaceOverride::new(&path, 0)
+                        })
+                        .await
+                        .unwrap();
+                        std::future::pending().await
+                    }))
+                }
+            }
+            let path = request
+                .execution_workspace
+                .map_or_else(|| PathBuf::from(request.workspace), |grant| grant.path);
+            let runtime = crate::Runtime::new(FillWorkspace(path.clone()), "demo", 256).unwrap();
+            Ok(LoadedRuntime::from_runtime(runtime, request.profile, path)
+                .await
+                .unwrap())
+        })
+    }
+}
+
+#[tokio::test]
+async fn disk_pressure_stops_provider_work_and_retains_unpublished_edits() {
+    let (root, source, _) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (runtime, session_id) =
+        open_session(root.path(), &source, Arc::new(DiskPressureLoader)).await;
+    let resolved = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ResolveWorkspace {
+                path: source.to_string_lossy().into_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::WorkspaceResolved { workspace_id } = resolved.outcome else {
+        panic!("workspace")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: resolved.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![InputPart::text("edit the file".to_owned())],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if let SessionEvent::RunFinished { outcome, .. } = event.event {
+                break outcome;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        matches!(&finished, RunOutcome::Failed { failure }
+            if failure.message.contains("disk_space_low")
+        ),
+        "{finished:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("vendor/policy.md")).unwrap(),
+        "original"
+    );
+    let tasks = std::fs::read_dir(root.path().join("control"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().join("vendor/policy.md"))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(std::fs::read_to_string(&tasks[0]).unwrap(), "retained edit");
+    runtime.shutdown().await.unwrap();
+}
+
 struct SideFileLoader;
 impl RuntimeLoader for SideFileLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {

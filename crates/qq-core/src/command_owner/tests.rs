@@ -3,6 +3,107 @@ use std::path::Path;
 
 use super::*;
 
+#[tokio::test]
+async fn scoped_command_refuses_low_disk_space_before_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _space = crate::storage::SpaceOverride::new(workspace.path(), 0);
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "echo unexpected > ran");
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: vec![],
+        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+    };
+    owner.submit(request).await.unwrap();
+    let result = wait_finished(&owner, id, 0).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(result.is_error());
+    assert!(!workspace.path().join("ran").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_command_is_reaped_when_disk_space_drops() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
+    let release = workspace.path().join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(
+        workspace.path(),
+        id,
+        "printf ready; read token < release; echo unexpected > ran",
+    );
+    let mut roots = Vec::new();
+    for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
+        if let Ok(path) = Path::new(path).canonicalize()
+            && !roots.contains(&path)
+        {
+            roots.push(path);
+        }
+    }
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: roots
+            .iter()
+            .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+            .collect(),
+        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+    };
+    owner.submit(request).await.unwrap();
+    let mut after = 0;
+    let running = loop {
+        let observed = owner.wait(id, after).await.unwrap();
+        assert_ne!(
+            observed.status,
+            CommandStatus::Finished,
+            "{:?}",
+            observed.result
+        );
+        if observed.output.contains("ready") {
+            break observed;
+        }
+        after = observed.version;
+    };
+    space.set(0);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    tokio::time::resume();
+    let finished = wait_finished(&owner, id, running.version).await;
+    owner.shutdown().await.unwrap();
+    let result = finished.result.unwrap();
+    assert!(result.is_error());
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(
+        result.text().contains("ready"),
+        "captured output must be preserved"
+    );
+    let pid = running.process.unwrap().0.facts().pid;
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    assert!(rustix::process::test_kill_process(pid).is_err());
+    assert!(!workspace.path().join("ran").exists());
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_cold_admission_keeps_submission_progressing() {
     use crate::{

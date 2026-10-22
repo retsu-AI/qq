@@ -746,7 +746,19 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let mut result = ToolOutput::interrupted("tool execution was cancelled");
+                let mut content = Header::new(launch.header_tool(), None)
+                    .field("exit", "cancelled")
+                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+                    .field("bytes", capture.total())
+                    .into_line();
+                content.push_str(&capture.into_output());
+                if !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str("tool execution was cancelled; its process group was killed");
+                let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
+                result.disposition = ResultDisposition::Interrupted;
+                result.result_digest = identity.finish(None, None, false);
                 result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Cancelled);
                 result
             }

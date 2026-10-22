@@ -1954,6 +1954,32 @@ async fn execute_started_run(
     if goal_spend {
         accounting = accounting.with_zero_spend();
     }
+    let storage_scope = resources.task_scope();
+    let pressure = async move {
+        match storage_scope {
+            Some(scope) => {
+                let permit = match crate::workspace::blocking_permits().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => return crate::storage::Pressure::Unavailable,
+                };
+                let workspace = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::workspace::Workspace::open(&scope.workspace.path)
+                })
+                .await;
+                let workspace = match workspace {
+                    Ok(result) => result.map_err(crate::storage::Pressure::from),
+                    Err(error) => Err(crate::storage::Pressure::from(error)),
+                };
+                match workspace {
+                    Ok(workspace) => crate::storage::watch(workspace).await,
+                    Err(error) => error,
+                }
+            }
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(pressure);
     let mut runtime_failed = inner.failed.subscribe();
     if *runtime_failed.borrow() {
         tool_cancellation.cancel();
@@ -2006,6 +2032,7 @@ async fn execute_started_run(
             tokio::select! {
                 biased;
                 _ = runtime_failed.changed() => RunInput::RuntimeFailed,
+                pressure = &mut pressure => RunInput::StoragePressure(pressure),
                 changed = cancellation.changed() => {
                     if changed.is_ok() && *cancellation.borrow() {
                         RunInput::Cancelled
@@ -2020,6 +2047,7 @@ async fn execute_started_run(
             tokio::select! {
                 biased;
                 _ = runtime_failed.changed() => RunInput::RuntimeFailed,
+                pressure = &mut pressure => RunInput::StoragePressure(pressure),
                 changed = cancellation.changed() => {
                     if changed.is_ok() && *cancellation.borrow() {
                         RunInput::Cancelled
@@ -2081,7 +2109,10 @@ async fn execute_started_run(
         }
         let stopped = matches!(
             &input,
-            RunInput::Cancelled | RunInput::Interrupted | RunInput::RuntimeFailed
+            RunInput::Cancelled
+                | RunInput::Interrupted
+                | RunInput::RuntimeFailed
+                | RunInput::StoragePressure(_)
         );
         if !pending_tool_output.is_empty()
             && !continues_tool_output
@@ -2274,6 +2305,22 @@ async fn execute_started_run(
                     &inner,
                     &claimed,
                     outcome,
+                    Some(accounting.snapshot()),
+                    teardown,
+                )
+                .await;
+                return;
+            }
+            RunInput::StoragePressure(pressure) => {
+                tool_cancellation.cancel();
+                let Ok(teardown) = resources.stop(&mut events).await else {
+                    inner.failed.send_replace(true);
+                    return;
+                };
+                finish_run_accounted(
+                    &inner,
+                    &claimed,
+                    internal_failure(&pressure.to_string()),
                     Some(accounting.snapshot()),
                     teardown,
                 )
@@ -3643,6 +3690,7 @@ enum RunInput {
     Cancelled,
     Interrupted,
     RuntimeFailed,
+    StoragePressure(crate::storage::Pressure),
 }
 
 async fn flush_pending_reasoning(

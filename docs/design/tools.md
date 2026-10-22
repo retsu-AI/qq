@@ -46,12 +46,15 @@ socket restrictions. Unsupported kernels and unimplemented platform backends
 refuse a requested restriction; they never fall back to host execution. The
 safe Rust `landlock` dependency supplies the kernel interface.
 
-This is a filesystem primitive, not a qualified Auto sandbox. The normal
-server setup does not create or register task scopes yet. Grants are additive and include existing
-inodes within a granted root: protecting policy files beneath a writable root,
-external hardlink aliases, authorized network egress, credential
-brokering, disk capacity, shared task resource budgets and concurrent writers still require further enforcement
-before Auto enablement.
+The binary creates detached task scopes for ordinary Auto runs and their
+children. Built-ins use the private task tree; native commands receive its
+filesystem, network and resource scope. Configuration is loaded from the
+source project. Completed root runs publish checked file changes after their
+commands and children drain; failed or interrupted work stays private.
+Unsupported required native restrictions fail closed. Linux is the first
+integrated backend; macOS resource limits and Windows containment remain
+unfinished. Authorized network egress, credential brokering, per-task aggregate
+resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
@@ -218,12 +221,27 @@ exit; empty groups left by a dead owner are reclaimed on subsequent admission.
 Resource scope is required in the persisted command identity, so a retry cannot
 raise limits or remove them. Other native adapters explicitly refuse limited
 execution until implemented. Linux applies both invocation and worker-fleet
-ceilings; per-task aggregate budgets and writable disk capacity remain unfinished.
+ceilings; per-task aggregate budgets and hard writable disk quotas remain unfinished.
 The native resource test uses the production delegation bootstrap and exercises
 thread exhaustion, memory OOM, controller values, stale-group reclamation and
 cleanup after exit and cancellation. Positive qualification requires a supported
 kernel and working user-manager delegation. Refusal tests cover unavailable
 delegation separately; they do not prove successful containment.
+
+### Disk-space safeguard
+
+Restricted native commands check available space before launch and once per
+second while running. Below a 512 MiB free-space reserve, the independent
+worker cancels the command, waits for native cleanup, and retains its captured
+output and stop reason. This continues while the coordinator is disconnected.
+The session runtime also stops private task work under disk pressure. Import
+and publication require the reserve plus their configured copy-size ceiling;
+failed publication retains the private edits.
+
+This requires no volumes, administrator access or filesystem setup. It is a
+best-effort safeguard, not a quota: concurrent writers and writes between
+checks can overshoot the reserve. Host-authority native commands do not use
+this guard.
 
 ## The Tool Loop
 

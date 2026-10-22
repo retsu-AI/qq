@@ -30,6 +30,8 @@ pub struct TaskWorkspacePolicy {
 pub(super) enum TaskExecutionError {
     #[error("invalid task execution state: {0}")]
     Invalid(&'static str),
+    #[error(transparent)]
+    Storage(#[from] crate::storage::Pressure),
     #[error("task workspace I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -110,6 +112,11 @@ impl TaskExecution {
                 .workspace
                 .protect_source(&TaskWorkspaceSource::from_plan(&loaded.plan)?)?;
             let root = Workspace::open(record.workspace.path())?;
+            crate::storage::check_blocking(&root, 0)?;
+            crate::storage::check_blocking(
+                &loaded.plan.workspace_handle(),
+                record.workspace_limits().max_bytes,
+            )?;
             let mut outputs: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
             outputs.extend(files(&root, record.workspace_limits(), false)?);
             if outputs.len() > record.workspace_limits().max_entries {
@@ -212,6 +219,8 @@ pub(super) async fn prepare(
                         "task control directory changed",
                     ));
                 }
+                let control = Workspace::open(&policy.directory.path)?;
+                crate::storage::check_blocking(&control, policy.limits.max_bytes)?;
                 let inputs = files(&source, policy.limits, true)?;
                 let workspace = TaskWorkspace::import(
                     &TaskWorkspaceSource::from_plan(&source_plan)?,
@@ -253,6 +262,7 @@ pub(super) async fn prepare(
         record
             .scope
             .validate_workspace(held.path(), NativeWorkspaceIdentity::held(held.root())?)?;
+        crate::storage::check_blocking(&held, 0)?;
         for protected in source.protected_pack_roots() {
             if !protected.as_os_str().is_empty() {
                 held.root().create_dir_all(protected)?;

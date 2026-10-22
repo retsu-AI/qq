@@ -63,6 +63,7 @@ pub use tools::bench_support as tool_bench;
 pub use tools::network::{NetworkPolicy, host_grant_matches};
 #[doc(hidden)]
 pub use tools::output::bench_support as tool_output_bench;
+mod storage;
 mod workspace;
 
 use runtime::{
