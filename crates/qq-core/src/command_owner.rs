@@ -110,10 +110,17 @@ impl CommandLauncher {
     }
 }
 
-/// Trusted Linux monitor/PID-1 entry point, called before starting a runtime.
-#[cfg(target_os = "linux")]
+/// Trusted native launch entry point, called before starting a runtime.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
-    crate::tools::linux_owner::execute(encoded)
+    #[cfg(target_os = "linux")]
+    {
+        crate::tools::linux_owner::execute(encoded)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::tools::macos_owner::execute(encoded)
+    }
 }
 
 /// Establish QQ's host job before a trusted worker requests breakaway.
@@ -287,6 +294,8 @@ struct OwnerState {
 struct LiveCommand {
     changed: watch::Sender<u64>,
     cancellation: RunCancellation,
+    pending_admissions: usize,
+    admitted: bool,
 }
 
 impl CommandOwner {
@@ -321,7 +330,11 @@ impl CommandOwner {
         let tools =
             blocking(move || ToolTasks::owned_linux(launcher).map_err(CommandOwnerError::Io))
                 .await?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let tools =
+            blocking(move || ToolTasks::owned_macos(launcher).map_err(CommandOwnerError::Io))
+                .await?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let tools = {
             let _ = launcher;
             ToolTasks::default()
@@ -447,21 +460,25 @@ impl CommandOwner {
             .try_acquire_owned()
             .map_err(|_| CommandOwnerError::Full)?;
         self.available()?;
-        let (changed, _) = watch::channel(0);
-        let cancellation = RunCancellation::new();
         // Register before admission so a concurrent observer cannot miss the
         // first committed transition. Duplicates retain the original watcher.
-        {
-            self.0
+        let (changed, cancellation) = {
+            let mut jobs = self
+                .0
                 .jobs
                 .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .entry(request.id)
-                .or_insert_with(|| LiveCommand {
-                    changed,
-                    cancellation: cancellation.clone(),
-                });
-        }
+                .unwrap_or_else(|error| error.into_inner());
+            let job = jobs.entry(request.id).or_insert_with(|| LiveCommand {
+                changed: watch::channel(0).0,
+                cancellation: RunCancellation::new(),
+                pending_admissions: 0,
+                admitted: false,
+            });
+            job.pending_admissions += 1;
+            (job.changed.clone(), job.cancellation.clone())
+        };
+        #[cfg(test)]
+        wait_at_async_hook(&SUBMISSION_HOOKS, request.id).await;
         let (reply, admitted) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         // Admission and execution have the same owner. Losing the response
@@ -474,18 +491,33 @@ impl CommandOwner {
             };
             let id = request.id;
             let admission = owner.0.journal.admit(id, encoded).await;
+            #[cfg(test)]
+            wait_at_async_hook(&ADMISSION_RESULT_HOOKS, id).await;
+            {
+                let mut jobs = owner
+                    .0
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                // A refusal owns only its registration, not its duplicates'.
+                // Acknowledgement may already have reclaimed this generation.
+                if let Some(job) = jobs
+                    .get_mut(&id)
+                    .filter(|job| job.changed.same_channel(&changed))
+                {
+                    job.pending_admissions -= 1;
+                    job.admitted |= admission.is_ok();
+                    if job.pending_admissions == 0 && !job.admitted {
+                        jobs.remove(&id);
+                    }
+                }
+            }
             match admission {
                 Ok(false) => {
                     let _ = reply.send(Ok(()));
                     guard.completed = true;
                 }
                 Err(error @ CommandOwnerError::Retired) => {
-                    owner
-                        .0
-                        .jobs
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .remove(&id);
                     let _ = reply.send(Err(error));
                     guard.completed = true;
                 }
@@ -494,12 +526,6 @@ impl CommandOwner {
                     guard.completed = true;
                 }
                 Err(CommandOwnerError::Full) => {
-                    owner
-                        .0
-                        .jobs
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .remove(&id);
                     let _ = reply.send(Err(CommandOwnerError::Full));
                     guard.completed = true;
                 }
@@ -509,15 +535,6 @@ impl CommandOwner {
                     owner.failure();
                 }
                 Ok(true) => {
-                    let cancellation = owner
-                        .0
-                        .jobs
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .get(&id)
-                        .expect("admitted command has a watcher")
-                        .cancellation
-                        .clone();
                     if owner.0.closing.load(Ordering::Acquire) || *owner.0.failed.borrow() {
                         cancellation.cancel();
                     }
@@ -958,11 +975,20 @@ fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
 
 #[cfg(test)]
 static OUTPUT_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static SUBMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static ADMISSION_RESULT_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 async fn wait_before_output(id: ToolCallId) {
+    wait_at_async_hook(&OUTPUT_HOOKS, id).await;
+}
+
+#[cfg(test)]
+async fn wait_at_async_hook(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
     let hook = {
-        let mut hooks = OUTPUT_HOOKS.lock().unwrap();
+        let mut hooks = hooks.lock().unwrap();
         hooks
             .iter()
             .position(|hook| hook.id == id)

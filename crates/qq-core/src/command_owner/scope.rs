@@ -7,8 +7,9 @@ use super::{
 };
 
 /// Native commands use the same captured task directory as built-in tools.
-/// No writable host roots or implicit readable roots are added. This policy is
-/// independent of approvals and applies to child sessions in the same store.
+/// No writable host roots or implicit readable file trees are added. macOS
+/// permits root-directory entries for loader startup. This policy is independent
+/// of approvals and applies to child sessions in the same store.
 /// Hosts must still choose safe inputs and provide a qualifying native backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

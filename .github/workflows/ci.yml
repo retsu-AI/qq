@@ -183,7 +183,12 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
+            cargo build --locked -p qq-core --example command_owner
+            cargo build --locked -p qq-server --example command_owner_launcher
+            cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
           fi
           bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
@@ -198,6 +203,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
+          bash .github/scripts/test-exact.sh command_owner::tests::refused_duplicate_cannot_remove_an_admitted_commands_cancellation
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_migration_preserves_the_journal_identity_and_results
           bash .github/scripts/test-exact.sh command_owner::tests::accepted_acknowledgement_survives_caller_loss_and_drains_before_shutdown
           bash .github/scripts/test-exact.sh command_owner::tests::exhausted_execution_slots_refuse_admission_without_poisoning_the_owner
@@ -220,6 +226,29 @@ jobs:
             bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
             bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
           fi
+      - name: macOS sandbox failure diagnostics
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
+          python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          roots = [Path.home() / "Library/Logs/DiagnosticReports", Path("/Library/Logs/DiagnosticReports")]
+          reports = [p for root in roots for pattern in ("sh-*.ips", "sandbox-exec-*.ips") for p in root.glob(pattern)]
+          for path in sorted(reports, key=lambda p: p.stat().st_mtime)[-5:]:
+              print(path.name)
+              try:
+                  report = json.loads(path.read_text().split("\n", 1)[1])
+                  for key in ("exception", "termination", "asi", "ktriageinfo", "asiSignatures"):
+                      print(key, report.get(key))
+                  thread = report.get("threads", [])[report.get("faultingThread", 0)]
+                  images = report.get("usedImages", [])
+                  for frame in thread.get("frames", [])[:20]:
+                      print(images[frame["imageIndex"]].get("name"), frame.get("symbol"), frame.get("imageOffset"))
+              except (ValueError, KeyError, IndexError, OSError) as error:
+                  print(type(error).__name__, str(error))
+          PYTHON
       - name: Unix output and observer regressions
         if: runner.os == 'macOS'
         shell: bash
@@ -280,6 +309,10 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
               grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
+            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/qq-macos-tests.txt"
+            for name in payload_cannot_leave_the_owned_process_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes; do
+              grep -Fx "macos::$name: test" "$RUNNER_TEMP/qq-macos-tests.txt"
+            done
           fi
 
   release-size:

@@ -158,3 +158,7 @@ mod kernel_isolation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "command_worker_client/runtime.rs"]
 mod runtime;
+
+#[cfg(target_os = "macos")]
+#[path = "command_worker_client/macos.rs"]
+mod macos;

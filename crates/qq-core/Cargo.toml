@@ -40,6 +40,11 @@ url.workspace = true
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["fs", "event", "pipe", "thread"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+command-fds.workspace = true
+nix.workspace = true
+tempfile.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["mount"] }
 command-fds.workspace = true
