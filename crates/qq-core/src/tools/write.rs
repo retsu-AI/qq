@@ -6,11 +6,11 @@ use std::{
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, content_hash};
+use crate::workspace::{FileState, FileStateUpdate, Workspace, apply_atomically, content_hash};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
-    edit::{MAX_DIFF_BYTES, MAX_EDIT_FILE_BYTES, apply_atomically, read_editable, unified_diff},
+    edit::{MAX_DIFF_BYTES, MAX_EDIT_FILE_BYTES, read_editable, unified_diff},
     matching::lcs_len,
     output::Header,
 };
@@ -120,7 +120,7 @@ pub(super) fn write_file(
                 arguments.content.as_bytes(),
                 Some(current.permissions),
             ) {
-                return ToolOutput::error(error);
+                return ToolOutput::error(error.to_string());
             }
             (false, Some(current.bytes))
         }
@@ -132,7 +132,7 @@ pub(super) fn write_file(
             if let Err(error) =
                 apply_atomically(workspace, &target, arguments.content.as_bytes(), None)
             {
-                return ToolOutput::error(error);
+                return ToolOutput::error(error.to_string());
             }
             (true, None)
         }

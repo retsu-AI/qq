@@ -68,6 +68,368 @@ fn detached_task_workspace_preserves_selected_bytes_without_host_aliases() {
 }
 
 #[test]
+fn publication_preserves_other_source_edits_and_can_resume_from_a_saved_record() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "original").unwrap();
+    fs::write(fixture.source.path.join("b"), "original").unwrap();
+    let task = fixture.import(&["a", "b"], 1024).unwrap();
+    let saved = serde_json::to_vec(&task).unwrap();
+    fs::write(task.path().join("a"), "agent change").unwrap();
+    fs::write(task.path().join("new"), "created").unwrap();
+    fs::write(fixture.source.path.join("b"), "human change").unwrap();
+    let mut reopened: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    let paths = ["a", "b", "new"].map(PathBuf::from);
+    assert_eq!(
+        reopened.publish(&paths).unwrap(),
+        [PathBuf::from("a"), PathBuf::from("new")]
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "agent change"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("b")).unwrap(),
+        "human change"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("new")).unwrap(),
+        "created"
+    );
+    // A crash can leave installed bytes with the earlier saved baseline.
+    let mut retried: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(
+        retried.publish(&paths).unwrap(),
+        [PathBuf::from("a"), PathBuf::from("new")]
+    );
+    assert!(retried.publish(&paths).unwrap().is_empty());
+}
+
+#[test]
+fn publication_preflights_conflicts_before_installing_any_output() {
+    let fixture = Fixture::new();
+    for name in ["a", "z"] {
+        fs::write(fixture.source.path.join(name), "original").unwrap();
+    }
+    let mut task = fixture.import(&["a", "z"], 1024).unwrap();
+    for name in ["a", "z"] {
+        fs::write(task.path().join(name), "agent change").unwrap();
+    }
+    fs::write(fixture.source.path.join("z"), "human change").unwrap();
+    assert!(
+        matches!(task.publish(&["a", "z"].map(PathBuf::from)), Err(TaskWorkspaceError::Conflict(path)) if path == Path::new("z"))
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "original"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("z")).unwrap(),
+        "human change"
+    );
+}
+
+#[test]
+fn publication_handles_deletion_without_deleting_changed_source_bytes() {
+    for conflict in [false, true] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("a"), "original").unwrap();
+        let mut task = fixture.import(&["a"], 1024).unwrap();
+        fs::remove_file(task.path().join("a")).unwrap();
+        if conflict {
+            fs::write(fixture.source.path.join("a"), "human change").unwrap();
+        }
+        let result = task.publish(&[PathBuf::from("a")]);
+        if conflict {
+            assert!(matches!(result, Err(TaskWorkspaceError::Conflict(_))));
+            assert_eq!(
+                fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+                "human change"
+            );
+        } else {
+            assert_eq!(result.unwrap(), [PathBuf::from("a")]);
+            assert!(!fixture.source.path.join("a").exists());
+        }
+    }
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn publication_refuses_task_and_source_aliases_before_changing_files() {
+    #[cfg(unix)]
+    let aliases: &[&str] = &["symlink", "hardlink", "symlink-parent"];
+    #[cfg(windows)]
+    let aliases: &[&str] = &["hardlink", "junction-parent"];
+    for side in ["task", "source"] {
+        for &alias in aliases {
+            let parent_alias = matches!(alias, "symlink-parent" | "junction-parent");
+            let fixture = Fixture::new();
+            fs::write(fixture.source.path.join("a"), "original").unwrap();
+            let selected = if parent_alias {
+                fs::create_dir(fixture.source.path.join("z")).unwrap();
+                "z/host"
+            } else {
+                "z"
+            };
+            fs::write(fixture.source.path.join(selected), "original").unwrap();
+            let mut task = fixture.import(&["a", selected], 1024).unwrap();
+            fs::write(task.path().join("a"), "agent change").unwrap();
+            fs::write(task.path().join(selected), "agent change").unwrap();
+            let outside = fixture.source.path.parent().unwrap().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("host"), "host bytes").unwrap();
+            let root = if side == "task" {
+                task.path()
+            } else {
+                &fixture.source.path
+            };
+            if parent_alias {
+                fs::remove_dir_all(root.join("z")).unwrap();
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&outside, root.join("z")).unwrap();
+                #[cfg(windows)]
+                assert!(
+                    std::process::Command::new("cmd")
+                        .args(["/d", "/c", "mklink", "/J"])
+                        .arg(root.join("z"))
+                        .arg(&outside)
+                        .stdout(std::process::Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                fs::remove_file(root.join("z")).unwrap();
+                match alias {
+                    "hardlink" => fs::hard_link(outside.join("host"), root.join("z")).unwrap(),
+                    #[cfg(unix)]
+                    "symlink" => {
+                        std::os::unix::fs::symlink(outside.join("host"), root.join("z")).unwrap()
+                    }
+                    _ => unreachable!("unknown alias fixture"),
+                }
+            }
+            assert!(
+                task.publish(&[PathBuf::from("a"), PathBuf::from(selected)])
+                    .is_err(),
+                "{side} {alias}"
+            );
+            assert_eq!(
+                fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+                "original",
+                "{side} {alias}"
+            );
+            assert_eq!(
+                fs::read_to_string(outside.join("host")).unwrap(),
+                "host bytes"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_refuses_aliased_or_special_lock_files() {
+    for alias in ["symlink", "hardlink", "fifo"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("a"), "original").unwrap();
+        let mut task = fixture.import(&["a"], 1024).unwrap();
+        fs::write(task.path().join("a"), "agent change").unwrap();
+        let outside = fixture.source.path.parent().unwrap().join("outside");
+        fs::write(&outside, "host bytes").unwrap();
+        fs::create_dir(fixture.source.path.join(".qq")).unwrap();
+        let lock = fixture.source.path.join(".qq/task-publication.lock");
+        match alias {
+            "symlink" => std::os::unix::fs::symlink(&outside, &lock).unwrap(),
+            "hardlink" => fs::hard_link(&outside, &lock).unwrap(),
+            "fifo" => assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&lock)
+                    .status()
+                    .unwrap()
+                    .success()
+            ),
+            _ => unreachable!(),
+        }
+        assert!(matches!(
+            task.publish(&[PathBuf::from("a")]),
+            Err(TaskWorkspaceError::UnsupportedFile(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+            "original"
+        );
+        assert_eq!(fs::read_to_string(outside).unwrap(), "host bytes");
+    }
+}
+
+#[tokio::test]
+async fn publication_reports_partial_failure_and_retries_the_saved_baseline() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.path.join("nested")).unwrap();
+    for name in ["a", "nested/z"] {
+        fs::write(fixture.source.path.join(name), "original").unwrap();
+    }
+    let mut task = fixture.import(&["a", "nested/z"], 1024).unwrap();
+    let saved = serde_json::to_vec(&task).unwrap();
+    for name in ["a", "nested/z"] {
+        fs::write(task.path().join(name), "agent change").unwrap();
+    }
+    let paths = ["a", "nested/z"].map(PathBuf::from);
+    let pending_paths = paths.clone();
+    let (entered, release) = crate::workspace::hold_tool_apply(&fixture.source.path);
+    let publishing = tokio::task::spawn_blocking(move || task.publish(&pending_paths));
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .unwrap()
+        .unwrap();
+    let lock = fixture.source.path.join(".qq/task-publication.lock");
+    let probe = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "task_workspace::tests::publication_lock_probe",
+                "--nocapture",
+            ])
+            .env("QQ_TEST_PUBLICATION_LOCK", lock)
+            .output()
+            .unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&probe.stdout).contains("1 passed"),
+        "the cross-process lock probe must execute"
+    );
+    // Another writer changes the later target after preflight, while the
+    // first atomic apply is staged. This works without permission tricks.
+    fs::remove_file(fixture.source.path.join("nested/z")).unwrap();
+    fs::create_dir(fixture.source.path.join("nested/z")).unwrap();
+    release.send(()).unwrap();
+    let failed = publishing.await.unwrap();
+    assert!(
+        matches!(failed, Err(TaskWorkspaceError::PartialPublication { applied, .. }) if applied == [PathBuf::from("a")])
+    );
+    fs::remove_dir(fixture.source.path.join("nested/z")).unwrap();
+    fs::write(fixture.source.path.join("nested/z"), "original").unwrap();
+    let mut reopened: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(reopened.publish(&paths).unwrap(), paths);
+    for name in ["a", "nested/z"] {
+        assert_eq!(
+            fs::read_to_string(fixture.source.path.join(name)).unwrap(),
+            "agent change"
+        );
+    }
+}
+
+#[test]
+fn publication_lock_probe() {
+    let Some(path) = std::env::var_os("QQ_TEST_PUBLICATION_LOCK") else {
+        return;
+    };
+    let lock = fs::File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    assert!(
+        matches!(lock.try_lock(), Err(fs::TryLockError::WouldBlock)),
+        "another process must not publish while the first holds the checkout lock"
+    );
+}
+
+#[test]
+fn publication_cannot_install_policy_or_git_trust_files() {
+    for protected in [".git/config", ".qq/config.ron", "../outside"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("a"), "original").unwrap();
+        let mut task = fixture.import(&["a"], 1024).unwrap();
+        fs::write(task.path().join("a"), "agent change").unwrap();
+        assert!(matches!(
+            task.publish(&[PathBuf::from("a"), PathBuf::from(protected)]),
+            Err(TaskWorkspaceError::InvalidInput(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+            "original"
+        );
+    }
+}
+
+#[test]
+fn publication_bounds_output_bytes_and_retained_entries_before_applying() {
+    for limit in ["bytes", "entries"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("a"), "old").unwrap();
+        let mut task = fixture.import(&["a"], 8).unwrap();
+        fs::write(task.path().join("a"), "new").unwrap();
+        let mut paths = vec![PathBuf::from("a")];
+        if limit == "bytes" {
+            fs::write(task.path().join("z"), "too large").unwrap();
+            paths.push(PathBuf::from("z"));
+        } else {
+            // Repeated publication must not grow the saved baseline without
+            // bound even when each individual request fits the entry budget.
+            task.limits.max_entries = 1;
+            fs::write(task.path().join("z"), "new").unwrap();
+            paths = vec![PathBuf::from("z")];
+        }
+        assert!(matches!(
+            task.publish(&paths),
+            Err(TaskWorkspaceError::LimitExceeded)
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+            "old"
+        );
+        assert!(!fixture.source.path.join("z").exists());
+    }
+}
+
+#[test]
+fn publication_refuses_replaced_source_and_task_roots() {
+    for side in ["source", "task"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("a"), "original").unwrap();
+        let mut task = fixture.import(&["a"], 1024).unwrap();
+        fs::write(task.path().join("a"), "agent change").unwrap();
+        let path = if side == "source" {
+            &fixture.source.path
+        } else {
+            task.path()
+        };
+        let old = path.with_file_name("old");
+        fs::rename(path, &old).unwrap();
+        fs::create_dir(path).unwrap();
+        fs::write(path.join("a"), "replacement").unwrap();
+        assert!(matches!(
+            task.publish(&[PathBuf::from("a")]),
+            Err(TaskWorkspaceError::Changed(_))
+        ));
+        assert_eq!(
+            fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+            if side == "source" {
+                "replacement"
+            } else {
+                "original"
+            }
+        );
+        assert_eq!(
+            fs::read_to_string(old.join("a")).unwrap(),
+            if side == "source" {
+                "original"
+            } else {
+                "agent change"
+            }
+        );
+    }
+}
+
+#[test]
 fn detached_task_workspace_rejects_hardlinks_and_cleans_partial_import() {
     let fixture = Fixture::new();
     fs::write(fixture.source.path.join("a"), "ordinary").unwrap();

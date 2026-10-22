@@ -274,8 +274,17 @@ jobs:
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_is_shared_by_builtin_tools_and_native_commands
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_other_source_edits_and_can_resume_from_a_saved_record
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_preflights_conflicts_before_installing_any_output
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_handles_deletion_without_deleting_changed_source_bytes
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_task_and_source_aliases_before_changing_files
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_reports_partial_failure_and_retries_the_saved_baseline
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_cannot_install_policy_or_git_trust_files
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_bounds_output_bytes_and_retained_entries_before_applying
+          bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_replaced_source_and_task_roots
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_links_special_files_and_preserves_executable_bits
+            bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_aliased_or_special_lock_files
           else
             bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_refuses_junctions_and_ambiguous_windows_names
           fi
