@@ -282,6 +282,7 @@ pub(super) async fn spawn(
         lease: Some(lease),
         reported: None,
     };
+    let mut released = false;
     let authorized = tokio::select! {
         biased;
         () = cancelled.cancelled() => Err(io::Error::other("native startup cancelled")),
@@ -298,18 +299,48 @@ pub(super) async fn spawn(
             if cancelled.is_cancelled() || Instant::now() >= deadline {
                 return Err(io::Error::other("native startup stopped"));
             }
-            control.write_all(&[1]).await
+            // One byte is the entire authorization. There is no yield
+            // between its successful write and recording the release.
+            control.write_all(&[1]).await?;
+            released = true;
+            Ok::<_, io::Error>(())
         } => result,
     };
     if let Err(error) = authorized {
-        child.start_kill()?;
+        if released {
+            child.start_kill()?;
+        } else {
+            // The trusted helper cannot fork a payload before authorization.
+            // Reap this sole child directly: Darwin's killpg rejects a group
+            // containing only its exited leader. A denied group signal must
+            // not abandon an already-exited, unreleased helper.
+            if child.inner.try_wait()?.is_none() {
+                match child.inner.start_kill() {
+                    Ok(()) => {}
+                    Err(error)
+                        if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            // An unreleased helper has no payload result. Its actual process
+            // exit below is the cleanup proof; do not wait for a result frame.
+            drop(child.control.take());
+        }
         child.wait().await?;
         return Err(error);
     }
     Ok(child)
 }
 
+#[cfg(test)]
+static GROUP_KILL_DENIALS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
 fn kill_group(pid: Option<u32>) -> io::Result<()> {
+    #[cfg(test)]
+    if pid.is_some_and(|pid| GROUP_KILL_DENIALS.lock().unwrap().contains(&pid)) {
+        return Err(rustix::io::Errno::PERM.into());
+    }
     let Some(pid) = pid
         .and_then(|pid| i32::try_from(pid).ok())
         .and_then(rustix::process::Pid::from_raw)
@@ -693,6 +724,120 @@ mod tests {
             );
             assert_eq!(root.path().join("escaped").exists(), authorize);
         }
+    }
+
+    #[tokio::test]
+    async fn unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied() {
+        // Darwin returns EPERM for an existing group containing only zombies.
+        // Keep its exited leader waitable, and reproduce that kernel response
+        // on Linux too so this startup cleanup regression is deterministic.
+        struct DeniedGroup(u32);
+        impl Drop for DeniedGroup {
+            fn drop(&mut self) {
+                GROUP_KILL_DENIALS
+                    .lock()
+                    .unwrap()
+                    .retain(|pid| *pid != self.0);
+            }
+        }
+        let (control, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        // This peer prevents EOF until the fixture has observed the helper's
+        // exit. It is never inherited by the helper or any payload.
+        let held_peer = inherited.try_clone().unwrap();
+        let mut command = tokio::process::Command::new("bash");
+        command
+            .args(["-c", "printf '%s\n' \"$$\"; exit 7"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        command
+            .as_std_mut()
+            .fd_mappings(vec![command_fds::FdMapping {
+                parent_fd: inherited.into(),
+                child_fd: 3,
+            }])
+            .unwrap();
+        // Capture the helper PID without polling/reaping the Child owned by
+        // spawn. Use a separate output pipe because startup owns stdio.
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        command.stdout(std::process::Stdio::from(write));
+        let mut pid_output =
+            tokio::io::BufReader::new(tokio::fs::File::from_std(std::fs::File::from(read)));
+        let startup = Startup {
+            encoded: vec![b'J'],
+            control: tokio::net::UnixStream::from_std(control).unwrap(),
+            _image: std::sync::Arc::new(HelperImage(Some(tempfile::tempdir().unwrap()))),
+        };
+        let tasks = crate::tools::dispatch::ToolTasks::default();
+        let lease = tasks.enter();
+        let cancelled = ToolCancellation::new(crate::RunCancellation::new());
+        let execution = tokio::spawn(async move {
+            spawn(
+                command,
+                startup,
+                &lease,
+                &cancelled,
+                Instant::now() + std::time::Duration::from_secs(15),
+            )
+            .await
+        });
+        let mut text = String::new();
+        use tokio::io::AsyncBufReadExt as _;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pid_output.read_line(&mut text),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let pid: u32 = text.trim().parse().unwrap();
+        tokio::task::spawn_blocking(move || {
+            let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+            let status = rustix::process::waitid(
+                rustix::process::WaitId::Pid(pid),
+                rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+            )
+            .unwrap();
+            assert!(
+                status.is_some(),
+                "the helper must have exited before startup fails"
+            );
+        })
+        .await
+        .unwrap();
+        #[cfg(target_os = "linux")]
+        GROUP_KILL_DENIALS.lock().unwrap().push(pid);
+        #[cfg(target_os = "macos")]
+        {
+            let group = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+            assert_eq!(
+                rustix::process::test_kill_process_group(group),
+                Err(rustix::io::Errno::PERM)
+            );
+        }
+        let denied = DeniedGroup(pid);
+        drop(held_peer);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        let drained = tasks.drain().await;
+        drop(denied);
+        // Reap only this fixture if the broken path abandoned its Child. This
+        // cannot change the already-recorded production cleanup verdict.
+        crate::tools::assert_panicked_process_exits(pid).await;
+        assert!(
+            result.is_err(),
+            "an exited, unauthorized helper must remain a refused launch"
+        );
+        assert_eq!(
+            drained,
+            Ok(()),
+            "the sole unreleased helper must be reaped even when killpg cannot signal its zombie"
+        );
     }
 
     #[test]
