@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,34 @@ impl From<String> for SecretLiteral {
 impl From<&str> for SecretLiteral {
     fn from(secret: &str) -> Self {
         Self(secret.to_owned())
+    }
+}
+
+/// Authentication an adapter sends unchanged on every request.
+///
+/// One type serves every protocol: a protocol's API key is a [`Self::Header`]
+/// with its own name (`x-api-key`, `x-goog-api-key`) or a [`Self::Bearer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StaticAuth {
+    None,
+    /// `Authorization: Bearer <secret>`.
+    Bearer(SecretLiteral),
+    /// The secret, verbatim, in the named header.
+    Header(Cow<'static, str>, SecretLiteral),
+}
+
+impl StaticAuth {
+    pub(crate) fn header(name: impl Into<Cow<'static, str>>, secret: SecretLiteral) -> Self {
+        Self::Header(name.into(), secret)
+    }
+
+    /// The scheme, never the secret: `none`, `bearer`, or the header name.
+    pub(crate) fn kind(&self) -> &str {
+        match self {
+            Self::None => "none",
+            Self::Bearer(_) => "bearer",
+            Self::Header(name, _) => name,
+        }
     }
 }
 

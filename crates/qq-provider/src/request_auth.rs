@@ -294,6 +294,15 @@ impl RequestAuthorizer {
         Self::request_credentials(credentials, RequestCredentialKindExpected::Codex)
     }
 
+    /// The headers this authorizer sets on each attempt, which static
+    /// configuration therefore may not set.
+    pub(crate) fn owned_headers(&self) -> &'static [HeaderName] {
+        match self {
+            Self::Credential(_, expected) => expected.allowed(),
+            _ => &[],
+        }
+    }
+
     const fn request_credentials(
         credentials: SharedRequestCredentialProvider,
         expected: RequestCredentialKindExpected,

@@ -4,15 +4,16 @@
 //! selection. Callers must resolve endpoints and supply an HTTP client before
 //! entering this boundary.
 
+use std::borrow::Cow;
+
 use crate::{
     Provider, ProviderError, ProviderStream,
     compiler::{EndpointKind, HttpAuth, HttpProtocol, ResponsesBodyShape},
+    credentials::StaticAuth,
     http::AttemptPolicy,
     providers::{
-        anthropic::{AnthropicAuth, AnthropicMessages},
-        google::{GoogleAuth, GoogleGenerateContent},
-        openai::{OpenAi, ResponsesAuth, ResponsesConstructionAuth},
-        openai_chat::{ChatCompletionsAuth, OpenAiChatCompletions},
+        anthropic::AnthropicMessages, google::GoogleGenerateContent, openai::OpenAi,
+        openai_chat::OpenAiChatCompletions,
     },
     request_auth::RequestAuthorizer,
 };
@@ -37,20 +38,10 @@ pub(crate) struct HttpConstructionSpec {
     pub(crate) body_shape: ResponsesBodyShape,
 }
 
-enum ResolvedHttpAuth {
-    OpenAiResponses(ResponsesConstructionAuth),
-    OpenAiChatCompletions {
-        auth: ChatCompletionsAuth,
-        authorizer: RequestAuthorizer,
-    },
-    AnthropicMessages {
-        auth: AnthropicAuth,
-        authorizer: RequestAuthorizer,
-    },
-    GoogleGenerateContent {
-        auth: GoogleAuth,
-        authorizer: RequestAuthorizer,
-    },
+/// The static headers and per-attempt authorizer one adapter sends.
+struct ResolvedHttpAuth {
+    auth: StaticAuth,
+    authorizer: RequestAuthorizer,
 }
 
 // Only the Mantle adapter selects a retry mode at construction; the HTTP
@@ -130,31 +121,23 @@ pub(crate) fn construct_http_provider(
         body_shape,
     } = spec;
 
-    let resolved = resolve_http_auth(protocol, auth, authorizer)?;
-    if body_shape == ResponsesBodyShape::Codex
-        && !matches!(resolved, ResolvedHttpAuth::OpenAiResponses(_))
-    {
+    if body_shape == ResponsesBodyShape::Codex && protocol != HttpProtocol::OpenAiResponses {
         return Err(ProviderError::Configuration(
             CODEX_BODY_REQUIRES_RESPONSES_MESSAGE.to_owned(),
         ));
     }
-    match resolved {
-        ResolvedHttpAuth::OpenAiResponses(auth) => Ok(CompiledHttpProvider::OpenAiResponses(
-            OpenAi::with_client_and_auth(client, endpoint, auth, headers, body_shape)?,
-        )),
-        ResolvedHttpAuth::OpenAiChatCompletions { auth, authorizer } => {
-            Ok(CompiledHttpProvider::OpenAiChatCompletions(
-                OpenAiChatCompletions::with_client_and_authorizer(
-                    client, endpoint, auth, headers, authorizer,
-                )?,
-            ))
-        }
-        ResolvedHttpAuth::AnthropicMessages { auth, authorizer } => Ok(
-            CompiledHttpProvider::AnthropicMessages(AnthropicMessages::with_client_and_authorizer(
-                client, endpoint, auth, headers, authorizer,
-            )?),
+    let ResolvedHttpAuth { auth, authorizer } = resolve_http_auth(protocol, auth, authorizer)?;
+    Ok(match protocol {
+        HttpProtocol::OpenAiResponses => CompiledHttpProvider::OpenAiResponses(
+            OpenAi::with_client(client, endpoint, auth, headers, authorizer, body_shape)?,
         ),
-        ResolvedHttpAuth::GoogleGenerateContent { auth, authorizer } => Ok(
+        HttpProtocol::OpenAiChatCompletions => CompiledHttpProvider::OpenAiChatCompletions(
+            OpenAiChatCompletions::with_client(client, endpoint, auth, headers, authorizer)?,
+        ),
+        HttpProtocol::AnthropicMessages => CompiledHttpProvider::AnthropicMessages(
+            AnthropicMessages::with_client(client, endpoint, auth, headers, authorizer)?,
+        ),
+        HttpProtocol::GoogleGenerateContent => {
             CompiledHttpProvider::GoogleGenerateContent(GoogleGenerateContent::with_client(
                 client,
                 endpoint,
@@ -162,8 +145,19 @@ pub(crate) fn construct_http_provider(
                 auth,
                 headers,
                 authorizer,
-            )?),
-        ),
+            )?)
+        }
+    })
+}
+
+/// The header a protocol carries a plain API key in.
+fn api_key_auth(protocol: HttpProtocol, secret: crate::SecretLiteral) -> StaticAuth {
+    match protocol {
+        HttpProtocol::OpenAiResponses | HttpProtocol::OpenAiChatCompletions => {
+            StaticAuth::Bearer(secret)
+        }
+        HttpProtocol::AnthropicMessages => StaticAuth::header("x-api-key", secret),
+        HttpProtocol::GoogleGenerateContent => StaticAuth::header("x-goog-api-key", secret),
     }
 }
 
@@ -172,115 +166,35 @@ fn resolve_http_auth(
     auth: HttpAuth,
     authorizer: Option<RequestAuthorizer>,
 ) -> Result<ResolvedHttpAuth, ProviderError> {
+    let resolved = |auth, authorizer| Ok(ResolvedHttpAuth { auth, authorizer });
     match (auth, authorizer) {
-        (HttpAuth::NoAuth, Some(authorizer)) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::MantleSigV4(authorizer),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::NoAuth,
-                authorizer,
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::NoAuth,
-                authorizer,
-            }),
-            HttpProtocol::GoogleGenerateContent => Err(ProviderError::Configuration(
-                GOOGLE_MANTLE_UNSUPPORTED_MESSAGE.to_owned(),
-            )),
-        },
+        (HttpAuth::NoAuth, Some(_)) if protocol == HttpProtocol::GoogleGenerateContent => Err(
+            ProviderError::Configuration(GOOGLE_MANTLE_UNSUPPORTED_MESSAGE.to_owned()),
+        ),
+        (HttpAuth::NoAuth, Some(authorizer)) => resolved(StaticAuth::None, authorizer),
         (_, Some(_)) => Err(ProviderError::Configuration(
             AUTHORIZER_WITH_AUTH_MESSAGE.to_owned(),
         )),
-        (HttpAuth::NoAuth, None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::Static(ResponsesAuth::NoAuth),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::NoAuth,
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::NoAuth,
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::NoAuth,
-                authorizer: RequestAuthorizer::default(),
-            }),
-        },
-        (HttpAuth::ApiKey(secret), None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::Static(ResponsesAuth::Bearer(secret)),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::Bearer(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::XApiKey(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::XGoogApiKey(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-        },
-        (HttpAuth::Bearer(secret), None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::Static(ResponsesAuth::Bearer(secret)),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::Bearer(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::Bearer(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::Bearer(secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-        },
-        (HttpAuth::Header(name, secret), None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::Static(ResponsesAuth::Header(name, secret)),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::Header(name, secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::Header(name, secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::Header(name, secret),
-                authorizer: RequestAuthorizer::default(),
-            }),
-        },
-        (HttpAuth::RequestTimeBearer(credentials), None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::RequestTimeBearer(credentials),
-            )),
-            HttpProtocol::OpenAiChatCompletions => Ok(ResolvedHttpAuth::OpenAiChatCompletions {
-                auth: ChatCompletionsAuth::NoAuth,
-                authorizer: RequestAuthorizer::request_time_bearer(credentials),
-            }),
-            HttpProtocol::AnthropicMessages => Ok(ResolvedHttpAuth::AnthropicMessages {
-                auth: AnthropicAuth::NoAuth,
-                authorizer: RequestAuthorizer::request_time_bearer(credentials),
-            }),
-            HttpProtocol::GoogleGenerateContent => Ok(ResolvedHttpAuth::GoogleGenerateContent {
-                auth: GoogleAuth::NoAuth,
-                authorizer: RequestAuthorizer::request_time_bearer(credentials),
-            }),
-        },
+        (HttpAuth::NoAuth, None) => resolved(StaticAuth::None, RequestAuthorizer::default()),
+        (HttpAuth::ApiKey(secret), None) => {
+            resolved(api_key_auth(protocol, secret), RequestAuthorizer::default())
+        }
+        (HttpAuth::Bearer(secret), None) => {
+            resolved(StaticAuth::Bearer(secret), RequestAuthorizer::default())
+        }
+        (HttpAuth::Header(name, secret), None) => resolved(
+            StaticAuth::Header(Cow::Owned(name), secret),
+            RequestAuthorizer::default(),
+        ),
+        (HttpAuth::RequestTimeBearer(credentials), None) => resolved(
+            StaticAuth::None,
+            RequestAuthorizer::request_time_bearer(credentials),
+        ),
         (HttpAuth::RequestTimeCodex(credentials), None) => match protocol {
-            HttpProtocol::OpenAiResponses => Ok(ResolvedHttpAuth::OpenAiResponses(
-                ResponsesConstructionAuth::RequestTimeCodex(credentials),
-            )),
+            HttpProtocol::OpenAiResponses => resolved(
+                StaticAuth::None,
+                RequestAuthorizer::request_time_codex(credentials),
+            ),
             _ => Err(ProviderError::Configuration(
                 REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE.to_owned(),
             )),
