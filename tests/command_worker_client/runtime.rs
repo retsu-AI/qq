@@ -7,7 +7,8 @@ use std::{path::Path, process::Stdio, time::Duration};
 #[tokio::test]
 async fn real_cli_persists_native_ownership_and_releases_worker_results() {
     let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("workspace");
+    let home = root.path().canonicalize().unwrap();
+    let workspace = home.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     assert!(
         std::process::Command::new("git")
@@ -18,9 +19,9 @@ async fn real_cli_persists_native_ownership_and_releases_worker_results() {
             .success()
     );
     #[cfg(target_os = "linux")]
-    let data = root.path().join("data/qq");
+    let data = home.join("data/qq");
     #[cfg(target_os = "macos")]
-    let data = root.path().join("Library/Application Support/dev.qq.qq");
+    let data = home.join("Library/Application Support/dev.qq.qq");
     let worker = client::CommandWorker::new(
         data.join("command-owner-v3"),
         env!("CARGO_BIN_EXE_qq").into(),
@@ -55,7 +56,7 @@ async fn real_cli_persists_native_ownership_and_releases_worker_results() {
     );
     let output = tokio::time::timeout(
         Duration::from_secs(30),
-        configured_cli(root.path(), &workspace, &config)
+        configured_cli(&home, &workspace, &config)
             .args([
                 "run",
                 "--approval",
