@@ -271,8 +271,13 @@ delegation separately; they do not prove successful containment.
 
 ### Disk-space safeguard
 
-Restricted native commands check available space before launch and once per
-second while running. Below a 512 MiB free-space reserve, the independent
+Restricted native commands check available space on every declared writable
+root before launch and once per second while running. Checks also include the
+native helper's temporary storage on macOS/Windows and Windows' AppContainer
+profile storage, which can be on a different disk from task files. Each sampling
+pass batches its filesystem queries outside Tokio workers. Copying a trusted
+helper requires the reserve plus the image size; the macOS copy is bounded even
+if its source changes during preparation. Below a 512 MiB free-space reserve, the independent
 worker cancels the command, waits for native cleanup, and retains its captured
 output and stop reason. This continues while the coordinator is disconnected.
 The session runtime also stops private task work under disk pressure. Import

@@ -105,6 +105,11 @@ impl WindowsOwner {
                     let directory =
                         crate::command_owner::windows_state::directory(temporary.path())
                             .map_err(io::Error::other)?;
+                    crate::storage::check_path_blocking(
+                        temporary.path(),
+                        self.0.source.metadata()?.len(),
+                    )
+                    .map_err(io::Error::other)?;
                     let path = temporary.path().join("helper.exe");
                     let mut destination =
                         File::options().write(true).create_new(true).open(&path)?;
