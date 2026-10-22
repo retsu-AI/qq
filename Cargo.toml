@@ -190,6 +190,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Producer receipts hash the executable once. Unoptimized SHA-2 can keep a
+# clean debug worker's first command queued for seconds, especially under CI
+# contention. Preserve the identity check without slowing command admission.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
 # every supported provider family. The minimal embedding profile is
