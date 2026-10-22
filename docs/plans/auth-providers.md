@@ -26,13 +26,15 @@ Proof: `qq-provider` and `qq-auth` tests; `cargo xtask check`.
 
 - Replace `ResponsesAuth`, `ChatCompletionsAuth`, `AnthropicAuth` and
   `GoogleAuth` with one `StaticAuth { None, Bearer, Header(name, secret) }`
-  and one `SafeHeaders::insert_auth(auth, protected)`. `resolve_http_auth`
-  maps `ApiKey` to the protocol's header.
-- Drop `ResponsesConstructionAuth`; every adapter takes `(auth, authorizer)`.
+  and one `build_static_headers`. `resolve_http_auth` maps `ApiKey` to the
+  protocol's header.
+- Drop `ResponsesConstructionAuth`; every adapter takes `(auth, authorizer)`,
+  and the headers a request-time authorizer sets are protected from static
+  configuration for every protocol, not only Codex.
 - One error wording for protected auth headers.
-- Keep static and per-attempt redactions as two lists (secrets as
-  `Arc<str>`) instead of copying and re-sorting per attempt; normalize once.
-- Confirm Mantle's Anthropic endpoint takes `x-api-key` before touching it.
+- Reuse the per-attempt credential list when merging redactions instead of
+  copying the static list first.
+- Mantle Anthropic keeps `x-api-key`, unchanged.
 
 Proof: existing adapter header/redaction tests unchanged in behavior;
 `benches/provider_compiler.rs` reported, not gated.

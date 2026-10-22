@@ -50,7 +50,7 @@ crates/qq-harness/src/plan.rs	1079	fn concurrent_misses_on_one_key_compile_once(
 crates/qq-mcp/src/tests.rs	113	async fn call_tool(	tokio::time::sleep(self.slow_delay).await;
 crates/qq-mcp/src/tests.rs	245	async fn poll_until(mut condition: impl AsyncFnMut() -> bool) {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-mcp/src/tests.rs	478	async fn cancellation_stops_a_call_without_wedging_the_shared_client() {	tokio::time::sleep(Duration::from_millis(20)).await;
-crates/qq-provider/src/http.rs	1854	fn serve_scripted_with_auth(	thread::sleep(duration);
+crates/qq-provider/src/http.rs	2030	fn serve_scripted_with_auth(	thread::sleep(duration);
 crates/qq-provider/src/test_support.rs	185	pub fn respond_sequence_with_timeout(	thread::sleep(Duration::from_millis(1));
 crates/qq-provider/src/test_support.rs	223	fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {	thread::sleep(Duration::from_millis(5));
 crates/qq-tui/src/terminal/tests.rs	455	async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {	tokio::time::sleep(FRAME_INTERVAL).await;

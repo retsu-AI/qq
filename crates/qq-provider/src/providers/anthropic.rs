@@ -10,11 +10,9 @@ use serde_json::{Value, value::RawValue};
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
     ProviderErrorKind, ProviderEvent, ProviderStream, ProviderUsage, Role, ToolSpec,
-    credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
+    credentials::StaticAuth,
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
-    http::{
-        ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
-    },
+    http::{ExchangeMessages, HttpExchange, HttpRejection, build_static_headers},
     limits::{ByteCounter, StreamLimits},
     providers::support::{self, Text, ToolCallLedger, UsageOnce, value_as_status},
     request_auth::RequestAuthorizer,
@@ -28,7 +26,7 @@ use crate::http::validate_endpoint;
 #[cfg(test)]
 const MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
+pub(crate) const X_API_KEY: HeaderName = HeaderName::from_static("x-api-key");
 const ANTHROPIC_VERSION: HeaderName = HeaderName::from_static("anthropic-version");
 
 const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
@@ -39,15 +37,6 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     non_sse_response: "Anthropic-compatible provider returned a non-SSE response",
     content_type_gate: ContentTypeGate::Strict,
 };
-
-/// Authentication applied by an Anthropic-compatible Messages client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AnthropicAuth {
-    NoAuth,
-    XApiKey(SecretLiteral),
-    Bearer(SecretLiteral),
-    Header(String, SecretLiteral),
-}
 
 /// A client for Anthropic-compatible Messages endpoints.
 pub(crate) struct AnthropicMessages {
@@ -74,7 +63,7 @@ impl AnthropicMessages {
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
             MESSAGES_ENDPOINT,
-            AnthropicAuth::XApiKey(api_key.into()),
+            StaticAuth::header("x-api-key", api_key.into()),
             [],
             false,
         )
@@ -87,7 +76,7 @@ impl AnthropicMessages {
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         endpoint: &str,
-        auth: AnthropicAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         allow_http: bool,
     ) -> Result<Self, ProviderError> {
@@ -104,7 +93,7 @@ impl AnthropicMessages {
     #[cfg(test)]
     pub(crate) fn with_endpoint_and_version(
         endpoint: &str,
-        auth: AnthropicAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         allow_http: bool,
         anthropic_version: &str,
@@ -122,10 +111,10 @@ impl AnthropicMessages {
         .map(Self::single_shot)
     }
 
-    pub(crate) fn with_client_and_authorizer(
+    pub(crate) fn with_client(
         client: reqwest::Client,
         endpoint: reqwest::Url,
-        auth: AnthropicAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         authorizer: RequestAuthorizer,
     ) -> Result<Self, ProviderError> {
@@ -142,7 +131,7 @@ impl AnthropicMessages {
     fn with_client_authorizer_and_version(
         client: reqwest::Client,
         endpoint: reqwest::Url,
-        auth: AnthropicAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         authorizer: RequestAuthorizer,
         anthropic_version: &str,
@@ -153,12 +142,7 @@ impl AnthropicMessages {
             name.make_ascii_lowercase();
         }
         origin_headers.sort();
-        let auth_kind = match &auth {
-            AnthropicAuth::NoAuth => "none",
-            AnthropicAuth::XApiKey(_) => "x-api-key",
-            AnthropicAuth::Bearer(_) => "bearer",
-            AnthropicAuth::Header(name, _) => name.as_str(),
-        };
+        let auth_kind = auth.kind();
         use sha2::Digest;
         let replay_origin = format!(
             "{:x}",
@@ -173,7 +157,8 @@ impl AnthropicMessages {
                 .expect("serializable origin")
             )
         );
-        let (headers, redactions) = build_headers(auth, static_headers, anthropic_version)?;
+        let (headers, redactions) =
+            build_headers(auth, static_headers, &authorizer, anthropic_version)?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
@@ -348,8 +333,9 @@ impl Provider for AnthropicMessages {
 }
 
 fn build_headers(
-    auth: AnthropicAuth,
+    auth: StaticAuth,
     static_headers: impl IntoIterator<Item = (String, String)>,
+    authorizer: &RequestAuthorizer,
     anthropic_version: &str,
 ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
     if anthropic_version.trim().is_empty() {
@@ -362,51 +348,15 @@ fn build_headers(
             "anthropic-version is not a valid HTTP header value".to_owned(),
         )
     })?;
-
-    // `anthropic-version` is a protocol constant, not a secret: redacting it
-    // would rewrite every matching date in a diagnostic.
-    let mut redactions = Vec::new();
-    let auth_header = match auth {
-        AnthropicAuth::NoAuth => None,
-        AnthropicAuth::XApiKey(secret) => {
-            let value = sensitive_header_value(&secret, "x-api-key secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((X_API_KEY, value))
-        }
-        AnthropicAuth::Bearer(secret) => {
-            let value = sensitive_bearer_value(&secret, "Bearer secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((AUTHORIZATION, value))
-        }
-        AnthropicAuth::Header(name, secret) => {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                ProviderError::Configuration("authentication header name is invalid".to_owned())
-            })?;
-            if name == ANTHROPIC_VERSION || is_request_controlled_header(&name) {
-                return Err(ProviderError::Configuration(
-                    "authentication header is controlled by the provider".to_owned(),
-                ));
-            }
-            let value = sensitive_header_value(&secret, "authentication header secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((name, value))
-        }
-    };
-    let auth_name = auth_header.as_ref().map(|(name, _)| name.clone());
-    let mut headers = SafeHeaders::new(
-        [AUTHORIZATION, X_API_KEY, ANTHROPIC_VERSION]
-            .into_iter()
-            .chain(auth_name),
-    );
-    headers.insert_configured(static_headers, false)?;
-    headers.insert_owned(ANTHROPIC_VERSION, version);
-    if let Some((name, value)) = auth_header {
-        headers.insert_owned(name, value);
-    }
-    for redaction in redactions {
-        headers.push_redaction(redaction);
-    }
-    Ok(headers.finish())
+    // `anthropic-version` is a protocol constant, not a secret: it is never
+    // redacted, which would rewrite every matching date in a diagnostic.
+    build_static_headers(
+        auth,
+        static_headers,
+        &[AUTHORIZATION, X_API_KEY],
+        authorizer,
+        &[(ANTHROPIC_VERSION, version)],
+    )
 }
 
 pub(crate) fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
@@ -1232,9 +1182,9 @@ mod tests {
     fn default_constructor_uses_anthropic_endpoint_and_redacts_auth_debug() {
         let provider = AnthropicMessages::new("anthropic-test-secret").unwrap();
         let auth_values = [
-            AnthropicAuth::XApiKey("anthropic-test-secret".into()),
-            AnthropicAuth::Bearer("anthropic-test-secret".into()),
-            AnthropicAuth::Header("x-custom-auth".to_owned(), "anthropic-test-secret".into()),
+            StaticAuth::header("x-api-key", "anthropic-test-secret".into()),
+            StaticAuth::Bearer("anthropic-test-secret".into()),
+            StaticAuth::header("x-custom-auth", "anthropic-test-secret".into()),
         ];
 
         assert_eq!(provider.endpoint.as_str(), MESSAGES_ENDPOINT);
@@ -1254,22 +1204,17 @@ mod tests {
             ("ftp://example.com/v1/messages", false),
         ] {
             let error =
-                AnthropicMessages::with_endpoint(endpoint, AnthropicAuth::NoAuth, [], allow_http)
+                AnthropicMessages::with_endpoint(endpoint, StaticAuth::None, [], allow_http)
                     .err()
                     .expect("endpoint must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
 
-        AnthropicMessages::with_endpoint(
-            "http://[::1]/v1/messages",
-            AnthropicAuth::NoAuth,
-            [],
-            true,
-        )
-        .expect("IPv6 loopback HTTP should be accepted");
+        AnthropicMessages::with_endpoint("http://[::1]/v1/messages", StaticAuth::None, [], true)
+            .expect("IPv6 loopback HTTP should be accepted");
         AnthropicMessages::with_endpoint(
             "http://localhost/v1/messages",
-            AnthropicAuth::NoAuth,
+            StaticAuth::None,
             [],
             true,
         )
@@ -1292,7 +1237,7 @@ mod tests {
         ] {
             let error = AnthropicMessages::with_endpoint(
                 "https://example.com/v1/messages",
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 [(name.to_owned(), "value".to_owned())],
                 false,
             )
@@ -1303,22 +1248,22 @@ mod tests {
 
         for (auth, headers) in [
             (
-                AnthropicAuth::Header("x-custom-auth".to_owned(), "secret".into()),
+                StaticAuth::header("x-custom-auth", "secret".into()),
                 vec![("x-custom-auth".to_owned(), "override".to_owned())],
             ),
             (
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 vec![
                     ("x-test".to_owned(), "one".to_owned()),
                     ("X-Test".to_owned(), "two".to_owned()),
                 ],
             ),
             (
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 vec![("bad header".to_owned(), "value".to_owned())],
             ),
             (
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 vec![("x-test".to_owned(), "bad\r\nvalue".to_owned())],
             ),
         ] {
@@ -1334,10 +1279,10 @@ mod tests {
         }
 
         for auth in [
-            AnthropicAuth::XApiKey("".into()),
-            AnthropicAuth::Bearer("".into()),
-            AnthropicAuth::Header("anthropic-version".to_owned(), "secret".into()),
-            AnthropicAuth::Header("x-auth".to_owned(), "".into()),
+            StaticAuth::header("x-api-key", "".into()),
+            StaticAuth::Bearer("".into()),
+            StaticAuth::header("anthropic-version", "secret".into()),
+            StaticAuth::header("x-auth", "".into()),
         ] {
             let error = AnthropicMessages::with_endpoint(
                 "https://example.com/v1/messages",
@@ -1353,14 +1298,20 @@ mod tests {
 
     #[test]
     fn validates_and_applies_an_explicit_anthropic_version_without_redacting_it() {
-        let (headers, redactions) = build_headers(AnthropicAuth::NoAuth, [], "2099-01-01").unwrap();
+        let (headers, redactions) = build_headers(
+            StaticAuth::None,
+            [],
+            &RequestAuthorizer::default(),
+            "2099-01-01",
+        )
+        .unwrap();
         assert_eq!(headers.get(ANTHROPIC_VERSION).unwrap(), "2099-01-01");
         assert!(redactions.is_empty(), "{redactions:?}");
 
         for version in ["", "bad\r\nversion"] {
             let error = AnthropicMessages::with_endpoint_and_version(
                 "https://example.com/v1/messages",
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 [],
                 false,
                 version,
@@ -1687,7 +1638,7 @@ mod tests {
         let endpoint = format!("{}/custom/messages?api-version=42", server.base_url);
         let provider = AnthropicMessages::with_endpoint(
             &endpoint,
-            AnthropicAuth::XApiKey("custom-test-secret".into()),
+            StaticAuth::header("x-api-key", "custom-test-secret".into()),
             [("x-client".to_owned(), "qq-tests".to_owned())],
             true,
         )
@@ -1789,7 +1740,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider =
-            AnthropicMessages::with_endpoint(&endpoint, AnthropicAuth::NoAuth, [], true).unwrap();
+            AnthropicMessages::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let request = ModelRequest::new(
             "claude-test",
             vec![
@@ -1930,7 +1881,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let provider = AnthropicMessages::with_endpoint(
             &format!("{}/v1/messages", server.base_url),
-            AnthropicAuth::NoAuth,
+            StaticAuth::None,
             [],
             true,
         )
@@ -1984,7 +1935,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider =
-            AnthropicMessages::with_endpoint(&endpoint, AnthropicAuth::NoAuth, [], true).unwrap();
+            AnthropicMessages::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(test_request())
             .collect::<Vec<_>>()
@@ -2029,7 +1980,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider =
-            AnthropicMessages::with_endpoint(&endpoint, AnthropicAuth::NoAuth, [], true).unwrap();
+            AnthropicMessages::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let error = provider
             .stream(test_request())
             .next()
@@ -2052,7 +2003,7 @@ mod tests {
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider = AnthropicMessages::with_endpoint(
             &endpoint,
-            AnthropicAuth::Bearer("stream-auth-secret".into()),
+            StaticAuth::Bearer("stream-auth-secret".into()),
             [(
                 "x-client-secret".to_owned(),
                 "static-test-secret".to_owned(),
@@ -2082,7 +2033,7 @@ mod tests {
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider = AnthropicMessages::with_endpoint(
             &endpoint,
-            AnthropicAuth::XApiKey("test-api-secret".into()),
+            StaticAuth::header("x-api-key", "test-api-secret".into()),
             [(
                 "x-client-secret".to_owned(),
                 "static-test-secret".to_owned(),
@@ -2113,7 +2064,7 @@ mod tests {
         let server = LoopbackServer::respond(200, "application/json", "{}");
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider =
-            AnthropicMessages::with_endpoint(&endpoint, AnthropicAuth::NoAuth, [], true).unwrap();
+            AnthropicMessages::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let error = provider
             .stream(test_request())
             .next()
@@ -2135,7 +2086,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/messages", server.base_url);
         let provider =
-            AnthropicMessages::with_endpoint(&endpoint, AnthropicAuth::NoAuth, [], true).unwrap();
+            AnthropicMessages::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider.stream(test_request()).collect::<Vec<_>>().await;
 
         assert!(matches!(
@@ -2158,7 +2109,7 @@ mod tests {
             let server = LoopbackServer::sse(&body);
             let provider = AnthropicMessages::with_endpoint(
                 &format!("{}/v1/messages", server.base_url),
-                AnthropicAuth::NoAuth,
+                StaticAuth::None,
                 [],
                 true,
             )
@@ -2178,7 +2129,7 @@ mod tests {
         let make = |key: &str, tenant: &str| {
             AnthropicMessages::with_endpoint(
                 "https://example.test/v1/messages",
-                AnthropicAuth::XApiKey(key.to_owned().into()),
+                StaticAuth::header("x-api-key", key.to_owned().into()),
                 [("x-tenant".into(), tenant.into())],
                 false,
             )
@@ -2369,7 +2320,7 @@ mod tests {
 
         let mut provider = AnthropicMessages::with_endpoint(
             &endpoint,
-            AnthropicAuth::Bearer("secret".into()),
+            StaticAuth::Bearer("secret".into()),
             [],
             true,
         )

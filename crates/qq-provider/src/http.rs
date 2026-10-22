@@ -4,11 +4,15 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use reqwest::{
     StatusCode, Url,
-    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
+    header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
 };
 
 use crate::{
-    ProviderError, limits::ByteCounter, request_auth::RequestAuthorizer, sanitize::sanitize_message,
+    ProviderError,
+    credentials::{StaticAuth, sensitive_bearer_value, sensitive_header_value},
+    limits::ByteCounter,
+    request_auth::RequestAuthorizer,
+    sanitize::sanitize_message,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -322,14 +326,68 @@ fn random_u32() -> u32 {
     })
 }
 
-pub(crate) struct SafeHeaders {
+/// Builds the headers an adapter sends on every request and the secrets to
+/// redact from its diagnostics.
+///
+/// `owned` names are set only by the adapter, as are the names the
+/// request-time `authorizer` sets; with request-controlled names, none of
+/// them can be configured. `constants` are protocol headers sent on every
+/// request (`anthropic-version`), which a custom authentication header may
+/// not replace either.
+pub(crate) fn build_static_headers(
+    auth: StaticAuth,
+    configured: impl IntoIterator<Item = (String, String)>,
+    owned: &[HeaderName],
+    authorizer: &RequestAuthorizer,
+    constants: &[(HeaderName, HeaderValue)],
+) -> Result<(HeaderMap, Vec<String>), ProviderError> {
+    let auth = match auth {
+        StaticAuth::None => None,
+        StaticAuth::Bearer(secret) => {
+            let value = sensitive_bearer_value(&secret, "Bearer secret")?;
+            Some((AUTHORIZATION, value, secret))
+        }
+        StaticAuth::Header(name, secret) => {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ProviderError::Configuration("authentication header name is invalid".to_owned())
+            })?;
+            if is_request_controlled_header(&name)
+                || constants.iter().any(|(constant, _)| *constant == name)
+            {
+                return Err(ProviderError::Configuration(
+                    "authentication header is controlled by the provider".to_owned(),
+                ));
+            }
+            let value = sensitive_header_value(&secret, "authentication header secret")?;
+            Some((name, value, secret))
+        }
+    };
+    let protected = owned
+        .iter()
+        .chain(authorizer.owned_headers())
+        .chain(constants.iter().map(|(name, _)| name))
+        .chain(auth.as_ref().map(|(name, ..)| name))
+        .cloned();
+    let mut headers = SafeHeaders::new(protected);
+    headers.insert_configured(configured)?;
+    for (name, value) in constants {
+        headers.headers.insert(name.clone(), value.clone());
+    }
+    if let Some((name, value, secret)) = auth {
+        headers.headers.insert(name, value);
+        headers.redactions.push(secret.expose_secret().to_owned());
+    }
+    Ok(headers.finish())
+}
+
+struct SafeHeaders {
     headers: HeaderMap,
     protocol_owned: Vec<HeaderName>,
     redactions: Vec<String>,
 }
 
 impl SafeHeaders {
-    pub(crate) fn new(protocol_owned: impl IntoIterator<Item = HeaderName>) -> Self {
+    fn new(protocol_owned: impl IntoIterator<Item = HeaderName>) -> Self {
         Self {
             headers: HeaderMap::new(),
             protocol_owned: protocol_owned.into_iter().collect(),
@@ -337,10 +395,9 @@ impl SafeHeaders {
         }
     }
 
-    pub(crate) fn insert_configured(
+    fn insert_configured(
         &mut self,
         configured: impl IntoIterator<Item = (String, String)>,
-        redact_whitespace_only: bool,
     ) -> Result<(), ProviderError> {
         for (name, value) in configured {
             let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
@@ -361,11 +418,9 @@ impl SafeHeaders {
                 ProviderError::Configuration("static header value is invalid".to_owned())
             })?;
             header_value.set_sensitive(true);
-            if if redact_whitespace_only {
-                !value.is_empty()
-            } else {
-                !value.trim().is_empty()
-            } {
+            // A blank value is not a secret; registering it would rewrite
+            // every run of spaces in a diagnostic.
+            if !value.trim().is_empty() {
                 self.redactions.push(value);
             }
             self.headers.insert(name, header_value);
@@ -373,19 +428,7 @@ impl SafeHeaders {
         Ok(())
     }
 
-    pub(crate) fn insert_owned(&mut self, name: HeaderName, value: HeaderValue) {
-        self.headers.insert(name, value);
-    }
-
-    pub(crate) fn extend_owned(&mut self, headers: HeaderMap) {
-        self.headers.extend(headers);
-    }
-
-    pub(crate) fn push_redaction(&mut self, value: String) {
-        self.redactions.push(value);
-    }
-
-    pub(crate) fn finish(mut self) -> (HeaderMap, Vec<String>) {
+    fn finish(mut self) -> (HeaderMap, Vec<String>) {
         normalize_redactions(&mut self.redactions);
         (self.headers, self.redactions)
     }
@@ -527,8 +570,10 @@ impl HttpExchange {
             let redactions: Arc<[String]> = if dynamic.is_empty() {
                 Arc::clone(&self.redactions)
             } else {
-                let mut merged = self.redactions.as_ref().to_vec();
-                merged.extend(dynamic);
+                // A request-time credential usually has no static secrets
+                // beside it, so the merge rarely copies the static list.
+                let mut merged = dynamic;
+                merged.extend(self.redactions.iter().cloned());
                 normalize_redactions(&mut merged);
                 Arc::from(merged)
             };
@@ -829,6 +874,137 @@ mod tests {
     };
 
     use super::*;
+
+    fn static_headers(
+        auth: StaticAuth,
+        configured: &[(&str, &str)],
+        authorizer: &RequestAuthorizer,
+    ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
+        build_static_headers(
+            auth,
+            configured
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+            &[AUTHORIZATION],
+            authorizer,
+            &[(
+                HeaderName::from_static("x-protocol-version"),
+                HeaderValue::from_static("2099-01-01"),
+            )],
+        )
+    }
+
+    fn configuration_message(error: ProviderError) -> String {
+        match error {
+            ProviderError::Configuration(message) => message,
+            other => panic!("expected a configuration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn static_auth_headers_are_sensitive_and_their_secrets_redacted() {
+        let none = RequestAuthorizer::default();
+        let (headers, redactions) = static_headers(
+            StaticAuth::header("x-auth", "long-test-secret".into()),
+            &[
+                ("x-first", "test-secret"),
+                ("x-second", "long-test-secret"),
+                ("x-blank", "   "),
+            ],
+            &none,
+        )
+        .unwrap();
+        assert!(
+            ["x-auth", "x-first", "x-second", "x-blank"]
+                .iter()
+                .all(|name| headers[*name].is_sensitive())
+        );
+        assert!(!headers["x-protocol-version"].is_sensitive());
+        assert_eq!(headers["x-protocol-version"], "2099-01-01");
+        // Longest first, deduplicated, without the blank value or the
+        // protocol constant.
+        assert_eq!(redactions, ["long-test-secret", "test-secret"]);
+
+        let (headers, redactions) =
+            static_headers(StaticAuth::Bearer(" padded ".into()), &[], &none).unwrap();
+        assert_eq!(headers[AUTHORIZATION], "Bearer  padded ");
+        assert_eq!(redactions, [" padded "]);
+    }
+
+    #[test]
+    fn static_auth_rejects_owned_constant_and_blank_headers_with_one_wording() {
+        let none = RequestAuthorizer::default();
+        for (auth, configured, expected) in [
+            (
+                StaticAuth::None,
+                vec![("authorization", "value")],
+                "static header `authorization` is controlled by the provider",
+            ),
+            (
+                StaticAuth::None,
+                vec![("x-protocol-version", "value")],
+                "static header `x-protocol-version` is controlled by the provider",
+            ),
+            (
+                StaticAuth::header("x-api-key", "secret".into()),
+                vec![("x-api-key", "override")],
+                "static header `x-api-key` is controlled by the provider",
+            ),
+            (
+                StaticAuth::header("host", "secret".into()),
+                vec![],
+                "authentication header is controlled by the provider",
+            ),
+            (
+                StaticAuth::header("x-protocol-version", "secret".into()),
+                vec![],
+                "authentication header is controlled by the provider",
+            ),
+            (
+                StaticAuth::header("bad header", "secret".into()),
+                vec![],
+                "authentication header name is invalid",
+            ),
+            (
+                StaticAuth::header("x-api-key", " ".into()),
+                vec![],
+                "authentication header secret must not be empty",
+            ),
+            (
+                StaticAuth::Bearer("".into()),
+                vec![],
+                "Bearer secret must not be empty",
+            ),
+        ] {
+            let error = static_headers(auth, &configured, &none).unwrap_err();
+            assert_eq!(configuration_message(error), expected);
+        }
+    }
+
+    #[test]
+    fn headers_a_request_time_credential_sets_cannot_be_configured() {
+        struct Unused;
+        impl RequestCredentialProvider for Unused {
+            fn credential(&self) -> crate::request_auth::RequestCredentialFuture<'_> {
+                Box::pin(async { Err(RequestCredentialError::missing()) })
+            }
+        }
+        let codex =
+            RequestAuthorizer::request_time_codex(SharedRequestCredentialProvider::new(Unused));
+        for name in ["chatgpt-account-id", "originator", "x-openai-fedramp"] {
+            let error = static_headers(StaticAuth::None, &[(name, "value")], &codex).unwrap_err();
+            assert_eq!(
+                configuration_message(error),
+                format!("static header `{name}` is controlled by the provider")
+            );
+            static_headers(
+                StaticAuth::None,
+                &[(name, "value")],
+                &RequestAuthorizer::default(),
+            )
+            .expect("only the authorizer that sets a header owns it");
+        }
+    }
 
     #[test]
     fn default_attempt_policy_matches_documented_constants() {

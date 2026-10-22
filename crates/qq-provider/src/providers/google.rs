@@ -11,11 +11,9 @@ use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
     ProviderErrorKind, ProviderEvent, ProviderStream, ProviderUsage, Role, ToolSpec,
     compiler::EndpointKind,
-    credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
+    credentials::StaticAuth,
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
-    http::{
-        ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
-    },
+    http::{ExchangeMessages, HttpExchange, HttpRejection, build_static_headers},
     limits::{ByteCounter, StreamLimits},
     providers::support::{self, Text, UsageOnce, status_error_kind, subtract_cached_input_tokens},
     request_auth::RequestAuthorizer,
@@ -25,7 +23,7 @@ use crate::{
 
 #[cfg(test)]
 use crate::http::validate_endpoint;
-const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
+pub(crate) const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
 
 const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     messages: ExchangeMessages {
@@ -35,15 +33,6 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     non_sse_response: "Google GenerateContent provider returned a non-SSE response",
     content_type_gate: ContentTypeGate::Strict,
 };
-
-/// Authentication applied by a Google GenerateContent-compatible client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GoogleAuth {
-    NoAuth,
-    XGoogApiKey(SecretLiteral),
-    Bearer(SecretLiteral),
-    Header(String, SecretLiteral),
-}
 
 /// A client for Google GenerateContent-compatible endpoints.
 pub(crate) struct GoogleGenerateContent {
@@ -69,11 +58,17 @@ impl GoogleGenerateContent {
         client: reqwest::Client,
         endpoint: reqwest::Url,
         endpoint_kind: EndpointKind,
-        auth: GoogleAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         authorizer: RequestAuthorizer,
     ) -> Result<Self, ProviderError> {
-        let (headers, redactions) = build_headers(auth, static_headers)?;
+        let (headers, redactions) = build_static_headers(
+            auth,
+            static_headers,
+            &[AUTHORIZATION, X_GOOG_API_KEY],
+            &authorizer,
+            &[],
+        )?;
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
@@ -244,50 +239,6 @@ impl Provider for GoogleGenerateContent {
             })
         })
     }
-}
-
-fn build_headers(
-    auth: GoogleAuth,
-    static_headers: impl IntoIterator<Item = (String, String)>,
-) -> Result<(HeaderMap, Vec<String>), ProviderError> {
-    let mut redactions = Vec::new();
-    let auth_header = match auth {
-        GoogleAuth::NoAuth => None,
-        GoogleAuth::XGoogApiKey(secret) => {
-            let value = sensitive_header_value(&secret, "x-goog-api-key secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((X_GOOG_API_KEY, value))
-        }
-        GoogleAuth::Bearer(secret) => {
-            let value = sensitive_bearer_value(&secret, "Bearer secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((AUTHORIZATION, value))
-        }
-        GoogleAuth::Header(name, secret) => {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                ProviderError::Configuration("authentication header name is invalid".to_owned())
-            })?;
-            if name == X_GOOG_API_KEY || is_request_controlled_header(&name) {
-                return Err(ProviderError::Configuration(
-                    "authentication header is controlled by the provider".to_owned(),
-                ));
-            }
-            let value = sensitive_header_value(&secret, "authentication header secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((name, value))
-        }
-    };
-    let auth_name = auth_header.as_ref().map(|(name, _)| name.clone());
-    let mut headers =
-        SafeHeaders::new([AUTHORIZATION, X_GOOG_API_KEY].into_iter().chain(auth_name));
-    headers.insert_configured(static_headers, false)?;
-    if let Some((name, value)) = auth_header {
-        headers.insert_owned(name, value);
-    }
-    for redaction in redactions {
-        headers.push_redaction(redaction);
-    }
-    Ok(headers.finish())
 }
 
 fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
@@ -799,7 +750,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&base_url, true).unwrap(),
             EndpointKind::Base,
-            GoogleAuth::XGoogApiKey("google-test-secret".into()),
+            StaticAuth::header("x-goog-api-key", "google-test-secret".into()),
             [],
             RequestAuthorizer::default(),
         )
@@ -906,7 +857,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Base,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1004,7 +955,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Base,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1098,7 +1049,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1158,7 +1109,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1216,7 +1167,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint("https://example.test/custom", false).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1355,7 +1306,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             endpoint.clone(),
             EndpointKind::Base,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1368,7 +1319,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint("https://example.test/custom?alt=sse", false).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1384,7 +1335,7 @@ mod tests {
                 crate::http::build_direct_client().unwrap(),
                 endpoint,
                 EndpointKind::Base,
-                GoogleAuth::XGoogApiKey("secret".into()),
+                StaticAuth::header("x-goog-api-key", "secret".into()),
                 [("x-goog-api-key".to_owned(), "override".to_owned())],
                 RequestAuthorizer::default(),
             )
@@ -1405,7 +1356,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::XGoogApiKey(secret.into()),
+            StaticAuth::header("x-goog-api-key", secret.into()),
             [],
             RequestAuthorizer::default(),
         )
@@ -1438,7 +1389,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
@@ -1466,7 +1417,7 @@ mod tests {
             crate::http::build_direct_client().unwrap(),
             validate_endpoint(&endpoint, true).unwrap(),
             EndpointKind::Exact,
-            GoogleAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::default(),
         )
