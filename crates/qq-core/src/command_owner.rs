@@ -659,13 +659,16 @@ impl CommandOwner {
         if let Some(pressure) = pressure {
             return Ok(ToolOutput::refused(pressure.to_string()));
         }
-        let guarded_workspace = match &request.filesystem {
-            NativeFilesystem::Restricted { .. } => Some(workspace.clone()),
-            NativeFilesystem::Host => None,
-        };
+        let guarded_storage =
+            match crate::storage::NativeStorage::capture(workspace.clone(), &request.filesystem)
+                .await
+            {
+                Ok(storage) => storage,
+                Err(pressure) => return Ok(ToolOutput::refused(pressure.to_string())),
+            };
         let pressure = async move {
-            match guarded_workspace {
-                Some(workspace) => crate::storage::watch(workspace).await,
+            match guarded_storage {
+                Some(storage) => storage.watch().await,
                 None => std::future::pending().await,
             }
         };
