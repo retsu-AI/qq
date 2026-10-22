@@ -114,8 +114,8 @@ pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, h
 pub(crate) use read::hold_tool_read;
 pub(crate) use specs::{
     CancelAgentArgs, MAX_SPAWN_AGENT_SCHEMA_BYTES, MAX_WAIT_AGENTS_SECS, SPAWN_AGENT_TOOL,
-    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, static_tools,
-    wait_agents_spec,
+    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, spawn_model_routes,
+    static_tools, wait_agents_spec,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};

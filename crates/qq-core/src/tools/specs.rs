@@ -322,6 +322,22 @@ impl BuiltInTool {
 /// past what every turn should pay for.
 pub(crate) const MAX_SPAWN_AGENT_SCHEMA_BYTES: usize = 2 * 1024;
 
+/// The exact overrides the tool advertises, retained unchanged for admission.
+pub(crate) fn spawn_model_routes<'a>(
+    model_routes: &'a [String],
+    delegation: &'a DelegationRoster,
+) -> Vec<&'a str> {
+    if delegation.roster.is_empty() {
+        model_routes.iter().map(String::as_str).collect()
+    } else {
+        delegation
+            .roster
+            .iter()
+            .map(|entry| entry.route.as_str())
+            .collect()
+    }
+}
+
 /// The declaration for [`SPAWN_AGENT_TOOL`]. Kept out of [`specs`] because it
 /// joins the tool list only when the run may spawn: child sessions and
 /// session-less runs never see it. With a roster, `role` is the model's
@@ -371,15 +387,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             }),
         );
     }
-    let override_routes: Vec<&str> = if has_roster {
-        delegation
-            .roster
-            .iter()
-            .map(|entry| entry.route.as_str())
-            .collect()
-    } else {
-        model_routes.iter().map(String::as_str).collect()
-    };
+    let override_routes = spawn_model_routes(model_routes, delegation);
     if !override_routes.is_empty() {
         properties.insert(
             "model".to_owned(),

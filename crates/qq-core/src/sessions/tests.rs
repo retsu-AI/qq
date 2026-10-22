@@ -5798,6 +5798,21 @@ struct AuditLoader {
 }
 
 impl RuntimeLoader for AuditLoader {
+    fn validate_spawn_model(
+        &self,
+        _workspace: String,
+        selection: ModelSelection,
+        advertised: Arc<[String]>,
+    ) -> SpawnModelValidationFuture {
+        assert!(
+            advertised
+                .iter()
+                .any(|route| Some(route) == selection.model.as_ref()),
+            "the auditor's roster route was not retained: {advertised:?}"
+        );
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let provider = self.inner.next_provider(&request);
         let mode = self.mode;

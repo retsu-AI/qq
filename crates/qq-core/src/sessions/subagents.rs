@@ -1,6 +1,7 @@
 use super::runtime::SessionRuntimeInner;
 use super::*;
 use crate::runtime::{ChildCleanupError, ChildDrainFuture};
+use crate::tools;
 use qq_protocol::ChildAuthority;
 
 type ChildReceipt = Result<SpawnAgentSpend, ChildCleanupError>;
@@ -1270,6 +1271,10 @@ impl crate::runtime::AuditHook for SessionAuditHook {
         let slots = Arc::clone(&self.slots);
         let tasks = Arc::clone(&self.tasks);
         let pending = Arc::clone(&self.pending);
+        let advertised_models = tools::spawn_model_routes(&[], &self.delegation)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         let model = self
             .delegation
             .route_for_role(request.role)
@@ -1315,7 +1320,7 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                 inner,
                 parent,
                 SpawnBudget {
-                    advertised_models: Arc::from([]),
+                    advertised_models,
                     slots,
                     write_slot: Arc::new(Semaphore::new(1)),
                     write_children: false,
