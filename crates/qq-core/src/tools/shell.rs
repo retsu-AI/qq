@@ -1060,15 +1060,42 @@ impl ProcessGroupGuard {
     async fn confirm_stopped(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.killed_pgid {
-            return super::native_exit::confirm(move || {
-                match rustix::process::test_kill_process_group(pgid) {
-                    Err(rustix::io::Errno::SRCH) => Ok(true),
-                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
-                    Err(error) => Err(error.into()),
-                    Ok(()) => Ok(false),
-                }
-            })
-            .await;
+            let result =
+                super::native_exit::confirm(
+                    move || match rustix::process::test_kill_process_group(pgid) {
+                        Err(rustix::io::Errno::SRCH) => Ok(true),
+                        Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
+                        Err(error) => Err(error.into()),
+                        Ok(()) => Ok(false),
+                    },
+                )
+                .await;
+            #[cfg(all(test, target_os = "macos"))]
+            if result.is_err() {
+                // Failure-only probe: metadata distinguishes zombies from live
+                // survivors without printing command lines or environment.
+                let _ = tokio::task::spawn_blocking(move || {
+                    let signal = rustix::process::test_kill_process_group(pgid);
+                    let snapshot = std::process::Command::new("/bin/ps")
+                        .args(["-axo", "pid=,ppid=,pgid=,stat=,uid="])
+                        .output();
+                    eprintln!("[DEBUG-macos-group-exit] pgid={pgid} signal={signal:?}");
+                    match snapshot {
+                        Ok(snapshot) => {
+                            let group = pgid.to_string();
+                            for row in String::from_utf8_lossy(&snapshot.stdout).lines() {
+                                if row.split_whitespace().nth(2) == Some(group.as_str()) {
+                                    eprintln!("[DEBUG-macos-group-exit] {row}");
+                                }
+                            }
+                            eprintln!("[DEBUG-macos-group-exit] ps={}", snapshot.status);
+                        }
+                        Err(error) => eprintln!("[DEBUG-macos-group-exit] ps failed: {error}"),
+                    }
+                })
+                .await;
+            }
+            return result;
         }
         Ok(())
     }
