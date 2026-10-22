@@ -519,9 +519,10 @@ mod tests {
 
         for attack in ["replace", "symlink", "hardlink", "ancestor"] {
             let root = tempfile::tempdir().unwrap();
-            let task = root.path().join("task");
+            let root_path = root.path().canonicalize().unwrap();
+            let task = root_path.join("task");
             std::fs::create_dir(&task).unwrap();
-            let source = root.path().join("original");
+            let source = root_path.join("original");
             std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
             std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
             let executable = task.join("helper");
@@ -533,11 +534,11 @@ mod tests {
                 std::fs::copy(&source, &executable).unwrap();
             }
             let owner = MacosOwner::discover(CommandLauncher::new(executable.clone())).unwrap();
-            let escaped = root.path().join("escaped");
+            let escaped = root_path.join("escaped");
             // Replacing the launcher runs before the sandbox or readiness
             // handshake, so even a helper that refuses startup can escape.
             if attack == "ancestor" {
-                std::fs::rename(&task, root.path().join("old-task")).unwrap();
+                std::fs::rename(&task, root_path.join("old-task")).unwrap();
                 std::fs::create_dir(&task).unwrap();
             } else if attack != "hardlink" {
                 std::fs::remove_file(&executable).unwrap();
