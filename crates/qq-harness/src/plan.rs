@@ -53,6 +53,8 @@ pub struct PlanKey {
     /// Logical project supplying configuration, separate from task files.
     pub configuration_workspace: PathBuf,
     pub workspace: PathBuf,
+    /// Captured task-directory authority, including replacement at the same path.
+    pub execution_workspace_identity: Option<qq_core::command_owner::NativeWorkspaceIdentity>,
     pub model: ModelSelection,
     pub profile: AgentProfileId,
     pub explicit_config_path: Option<PathBuf>,
@@ -108,6 +110,10 @@ impl std::fmt::Debug for PlanKey {
             .debug_struct("PlanKey")
             .field("workspace", &self.workspace)
             .field("configuration_workspace", &self.configuration_workspace)
+            .field(
+                "execution_workspace_identity",
+                &self.execution_workspace_identity,
+            )
             .field("model", &self.model)
             .field("profile", &self.profile)
             .field("explicit_config_path", &self.explicit_config_path)
@@ -642,6 +648,7 @@ mod tests {
         PlanKey {
             configuration_workspace: workspace.to_owned(),
             workspace: workspace.to_owned(),
+            execution_workspace_identity: None,
             model: ModelSelection {
                 model_is_fallback: false,
                 model: Some(model.to_owned()),

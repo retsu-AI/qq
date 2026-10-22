@@ -1396,6 +1396,7 @@ impl RuntimeFactory {
         let key = PlanKey {
             configuration_workspace,
             workspace: workspace.clone(),
+            execution_workspace_identity: execution_workspace.map(|grant| grant.identity),
             model: ModelSelection {
                 model_is_fallback: false,
                 model: request.overrides().model().map(str::to_owned),
@@ -6088,6 +6089,40 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory() {
+        let fixture = RuntimeFixture::new();
+        let source = fixture.path("work").canonicalize().unwrap();
+        let task = fixture.path("task");
+        fs::create_dir(&task).unwrap();
+        let task = task.canonicalize().unwrap();
+        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
+        let factory = fixture.factory();
+        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        let mut request = RuntimeLoadRequest {
+            execution_workspace: Some(grant.clone()),
+            workspace: source.to_string_lossy().into_owned(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+            reasoning_effort: None,
+        };
+        let original = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        fs::rename(&task, fixture.path("original-task")).unwrap();
+        fs::create_dir(&task).unwrap();
+        let replacement = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        assert_ne!(grant.identity, replacement.identity);
+        request.execution_workspace = Some(replacement.clone());
+        let loaded = RuntimeLoader::load(&factory, request).await.unwrap();
+        assert_eq!(
+            loaded.plan.workspace_identity().unwrap(),
+            replacement.identity
+        );
+        assert_eq!(original.plan.workspace_identity().unwrap(), grant.identity);
+    }
+
     #[tokio::test]
     async fn session_model_fallback_resolves_config_but_explicit_pin_wins() {
         let fixture = RuntimeFixture::new();
@@ -8372,6 +8407,7 @@ mod tests {
         let key = PlanKey {
             configuration_workspace: workspace.clone(),
             workspace: workspace.clone(),
+            execution_workspace_identity: None,
             model: ModelSelection::default(),
             profile: profile.clone(),
             explicit_config_path: None,
