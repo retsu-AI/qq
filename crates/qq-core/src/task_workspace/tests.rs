@@ -642,6 +642,15 @@ fn task_workspace_preserves_configured_pack_protections_after_restore() {
     .unwrap();
     let saved = serde_json::to_vec(&task).unwrap();
     let mut restored: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    // Removing a pack from current configuration must not remove the trust
+    // protection captured when this task imported its files.
+    let current = crate::plan::CompiledAgentPlan::compile_blocking(
+        crate::plan::AgentProfile::embedded(&runtime, fixture.source.path.clone()),
+    )
+    .unwrap();
+    restored
+        .protect_source(&TaskWorkspaceSource::from_plan(&current).unwrap())
+        .unwrap();
     assert!(matches!(
         restored.publish(&["a", "vendor/reviewer/policy.md"].map(PathBuf::from)),
         Err(TaskWorkspaceError::InvalidInput(_))

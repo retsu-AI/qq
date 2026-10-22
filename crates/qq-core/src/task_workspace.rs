@@ -281,6 +281,24 @@ impl TaskWorkspace {
         self.baseline.keys()
     }
 
+    /// Re-admission may tighten protections, but never forgets the protections
+    /// under which these files were imported. The source identity cannot move.
+    pub(crate) fn protect_source(
+        &mut self,
+        source: &TaskWorkspaceSource,
+    ) -> Result<(), TaskWorkspaceError> {
+        if source.directory.path != self.source.path
+            || source.directory.identity != self.source.identity
+        {
+            return Err(TaskWorkspaceError::Changed(self.source.path.clone()));
+        }
+        self.protected_pack_roots
+            .extend(source.protected_pack_roots.iter().cloned());
+        self.protected_pack_roots.sort();
+        self.protected_pack_roots.dedup();
+        Ok(())
+    }
+
     /// Publish selected outputs after every task process and child has stopped.
     /// Validate all outputs and expected source versions before changing files.
     /// Each file is installed atomically; an I/O failure reports any earlier

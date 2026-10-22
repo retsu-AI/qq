@@ -58,6 +58,7 @@ struct TaskRecord {
 pub(super) struct TaskExecution {
     owner: RunId,
     publisher: bool,
+    source_request: RuntimeLoadRequest,
     pub(super) scope: NativeCommandScope,
     record: Mutex<TaskRecord>,
 }
@@ -80,6 +81,9 @@ impl TaskExecution {
         if !self.publisher {
             return Ok(());
         }
+        // Configuration is trusted source authority. Reload it after payloads
+        // drain so newly protected pack files cannot be installed as output.
+        let loaded = inner.loader.load(self.source_request.clone()).await?;
         let policy = inner.store.tool_approval_policy(session).await?;
         if !matches!(policy.mode, ApprovalMode::Auto | ApprovalMode::Full)
             || policy
@@ -102,6 +106,9 @@ impl TaskExecution {
                 .record
                 .lock()
                 .map_err(|_| TaskExecutionError::Invalid("task record poisoned"))?;
+            record
+                .workspace
+                .protect_source(&TaskWorkspaceSource::from_plan(&loaded.plan)?)?;
             let root = Workspace::open(record.workspace.path())?;
             let mut outputs: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
             outputs.extend(files(&root, record.workspace_limits(), false)?);
@@ -177,6 +184,13 @@ pub(super) async fn prepare(
             "existing task record is missing",
         ));
     }
+    let source_request = RuntimeLoadRequest {
+        execution_workspace: None,
+        workspace: claimed.workspace.clone(),
+        model: claimed.model.clone(),
+        profile: claimed.profile.clone(),
+        reasoning_effort: claimed.reasoning_effort,
+    };
     let permit = crate::workspace::blocking_permits()
         .acquire_owned()
         .await
@@ -232,6 +246,9 @@ pub(super) async fn prepare(
         record.scope.read_only = policy.read_only;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
+        record
+            .workspace
+            .protect_source(&TaskWorkspaceSource::from_plan(&source_plan)?)?;
         let held = Workspace::open(record.workspace.path())?;
         record
             .scope
@@ -247,6 +264,7 @@ pub(super) async fn prepare(
             Arc::new(TaskExecution {
                 owner,
                 publisher,
+                source_request,
                 scope: record.scope.clone(),
                 record: Mutex::new(record),
             }),

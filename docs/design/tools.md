@@ -97,7 +97,9 @@ boundary need no additional Auto approval unless a forbidden rule or internal
 child supervision requires it. Ask and Read-only retain their own rules.
 
 Completed runs publish after tools and children drain and recheck the session's
-current publication permission. Failed/cancelled work stays in its private task
+current publication permission. Publication reloads trusted source configuration
+and retains both the imported and current configured-pack protections; a newly
+protected output refuses publication. Failed/cancelled work stays in its private task
 tree. Completion checks acquire the source workspace exclusion before importing
 the published artifact and execute through the same durable worker; their file
 changes are not published. Successive goal-origin runs reuse the same persisted
