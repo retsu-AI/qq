@@ -4045,6 +4045,7 @@ mod tests {
             for directory in [".git", "global", "data", "managed", "work"] {
                 fs::create_dir_all(root.join(directory)).unwrap();
             }
+            let root = root.canonicalize().unwrap();
             Self { root }
         }
 
@@ -5975,6 +5976,32 @@ mod tests {
         assert_eq!(fallback, parent);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn task_runtime_works_below_a_symlinked_temporary_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::task_runtime_uses_detached_files_and_source_configuration",
+                "--nocapture",
+            ])
+            .env("TMPDIR", &alias)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
     #[tokio::test]
     async fn task_runtime_uses_detached_files_and_source_configuration() {
         let fixture = RuntimeFixture::new();
@@ -6034,7 +6061,12 @@ mod tests {
             // First prove replacement is refused, then release those handles
             // to exercise admission against the saved identity after replacement.
             let error = fs::rename(&task, fixture.path("held-task")).unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(!fixture.path("held-task").exists(), "{error:?}");
+            assert_eq!(
+                &qq_core::command_owner::NativeWorkspaceIdentity::capture(&task).unwrap(),
+                &request.execution_workspace.as_ref().unwrap().identity,
+                "a refused rename must retain the admitted directory identity"
+            );
             drop(loaded);
             drop(other);
             factory.shutdown_plans();
