@@ -148,7 +148,11 @@ async fn run_inner(
         None => ProcessOutcome::Failed,
     };
     let result = crate::cite_spill(result, "shell", id, true);
-    let tail = truncate_utf8(result.model_text.clone(), OUTPUT_BYTES);
+    let mut start = result.model_text.len().saturating_sub(OUTPUT_BYTES);
+    while !result.model_text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = result.model_text[start..].to_owned();
     let commit = inner
         .store
         .finish_tool_call(

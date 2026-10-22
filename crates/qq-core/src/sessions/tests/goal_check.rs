@@ -1872,15 +1872,12 @@ impl crate::command_owner::NativeCommandService for CheckService {
         let code = self.code;
         Box::pin(async move {
             use crate::command_owner::*;
-            let mut output = crate::tools::dispatch::bounded_result(
-                if code == 0 {
-                    "shell exit=7"
-                } else {
-                    "shell exit=0 check-output-unique"
-                }
-                .into(),
-                code != 0,
-            );
+            let text = if code == 0 {
+                "shell exit=7".to_owned()
+            } else {
+                format!("shell exit=0 {}check-output-unique", "界\n".repeat(2000))
+            };
+            let mut output = crate::tools::dispatch::bounded_result(text, code != 0);
             output.native_outcome = Some(NativeCommandOutcome::Exited { code: Some(code) });
             let result = serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap();
             Ok(CommandSnapshot {
@@ -2011,7 +2008,9 @@ async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() 
         !root.join("outside").exists(),
         "check escaped its task workspace"
     );
-    if output.contains("required Linux filesystem enforcement is unavailable") {
+    if output.contains("required Linux filesystem enforcement is unavailable")
+        || output.contains("required Linux network enforcement is unavailable")
+    {
         assert_ne!(status, qq_protocol::GoalStatus::Achieved);
         assert!(!workspace.join("goal-check-marker").exists());
     } else {
