@@ -223,6 +223,8 @@ pub(crate) struct PreparedLaunch {
     _image: Option<(std::fs::File, String)>,
     #[cfg(target_os = "linux")]
     startup: Option<super::linux_owner::Startup>,
+    #[cfg(target_os = "macos")]
+    macos_startup: Option<super::macos_owner::Startup>,
 }
 
 impl PreparedLaunch {
@@ -246,6 +248,29 @@ impl PreparedLaunch {
             .map_err(PreparationError::Custody)?;
         self.command = Some(command);
         self.startup = Some(startup);
+        Ok(self)
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn owned_macos(
+        mut self,
+        owner: &super::macos_owner::MacosOwner,
+        native: Option<&NativeExecution>,
+        deadline: Instant,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                native,
+                deadline,
+            )
+            .map_err(PreparationError::Macos)?;
+        self.command = Some(command);
+        self.macos_startup = Some(startup);
         Ok(self)
     }
     /// Only stream/process supervision settings may change after verification.
@@ -286,7 +311,13 @@ impl PreparedLaunch {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        #[cfg(not(any(windows, target_os = "linux")))]
+        #[cfg(target_os = "macos")]
+        let child = if let Some(startup) = self.macos_startup.take() {
+            super::macos_owner::spawn(command, startup, process, cancelled, deadline).await?
+        } else {
+            command.spawn()?.into()
+        };
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         let child = {
             let _ = process;
             command.spawn()?
@@ -328,6 +359,9 @@ pub(crate) enum PreparationError {
     #[cfg(target_os = "linux")]
     #[error("could not establish Linux command custody: {0}")]
     Custody(#[source] std::io::Error),
+    #[cfg(target_os = "macos")]
+    #[error("could not establish macOS command isolation: {0}")]
+    Macos(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -520,6 +554,8 @@ pub(super) fn prepare(
         _image: image,
         #[cfg(target_os = "linux")]
         startup: None,
+        #[cfg(target_os = "macos")]
+        macos_startup: None,
     })
 }
 

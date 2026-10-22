@@ -9,7 +9,7 @@ use qq_core::{
 use qq_protocol::ToolCallId;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         let code = qq_core::command_owner::execute_native_launch(
             std::env::args_os()

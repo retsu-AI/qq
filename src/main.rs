@@ -31,7 +31,7 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         return match std::env::args_os()
             .nth(2)

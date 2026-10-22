@@ -110,10 +110,17 @@ impl CommandLauncher {
     }
 }
 
-/// Trusted Linux monitor/PID-1 entry point, called before starting a runtime.
-#[cfg(target_os = "linux")]
+/// Trusted native launch entry point, called before starting a runtime.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
-    crate::tools::linux_owner::execute(encoded)
+    #[cfg(target_os = "linux")]
+    {
+        crate::tools::linux_owner::execute(encoded)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        crate::tools::macos_owner::execute(encoded)
+    }
 }
 
 /// Establish QQ's host job before a trusted worker requests breakaway.
@@ -321,7 +328,11 @@ impl CommandOwner {
         let tools =
             blocking(move || ToolTasks::owned_linux(launcher).map_err(CommandOwnerError::Io))
                 .await?;
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let tools =
+            blocking(move || ToolTasks::owned_macos(launcher).map_err(CommandOwnerError::Io))
+                .await?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let tools = {
             let _ = launcher;
             ToolTasks::default()

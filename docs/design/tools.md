@@ -1231,9 +1231,18 @@ forwarding output. Explicit cancellation reaches the worker and waits for
 confirmed completion. Losing the coordinator leaves the worker and its
 command running; reopening reconciles its original journal and retains its
 terminal result before the session continues. An active durable goal can then
-schedule its successor within its remaining shared budget. macOS uses its existing
-process-group teardown; it does not yet provide Linux namespace custody or
-Windows job containment. Restricted native scopes remain refused there.
+schedule its successor within its remaining shared budget.
+
+The macOS adapter starts a trusted helper before the payload. It closes ambient
+file descriptors and keeps an owner-liveness channel which payloads do not
+inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
+network operations when isolation is requested. Descendants cannot call
+`setsid` or `setpgid`; the helper retains the group identity until terminating
+the group, including on owner disconnect. A terminal payload status is returned
+through the private channel before group teardown. Loader-injection environment
+variables are refused before helper startup. macOS does not create Linux-style
+mount or PID namespaces, and aggregate resource limits remain unavailable;
+requesting those limits fails closed. Restricted Windows scopes remain refused.
 This worker integration provides process ownership, not filesystem, network,
 credential or resource isolation.
 

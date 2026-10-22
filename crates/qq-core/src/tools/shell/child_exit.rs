@@ -86,9 +86,9 @@ mod tests {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let mut child = child;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut child: super::super::NativeChild = child.into();
         let mut group = super::super::ProcessGroupGuard::new(child.id());
         let mut interrupted = Box::pin(exit.wait(&mut child, &mut group));

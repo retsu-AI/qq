@@ -7,6 +7,15 @@ pub(crate) mod goal;
 mod lang;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux_owner;
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
+#[cfg_attr(
+    all(test, target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "compile shared Unix launch interfaces and validate grants without claiming macOS enforcement"
+    )
+)]
+pub(crate) mod macos_owner;
 mod matching;
 mod native_exit;
 pub(crate) mod network;

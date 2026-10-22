@@ -8,7 +8,9 @@ mod child_exit;
 pub(crate) type NativeChild = super::windows_job::Child;
 #[cfg(target_os = "linux")]
 pub(crate) type NativeChild = super::linux_owner::Child;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+pub(crate) type NativeChild = super::macos_owner::Child;
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub(crate) type NativeChild = tokio::process::Child;
 
 use crate::{
@@ -377,6 +379,8 @@ pub(super) async fn run_shell(
     let preparation_workspace = workspace.clone();
     #[cfg(target_os = "linux")]
     let linux_owner = process.linux_owner().cloned();
+    #[cfg(target_os = "macos")]
+    let macos_owner = process.macos_owner().cloned();
     let mut prepared =
         match tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -393,6 +397,10 @@ pub(super) async fn run_shell(
             #[cfg(target_os = "linux")]
             if let Some(owner) = &linux_owner {
                 return prepared.owned_linux(owner, native.as_deref());
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(owner) = &macos_owner {
+                return prepared.owned_macos(owner, native.as_deref(), preparation_deadline);
             }
             if native.as_ref().is_some_and(|native| {
                 native.resources != crate::command_owner::NativeResources::Host
