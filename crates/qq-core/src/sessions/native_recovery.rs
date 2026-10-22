@@ -341,12 +341,17 @@ async fn observe_existing(
                     {
                         return Ok(());
                     }
-                    scopes
-                        .as_ref()
-                        .ok_or(SessionRuntimeError::Unavailable)?
-                        .admit(&pending.workspace)
-                        .await
-                        .map_err(|reason| SessionRuntimeError::InvalidNativeScope { reason })
+                    if let Some(scopes) = scopes.as_ref() {
+                        return scopes
+                            .admit(&pending.workspace)
+                            .await
+                            .map_err(|reason| SessionRuntimeError::InvalidNativeScope { reason });
+                    }
+                    // Unbound Full/Ask checks use host authority. Their result
+                    // still comes from the original owner and invocation; no
+                    // new execution is admitted here. Bound task errors above
+                    // must never fall back to this host path.
+                    Ok(())
                 })
                 .await
                 .map_err(|_| SessionRuntimeError::Unavailable)??;

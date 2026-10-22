@@ -178,9 +178,16 @@ impl NativeCommandService for Worker {
 
 #[tokio::test]
 async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent() {
-    for (result_saved, detached_task) in
-        [(false, false), (true, false), (false, true), (true, true)]
-    {
+    for (result_saved, detached_task, host_mode) in [
+        (false, false, None),
+        (true, false, None),
+        (false, true, None),
+        (true, true, None),
+        (false, false, Some(ApprovalMode::Full)),
+        (true, false, Some(ApprovalMode::Full)),
+        (false, false, Some(ApprovalMode::Ask)),
+        (true, false, Some(ApprovalMode::Ask)),
+    ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().canonicalize().unwrap();
         let database = path.join("sessions.sqlite3");
@@ -193,6 +200,21 @@ async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
         } else {
             None
         };
+        if let Some(mode) = host_mode {
+            let session = claim.identity.session_id;
+            store
+                .call_write(Priority::Control, move |connection| {
+                    connection
+                        .execute("DELETE FROM metadata WHERE key='native_command_scopes'", [])?;
+                    connection.execute(
+                        "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                        params![session.to_string(), approval_mode_str(mode)],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
         let run = claim.identity.run_id;
         if result_saved {
             store
@@ -280,7 +302,7 @@ async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
         assert_eq!(
             goal.status,
             qq_protocol::GoalStatus::Achieved,
-            "saved result: {result_saved}, detached task: {detached_task}"
+            "saved result: {result_saved}, detached task: {detached_task}, host mode: {host_mode:?}"
         );
         assert_eq!(goal.counters.audits, 1);
         assert_eq!(
