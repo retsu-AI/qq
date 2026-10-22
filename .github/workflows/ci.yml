@@ -179,6 +179,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
+      - name: Task files retain source configuration and directory identity
+        shell: bash
+        run: |
+          cargo test --locked -p qq --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
+          cargo test --locked -p qq --bin qq runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
       - name: Native ownership, cancellation and durable observations
         shell: bash
         run: |
