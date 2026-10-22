@@ -263,6 +263,7 @@ async fn prepare_execution(
     inner: &Arc<SessionRuntimeInner>,
     claimed: &mut ClaimedRun,
     loaded: &LoadedRuntime,
+    input_workspace: &crate::workspace::Workspace,
     cancellation: &mut watch::Receiver<bool>,
     resources: &RunResources,
     execution_started: tokio::time::Instant,
@@ -338,7 +339,9 @@ async fn prepare_execution(
         let resolved = if let Some(resolved) = &claimed.resolved_input {
             Arc::clone(resolved)
         } else {
-            let workspace = loaded.plan.workspace_handle();
+            // Explicit attachments belong to the project selected by the
+            // human, including ignored files and read-only policy inputs.
+            let workspace = input_workspace.clone();
             let state = Arc::clone(&file_state);
             let parts = input;
             let mut resolution = tokio::task::spawn_blocking(move || {
@@ -919,8 +922,51 @@ pub(super) async fn execute_run(
         .await;
         return;
     }
-    let task = match super::task_workspaces::prepare(&inner, &claimed, loaded.plan.clone()).await {
+    let input_workspace = loaded.plan.workspace_handle();
+    let preparation_stop = RunCancellation::new();
+    let mut preparation = Box::pin(super::task_workspaces::prepare(
+        &inner,
+        &claimed,
+        loaded.plan.clone(),
+        &preparation_stop,
+        claimed
+            .limits
+            .max_duration_ms
+            .map(|duration| execution_started + std::time::Duration::from_millis(duration)),
+    ));
+    let prepared_task = tokio::select! {
+        biased;
+        () = RunDeadline::wait(deadline) => {
+            preparation_stop.expire();
+            let _ = preparation.await;
+            finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted {
+                exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()),
+            }).await;
+            return;
+        }
+        changed = cancellation.changed() => {
+            preparation_stop.cancel();
+            let _ = preparation.await;
+            let outcome = if changed.is_ok() { RunOutcome::Cancelled } else { RunOutcome::Interrupted };
+            finish_reserved_run(&inner, &claimed, outcome).await;
+            return;
+        }
+        result = &mut preparation => result,
+    };
+    drop(preparation);
+    let task = match prepared_task {
         Ok(task) => task,
+        Err(super::task_workspaces::TaskExecutionError::Stopped) => {
+            let outcome = if preparation_stop.timed_out() {
+                RunOutcome::BudgetExhausted {
+                    exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()),
+                }
+            } else {
+                RunOutcome::Cancelled
+            };
+            finish_reserved_run(&inner, &claimed, outcome).await;
+            return;
+        }
         Err(error) => {
             finish_reserved_run(
                 &inner,
@@ -1026,6 +1072,7 @@ pub(super) async fn execute_run(
             &inner,
             &mut claimed,
             &loaded,
+            &input_workspace,
             &mut cancellation,
             &resources,
             execution_started,
@@ -1641,6 +1688,7 @@ async fn run_auto_compaction(
         inner,
         &mut candidate,
         loaded,
+        &loaded.plan.workspace_handle(),
         cancellation,
         resources,
         execution_started,

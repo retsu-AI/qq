@@ -16,6 +16,10 @@ const RECORD_PREFIX: &str = "qq_task_workspace:";
 const GOAL_PREFIX: &str = "qq_task_goal:";
 const PRIVATE_HOME: &str = ".qq/task-home";
 
+#[cfg(test)]
+static PREPARATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)>> =
+    Mutex::new(Vec::new());
+
 /// Authority supplied by the server, independently of project/model output.
 /// `directory` is a private control root outside every project and task grant.
 #[derive(Debug, Clone)]
@@ -28,6 +32,8 @@ pub struct TaskWorkspacePolicy {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum TaskExecutionError {
+    #[error("task preparation was cancelled or exceeded its deadline")]
+    Stopped,
     #[error("invalid task execution state: {0}")]
     Invalid(&'static str),
     #[error(transparent)]
@@ -148,6 +154,8 @@ pub(super) async fn prepare(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     source_plan: Arc<crate::plan::CompiledAgentPlan>,
+    cancellation: &RunCancellation,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<Option<Arc<TaskExecution>>, TaskExecutionError> {
     let Some(policy) = inner.task_workspaces.clone() else {
         return Ok(None);
@@ -198,12 +206,52 @@ pub(super) async fn prepare(
         profile: claimed.profile.clone(),
         reasoning_effort: claimed.reasoning_effort,
     };
-    let permit = crate::workspace::blocking_permits()
-        .acquire_owned()
-        .await
-        .map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?;
+    #[cfg(test)]
+    {
+        let observer = {
+            let mut observers = PREPARATION_WAITERS.lock().unwrap();
+            observers
+                .iter()
+                .position(|(path, _)| path == &claimed.workspace)
+                .map(|index| observers.remove(index).1)
+        };
+        if let Some(observer) = observer {
+            let _ = observer.send(());
+        }
+    }
+    let permit = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(TaskExecutionError::Stopped),
+        () = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            cancellation.expire();
+            return Err(TaskExecutionError::Stopped);
+        }
+        permit = crate::workspace::blocking_permits().acquire_owned() => {
+            permit.map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?
+        }
+    };
+    let stopped = cancellation.clone();
+    let attachments = claimed
+        .input
+        .iter()
+        .filter_map(|part| match part {
+            InputPart::WorkspaceFile { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     let prepared = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            stopped.expire();
+        }
+        if stopped.is_cancelled() {
+            return Err(TaskExecutionError::Stopped);
+        }
         let source = source_plan.workspace_handle();
         let source_grant = NativeDirectoryGrant {
             path: source.path().to_owned(),
@@ -221,11 +269,23 @@ pub(super) async fn prepare(
                 }
                 let control = Workspace::open(&policy.directory.path)?;
                 crate::storage::check_blocking(&control, policy.limits.max_bytes)?;
-                let inputs = files(&source, policy.limits, true)?;
+                let mut inputs: BTreeSet<_> =
+                    files(&source, policy.limits, true)?.into_iter().collect();
+                // Explicit human inputs override ignore rules. Editable files
+                // get private copies and publication baselines; protected
+                // configuration remains source authority and is only attached.
+                for path in attachments {
+                    if let Ok(relative) = source.contained_path(&path)
+                        && source.check_write_path(&path, &relative).is_ok()
+                        && source.root().is_file(&relative)
+                    {
+                        inputs.insert(relative);
+                    }
+                }
                 let workspace = TaskWorkspace::import(
                     &TaskWorkspaceSource::from_plan(&source_plan)?,
                     &policy.directory.path.join(owner.to_string()),
-                    &inputs,
+                    &inputs.into_iter().collect::<Vec<_>>(),
                     policy.limits,
                 )?;
                 let scope = NativeCommandScope {
@@ -282,6 +342,9 @@ pub(super) async fn prepare(
         ))
     })
     .await??;
+    if cancellation.is_cancelled() {
+        return Err(TaskExecutionError::Stopped);
+    }
     save(&inner.store, format!("{RECORD_PREFIX}{owner}"), prepared.1).await?;
     save(
         &inner.store,
@@ -335,7 +398,7 @@ pub(super) async fn prepare_check(
             "check source plan names another project",
         ));
     }
-    if let Some(task) = prepare(inner, claimed, loaded.plan).await? {
+    if let Some(task) = prepare(inner, claimed, loaded.plan, cancellation, Some(deadline)).await? {
         resources.bind_task(task)?;
     }
     Ok(())

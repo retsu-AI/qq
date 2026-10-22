@@ -707,3 +707,373 @@ async fn side_question_reads_active_private_task_edits() {
         .unwrap();
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn task_preparation_cancellation_settles_without_filesystem_capacity() {
+    stalled_task_preparation(false).await;
+}
+
+#[tokio::test]
+async fn task_preparation_deadline_settles_without_filesystem_capacity() {
+    stalled_task_preparation(true).await;
+}
+
+async fn stalled_task_preparation(expire: bool) {
+    let (root, source, _) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (runtime, session) = open_session(root.path(), &source, Arc::new(SideFileLoader)).await;
+    let workspace = runtime
+        .inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            session_workspace(connection, session)
+        })
+        .await
+        .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: workspace,
+            after: EventCursor {
+                store_id: runtime.store_id(),
+                workspace_id: workspace,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    let permits = crate::workspace::blocking_permits();
+    let held = permits
+        .clone()
+        .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
+        .await
+        .unwrap();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    PREPARATION_WAITERS
+        .lock()
+        .unwrap()
+        .push((source.to_string_lossy().into_owned(), entered));
+    let queued = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: session,
+                input: vec![InputPart::text("prepare a task".to_owned())],
+                limits: RunLimits {
+                    max_duration_ms: expire.then_some(60_000),
+                    ..RunLimits::default()
+                },
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+        panic!("prompt queued")
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    if expire {
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::time::resume();
+    } else {
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CancelRun { run_id },
+            )
+            .await
+            .unwrap();
+    }
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if let SessionEvent::RunFinished {
+                run_id: finished,
+                outcome,
+                ..
+            } = event.event
+                && finished == run_id
+            {
+                break outcome;
+            }
+        }
+    })
+    .await;
+    // Release the old implementation as well, so a failing test still drains
+    // its executor and removes its temporary files.
+    drop(held);
+    runtime.shutdown().await.unwrap();
+    assert!(
+        if expire {
+            matches!(&settled, Ok(RunOutcome::BudgetExhausted { exhaustion }) if exhaustion.limit == qq_protocol::BudgetLimitKind::Duration)
+        } else {
+            matches!(settled, Ok(RunOutcome::Cancelled))
+        },
+        "cancellation must settle while capacity remains occupied: {settled:?}"
+    );
+    assert!(
+        std::fs::read_dir(root.path().join("control"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "cancelled preparation must not import a task after capacity returns"
+    );
+}
+
+#[tokio::test]
+async fn check_task_preparation_cancellation_releases_its_capacity_wait() {
+    stalled_check_task_preparation(false).await;
+}
+
+#[tokio::test]
+async fn check_task_preparation_deadline_releases_its_capacity_wait() {
+    stalled_check_task_preparation(true).await;
+}
+
+async fn stalled_check_task_preparation(expire: bool) {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (runtime, session) = open_session(root.path(), &source, Arc::new(SideFileLoader)).await;
+    let workspace = runtime
+        .inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            session_workspace(connection, session)
+        })
+        .await
+        .unwrap();
+    let mut claim = super::super::settlement::recovery_claim(RunIdentity {
+        workspace_id: workspace,
+        session_id: session,
+        run_id: task.owner,
+        command_id: CommandId::generate().unwrap(),
+        kind: RunKind::GoalCheck,
+        child: false,
+    });
+    claim.workspace = source.to_string_lossy().into_owned();
+    claim.approval_mode = ApprovalMode::Auto;
+    let permits = crate::workspace::blocking_permits();
+    let held = permits
+        .clone()
+        .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
+        .await
+        .unwrap();
+    let (entered, waiting) = tokio::sync::oneshot::channel();
+    PREPARATION_WAITERS
+        .lock()
+        .unwrap()
+        .push((claim.workspace.clone(), entered));
+    let cancellation = RunCancellation::new();
+    let stopped = cancellation.clone();
+    let inner = runtime.inner.clone();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut preparation = tokio::spawn(async move {
+        let mut resources = super::super::execution::RunResources::default();
+        prepare_check(&inner, &claim, &stopped, deadline, &mut resources).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    if expire {
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(61)).await;
+        tokio::time::resume();
+    } else {
+        cancellation.cancel();
+    }
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), &mut preparation).await;
+    drop(held);
+    if stopped.is_err() {
+        let _ = preparation.await;
+    }
+    runtime.shutdown().await.unwrap();
+    assert!(
+        matches!(stopped, Ok(Ok(Err(TaskExecutionError::Stopped)))),
+        "check preparation must stop before capacity is released: {stopped:?}"
+    );
+    assert_eq!(cancellation.timed_out(), expire);
+    assert!(
+        std::fs::read_dir(root.path().join("control"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+struct AttachmentLoader {
+    path: String,
+    edit: bool,
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+impl RuntimeLoader for AttachmentLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let path = self.path.clone();
+        let edit = self.edit;
+        let prompts = self.prompts.clone();
+        Box::pin(async move {
+            struct CaptureAttachment {
+                script: qq_provider::test_support::ScriptedProvider,
+                prompts: Arc<Mutex<Vec<String>>>,
+            }
+            impl qq_provider::Provider for CaptureAttachment {
+                fn stream(
+                    &self,
+                    request: qq_provider::ModelRequest,
+                ) -> qq_provider::ProviderStream {
+                    let prompt = request
+                        .messages()
+                        .iter()
+                        .filter(|message| message.role() == Role::User)
+                        .flat_map(|message| message.content())
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    self.prompts.lock().unwrap().push(prompt);
+                    self.script.stream(request)
+                }
+            }
+            let script = if edit {
+                qq_provider::test_support::ScriptedProvider::tool_then_text(
+                    "write_file",
+                    &serde_json::json!({"path": path, "content": "updated attachment"}).to_string(),
+                    "updated",
+                )
+            } else {
+                qq_provider::test_support::ScriptedProvider::new(vec![vec![
+                    qq_provider::ProviderEvent::OutputTextDelta {
+                        text: "read attachment".to_owned(),
+                    },
+                    qq_provider::ProviderEvent::Completed { usage: None },
+                ]])
+            };
+            let runtime =
+                crate::Runtime::new(CaptureAttachment { script, prompts }, "demo", 256).unwrap();
+            let workspace = request
+                .execution_workspace
+                .map_or_else(|| PathBuf::from(request.workspace), |grant| grant.path);
+            Ok(
+                LoadedRuntime::from_runtime(runtime, request.profile, workspace)
+                    .await
+                    .unwrap(),
+            )
+        })
+    }
+}
+
+#[tokio::test]
+async fn explicit_task_attachments_survive_ignore_rules_and_keep_source_authority() {
+    for (relative, edit) in [("notes.local", true), (".qq/config.ron", false)] {
+        let (root, source, _) = tokio::task::spawn_blocking(publication_fixture)
+            .await
+            .unwrap();
+        std::fs::write(source.join(".gitignore"), "*.local\n").unwrap();
+        std::fs::create_dir_all(source.join(".qq")).unwrap();
+        std::fs::write(source.join(relative), "explicit attachment bytes").unwrap();
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let (runtime, session) = open_session(
+            root.path(),
+            &source,
+            Arc::new(AttachmentLoader {
+                path: relative.to_owned(),
+                edit,
+                prompts: prompts.clone(),
+            }),
+        )
+        .await;
+        let workspace = runtime
+            .inner
+            .store
+            .call(Priority::AwaitControl, move |connection| {
+                session_workspace(connection, session)
+            })
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: EventCursor {
+                    store_id: runtime.store_id(),
+                    workspace_id: workspace,
+                    sequence: 0,
+                },
+            })
+            .unwrap();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id: session,
+                    input: vec![
+                        InputPart::text("inspect the attached file".to_owned()),
+                        InputPart::WorkspaceFile {
+                            path: relative.to_owned(),
+                            expected_hash: Some(
+                                crate::workspace::content_hash(b"explicit attachment bytes")
+                                    .parse()
+                                    .unwrap(),
+                            ),
+                            range: None,
+                        },
+                    ],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let event = events.next().await.unwrap().unwrap();
+                if let SessionEvent::RunFinished { outcome, .. } = event.event {
+                    break outcome;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        runtime.shutdown().await.unwrap();
+        assert!(
+            matches!(outcome, RunOutcome::Completed),
+            "{relative}: {outcome:?}"
+        );
+        let prompts = prompts.lock().unwrap();
+        assert!(!prompts.is_empty());
+        assert!(
+            prompts[0].contains("explicit attachment bytes"),
+            "{relative}: {}",
+            prompts[0]
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join(relative)).unwrap(),
+            if edit {
+                "updated attachment"
+            } else {
+                "explicit attachment bytes"
+            }
+        );
+        for task in std::fs::read_dir(root.path().join("control")).unwrap() {
+            let task = task.unwrap().path();
+            if edit {
+                assert_eq!(
+                    std::fs::read_to_string(task.join(relative)).unwrap(),
+                    "updated attachment"
+                );
+            } else {
+                assert!(
+                    !task.join(relative).exists(),
+                    "source authority must not become task-controlled configuration"
+                );
+            }
+        }
+    }
+}

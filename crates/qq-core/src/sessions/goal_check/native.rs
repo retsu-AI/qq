@@ -154,7 +154,11 @@ pub(super) async fn run(
         Err(reason) => ProcessResult {
             outcome: if cancellation.timed_out() {
                 ProcessOutcome::TimedOut
-            } else if matches!(reason, CheckError::Stopped) {
+            } else if matches!(
+                reason,
+                CheckError::Stopped
+                    | CheckError::Task(super::super::task_workspaces::TaskExecutionError::Stopped)
+            ) {
                 ProcessOutcome::Cancelled
             } else {
                 ProcessOutcome::Failed
