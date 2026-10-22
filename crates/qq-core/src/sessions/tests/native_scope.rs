@@ -330,7 +330,9 @@ async fn native_scope_enforces_auto_session_commands_through_the_real_owner() {
             _ => None,
         })
         .expect("native result");
-    if result.contains("required Linux filesystem enforcement is unavailable") {
+    if result.contains("required Linux filesystem enforcement is unavailable")
+        || result.contains("required Linux network enforcement is unavailable")
+    {
         assert_eq!(
             std::fs::read_to_string(workspace.join("input")).unwrap(),
             "initial"
