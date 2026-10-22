@@ -1180,6 +1180,36 @@ mod tests {
     }
 
     #[test]
+    fn http_canaries_target_the_endpoints_qq_ships() {
+        // The canary spells its endpoints out so it can run without loading
+        // configuration; this keeps that copy from drifting off the table.
+        for case in CASES {
+            let RecipeKind::Http {
+                endpoint,
+                endpoint_kind,
+                ..
+            } = case.recipe
+            else {
+                continue;
+            };
+            let provider = qq_config::builtin_provider(case.provider.as_str())
+                .unwrap_or_else(|| panic!("{}: no built-in provider", case.id));
+            assert_eq!(
+                endpoint.trim_end_matches('/'),
+                provider.endpoint.trim_end_matches('/'),
+                "{}",
+                case.id
+            );
+            assert_eq!(
+                matches!(endpoint_kind, EndpointKind::Exact),
+                provider.endpoint_mode == qq_config::EndpointMode::Exact,
+                "{}",
+                case.id
+            );
+        }
+    }
+
+    #[test]
     fn selection_requires_exactly_one_selection_mode() {
         assert!(
             selected_cases(&LiveArgs {

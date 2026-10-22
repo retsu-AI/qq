@@ -47,6 +47,9 @@ pub use xai::XaiLogin;
 pub const OPENAI_CODEX_CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
 /// Credential audience of the built-in xAI deployment, for API keys and OAuth.
 pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
+/// The variable xAI resolution falls back to when nothing is stored. The
+/// provider table names the same variable; a root test keeps them equal.
+pub const XAI_API_KEY_VARIABLE: &str = "XAI_API_KEY";
 
 pub(crate) const KEYRING_SERVICE: &str = "dev.qq";
 pub(crate) const MAX_CREDENTIAL_NAME_LEN: usize = 128;

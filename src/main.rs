@@ -14,6 +14,7 @@ use qq_config as config;
 use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
+mod builtin_auth;
 mod catalog;
 mod cli;
 mod command_owner;
@@ -2046,7 +2047,7 @@ fn login_providers() -> Vec<&'static str> {
 /// to: the table's for an API-key preset, `qq-auth`'s for a provider whose
 /// credential it owns (ADR-0064 §1).
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
-    Some(runtime::builtin_audience(&login_provider(provider)?))
+    Some(builtin_auth::BuiltinAuth::of(&login_provider(provider)?).audience())
 }
 
 async fn run_blocking_command(

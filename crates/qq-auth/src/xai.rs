@@ -18,7 +18,7 @@ use qq_provider::{
     RequestCredential, RequestCredentialError, SecretRef, SharedRequestCredentialProvider,
 };
 
-use super::XAI_CREDENTIAL_ENDPOINT;
+use super::{XAI_API_KEY_VARIABLE, XAI_CREDENTIAL_ENDPOINT};
 use qq_protocol::CredentialEpoch;
 
 const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
@@ -434,7 +434,7 @@ impl CredentialStore {
             "xai",
             profile,
             &["qq auth login xai --oauth", "qq auth login xai"],
-            Some("XAI_API_KEY"),
+            Some(XAI_API_KEY_VARIABLE),
         );
         SharedRequestCredentialProvider::new(CachedRequestCredentials::new(
             self,
@@ -453,6 +453,27 @@ impl CredentialStore {
     ) -> Result<Secret, AuthError> {
         self.resolve_xai_with_reuse(profile, explicit, false)
             .map(|(secret, _)| secret)
+    }
+
+    /// Whether a request for `profile` could find an xAI credential, by the
+    /// same precedence [`Self::resolve_xai`] uses, without refreshing a
+    /// stored OAuth login: an expired one passes, an unreadable one fails.
+    /// It therefore performs no network I/O.
+    pub fn check_xai_credential(
+        &self,
+        profile: &str,
+        explicit: Option<&SecretRef>,
+    ) -> Result<(), AuthError> {
+        let name = credential_name(profile)?;
+        if explicit.is_none()
+            && self
+                .status(&name)?
+                .is_some_and(|metadata| metadata.kind.as_deref() == Some("xai-oauth"))
+        {
+            return self.load_xai_oauth(&name, false).map(|_| ());
+        }
+        self.resolve_xai_with_reuse(profile, explicit, false)
+            .map(|_| ())
     }
 
     /// [`Self::resolve_xai`] plus, for a stored OAuth credential, the epoch
@@ -484,7 +505,7 @@ impl CredentialStore {
                 self,
                 None,
                 &name,
-                "XAI_API_KEY",
+                XAI_API_KEY_VARIABLE,
                 Some(XAI_CREDENTIAL_ENDPOINT),
             )
             .map(without_reuse),
@@ -573,7 +594,7 @@ pub(super) fn source_for_test(profile: &str, explicit: Option<SecretRef>) -> Xai
             "xai",
             profile,
             &["qq auth login xai --oauth", "qq auth login xai"],
-            Some("XAI_API_KEY"),
+            Some(XAI_API_KEY_VARIABLE),
         ),
     }
 }
@@ -592,7 +613,7 @@ pub(super) fn request_credentials_for_test(
                 "xai",
                 profile,
                 &["qq auth login xai --oauth", "qq auth login xai"],
-                Some("XAI_API_KEY"),
+                Some(XAI_API_KEY_VARIABLE),
             ),
         },
     )
