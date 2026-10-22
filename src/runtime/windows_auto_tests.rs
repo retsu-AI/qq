@@ -14,10 +14,21 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
-    let script = format!(
+    let mut script = format!(
         "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
         secret.display()
     );
+    for name in [
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
+        script.push_str(&format!(" & echo private-{name}>\"%{name}%/proof-{name}\""));
+    }
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
@@ -179,6 +190,27 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             .trim_end(),
         "cache-retained"
     );
+    for (name, directory) in [
+        ("HOME", ""),
+        ("USERPROFILE", ""),
+        ("TMPDIR", "tmp"),
+        ("TEMP", "tmp"),
+        ("TMP", "tmp"),
+        ("APPDATA", "AppData/Roaming"),
+        ("LOCALAPPDATA", "AppData/Local"),
+    ] {
+        assert_eq!(
+            fs::read_to_string(
+                task.join(".qq/task-home")
+                    .join(directory)
+                    .join(format!("proof-{name}"))
+            )
+            .unwrap()
+            .trim_end(),
+            format!("private-{name}"),
+            "{name} must resolve to private task storage",
+        );
+    }
     let calls = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();
