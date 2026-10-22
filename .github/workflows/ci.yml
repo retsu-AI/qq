@@ -216,6 +216,10 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
             cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+            bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs
+            bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers
+            bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::budgeted_exit_notification_survives_a_dropped_wait
+            bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::nested_cpu_rates_never_exceed_the_requested_machine_share
           fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1

@@ -23,6 +23,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 mod access;
 mod arguments;
 mod directory;
+pub(super) mod fleet;
 mod resources;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
@@ -33,6 +34,7 @@ struct Owner {
     launcher: CommandLauncher,
     source: File,
     image: Mutex<Option<Arc<HelperImage>>>,
+    fleet: Mutex<Option<Arc<fleet::Fleet>>>,
 }
 pub(super) struct HelperImage {
     path: PathBuf,
@@ -58,6 +60,7 @@ impl Drop for HelperImage {
 pub(super) struct Startup {
     encoded: Vec<u8>,
     image: Arc<HelperImage>,
+    fleet: Option<Arc<fleet::Fleet>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -70,6 +73,7 @@ struct Packet {
     cwd_identity: NativeWorkspaceIdentity,
     filesystem: NativeFilesystem,
     resources: NativeResources,
+    cpu_parent_percent: Option<u32>,
     not_after_ms: u64,
 }
 impl WindowsOwner {
@@ -92,6 +96,7 @@ impl WindowsOwner {
             launcher,
             source,
             image: Mutex::new(None),
+            fleet: Mutex::new(None),
         })))
     }
     fn image(&self) -> io::Result<Arc<HelperImage>> {
@@ -174,6 +179,22 @@ impl WindowsOwner {
                 "filesystem enforcement is unavailable without isolated network authority on Windows",
             ));
         }
+        let fleet = if matches!(native.resources, NativeResources::Committed { .. }) {
+            let mut cached = self
+                .0
+                .fleet
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(fleet) = cached.as_ref() {
+                Some(fleet.clone())
+            } else {
+                let fleet = Arc::new(fleet::Fleet::discover()?);
+                *cached = Some(fleet.clone());
+                Some(fleet)
+            }
+        } else {
+            None
+        };
         let image = self.image()?;
         if let NativeFilesystem::Restricted { read_write, .. } = &native.filesystem {
             for ancestor in image
@@ -205,6 +226,7 @@ impl WindowsOwner {
             cwd_identity: NativeWorkspaceIdentity::held(cwd)?,
             filesystem: native.filesystem.clone(),
             resources: native.resources,
+            cpu_parent_percent: fleet.as_ref().map(|_| fleet::CPU_PERCENT),
             not_after_ms: unix_ms().saturating_add(
                 u64::try_from(
                     deadline
@@ -235,7 +257,14 @@ impl WindowsOwner {
                 wrapped.env(key, value);
             }
         }
-        Ok((wrapped, Some(Startup { encoded, image })))
+        Ok((
+            wrapped,
+            Some(Startup {
+                encoded,
+                image,
+                fleet,
+            }),
+        ))
     }
 }
 
@@ -252,8 +281,15 @@ pub(super) async fn spawn(
     if startup.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
-    let mut child =
-        super::windows_job::spawn(command, directory, process, cancelled, deadline).await?;
+    let mut child = super::windows_job::spawn(
+        command,
+        directory,
+        process,
+        cancelled,
+        deadline,
+        startup.as_ref().and_then(|startup| startup.fleet.clone()),
+    )
+    .await?;
     let Some(startup) = startup else {
         return Ok(child);
     };
@@ -400,7 +436,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         rappct::AppContainerProfile::ensure(&name, "QQ task", Some("QQ native task scope"))
             .map_err(io::Error::other)?;
     let _grants = access::prepare(&packet.filesystem, &profile.sid, packet.not_after_ms)?;
-    let cpu_rate_percent = resources::apply(packet.resources)?;
+    let cpu_rate_percent = resources::apply(packet.resources, packet.cpu_parent_percent)?;
     let capabilities = access::capabilities(&packet.filesystem, &profile.sid)?;
     let options = rappct::LaunchOptions {
         exe: packet.program.clone(),
