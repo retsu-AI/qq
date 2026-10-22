@@ -127,3 +127,13 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
 `src/plan.rs`; `src/mcp.rs:37–60`; `crates/qq-core/tests/mcp_session.rs:120`.
 `cargo tree -p qq-core -e normal` = 170 packages; `htmd`'s exclusive closure =
 22. Codex `codex-rs/core-api/src/lib.rs`, `thread-manager-sample/src/main.rs`.
+
+## Implementation notes
+
+- 2026-10-22: the crate is named `qq-host`; `qq-harness` was renamed when
+  `RuntimeFactory`, `RuntimeHandler`, the reviewer, model discovery,
+  built-in credential policy (`builtin_auth`) and the command-worker client
+  moved out of `src/` (AC12.2, mechanical, no behaviour
+  change). The binary hands in its build identity as `qq_host::HostBuild`, and
+  `RuntimeBuildError` moved with the rest. Still in the binary: the headless
+  driver (`src/headless.rs`, AC12.3) and the decision 1, 3 and 4 items.

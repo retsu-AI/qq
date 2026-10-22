@@ -47,6 +47,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    HostBuild,
     builtin_auth::{self, BuiltinAuth},
     catalog::{DiscoveredModel, ModelDiscovery},
     plan::{
@@ -107,7 +108,7 @@ impl<'a> From<&'a ClientSnapshot> for CatalogSource<'a> {
 /// of the day into an explicit override on every later load (and, for
 /// reasoning routes, defeat the effort-aware lift). Any other provenance —
 /// a configuration layer, the CLI, a profile, a picker — is kept.
-pub(crate) fn chosen_max_output_tokens(
+pub fn chosen_max_output_tokens(
     effective: u32,
     provenance: &qq_config::ConfigProvenance,
 ) -> Option<u32> {
@@ -169,6 +170,7 @@ pub struct RuntimeFactory {
 }
 
 struct RuntimeFactoryInner {
+    build: HostBuild,
     config: ConfigLoader,
     credentials: CredentialStore,
     mode: RuntimeMode,
@@ -238,17 +240,24 @@ fn validate_tui_qa_tree(path: &Path) -> Result<(), String> {
 
 impl RuntimeFactory {
     pub fn system_with_read_images(
+        build: HostBuild,
         images: qq_core::ApprovedReadImages,
     ) -> Result<Self, RuntimeBuildError> {
-        Self::new_with_read_images(ConfigLoader::system()?, CredentialStore::system()?, images)
+        Self::new_with_read_images(
+            build,
+            ConfigLoader::system()?,
+            CredentialStore::system()?,
+            images,
+        )
     }
 
     pub fn new_with_read_images(
+        build: HostBuild,
         config: ConfigLoader,
         credentials: CredentialStore,
         images: qq_core::ApprovedReadImages,
     ) -> Result<Self, RuntimeBuildError> {
-        Self::with_mode_and_images(config, credentials, RuntimeMode::Standard, images)
+        Self::with_mode_and_images(build, config, credentials, RuntimeMode::Standard, images)
     }
 
     #[cfg(test)]
@@ -256,10 +265,16 @@ impl RuntimeFactory {
         config: ConfigLoader,
         credentials: CredentialStore,
     ) -> Result<Self, RuntimeBuildError> {
-        Self::with_mode(config, credentials, RuntimeMode::Standard)
+        Self::with_mode(
+            tests::TEST_BUILD,
+            config,
+            credentials,
+            RuntimeMode::Standard,
+        )
     }
 
-    pub(crate) fn isolated_tui_qa(
+    pub fn isolated_tui_qa(
+        build: HostBuild,
         config: ConfigLoader,
         credentials: CredentialStore,
         workspace: PathBuf,
@@ -282,6 +297,7 @@ impl RuntimeFactory {
             });
         }
         Self::with_mode(
+            build,
             config,
             credentials,
             RuntimeMode::IsolatedTuiQa {
@@ -292,11 +308,13 @@ impl RuntimeFactory {
     }
 
     fn with_mode(
+        build: HostBuild,
         config: ConfigLoader,
         credentials: CredentialStore,
         mode: RuntimeMode,
     ) -> Result<Self, RuntimeBuildError> {
         Self::with_mode_and_images(
+            build,
             config,
             credentials,
             mode,
@@ -305,6 +323,7 @@ impl RuntimeFactory {
     }
 
     fn with_mode_and_images(
+        build: HostBuild,
         config: ConfigLoader,
         credentials: CredentialStore,
         mode: RuntimeMode,
@@ -312,13 +331,12 @@ impl RuntimeFactory {
     ) -> Result<Self, RuntimeBuildError> {
         Ok(Self {
             inner: Arc::new(RuntimeFactoryInner {
+                build,
                 config,
                 credentials,
                 mode,
                 approved_read_images,
-                process_producer: Arc::new(qq_core::ProcessProducer::new(env!(
-                    "QQ_SOURCE_REVISION"
-                ))),
+                process_producer: Arc::new(qq_core::ProcessProducer::new(build.source_revision)),
                 providers: ProviderCompiler::new()?,
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
@@ -528,7 +546,7 @@ impl RuntimeFactory {
     }
 
     /// The authenticated configured catalog; tests assert on it directly.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn configured_model_options(&self, snapshot: &ConfigSnapshot) -> Vec<ModelDescriptor> {
         if self.is_isolated_tui_qa() {
             vec![Self::isolated_tui_qa_model_option(snapshot)]
@@ -886,7 +904,7 @@ impl RuntimeFactory {
     /// Revalidates the isolated fixture immediately before each lifecycle
     /// operation. This prevents a caller from replacing an initially-safe
     /// config or database path with a symlink or hard link after startup.
-    pub(crate) fn validate_isolated_tui_qa_state(&self) -> Result<(), RuntimeBuildError> {
+    pub fn validate_isolated_tui_qa_state(&self) -> Result<(), RuntimeBuildError> {
         let RuntimeMode::IsolatedTuiQa { root, workspace } = &self.inner.mode else {
             return Ok(());
         };
@@ -2314,7 +2332,7 @@ fn environment_variable_set(variable: &str) -> bool {
 
 /// Which input the AWS default credential chain would pick up locally,
 /// without calling AWS or probing IMDS.
-pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
+pub fn aws_default_chain_source() -> Option<&'static str> {
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
         && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
     {
@@ -2339,7 +2357,7 @@ pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
     None
 }
 
-pub(crate) fn aws_profile_configured(profile: &str) -> bool {
+pub fn aws_profile_configured(profile: &str) -> bool {
     if profile.is_empty() {
         return false;
     }
@@ -3047,7 +3065,7 @@ fn credential_reference(reference: &SecretRef) -> CredentialReference {
 /// An endpoint reduced to scheme, host, port, and path. Userinfo, query, and
 /// fragment can carry credentials and are dropped; an unparseable endpoint is
 /// described only by its scheme so no raw bytes leak into a descriptor.
-pub(crate) use qq_harness::describe_endpoint;
+pub use crate::describe_endpoint;
 
 impl ResolvedAuth {
     fn into_http(self) -> Result<HttpAuth, AuthError> {
@@ -3071,7 +3089,7 @@ pub struct RuntimeHandler {
 impl RuntimeHandler {
     /// [`Self::open_with`] with no server-side approval deadline: the
     /// interactive default.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn open(factory: RuntimeFactory) -> Result<Self, RuntimeHandlerError> {
         Self::open_with(factory, None).await
     }
@@ -3085,7 +3103,7 @@ impl RuntimeHandler {
     ) -> Result<Self, RuntimeHandlerError> {
         #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
-            Some(Arc::new(crate::command_owner::client::CommandWorker::new(
+            Some(Arc::new(crate::command_worker::CommandWorker::new(
                 factory
                     .inner
                     .config
@@ -3093,14 +3111,14 @@ impl RuntimeHandler {
                     .data_dir()
                     .join("command-owner-v3"),
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
-                crate::cli::BUILD_VERSION,
+                factory.inner.build.version,
             )?));
         #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let commands = None;
         Self::open_with_commands(factory, approval_timeout, commands).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn open_with(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
@@ -3907,7 +3925,7 @@ pub enum RuntimeBuildError {
         limit: u32,
     },
     #[error(transparent)]
-    McpBridge(#[from] qq_harness::McpBuildError),
+    McpBridge(#[from] crate::McpBuildError),
     #[error(transparent)]
     Mcp(#[from] qq_mcp::McpConfigError),
     #[error("runtime cache is unavailable")]
@@ -3975,7 +3993,7 @@ impl RuntimeBuildError {
                 qq_provider::ProviderErrorKind::Protocol => RunFailureKind::ProviderProtocol,
             },
             Self::Mcp(_)
-            | Self::McpBridge(qq_harness::McpBuildError::Configuration(_))
+            | Self::McpBridge(crate::McpBuildError::Configuration(_))
             | Self::UnknownModel { .. }
             | Self::UnknownProfile(_)
             | Self::PackRequiresNewerProtocol { .. }
@@ -3990,7 +4008,7 @@ impl RuntimeBuildError {
             | Self::UnrepresentableOutputLimit { .. } => RunFailureKind::ProviderConfiguration,
             Self::Plan(_) => RunFailureKind::Configuration,
             Self::PreparationCancelled
-            | Self::McpBridge(qq_harness::McpBuildError::CacheUnavailable)
+            | Self::McpBridge(crate::McpBuildError::CacheUnavailable)
             | Self::CacheUnavailable
             | Self::PlanCacheFull
             | Self::PlanCacheShutDown
@@ -4003,7 +4021,7 @@ impl RuntimeBuildError {
 mod tests {
     #[test]
     fn extracted_mcp_cache_failure_keeps_its_server_classification() {
-        let error = super::RuntimeBuildError::from(qq_harness::McpBuildError::CacheUnavailable);
+        let error = super::RuntimeBuildError::from(crate::McpBuildError::CacheUnavailable);
         assert_eq!(error.failure_kind(), qq_protocol::RunFailureKind::Server);
         assert_eq!(error.to_string(), "runtime cache is unavailable");
     }
@@ -4045,6 +4063,11 @@ mod tests {
     use qq_server::{ServerOptions, ServerPaths, StartOutcome};
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) const TEST_BUILD: crate::HostBuild = crate::HostBuild {
+        source_revision: "test",
+        version: "0.0.0+test",
+    };
 
     #[derive(Default)]
     pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
@@ -7108,6 +7131,7 @@ mod tests {
         }
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
         let factory = RuntimeFactory::isolated_tui_qa(
+            TEST_BUILD,
             ConfigLoader::new(ConfigPaths::new(
                 canonical_root.join("config"),
                 canonical_root.join("data"),
@@ -8523,6 +8547,7 @@ mod tests {
         ])
         .unwrap();
         let factory = RuntimeFactory::new_with_read_images(
+            TEST_BUILD,
             ConfigLoader::new(ConfigPaths::new(
                 fixture.path("global"),
                 fixture.path("data"),

@@ -48,7 +48,7 @@ providers/
 The root re-exports `BedrockAuth`, the recipe/compiler types, request-credential
 types, structural secret types and the neutral model. It does not expose
 adapter modules or name any vendor's credential audience; `qq-auth` owns
-those (`OPENAI_CODEX_CREDENTIAL_ENDPOINT`, `XAI_CREDENTIAL_ENDPOINT`). The root package
+those (`OPENAI_CODEX_CREDENTIAL_ENDPOINT`, `XAI_CREDENTIAL_ENDPOINT`). `qq-host`
 is the composition layer that translates `qq-config` and `qq-auth` values into
 provider recipes.
 

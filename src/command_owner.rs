@@ -1,8 +1,5 @@
 //! Entry point for the command process; no provider or agent runtime opens here.
 
-#[cfg(any(target_os = "linux", target_os = "macos", windows))]
-pub(crate) mod client;
-
 #[cfg(target_os = "linux")]
 mod delegation;
 

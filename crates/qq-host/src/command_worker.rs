@@ -383,5 +383,5 @@ fn io_error(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Comma
 }
 
 #[cfg(test)]
-#[path = "client_tests.rs"]
+#[path = "command_worker_tests.rs"]
 mod tests;

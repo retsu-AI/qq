@@ -11,11 +11,10 @@ use std::{
 use qq_auth as auth;
 use qq_client as client;
 use qq_config as config;
+use qq_host::{builtin_auth, mcp, runtime};
 use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
-mod builtin_auth;
-mod catalog;
 mod cli;
 mod command_owner;
 #[cfg(test)]
@@ -26,10 +25,7 @@ mod headless;
 mod init;
 
 mod logging;
-mod mcp;
 mod output;
-mod plan;
-mod runtime;
 
 fn main() -> ExitCode {
     if let Some(request) = cli::task_git_request() {
@@ -281,8 +277,10 @@ impl CliOverrides {
 }
 
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
-    let factory =
-        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())?;
+    let factory = runtime::RuntimeFactory::system_with_read_images(
+        cli::HOST_BUILD,
+        overrides.approved_read_images.clone(),
+    )?;
     let load = overrides
         .load_request()?
         .with_untrusted_project_config_ignored();
@@ -538,9 +536,11 @@ async fn prepare_headless(
         }
     };
 
-    let factory =
-        runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())
-            .map_err(|error| invalid(error.to_string()))?;
+    let factory = runtime::RuntimeFactory::system_with_read_images(
+        cli::HOST_BUILD,
+        overrides.approved_read_images.clone(),
+    )
+    .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
         .map_err(|error| invalid(error.to_string()))?
@@ -695,6 +695,7 @@ async fn serve(
         }
         server::ReserveOutcome::Reserved(reservation) => {
             let factory = runtime::RuntimeFactory::system_with_read_images(
+                cli::HOST_BUILD,
                 overrides.approved_read_images.clone(),
             )?;
             // The server's own configuration decides the approval wait for
@@ -1096,6 +1097,7 @@ impl InteractiveEnvironment {
         let Some(root) = tui_qa_root else {
             let config = config::ConfigLoader::system()?;
             let factory = runtime::RuntimeFactory::new_with_read_images(
+                cli::HOST_BUILD,
                 config.clone(),
                 auth::CredentialStore::system()?,
                 overrides.approved_read_images.clone(),
@@ -1127,6 +1129,7 @@ impl InteractiveEnvironment {
             auth::CredentialStore::with_paths(auth::CredentialPaths::new(root.join("credentials")));
         let workspace = root.join("workspace");
         let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            cli::HOST_BUILD,
             config.clone(),
             credentials,
             workspace.clone(),
@@ -2425,7 +2428,9 @@ mod tests {
             Arc::new(PanicKeyring),
         );
         let request = config::LoadRequest::new(&workspace);
-        let factory = runtime::RuntimeFactory::isolated_tui_qa(loader, store, workspace).unwrap();
+        let factory =
+            runtime::RuntimeFactory::isolated_tui_qa(cli::HOST_BUILD, loader, store, workspace)
+                .unwrap();
         (root, factory, request)
     }
 
@@ -2526,9 +2531,12 @@ mod tests {
             auth::CredentialPaths::new(canonical.join("credentials")),
             Arc::new(PanicKeyring),
         );
-        let Err(error) =
-            runtime::RuntimeFactory::isolated_tui_qa(loader, store, canonical.join("workspace"))
-        else {
+        let Err(error) = runtime::RuntimeFactory::isolated_tui_qa(
+            cli::HOST_BUILD,
+            loader,
+            store,
+            canonical.join("workspace"),
+        ) else {
             panic!("mixed QA roots were accepted");
         };
         assert!(
@@ -2656,6 +2664,7 @@ mod tests {
             Arc::new(PanicKeyring),
         );
         let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            cli::HOST_BUILD,
             environment.config,
             credentials,
             environment.workspace,
@@ -2740,6 +2749,7 @@ mod tests {
             Arc::new(PanicKeyring),
         );
         let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            cli::HOST_BUILD,
             environment.config,
             credentials,
             environment.workspace.clone(),
@@ -2801,8 +2811,13 @@ mod tests {
             canonical.join("data"),
             canonical.join("managed"),
         ));
-        let factory =
-            runtime::RuntimeFactory::isolated_tui_qa(loader, store, workspace.clone()).unwrap();
+        let factory = runtime::RuntimeFactory::isolated_tui_qa(
+            cli::HOST_BUILD,
+            loader,
+            store,
+            workspace.clone(),
+        )
+        .unwrap();
         let error = factory
             .plan_for(&config::LoadRequest::new(workspace))
             .unwrap_err();
