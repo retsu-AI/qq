@@ -1,5 +1,6 @@
 //! Kernel lifetime custody and explicit filesystem restrictions.
-//! Network and resource containment are separate, unfinished boundaries.
+//! Optional private networking is independent of file grants; resource bounds
+//! and complete Auto qualification remain unfinished.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -19,6 +20,7 @@ use command_fds::CommandFdExt as _;
 mod bootstrap;
 mod exec;
 mod filesystem;
+mod network;
 pub(crate) use exec::execute;
 
 #[derive(Clone)]
@@ -121,7 +123,7 @@ impl LinuxOwner {
         command: tokio::process::Command,
         cwd: &cap_std::fs::Dir,
         image: Option<&(File, String)>,
-        filesystem: Option<&crate::command_owner::NativeFilesystem>,
+        native: Option<&super::process_context::NativeExecution>,
     ) -> io::Result<(tokio::process::Command, Startup)> {
         let command = command.as_std();
         let cwd = cwd.as_fd().try_clone_to_owned()?;
@@ -130,7 +132,13 @@ impl LinuxOwner {
         let (gate_child, gate) = pipe()?;
         let (acknowledgement, ack_child) = pipe()?;
         let mut descriptors = Vec::new();
-        let filesystem = filesystem
+        let isolated_network = native
+            .is_some_and(|native| native.network == crate::command_owner::NativeNetwork::Isolated);
+        if isolated_network {
+            network::prepare()?;
+        }
+        let filesystem = native
+            .map(|native| &native.filesystem)
             .filter(|scope| scope.is_restricted())
             .map(|scope| {
                 let (rules, fds) = filesystem::prepare(scope)?;
@@ -167,6 +175,7 @@ impl LinuxOwner {
         launcher_arguments.extend(self.launcher.arguments.iter().cloned());
         let packet = exec::Packet {
             filesystem,
+            isolated_network,
             program: program.as_bytes().to_vec(),
             argv0: argv0.as_bytes().to_vec(),
             arguments: command

@@ -137,6 +137,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
         arguments: r#"{"command":"echo once>>count"}"#.to_owned(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
+        network: qq_core::command_owner::NativeNetwork::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
@@ -204,6 +205,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
                     arguments: r#"{"command":"echo forbidden"}"#.to_owned(),
                     shell_policy: Default::default(),
                     approved_images: Vec::new(),
+                    network: qq_core::command_owner::NativeNetwork::Host,
                     filesystem: qq_core::command_owner::NativeFilesystem::Host,
                     not_after_ms: None,
                 })
@@ -375,6 +377,7 @@ environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         arguments: r#"{"command":"printf x >> count; printf started; read token < release; printf finished"}"#.to_owned(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
+        network: qq_core::command_owner::NativeNetwork::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
@@ -489,6 +492,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
         arguments: r#"{"command":"sleep 300"}"#.to_owned(),
         shell_policy: Default::default(),
         approved_images: Vec::new(),
+        network: qq_core::command_owner::NativeNetwork::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };

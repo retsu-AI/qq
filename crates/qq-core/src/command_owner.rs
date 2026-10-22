@@ -113,6 +113,14 @@ pub fn prepare_independent_worker() -> std::io::Result<()> {
     crate::tools::windows_job::root_job().map(|_| ())
 }
 
+/// Network authority chosen by the trusted host, never inferred from a tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeNetwork {
+    Host,
+    Isolated,
+}
+
 /// An authorized invocation. Its ID is an idempotency key, not a new attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +129,7 @@ pub struct NativeCommand {
     /// Explicit host authority. Host retains unrestricted filesystem access.
     /// This is not inferred from the program, arguments, or a model decision.
     pub filesystem: NativeFilesystem,
+    pub network: NativeNetwork,
     pub id: ToolCallId,
     /// Canonical absolute root, opened without following symlink components.
     pub workspace: PathBuf,
@@ -569,6 +578,7 @@ impl CommandOwner {
             Some(Arc::new(crate::tools::process_context::NativeExecution {
                 environment: request.environment,
                 filesystem: request.filesystem,
+                network: request.network,
             })),
             workspace,
             Arc::default(),

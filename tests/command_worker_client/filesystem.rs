@@ -4,7 +4,7 @@ use qq_core::command_owner::{NativeDirectoryGrant, NativeFilesystem, NativeWorks
 use qq_protocol::ToolCallId;
 use std::path::Path;
 
-fn request(workspace: &Path, tool: &str, script: &str) -> NativeCommand {
+pub(super) fn request(workspace: &Path, tool: &str, script: &str) -> NativeCommand {
     let workspace = workspace.canonicalize().unwrap();
     let mut roots = Vec::new();
     // Explicit fixture toolchain inputs, not production implicit grants.
@@ -17,6 +17,7 @@ fn request(workspace: &Path, tool: &str, script: &str) -> NativeCommand {
     }
     NativeCommand {
         environment: NativeEnvironment::capture(&[]).unwrap(),
+        network: qq_core::command_owner::NativeNetwork::Host,
         filesystem: NativeFilesystem::Restricted {
             read_only: roots
                 .iter()
@@ -40,7 +41,7 @@ fn request(workspace: &Path, tool: &str, script: &str) -> NativeCommand {
     }
 }
 
-async fn finish(
+pub(super) async fn finish(
     client: &client::CommandWorker,
     request: NativeCommand,
 ) -> qq_core::command_owner::CommandSnapshot {
@@ -57,7 +58,7 @@ async fn finish(
     }
 }
 
-fn worker(path: &Path) -> client::CommandWorker {
+pub(super) fn worker(path: &Path) -> client::CommandWorker {
     client::CommandWorker::new(
         path.to_owned(),
         env!("CARGO_BIN_EXE_qq").into(),

@@ -18,6 +18,7 @@ pub(super) const MAX_PACKET: u64 = 4 * 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub(super) struct Packet {
     pub filesystem: Option<Vec<super::filesystem::Directory>>,
+    pub isolated_network: bool,
     pub program: Vec<u8>,
     pub arguments: Vec<Vec<u8>>,
     pub environment: Vec<(Vec<u8>, Vec<u8>)>,
@@ -175,12 +176,22 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     protect_supervisor()?;
-    if let Some(filesystem) = packet.filesystem {
-        super::filesystem::enforce(filesystem)?;
-    }
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     live(monitor)?;
     live(owner)?;
+    drop(gate);
+    let mut retained = vec![ack.as_raw_fd()];
+    retained.extend(image.iter().map(|image| image.as_raw_fd()));
+    if let Some(filesystem) = &packet.filesystem {
+        retained.extend(filesystem.iter().map(|directory| directory.fd));
+    }
+    close_ambient_descriptors(&retained)?;
+    if packet.isolated_network {
+        super::network::enforce()?;
+    }
+    if let Some(filesystem) = packet.filesystem {
+        super::filesystem::enforce(filesystem)?;
+    }
     // PID 1 remains trusted: commands retain ordinary signal/reaping semantics.
     // Exiting PID 1 makes the kernel kill every remaining namespace member.
     let child = match command.spawn() {
@@ -217,6 +228,35 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn close_ambient_descriptors(retained: &[i32]) -> io::Result<()> {
+    // This entry point is single-threaded and runs before Tokio. Finish the
+    // directory scan before closing anything, including its own scan fd. No
+    // descriptor allocation occurs in the close loop, so EBADF can only refer
+    // to the already-dropped directory iterator, not a replacement object.
+    let descriptors = std::fs::read_dir("/proc/self/fd")?
+        .take(4097)
+        .map(|entry| {
+            entry?
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<i32>().ok())
+                .ok_or_else(|| io::Error::other("invalid inherited descriptor"))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    if descriptors.len() > 4096 {
+        return Err(io::Error::other("too many inherited descriptors"));
+    }
+    for fd in descriptors {
+        if fd > 2 && !retained.contains(&fd) {
+            match nix::unistd::close(fd) {
+                Ok(()) | Err(nix::errno::Errno::EBADF) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn protect_supervisor() -> io::Result<()> {
@@ -289,8 +329,9 @@ fn monitor(fields: &str) -> io::Result<u8> {
             "--fork",
             "--kill-child=KILL",
             "--mount-proc",
-            "--",
         ])
+        .args(packet.isolated_network.then_some("--net"))
+        .arg("--")
         .arg(std::ffi::OsString::from_vec(packet.launcher_program))
         .args(
             packet

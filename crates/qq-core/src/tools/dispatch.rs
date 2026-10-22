@@ -558,6 +558,7 @@ pub(crate) async fn execute_with_images(
                 };
                 let request = crate::command_owner::NativeCommand {
                     environment,
+                    network: crate::command_owner::NativeNetwork::Host,
                     filesystem: crate::command_owner::NativeFilesystem::Host,
                     id,
                     workspace: workspace.path().to_owned(),

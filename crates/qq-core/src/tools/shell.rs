@@ -391,7 +391,13 @@ pub(super) async fn run_shell(
         )?;
         #[cfg(target_os = "linux")]
         if let Some(owner) = &linux_owner {
-            return prepared.owned_linux(owner, native.as_ref().map(|native| &native.filesystem));
+            return prepared.owned_linux(owner, native.as_deref());
+        }
+        if native
+            .as_ref()
+            .is_some_and(|native| native.network == crate::command_owner::NativeNetwork::Isolated)
+        {
+            return Err(super::process_context::PreparationError::NetworkUnavailable);
         }
         if native
             .as_ref()
