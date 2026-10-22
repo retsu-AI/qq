@@ -151,8 +151,8 @@ pub(super) fn enforce() -> io::Result<()> {
     ))
 }
 
-/// Older Landlock cannot mediate pathname socket addresses. Connected stream
-/// pairs cannot be retargeted; datagram pairs can, so only stream pairs survive.
+/// Older Landlock cannot mediate pathname socket addresses. Stream and
+/// sequenced-packet pairs cannot be retargeted; datagram pairs can.
 #[cfg(all(
     target_endian = "little",
     any(
@@ -175,21 +175,23 @@ pub(super) fn deny_addressable_unix_sockets() -> io::Result<()> {
     let socket =
         SeccompRule::new(vec![unix().map_err(io::Error::other)?]).map_err(io::Error::other)?;
     let mut conditions = vec![unix().map_err(io::Error::other)?];
-    for flags in [
-        0,
-        libc::SOCK_CLOEXEC,
-        libc::SOCK_NONBLOCK,
-        libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-    ] {
-        conditions.push(
-            SeccompCondition::new(
-                1,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::Ne,
-                (libc::SOCK_STREAM | flags) as u64,
-            )
-            .map_err(io::Error::other)?,
-        );
+    for kind in [libc::SOCK_STREAM, libc::SOCK_SEQPACKET] {
+        for flags in [
+            0,
+            libc::SOCK_CLOEXEC,
+            libc::SOCK_NONBLOCK,
+            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        ] {
+            conditions.push(
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    (kind | flags) as u64,
+                )
+                .map_err(io::Error::other)?,
+            );
+        }
     }
     let pair = SeccompRule::new(conditions).map_err(io::Error::other)?;
     // io_uring can create sockets without entering socket(2), so it cannot

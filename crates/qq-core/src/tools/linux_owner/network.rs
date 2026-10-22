@@ -11,13 +11,13 @@ pub(super) fn prepare() -> io::Result<()> {
 
 enum Policy {
     Pathnames(landlock::RulesetCreated),
-    StreamPairs(landlock::RulesetCreated),
+    ConnectedPairs(landlock::RulesetCreated),
 }
 
 fn policy() -> io::Result<Policy> {
     match ruleset(true) {
         Ok(ruleset) => Ok(Policy::Pathnames(ruleset)),
-        Err(_) => ruleset(false).map(Policy::StreamPairs),
+        Err(_) => ruleset(false).map(Policy::ConnectedPairs),
     }
 }
 
@@ -28,7 +28,7 @@ pub(super) fn enforce() -> io::Result<()> {
 fn enforce_policy(policy: Policy) -> io::Result<()> {
     let (ruleset, stream_pairs_only) = match policy {
         Policy::Pathnames(ruleset) => (ruleset, false),
-        Policy::StreamPairs(ruleset) => (ruleset, true),
+        Policy::ConnectedPairs(ruleset) => (ruleset, true),
     };
     let status = ruleset.restrict_self().map_err(io::Error::other)?;
     if status.ruleset != RulesetStatus::FullyEnforced {
@@ -63,10 +63,7 @@ fn ruleset(pathnames: bool) -> io::Result<landlock::RulesetCreated> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io::{Read, Write},
-        os::unix::net::{UnixListener, UnixStream},
-    };
+    use std::os::unix::net::{UnixListener, UnixStream};
 
     #[test]
     fn legacy_probe() {
@@ -76,31 +73,35 @@ mod tests {
         let path = marker.strip_prefix("qq-legacy-unix:").unwrap();
         let descendant = std::env::var_os("QQ_LEGACY_CHILD").is_some();
         if !descendant {
-            enforce_policy(Policy::StreamPairs(ruleset(false).unwrap())).unwrap();
+            enforce_policy(Policy::ConnectedPairs(ruleset(false).unwrap())).unwrap();
         }
         let reachable = UnixStream::connect(path).is_ok();
         use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-        let host = SocketAddrUnix::new(path).unwrap();
-        for flags in [
-            SocketFlags::empty(),
-            SocketFlags::CLOEXEC,
-            SocketFlags::NONBLOCK,
-            SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
-        ] {
-            let (first, second) =
-                rustix::net::socketpair(AddressFamily::UNIX, SocketType::STREAM, flags, None)
-                    .unwrap();
-            assert!(rustix::net::connect_unspec(&first).is_err());
-            assert!(
-                rustix::net::connect(&first, &host).is_err(),
-                "a connected stream pair was retargeted"
-            );
-            let mut first = UnixStream::from(first);
-            let mut second = UnixStream::from(second);
-            first.write_all(b"ipc").unwrap();
-            let mut message = [0; 3];
-            second.read_exact(&mut message).unwrap();
-            assert_eq!(&message, b"ipc");
+        for kind in [SocketType::STREAM, SocketType::SEQPACKET] {
+            let host_path = if kind == SocketType::STREAM {
+                std::path::PathBuf::from(path)
+            } else {
+                std::path::Path::new(path).with_file_name("host-seq.sock")
+            };
+            let host = SocketAddrUnix::new(host_path).unwrap();
+            for flags in [
+                SocketFlags::empty(),
+                SocketFlags::CLOEXEC,
+                SocketFlags::NONBLOCK,
+                SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+            ] {
+                let (first, second) =
+                    rustix::net::socketpair(AddressFamily::UNIX, kind, flags, None).unwrap();
+                assert!(rustix::net::connect_unspec(&first).is_err());
+                assert!(
+                    rustix::net::connect(&first, &host).is_err(),
+                    "a connected pair was retargeted"
+                );
+                assert_eq!(rustix::io::write(&first, b"ipc").unwrap(), 3);
+                let mut message = [0; 3];
+                assert_eq!(rustix::io::read(&second, &mut message).unwrap(), 3);
+                assert_eq!(&message, b"ipc");
+            }
         }
         assert!(
             !reachable,
@@ -112,7 +113,11 @@ mod tests {
         );
         println!("legacy-unix-guard-ok");
         if !descendant {
+            use std::os::unix::process::CommandExt as _;
             let output = std::process::Command::new(std::env::current_exe().unwrap())
+                // An explicit uid forces Rust's fork/exec backend, including
+                // its connected SOCK_SEQPACKET error-report channel.
+                .uid(rustix::process::getuid().as_raw())
                 .args([
                     "--exact",
                     "tools::linux_owner::network::tests::legacy_probe",
@@ -134,10 +139,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_guard_denies_host_sockets_and_preserves_stream_pairs() {
+    fn legacy_guard_denies_host_sockets_and_preserves_connected_pairs() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("host.sock");
         let _listener = UnixListener::bind(&path).unwrap();
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let sequenced =
+            rustix::net::socket(AddressFamily::UNIX, SocketType::SEQPACKET, None).unwrap();
+        let sequence_address = SocketAddrUnix::new(root.path().join("host-seq.sock")).unwrap();
+        rustix::net::bind(&sequenced, &sequence_address).unwrap();
+        rustix::net::listen(&sequenced, 4).unwrap();
+        let control =
+            rustix::net::socket(AddressFamily::UNIX, SocketType::SEQPACKET, None).unwrap();
+        rustix::net::connect(&control, &sequence_address).unwrap();
+        drop(control);
         assert!(
             UnixStream::connect(&path).is_ok(),
             "the host control must be reachable before confinement"

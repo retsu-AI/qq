@@ -51,19 +51,29 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
         );
         a.unwrap();
         b.unwrap();
+        let mut last = None;
         let finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
             let mut after = 0;
             loop {
                 let snapshot = client.wait(request.id, after).await.unwrap();
-                if snapshot.status == CommandStatus::Finished {
+                last = Some(snapshot.clone());
+                if matches!(
+                    snapshot.status,
+                    CommandStatus::Finished | CommandStatus::Lost
+                ) {
                     break snapshot;
                 }
                 after = snapshot.version;
             }
         })
-        .await
-        .unwrap();
+        .await;
+        // Keep the observed state in failures and clean up even on timeout.
         client.stop_spawned().await;
+        let finished = finished.unwrap_or_else(|error| panic!(
+            "initial command did not finish: {error}; replace_store={replace_store}; last={last:?}; counter={:?}",
+            std::fs::read_to_string(workspace.path().join("counter")),
+        ));
+        assert_eq!(finished.status, CommandStatus::Finished, "{finished:?}");
         if replace_store {
             std::fs::rename(
                 directory.join("commands"),

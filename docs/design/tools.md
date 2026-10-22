@@ -44,13 +44,14 @@ bounded refusal before the payload starts.
 This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
 restrictions are available, an additional Landlock rule denies host socket
 connections. Otherwise a seccomp filter denies creation of addressable Unix
-sockets and datagram/sequence-packet pairs, while preserving connected stream
-pairs (including close-on-exec and nonblocking variants). Stream pairs cannot
-be retargeted to host services. The filter also denies io_uring entry points,
+sockets and datagram pairs, while preserving connected stream and
+sequence-packet pairs (including close-on-exec and nonblocking variants).
+These connected pairs cannot be retargeted to host services. The filter also denies io_uring entry points,
 which could otherwise create sockets outside socket(2). On this older-kernel
 path, local abstract Unix listeners are unavailable; subprocess stream-pair
-communication still works. Unsupported required enforcement and unimplemented
-platform backends refuse execution. The safe Rust `landlock` and `seccompiler`
+communication still works, including Rust's fork/exec startup channel.
+Unsupported required enforcement and unimplemented platform backends refuse
+execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
 On Linux, the binary creates detached task scopes for ordinary Auto runs and
