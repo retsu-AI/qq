@@ -231,6 +231,14 @@ async fn publication_preserves_windows_private_access() {
         None,
     )
     .unwrap();
+    let expected = GetSecurityInfo(
+        &source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl,
+    )
+    .unwrap()
+    .as_sddl()
+    .unwrap();
     drop(source);
     let mut task = fixture.import(&["a"], 1024).unwrap();
     fs::write(task.path().join("a"), "private agent change").unwrap();
@@ -261,7 +269,7 @@ async fn publication_preserves_windows_private_access() {
         SecurityInformation::Dacl,
     )
     .unwrap();
-    assert_eq!(actual.as_sddl().unwrap(), security.as_sddl().unwrap());
+    assert_eq!(actual.as_sddl().unwrap(), expected);
     assert_eq!(
         fs::read_to_string(fixture.source.path.join("a")).unwrap(),
         "private agent change"
@@ -306,6 +314,14 @@ async fn publication_preserves_windows_access_change_while_staging() {
         None,
     )
     .unwrap();
+    let expected = GetSecurityInfo(
+        &source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl,
+    )
+    .unwrap()
+    .as_sddl()
+    .unwrap();
     release.send(()).unwrap();
     let result = publication.await.unwrap();
     let actual = GetSecurityInfo(
@@ -326,7 +342,7 @@ async fn publication_preserves_windows_access_change_while_staging() {
     )
     .unwrap();
     drop(source);
-    assert_eq!(actual.as_sddl().unwrap(), edited.as_sddl().unwrap());
+    assert_eq!(actual.as_sddl().unwrap(), expected);
     assert!(matches!(result, Err(TaskWorkspaceError::Conflict(path)) if path == Path::new("a")));
     assert_eq!(
         fs::read_to_string(fixture.source.path.join("a")).unwrap(),

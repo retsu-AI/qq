@@ -3206,7 +3206,7 @@ mod tests {
             if existing {
                 fs::write(directory.path().join("a"), "original").unwrap();
             }
-            let workspace = Workspace::open(directory.path()).unwrap();
+            let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
             let arguments = if name == "edit_file" {
                 json!({"edits":[{"path":"a","old":"original","new":"agent change"}]})
             } else {
