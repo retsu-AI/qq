@@ -42,7 +42,7 @@ pub(crate) struct ExecutionContextFacts {
     pub(crate) context_id: ToolCallId,
     pub(crate) arguments_sha256: ContentHash,
     pub(crate) manifest_sha256: ContentHash,
-    pub(crate) base_env_present: u8,
+    pub(crate) base_env_present: u16,
     pub(crate) requested_env: bool,
     pub(crate) locale: Locale,
     pub(crate) cwd: CwdIdentity,
