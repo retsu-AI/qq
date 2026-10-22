@@ -3414,6 +3414,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[cfg(target_os = "linux")]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
