@@ -222,6 +222,11 @@ jobs:
             bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
             bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
           fi
+      - name: macOS sandbox failure diagnostics
+        if: failure() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
       - name: Unix output and observer regressions
         if: runner.os == 'macOS'
         shell: bash

@@ -431,7 +431,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                 }
                 let quoted = serde_json::to_string(path).map_err(io::Error::other)?;
                 profile.push_str(&format!(
-                    "(allow file-read* {} (subpath {quoted}))\n",
+                    "(allow file-read* file-map-executable {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
                 ));
                 for ancestor in grant.path.ancestors().skip(1) {
@@ -457,76 +457,84 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn helper_preparation_waits_for_readiness_and_remains_cancellable() {
-        let root = tempfile::tempdir().unwrap();
-        let (control, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
-        control.set_nonblocking(true).unwrap();
-        let (gate, held) = rustix::pipe::pipe().unwrap();
-        let (read, write) = rustix::pipe::pipe().unwrap();
-        let mut ready = tokio::fs::File::from_std(std::fs::File::from(read));
-        let mut command = tokio::process::Command::new("bash");
-        command.args(["-c", "dd bs=1 count=9 <&3 >/dev/null 2>&1; printf ready; IFS= read -r -n 1 gate <&4; printf RDY! >&3; IFS= read -r -n 1 go <&3; printf executed > escaped"])
+        for authorize in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let (control, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
+            control.set_nonblocking(true).unwrap();
+            let (gate, held) = rustix::pipe::pipe().unwrap();
+            let (read, write) = rustix::pipe::pipe().unwrap();
+            let mut ready = tokio::fs::File::from_std(std::fs::File::from(read));
+            let mut command = tokio::process::Command::new("bash");
+            command.args(["-c", "dd bs=1 count=9 <&3 >/dev/null 2>&1; printf ready; IFS= read -r -n 1 gate <&4; printf RDY! >&3; IFS= read -r -n 1 go <&3; printf executed > escaped"])
             .current_dir(root.path()).process_group(0).kill_on_drop(true)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(write)).stderr(std::process::Stdio::inherit());
-        command
-            .as_std_mut()
-            .fd_mappings(vec![
-                command_fds::FdMapping {
-                    parent_fd: inherited.into(),
-                    child_fd: 3,
-                },
-                command_fds::FdMapping {
-                    parent_fd: gate,
-                    child_fd: 4,
-                },
-            ])
-            .unwrap();
-        let startup = Startup {
-            encoded: vec![b'J'],
-            control: tokio::net::UnixStream::from_std(control).unwrap(),
-        };
-        let tasks = crate::tools::dispatch::ToolTasks::default();
-        let lease = tasks.enter();
-        let cancellation = crate::RunCancellation::new();
-        let cancelled = ToolCancellation::new(cancellation.clone());
-        let execution = tokio::spawn(async move {
-            spawn(
-                command,
-                startup,
-                &lease,
-                &cancelled,
-                Instant::now() + std::time::Duration::from_secs(60),
+            command
+                .as_std_mut()
+                .fd_mappings(vec![
+                    command_fds::FdMapping {
+                        parent_fd: inherited.into(),
+                        child_fd: 3,
+                    },
+                    command_fds::FdMapping {
+                        parent_fd: gate,
+                        child_fd: 4,
+                    },
+                ])
+                .unwrap();
+            let startup = Startup {
+                encoded: vec![b'J'],
+                control: tokio::net::UnixStream::from_std(control).unwrap(),
+            };
+            let tasks = crate::tools::dispatch::ToolTasks::default();
+            let lease = tasks.enter();
+            let cancellation = crate::RunCancellation::new();
+            let cancelled = ToolCancellation::new(cancellation.clone());
+            let execution = tokio::spawn(async move {
+                spawn(
+                    command,
+                    startup,
+                    &lease,
+                    &cancelled,
+                    Instant::now() + std::time::Duration::from_secs(60),
+                )
+                .await
+            });
+            let mut marker = [0; 5];
+            let preparing = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                ready.read_exact(&mut marker),
             )
-            .await
-        });
-        let mut marker = [0; 5];
-        let preparing = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            ready.read_exact(&mut marker),
-        )
-        .await;
-        cancellation.cancel();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
-            .await
-            .unwrap()
-            .unwrap();
-        let stopped = result.is_err();
-        let diagnostic = result.as_ref().err().map(ToString::to_string);
-        if let Ok(mut child) = result {
-            child.start_kill().unwrap();
-            child.wait().await.unwrap();
+            .await;
+            if authorize {
+                std::fs::File::from(held).write_all(b"1").unwrap();
+            } else {
+                cancellation.cancel();
+                drop(held);
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+                .await
+                .unwrap()
+                .unwrap();
+            let stopped = result.is_err();
+            let diagnostic = result.as_ref().err().map(ToString::to_string);
+            if let Ok(mut child) = result {
+                if !authorize {
+                    child.start_kill().unwrap();
+                }
+                assert!(child.wait().await.unwrap().success() || !authorize);
+            }
+            assert!(
+                matches!(preparing, Ok(Ok(_))),
+                "helper preparation marker failed: {preparing:?}; startup: {diagnostic:?}"
+            );
+            assert_eq!(&marker, b"ready");
+            tasks.drain().await.unwrap();
+            assert_eq!(
+                stopped, !authorize,
+                "only authorized startup may finish: {diagnostic:?}"
+            );
+            assert_eq!(root.path().join("escaped").exists(), authorize);
         }
-        assert!(
-            matches!(preparing, Ok(Ok(_))),
-            "helper preparation marker failed: {preparing:?}; startup: {diagnostic:?}"
-        );
-        assert_eq!(&marker, b"ready");
-        drop(held);
-        tasks.drain().await.unwrap();
-        assert!(
-            stopped,
-            "startup must wait for prepared helper readiness and honor cancellation while another stage owns the gate"
-        );
-        assert!(!root.path().join("escaped").exists());
     }
 
     #[test]
