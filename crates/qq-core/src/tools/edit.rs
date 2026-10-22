@@ -602,7 +602,7 @@ fn apply_one(
                 via: found.via,
                 count: 1,
                 index,
-                wrote: vec![found.start..found.start + wrote_len],
+                wrote: std::iter::once(found.start..found.start + wrote_len).collect(),
             });
             Ok(())
         }
@@ -644,7 +644,7 @@ fn apply_one(
                 via: found.via,
                 count: 1,
                 index,
-                wrote: vec![at..at + wrote_len],
+                wrote: std::iter::once(at..at + wrote_len).collect(),
             });
             Ok(())
         }
