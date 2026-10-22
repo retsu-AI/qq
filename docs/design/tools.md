@@ -55,8 +55,8 @@ before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
-`TaskWorkspace::import` with a compiled source plan before compiling the task
-runtime. The task record retains that plan’s configured pack protections and
+`TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
+source plan before compiling the task runtime. The task record retains that plan’s configured pack protections and
 restores them when publishing outputs. The importer copies current
 bytes into fresh files in a new detached directory, bounds total logical bytes
 and entries (including generated parent directories), and refuses symlinks,

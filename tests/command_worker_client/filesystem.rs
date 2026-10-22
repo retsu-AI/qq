@@ -76,7 +76,7 @@ pub(super) fn worker(path: &Path) -> client::CommandWorker {
 
 #[tokio::test]
 async fn detached_task_workspace_confines_edits_without_modifying_source_inputs() {
-    use qq_core::task_workspace::{TaskWorkspace, TaskWorkspaceLimits};
+    use qq_core::task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource};
     let (root, source, detached) = tokio::task::spawn_blocking(|| {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
@@ -94,7 +94,7 @@ async fn detached_task_workspace_confines_edits_without_modifying_source_inputs(
         )
         .unwrap();
         let detached = TaskWorkspace::import(
-            &source_plan,
+            &TaskWorkspaceSource::from_plan(&source_plan).unwrap(),
             &path.join("task"),
             &["input".into()],
             TaskWorkspaceLimits {

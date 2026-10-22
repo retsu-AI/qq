@@ -4,7 +4,7 @@ use std::fs;
 struct Fixture {
     _root: tempfile::TempDir,
     source: NativeDirectoryGrant,
-    plan: std::sync::Arc<crate::plan::CompiledAgentPlan>,
+    admission: TaskWorkspaceSource,
     destination: PathBuf,
 }
 
@@ -25,7 +25,7 @@ impl Fixture {
         )
         .unwrap();
         Self {
-            plan,
+            admission: TaskWorkspaceSource::from_plan(&plan).unwrap(),
             _root: root,
             source,
             destination: path.join("task"),
@@ -34,7 +34,7 @@ impl Fixture {
 
     fn import(&self, inputs: &[&str], bytes: u64) -> Result<TaskWorkspace, TaskWorkspaceError> {
         TaskWorkspace::import(
-            &self.plan,
+            &self.admission,
             &self.destination,
             &inputs.iter().map(PathBuf::from).collect::<Vec<_>>(),
             TaskWorkspaceLimits {
@@ -626,7 +626,7 @@ fn task_workspace_preserves_configured_pack_protections_after_restore() {
             )
             .is_err()
     );
-    fixture.plan = plan;
+    fixture.admission = TaskWorkspaceSource::from_plan(&plan).unwrap();
     assert!(matches!(
         fixture.import(&["vendor/reviewer/policy.md"], 1024),
         Err(TaskWorkspaceError::InvalidInput(_))
@@ -782,7 +782,7 @@ fn detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination() {
     assert!(!fixture.destination.exists());
     assert!(matches!(
         TaskWorkspace::import(
-            &fixture.plan,
+            &fixture.admission,
             &fixture.destination,
             &[PathBuf::from("a"), PathBuf::from("b")],
             TaskWorkspaceLimits {
@@ -794,7 +794,7 @@ fn detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination() {
     ));
     assert!(matches!(
         TaskWorkspace::import(
-            &fixture.plan,
+            &fixture.admission,
             &fixture.destination,
             &[PathBuf::from("a/b/c")],
             TaskWorkspaceLimits {
@@ -933,12 +933,12 @@ async fn detached_task_workspace_is_shared_by_builtin_tools_and_native_commands(
     use std::sync::Arc;
     let fixture = tokio::task::spawn_blocking(Fixture::new).await.unwrap();
     let source = fixture.source.clone();
-    let source_plan = fixture.plan.clone();
+    let source_admission = fixture.admission.clone();
     let destination = fixture.destination.clone();
     let detached = tokio::task::spawn_blocking(move || {
         fs::write(source.path.join("input"), "local edit").unwrap();
         TaskWorkspace::import(
-            &source_plan,
+            &source_admission,
             &destination,
             &["input".into()],
             TaskWorkspaceLimits {
@@ -1054,7 +1054,7 @@ fn detached_task_workspace_rejects_filesystem_ancestor_aliases() {
     }
     let destination = alternate.join("nested/task");
     let result = TaskWorkspace::import(
-        &fixture.plan,
+        &fixture.admission,
         &destination,
         &[],
         TaskWorkspaceLimits {

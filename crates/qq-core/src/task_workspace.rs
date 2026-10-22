@@ -32,6 +32,30 @@ pub struct TaskWorkspaceLimits {
     pub max_bytes: u64,
 }
 
+/// Trusted source identity and mutation protections captured from a compiled
+/// plan. This carries no runtime or open directory handles. It cannot be
+/// constructed from model-selected paths or an unqualified directory grant.
+#[derive(Debug, Clone)]
+pub struct TaskWorkspaceSource {
+    directory: NativeDirectoryGrant,
+    protected_pack_roots: Vec<PathBuf>,
+}
+
+impl TaskWorkspaceSource {
+    /// Capture policy from the source plan, before compiling a task runtime.
+    /// Performs blocking filesystem identity inspection.
+    pub fn from_plan(plan: &CompiledAgentPlan) -> io::Result<Self> {
+        let workspace = plan.workspace_handle();
+        Ok(Self {
+            directory: NativeDirectoryGrant {
+                path: workspace.path().to_owned(),
+                identity: NativeWorkspaceIdentity::held(workspace.root())?,
+            },
+            protected_pack_roots: workspace.protected_pack_roots().to_vec(),
+        })
+    }
+}
+
 /// A persistent detached tree. Dropping this handle does not delete task work.
 /// Serialized records carry source-write authority: restore them only from
 /// trusted host storage outside the writable task tree.
@@ -106,7 +130,7 @@ fn contains_directory(directory: &Dir, identity: NativeWorkspaceIdentity) -> io:
 }
 
 impl TaskWorkspace {
-    /// Import from a trusted source plan, retaining its configured pack protections
+    /// Import from a trusted source snapshot, retaining its configured pack protections
     /// in the persistent publication record.
     /// Copy selected workspace-relative regular files, including dirty and
     /// untracked bytes, into fresh inodes. Inputs are files, not recursive roots.
@@ -115,7 +139,7 @@ impl TaskWorkspace {
     /// remove only the newly created destination, without reading file contents
     /// through a symlink or externally linked input.
     pub fn import(
-        source_plan: &CompiledAgentPlan,
+        source: &TaskWorkspaceSource,
         destination: &Path,
         inputs: &[PathBuf],
         limits: TaskWorkspaceLimits,
@@ -126,14 +150,17 @@ impl TaskWorkspace {
         if inputs.len() > limits.max_entries {
             return Err(TaskWorkspaceError::LimitExceeded);
         }
-        let workspace = source_plan.workspace_handle();
-        let source = NativeDirectoryGrant {
-            path: workspace.path().to_owned(),
-            identity: at(
-                workspace.path(),
-                NativeWorkspaceIdentity::held(workspace.root()),
-            )?,
-        };
+        let protected_pack_roots = source.protected_pack_roots.clone();
+        let source = &source.directory;
+        let absolute_roots = protected_pack_roots
+            .iter()
+            .map(|relative| source.path.join(relative))
+            .collect::<Vec<_>>();
+        let workspace = at(
+            &source.path,
+            Workspace::open(&source.path)
+                .and_then(|workspace| workspace.with_protected_pack_roots(&absolute_roots)),
+        )?;
         if at(&source.path, NativeWorkspaceIdentity::capture(&source.path))? != source.identity {
             return Err(TaskWorkspaceError::Changed(source.path.clone()));
         }
@@ -220,7 +247,7 @@ impl TaskWorkspace {
                     identity,
                 },
                 source: source.clone(),
-                protected_pack_roots: workspace.protected_pack_roots().to_vec(),
+                protected_pack_roots,
                 baseline,
                 limits,
             })

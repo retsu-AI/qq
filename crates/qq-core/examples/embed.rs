@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use qq_core::*;
 use qq_core::{
     command_owner::{NativeCommandScope, NativeNetwork, NativeResourceLimits, NativeResources},
-    task_workspace::{TaskWorkspace, TaskWorkspaceLimits},
+    task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource},
 };
 use qq_protocol::*;
 use qq_provider::test_support::ScriptedProvider;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .map_err(std::io::Error::other)?;
         TaskWorkspace::import(
-            &source_plan,
+            &TaskWorkspaceSource::from_plan(&source_plan)?,
             &staged_root.join("task"),
             &["input.txt".into()],
             TaskWorkspaceLimits {
