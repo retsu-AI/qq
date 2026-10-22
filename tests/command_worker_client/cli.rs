@@ -1,9 +1,9 @@
+pub(super) use super::runtime::{configured_cli, reply};
 use qq_provider::test_support::LoopbackServer;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     io::{Read as _, Write as _},
     path::Path,
-    process::Stdio,
     time::Duration,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, unix::AsyncFd};
@@ -87,14 +87,6 @@ impl Drop for Worker {
     fn drop(&mut self) {
         let _ = rustix::process::pidfd_send_signal(self.0.get_ref(), rustix::process::Signal::KILL);
     }
-}
-
-pub(super) fn reply(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
-    let body = events
-        .into_iter()
-        .map(|event| format!("data: {event}\n\n"))
-        .collect::<String>();
-    (200, Some("text/event-stream"), vec![body.into_bytes()])
 }
 
 #[tokio::test]
@@ -313,31 +305,4 @@ async fn exercise_cli(restart: bool) {
         captured[1].body().contains("native-result"),
         "the resumed model must see the original command result"
     );
-}
-
-pub(super) fn configured_cli(
-    home: &Path,
-    workspace: &Path,
-    config: &str,
-) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_qq"));
-    command
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap())
-        .env("HOME", home)
-        .env("QQ_CONFIG_CONTENT", config)
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    for (name, directory) in [
-        ("XDG_CONFIG_HOME", "config"),
-        ("XDG_DATA_HOME", "data"),
-        ("XDG_STATE_HOME", "state"),
-        ("XDG_RUNTIME_DIR", "runtime"),
-    ] {
-        command.env(name, home.join(directory));
-    }
-    command
 }

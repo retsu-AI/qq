@@ -1216,7 +1216,7 @@ The backend requires an unprivileged owner and refuses unsupported loader or
 dependency configurations. These checks protect process custody; they do not
 provide filesystem or network containment.
 
-On Linux and Windows, the CLI, TUI and server submit approved `shell`/`exec`
+On Linux, macOS and Windows, the CLI, TUI and server submit approved `shell`/`exec`
 calls to a lazily started independent command worker. The persisted tool-call
 ID is also the worker's idempotency key. Transport reconnects reuse that ID;
 a replacement journal is rejected within a connected runtime. Worker failure
@@ -1231,8 +1231,9 @@ forwarding output. Explicit cancellation reaches the worker and waits for
 confirmed completion. Losing the coordinator leaves the worker and its
 command running; reopening reconciles its original journal and retains its
 terminal result before the session continues. An active durable goal can then
-schedule its successor within its remaining shared budget. macOS retains local
-execution until independent custody qualifies.
+schedule its successor within its remaining shared budget. macOS uses its existing
+process-group teardown; it does not yet provide Linux namespace custody or
+Windows job containment. Restricted native scopes remain refused there.
 This worker integration provides process ownership, not filesystem, network,
 credential or resource isolation.
 
