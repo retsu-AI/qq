@@ -277,6 +277,10 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::private_command_routes_authenticate_before_parsing_or_cancelling qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::saturated_completion_waits_do_not_block_command_cancellation qq-server
           cargo test --locked -p qq --no-default-features --test command_owner_process --test command_worker_client
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
+              grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
+          fi
 
   release-size:
     name: release build size

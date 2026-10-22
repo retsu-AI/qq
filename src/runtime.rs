@@ -2976,7 +2976,7 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
             Some(Arc::new(crate::command_owner::client::CommandWorker::new(
                 factory
@@ -2988,7 +2988,7 @@ impl RuntimeHandler {
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
                 crate::cli::BUILD_VERSION,
             )?));
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let commands = None;
         Self::open_with_commands(factory, approval_timeout, commands).await
     }

@@ -1,5 +1,5 @@
 #![forbid(unsafe_code)]
-#![cfg(any(target_os = "linux", windows))]
+#![cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[path = "../src/command_owner/client.rs"]
 mod client;
 use qq_core::command_owner::{
@@ -154,3 +154,7 @@ mod resources;
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/kernel_isolation.rs"]
 mod kernel_isolation;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "command_worker_client/runtime.rs"]
+mod runtime;

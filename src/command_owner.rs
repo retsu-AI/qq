@@ -1,6 +1,6 @@
 //! Entry point for the command process; no provider or agent runtime opens here.
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) mod client;
 
 use std::{error::Error, io, path::PathBuf};
