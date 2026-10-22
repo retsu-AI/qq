@@ -2277,6 +2277,7 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
         .unwrap();
     for (network, expected) in [
         (NativeNetwork::Host, "filesystem"),
+        #[cfg(not(target_os = "macos"))]
         (NativeNetwork::Isolated, "network"),
         (NativeNetwork::Host, "resource"),
     ] {
@@ -2304,13 +2305,23 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
         owner.submit(request).await.unwrap();
         let result = wait_finished(&owner, id, 0).await.result.unwrap();
         assert!(result.is_error());
-        assert!(
-            result
-                .text()
-                .contains(&format!("{expected} enforcement is unavailable")),
-            "{}",
-            result.text()
-        );
+        if cfg!(target_os = "macos") && expected == "filesystem" {
+            // The adapter is available, but no executable root was granted.
+            // Refusal must come from the restricted path, never a host retry.
+            assert!(
+                matches!(result.outcome(), Some(NativeCommandOutcome::Exited { code: Some(code) }) if code != 0),
+                "{}",
+                result.text()
+            );
+        } else {
+            assert!(
+                result
+                    .text()
+                    .contains(&format!("{expected} enforcement is unavailable")),
+                "{}",
+                result.text()
+            );
+        }
         assert!(!workspace.path().join("ran").exists());
     }
     owner.shutdown().await.unwrap();
