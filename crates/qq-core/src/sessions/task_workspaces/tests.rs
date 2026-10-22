@@ -94,18 +94,21 @@ async fn open_session(
     source: &Path,
     loader: Arc<dyn RuntimeLoader>,
 ) -> (SessionRuntime, SessionId) {
-    let control = root.join("control");
-    let policy = tokio::task::spawn_blocking(move || {
+    let root = root.to_owned();
+    let (root, policy) = tokio::task::spawn_blocking(move || {
+        let root = root.canonicalize().unwrap();
+        let control = root.join("control");
         std::fs::create_dir(&control).unwrap();
-        TaskWorkspacePolicy {
-            directory: NativeDirectoryGrant::capture(&control.canonicalize().unwrap()).unwrap(),
+        let policy = TaskWorkspacePolicy {
+            directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,
             limits: TaskWorkspaceLimits {
                 max_entries: 16,
                 max_bytes: 1024,
             },
-        }
+        };
+        (root, policy)
     })
     .await
     .unwrap();
@@ -158,8 +161,16 @@ async fn publication_delivers_new_ignored_files_without_generated_directories() 
     std::fs::write(path.join("requested.local"), "requested output").unwrap();
     std::fs::create_dir(path.join("target")).unwrap();
     std::fs::write(path.join("target/build-cache"), "disposable").unwrap();
+    let storage_root = root.path().to_path_buf();
+    #[cfg(unix)]
+    let storage_root = {
+        // Exercise the same storage alias used by macOS temporary directories.
+        let alias = storage_root.join("storage-alias");
+        std::os::unix::fs::symlink(storage_root.canonicalize().unwrap(), &alias).unwrap();
+        alias
+    };
     let (runtime, session) = open_session(
-        root.path(),
+        &storage_root,
         &source,
         Arc::new(PublicationLoader {
             protect_pack: false,
