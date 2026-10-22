@@ -109,10 +109,7 @@ impl NativeStorage {
                         .to_owned(),
                 ];
                 for path in paths {
-                    let root = Workspace::open(&path)?;
-                    if !roots.iter().any(|saved| saved.path() == root.path()) {
-                        roots.push(root);
-                    }
+                    capture_backend_storage(&mut roots, &path)?;
                 }
             }
             for root in &roots {
@@ -126,6 +123,18 @@ impl NativeStorage {
     pub(crate) async fn watch(self) -> Pressure {
         watch_all(self.0).await
     }
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+fn capture_backend_storage(roots: &mut Vec<Workspace>, path: &std::path::Path) -> io::Result<()> {
+    // Host-selected storage may use OS aliases such as macOS /var -> /private/var.
+    // Resolve them before taking the directory capability; task grants above
+    // must still match the canonical identities authorized by the caller.
+    let root = Workspace::open(&path.canonicalize()?)?;
+    if !roots.iter().any(|saved| saved.path() == root.path()) {
+        roots.push(root);
+    }
+    Ok(())
 }
 
 async fn check_all(roots: Vec<Workspace>, additional: u64) -> Result<(), Pressure> {
@@ -214,6 +223,27 @@ impl Drop for SpaceOverride {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn backend_storage_accepts_system_directory_aliases_and_keeps_canonical_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical = root.path().canonicalize().unwrap();
+        let storage = canonical.join("storage");
+        std::fs::create_dir(&storage).unwrap();
+        let alias = canonical.join("system-temp-alias");
+        std::os::unix::fs::symlink(&storage, &alias).unwrap();
+        let mut roots = Vec::new();
+        capture_backend_storage(&mut roots, &alias).unwrap();
+        capture_backend_storage(&mut roots, &storage).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].path(), storage);
+        assert_eq!(
+            NativeWorkspaceIdentity::held(roots[0].root()).unwrap(),
+            NativeWorkspaceIdentity::capture(&storage).unwrap()
+        );
+        check_blocking(&roots[0], 0).unwrap();
+    }
 
     #[test]
     fn admission_preserves_the_reserve_and_accounts_for_bounded_writes() {
