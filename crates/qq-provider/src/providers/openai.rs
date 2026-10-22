@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -35,11 +35,6 @@ pub(crate) enum ResponsesAuth {
     NoAuth,
     Bearer(SecretLiteral),
     Header(String, SecretLiteral),
-    Codex {
-        access_token: SecretLiteral,
-        account_id: SecretLiteral,
-        is_fedramp: bool,
-    },
 }
 
 #[derive(Clone, Copy)]
@@ -101,17 +96,12 @@ impl OpenAi {
     ) -> Result<Self, ProviderError> {
         let endpoint = validate_endpoint(exact_endpoint, allow_http)?;
         let client = support::client_for_endpoint(&endpoint)?;
-        let body_shape = if matches!(auth, ResponsesAuth::Codex { .. }) {
-            ResponsesBodyShape::Codex
-        } else {
-            ResponsesBodyShape::Standard
-        };
         Self::with_client_and_auth(
             client,
             endpoint,
             ResponsesConstructionAuth::Static(auth),
             static_headers,
-            body_shape,
+            ResponsesBodyShape::Standard,
         )
         .map(Self::single_shot)
     }
@@ -125,13 +115,9 @@ impl OpenAi {
         static_headers: impl IntoIterator<Item = (String, String)>,
         body_shape: ResponsesBodyShape,
     ) -> Result<Self, ProviderError> {
-        // Headers a request-time Codex credential owns are protected from
-        // static configuration exactly as a static Codex credential's are.
-        let codex_headers = matches!(
-            &auth,
-            ResponsesConstructionAuth::RequestTimeCodex(_)
-                | ResponsesConstructionAuth::Static(ResponsesAuth::Codex { .. })
-        );
+        // Headers a request-time Codex credential sets per attempt are
+        // protected from static configuration.
+        let codex_headers = matches!(&auth, ResponsesConstructionAuth::RequestTimeCodex(_));
         let request_kind = match body_shape {
             ResponsesBodyShape::Standard => ResponsesRequestKind::Standard,
             ResponsesBodyShape::Codex => ResponsesRequestKind::Codex,
@@ -286,20 +272,17 @@ fn build_headers(
     auth: ResponsesAuth,
     static_headers: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
-    let codex_headers = matches!(&auth, ResponsesAuth::Codex { .. });
-    build_headers_for(auth, codex_headers, static_headers)
+    build_headers_for(auth, false, static_headers)
 }
 
-/// `codex_headers` protects the Codex credential's headers from static
-/// configuration; it is set for both the static and the request-time Codex
-/// intents, since the latter adds them only per attempt.
+/// `codex_headers` protects the headers a request-time Codex credential adds
+/// per attempt from static configuration.
 fn build_headers_for(
     auth: ResponsesAuth,
     codex_headers: bool,
     static_headers: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(HeaderMap, Vec<String>), ProviderError> {
     let mut redactions = Vec::new();
-    let codex_auth = codex_headers;
     let mut auth_headers = HeaderMap::new();
     match auth {
         ResponsesAuth::NoAuth => {}
@@ -321,37 +304,11 @@ fn build_headers_for(
             redactions.push(secret.expose_secret().to_owned());
             auth_headers.insert(name, value);
         }
-        ResponsesAuth::Codex {
-            access_token,
-            account_id,
-            is_fedramp,
-        } => {
-            let authorization = sensitive_bearer_value(&access_token, "Codex access token")?;
-            let account_id_header = sensitive_header_value(&account_id, "Codex account ID")?;
-
-            redactions.push(access_token.expose_secret().to_owned());
-            redactions.push(account_id.expose_secret().to_owned());
-            auth_headers.insert(AUTHORIZATION, authorization);
-            auth_headers.insert(
-                HeaderName::from_static("chatgpt-account-id"),
-                account_id_header,
-            );
-            auth_headers.insert(
-                HeaderName::from_static("originator"),
-                HeaderValue::from_static("qq"),
-            );
-            if is_fedramp {
-                auth_headers.insert(
-                    HeaderName::from_static("x-openai-fedramp"),
-                    HeaderValue::from_static("true"),
-                );
-            }
-        }
     }
 
     let mut protocol_owned = vec![AUTHORIZATION];
     protocol_owned.extend(auth_headers.keys().cloned());
-    if codex_auth {
+    if codex_headers {
         protocol_owned.extend([
             HeaderName::from_static("chatgpt-account-id"),
             HeaderName::from_static("originator"),
@@ -1370,22 +1327,47 @@ mod tests {
         assert_eq!(request_body["store"], false);
     }
 
+    struct CodexCredentials {
+        is_fedramp: bool,
+    }
+
+    impl crate::RequestCredentialProvider for CodexCredentials {
+        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
+            let is_fedramp = self.is_fedramp;
+            Box::pin(async move {
+                crate::RequestCredential::codex(
+                    "codex-test-access-token",
+                    "workspace-test-id",
+                    is_fedramp,
+                )
+            })
+        }
+    }
+
+    /// A single-shot Codex adapter authorized per attempt, as the runtime
+    /// builds it for `openai-codex`.
+    fn codex_provider(endpoint: &str, is_fedramp: bool) -> OpenAi {
+        let endpoint = validate_endpoint(endpoint, true).unwrap();
+        let client = support::client_for_endpoint(&endpoint).unwrap();
+        OpenAi::with_client_and_auth(
+            client,
+            endpoint,
+            ResponsesConstructionAuth::RequestTimeCodex(SharedRequestCredentialProvider::new(
+                CodexCredentials { is_fedramp },
+            )),
+            [],
+            ResponsesBodyShape::Codex,
+        )
+        .unwrap()
+        .single_shot()
+    }
+
     #[tokio::test]
     async fn codex_auth_adds_backend_headers_and_omits_max_output_tokens() {
         let body = "data: {\"type\":\"response.completed\"}\n\n";
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(
-            &endpoint,
-            ResponsesAuth::Codex {
-                access_token: "codex-test-access-token".into(),
-                account_id: "workspace-test-id".into(),
-                is_fedramp: true,
-            },
-            [],
-            true,
-        )
-        .unwrap();
+        let provider = codex_provider(&endpoint, true);
 
         let events = provider
             .stream(ModelRequest::new(
@@ -1433,17 +1415,7 @@ mod tests {
         );
         let server = LoopbackServer::respond_chunks(200, None, vec![body.as_bytes().to_vec()]);
         let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(
-            &endpoint,
-            ResponsesAuth::Codex {
-                access_token: "codex-test-access-token".into(),
-                account_id: "workspace-test-id".into(),
-                is_fedramp: false,
-            },
-            [],
-            true,
-        )
-        .unwrap();
+        let provider = codex_provider(&endpoint, false);
 
         let events = provider
             .stream(ModelRequest::new(

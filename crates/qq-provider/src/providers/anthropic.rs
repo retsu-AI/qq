@@ -363,7 +363,9 @@ fn build_headers(
         )
     })?;
 
-    let mut redactions = vec![anthropic_version.to_owned()];
+    // `anthropic-version` is a protocol constant, not a secret: redacting it
+    // would rewrite every matching date in a diagnostic.
+    let mut redactions = Vec::new();
     let auth_header = match auth {
         AnthropicAuth::NoAuth => None,
         AnthropicAuth::XApiKey(secret) => {
@@ -1350,18 +1352,10 @@ mod tests {
     }
 
     #[test]
-    fn validates_and_applies_an_explicit_anthropic_version() {
-        let (headers, redactions) =
-            build_headers(AnthropicAuth::NoAuth, [], "mantle-version-test-secret").unwrap();
-        assert_eq!(
-            headers.get(ANTHROPIC_VERSION).unwrap(),
-            "mantle-version-test-secret"
-        );
-        assert!(
-            redactions
-                .iter()
-                .any(|value| value == "mantle-version-test-secret")
-        );
+    fn validates_and_applies_an_explicit_anthropic_version_without_redacting_it() {
+        let (headers, redactions) = build_headers(AnthropicAuth::NoAuth, [], "2099-01-01").unwrap();
+        assert_eq!(headers.get(ANTHROPIC_VERSION).unwrap(), "2099-01-01");
+        assert!(redactions.is_empty(), "{redactions:?}");
 
         for version in ["", "bad\r\nversion"] {
             let error = AnthropicMessages::with_endpoint_and_version(

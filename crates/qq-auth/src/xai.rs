@@ -649,14 +649,11 @@ fn map_request_credential_error(
         | AuthError::ProviderCredentialMissing { .. }
         | AuthError::StoredCredentialNotRegistered { .. }
         | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),
-        AuthError::XAi(XaiAuthError::RefreshRejected | XaiAuthError::AuthorizationDenied) => {
-            RequestCredentialError::RefreshRejected
+        // Only the refresh path reaches here; device-login errors cannot.
+        AuthError::XAi(XaiAuthError::RefreshRejected) => RequestCredentialError::RefreshRejected,
+        AuthError::XAi(XaiAuthError::RefreshRequestFailed | XaiAuthError::TokenResponseInvalid) => {
+            RequestCredentialError::RefreshUnavailable
         }
-        AuthError::XAi(
-            XaiAuthError::RefreshRequestFailed
-            | XaiAuthError::TokenResponseInvalid
-            | XaiAuthError::AuthorizationTimedOut,
-        ) => RequestCredentialError::RefreshUnavailable,
         AuthError::XAi(
             XaiAuthError::StoredCredentialInvalid
             | XaiAuthError::UnsupportedStoredCredentialVersion { .. },
