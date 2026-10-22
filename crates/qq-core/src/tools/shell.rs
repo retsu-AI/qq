@@ -468,6 +468,12 @@ pub(super) async fn run_shell(
     // Unix commands lead their own process group. Windows children own a
     // kernel job which follows descendants across process-group changes.
     let mut guard = ProcessGroupGuard::new(child.id());
+    #[cfg(target_os = "macos")]
+    if child.owns_payload_group() {
+        // The guardian has its own group. Its private exit receipt proves
+        // payload cleanup; killing this group would destroy that guardian.
+        guard.disarm();
+    }
     #[cfg(all(test, unix))]
     {
         let hook = {
@@ -807,7 +813,7 @@ async fn stop_shell(
             "could not terminate the command process group: {error}"
         ));
     }
-    #[cfg(not(unix))]
+    #[cfg(any(not(unix), target_os = "macos"))]
     if let Err(error) = child.start_kill() {
         return Err(format!("could not terminate the command: {error}"));
     }
@@ -1070,31 +1076,6 @@ impl ProcessGroupGuard {
                     },
                 )
                 .await;
-            #[cfg(all(test, target_os = "macos"))]
-            if result.is_err() {
-                // Failure-only probe: metadata distinguishes zombies from live
-                // survivors without printing command lines or environment.
-                let _ = tokio::task::spawn_blocking(move || {
-                    let signal = rustix::process::test_kill_process_group(pgid);
-                    let snapshot = std::process::Command::new("/bin/ps")
-                        .args(["-axo", "pid=,ppid=,pgid=,stat=,uid="])
-                        .output();
-                    eprintln!("[DEBUG-macos-group-exit] pgid={pgid} signal={signal:?}");
-                    match snapshot {
-                        Ok(snapshot) => {
-                            let group = pgid.to_string();
-                            for row in String::from_utf8_lossy(&snapshot.stdout).lines() {
-                                if row.split_whitespace().nth(2) == Some(group.as_str()) {
-                                    eprintln!("[DEBUG-macos-group-exit] {row}");
-                                }
-                            }
-                            eprintln!("[DEBUG-macos-group-exit] ps={}", snapshot.status);
-                        }
-                        Err(error) => eprintln!("[DEBUG-macos-group-exit] ps failed: {error}"),
-                    }
-                })
-                .await;
-            }
             return result;
         }
         Ok(())

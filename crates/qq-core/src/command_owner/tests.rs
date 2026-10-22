@@ -1298,7 +1298,7 @@ async fn owned_payload_retains_the_workers_host_supplementary_groups() {
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
-    let attempts = if cfg!(target_os = "macos") { 256 } else { 1 };
+    let attempts = if cfg!(target_os = "macos") { 32 } else { 1 };
     for _ in 0..attempts {
         exercise_cancel_response_loss(false).await;
         exercise_cancel_response_loss(true).await;

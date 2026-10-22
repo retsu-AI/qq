@@ -1359,9 +1359,14 @@ network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
 Descendants cannot call
-`setsid` or `setpgid`; the helper retains the group identity until terminating
-the group, including on owner disconnect. A terminal payload status is returned
-through the private channel before group teardown. Loader-injection environment
+`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
+so terminating payloads cannot kill their cleanup owner. It retains the exited
+leader without reaping it, repeatedly terminates remaining members, and checks
+two kernel snapshots for exited process identities before reaping. This also
+covers forks racing with cancellation and worker loss. A terminal payload status
+is returned through the private channel only after cleanup; a missing or partial
+status never confirms quiescence. Exited zombies may await collection by the OS,
+but live members keep cleanup unconfirmed. Loader-injection environment
 variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
 requesting those limits fails closed. Restricted Windows scopes remain refused.

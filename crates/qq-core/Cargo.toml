@@ -39,10 +39,11 @@ tree-sitter-bash.workspace = true
 url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "event", "pipe", "thread"] }
+rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 command-fds.workspace = true
+libproc.workspace = true
 nix.workspace = true
 tempfile.workspace = true
 

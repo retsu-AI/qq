@@ -18,6 +18,11 @@ impl ChildExit {
         child: &mut super::NativeChild,
         group: &mut super::ProcessGroupGuard,
     ) -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(target_os = "macos")]
+        if child.owns_payload_group() {
+            group.disarm();
+            return child.wait().await;
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
@@ -67,6 +72,61 @@ impl ChildExit {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use std::io::Write as _;
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped() {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+        let mut exit = super::ChildExit::new().unwrap();
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()).unwrap();
+        // Keep the exited process waitable: the OS cannot erase the group
+        // until this test reaps it. This models an orphaned descendant whose
+        // new parent has not collected its exit status yet.
+        loop {
+            match waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            ) {
+                Ok(Some(_)) => break,
+                Ok(None) => assert!(exit.signal.recv().await.is_some()),
+                Err(rustix::io::Errno::INTR) => continue,
+                Err(error) => panic!("observe exited fixture: {error}"),
+            }
+        }
+        let stopped = crate::tools::macos_owner::group_is_quiescent(pid);
+        // Reap even when confirmation fails; fixture cleanup must never turn
+        // the production observation into a successful result.
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(7));
+        assert!(stopped.unwrap(), "an exited zombie cannot execute");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_live_group_is_not_reported_quiescent() {
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "read token"])
+            .stdin(std::process::Stdio::piped())
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid =
+            rustix::process::Pid::from_raw(i32::try_from(child.id().unwrap()).unwrap()).unwrap();
+        let stopped = crate::tools::macos_owner::group_is_quiescent(pid);
+        drop(child.stdin.take());
+        child.wait().await.unwrap();
+        assert!(
+            !stopped.unwrap(),
+            "a live group must keep cleanup unconfirmed"
+        );
+    }
 
     #[tokio::test]
     async fn exit_notification_survives_an_interrupted_wait() {

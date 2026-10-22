@@ -191,6 +191,18 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
+      - name: Native macOS Clippy
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo clippy --locked -p qq-core --all-targets -- -D warnings
+          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+      - name: macOS group quiescence
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
+          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
       - name: Native ownership, cancellation and durable observations
         shell: bash
         run: |
@@ -243,6 +255,7 @@ jobs:
         if: failure() && runner.os == 'macOS'
         shell: bash
         run: |
+          /bin/ps -axo pid=,ppid=,pgid=,stat=,uid=
           /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
           python3 - <<'PYTHON'
           import json

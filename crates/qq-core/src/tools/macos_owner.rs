@@ -1,5 +1,5 @@
-//! macOS launch isolation. The trusted helper retains its process-group identity
-//! until it kills the group, and never gives payloads its owner-liveness channel.
+//! macOS launch isolation. The guardian stays outside the payload group and
+//! retains its waitable leader until every member stops, even after owner loss.
 use super::{
     dispatch::{ToolCancellation, ToolTaskLease},
     process_context::NativeExecution,
@@ -9,18 +9,16 @@ use crate::command_owner::{
 };
 use command_fds::CommandFdExt as _;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
 use std::{
     ffi::OsString,
-    io::{self, Read as _, Write as _},
+    io::Read as _,
+    os::{fd::AsRawFd as _, unix::ffi::OsStringExt as _},
+};
+use std::{
+    io::{self, Write as _},
     ops::{Deref, DerefMut},
-    os::{
-        fd::AsRawFd as _,
-        unix::{
-            ffi::{OsStrExt as _, OsStringExt as _},
-            fs::MetadataExt as _,
-            process::ExitStatusExt as _,
-        },
-    },
+    os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _, process::ExitStatusExt as _},
     process::ExitStatus,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -171,7 +169,7 @@ impl MacosOwner {
         wrapped
             .env_clear()
             .args(&self.launcher.arguments)
-            .arg("qq-macos-launch:3");
+            .arg("qq-macos-launch:4");
         wrapped
             .as_std_mut()
             .fd_mappings(vec![command_fds::FdMapping {
@@ -201,6 +199,9 @@ pub(crate) struct Child {
     control: Option<tokio::net::UnixStream>,
     lease: Option<ToolTaskLease>,
     reported: Option<ExitStatus>,
+    result_bytes: [u8; 4],
+    result_read: usize,
+    stopping: bool,
 }
 impl From<tokio::process::Child> for Child {
     fn from(inner: tokio::process::Child) -> Self {
@@ -209,6 +210,9 @@ impl From<tokio::process::Child> for Child {
             control: None,
             lease: None,
             reported: None,
+            result_bytes: [0; 4],
+            result_read: 0,
+            stopping: false,
         }
     }
 }
@@ -224,41 +228,95 @@ impl DerefMut for Child {
     }
 }
 impl Child {
-    pub(super) fn start_kill(&mut self) -> io::Result<()> {
-        if self.control.is_some() {
-            kill_group(self.inner.id())?;
-        }
-        self.inner.start_kill()
+    pub(super) fn owns_payload_group(&self) -> bool {
+        self.lease.is_some()
     }
-    pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
-        let status = self.inner.wait().await?;
-        if let Some(mut control) = self.control.take() {
-            let mut raw = [0; 4];
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                control.read_exact(&mut raw),
-            )
-            .await
-            {
-                Ok(Ok(_)) => self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(raw))),
-                Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {}
-                Ok(Err(error)) => return Err(error),
-                Err(_) => return Err(io::Error::other("native exit observation did not close")),
+
+    pub(super) fn start_kill(&mut self) -> io::Result<()> {
+        if !self.owns_payload_group() {
+            return self.inner.start_kill();
+        }
+        self.stopping = true;
+        if let Some(control) = &self.control {
+            // EOF requests cleanup without killing the guardian or losing the
+            // read half carrying its post-cleanup payload status.
+            match rustix::net::shutdown(control, rustix::net::Shutdown::Write) {
+                Ok(()) | Err(rustix::io::Errno::NOTCONN | rustix::io::Errno::PIPE) => {}
+                Err(error) => return Err(error.into()),
             }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
+        if !self.owns_payload_group() {
+            return self.inner.wait().await;
+        }
+        if self.stopping
+            && let Some(pid) = self.inner.id()
+        {
+            let pid = rustix::process::Pid::from_raw(i32::try_from(pid).map_err(io::Error::other)?)
+                .ok_or_else(|| io::Error::other("invalid guardian pid"))?;
+            // Use the OS clock, independently of simulated task-budget clocks.
+            // A timed-out guardian keeps custody; dropping this observer only
+            // closes its channel, never kills it before cleanup finishes.
+            super::native_exit::confirm(move || {
+                rustix::process::waitid(
+                    rustix::process::WaitId::Pid(pid),
+                    rustix::process::WaitIdOptions::EXITED
+                        | rustix::process::WaitIdOptions::NOHANG
+                        | rustix::process::WaitIdOptions::NOWAIT,
+                )
+                .map(|status| status.is_some())
+                .or_else(|error| {
+                    if error == rustix::io::Errno::INTR {
+                        Ok(false)
+                    } else {
+                        Err(error)
+                    }
+                })
+                .map_err(Into::into)
+            })
+            .await?;
+        }
+        let status = self.inner.wait().await?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "native guardian exited without confirming payload cleanup: {status}"
+            )));
+        }
+        if self.reported.is_none() {
+            let control = self
+                .control
+                .as_mut()
+                .ok_or_else(|| io::Error::other("missing native result channel"))?;
+            while self.result_read < self.result_bytes.len() {
+                let count = control
+                    .read(&mut self.result_bytes[self.result_read..])
+                    .await?;
+                if count == 0 {
+                    return Err(io::Error::other(
+                        "native guardian omitted its cleanup result",
+                    ));
+                }
+                // Keep partial reads on the Child: cancelling a wait must not
+                // discard consumed bytes or turn a failed payload into success.
+                self.result_read += count;
+            }
+            self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(self.result_bytes)));
         }
         if let Some(lease) = &mut self.lease {
             lease.process_reaped();
         }
-        Ok(self.reported.unwrap_or(status))
+        Ok(self.reported.expect("complete native result"))
     }
 }
 impl Drop for Child {
     fn drop(&mut self) {
-        // The unreaped helper pins its group identity. Kill the entire group
-        // before Tokio's kill-on-drop can terminate only the helper.
-        if self.control.is_some() {
-            let _ = kill_group(self.inner.id());
-        }
+        // The guardian owns the payload group. Closing this channel requests
+        // cleanup even on panic or coordinator/worker death; killing the
+        // guardian here could orphan a payload racing with process creation.
+        drop(self.control.take());
     }
 }
 
@@ -273,6 +331,7 @@ pub(super) async fn spawn(
         return Err(io::Error::other("native startup stopped"));
     }
     let mut lease = process.fork();
+    command.kill_on_drop(false);
     let inner = command.spawn()?;
     lease.process_started();
     drop(command);
@@ -281,6 +340,9 @@ pub(super) async fn spawn(
         control: Some(startup.control),
         lease: Some(lease),
         reported: None,
+        result_bytes: [0; 4],
+        result_read: 0,
+        stopping: false,
     };
     let mut released = false;
     let authorized = tokio::select! {
@@ -327,7 +389,16 @@ pub(super) async fn spawn(
             // exit below is the cleanup proof; do not wait for a result frame.
             drop(child.control.take());
         }
-        child.wait().await?;
+        if released {
+            child.wait().await?;
+        } else {
+            child.inner.wait().await?;
+            child
+                .lease
+                .as_mut()
+                .expect("owned startup lease")
+                .process_reaped();
+        }
         return Err(error);
     }
     Ok(child)
@@ -375,8 +446,9 @@ fn validate_environment(packet: &Packet) -> io::Result<()> {
 }
 
 /// Single-purpose entry, before Tokio or any application initialization.
+#[cfg(target_os = "macos")]
 pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
-    if encoded != "qq-macos-launch:3" {
+    if encoded != "qq-macos-launch:4" {
         return Err(io::Error::other("invalid native launch descriptor"));
     }
     if rustix::process::getpgrp() != rustix::process::getpid() {
@@ -441,6 +513,8 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     let mut liveness = control.try_clone()?;
     rustix::io::fcntl_setfd(&liveness, rustix::io::FdFlags::CLOEXEC)?;
+    let custody = std::sync::Arc::new(PayloadGroup::default());
+    let stop = custody.clone();
     std::thread::Builder::new()
         .name("qq-owner-liveness".into())
         .spawn(move || {
@@ -449,7 +523,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
                 match liveness.read(&mut byte) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     _ => {
-                        let _ = kill_group(Some(std::process::id()));
+                        stop.request_stop();
                         return;
                     }
                 }
@@ -468,21 +542,151 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
                 .into_iter()
                 .map(|(name, value)| (OsString::from_vec(name), OsString::from_vec(value))),
         );
-    // No new group: the trusted helper remains its leader. The kernel profile
-    // denies setsid/setpgid in every payload descendant.
+    // Keep this trusted guardian outside the group it must terminate. The
+    // sandboxed child leads a new group and cannot change it or create another.
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
     if unix_ms() >= packet.not_after_ms {
         return Err(io::Error::other("native launch authorization expired"));
     }
     let mut child = command.spawn()?;
-    if let Ok(status) = child.wait() {
-        // An observer can disappear before this write. Cleanup is mandatory
-        // even when its result channel has closed.
-        let _ = control.write_all(&status.into_raw().to_le_bytes());
+    let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).map_err(io::Error::other)?)
+        .ok_or_else(|| io::Error::other("invalid payload pid"))?;
+    custody.publish(pid);
+    // Observe without reaping: this leader pins the group identity while
+    // cleanup catches descendants racing with the first termination signal.
+    loop {
+        match rustix::process::waitid(
+            rustix::process::WaitId::Pid(pid),
+            rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOWAIT,
+        ) {
+            Ok(Some(_)) => break,
+            Err(rustix::io::Errno::INTR) => continue,
+            result => {
+                custody.disarm();
+                return Err(io::Error::other(format!(
+                    "payload exit observation failed: {result:?}"
+                )));
+            }
+        }
     }
-    kill_group(Some(std::process::id()))?;
-    Err(io::Error::other(
-        "native process-group termination returned",
-    ))
+    loop {
+        let _ = kill_group(Some(child.id()));
+        if group_is_quiescent(pid).unwrap_or(false) {
+            break;
+        }
+        // The observer has a bounded cleanup wait. If the OS cannot yet prove
+        // exit, this small guardian keeps custody after that observer leaves.
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
+    // Serialize disarming against the liveness thread before the only reap.
+    // No code may signal this numeric group after its leader can be reused.
+    custody.disarm();
+    let status = child.wait()?;
+    let _ = control.write_all(&status.into_raw().to_le_bytes());
+    Ok(0)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct PayloadGroup(std::sync::Mutex<PayloadGroupState>);
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct PayloadGroupState {
+    leader: Option<rustix::process::Pid>,
+    stopping: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl PayloadGroup {
+    fn request_stop(&self) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.stopping = true;
+        if let Some(pid) = state.leader {
+            let _ = kill_group(Some(pid.as_raw_nonzero().get() as u32));
+        }
+    }
+
+    fn publish(&self, pid: rustix::process::Pid) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.leader = Some(pid);
+        if state.stopping {
+            let _ = kill_group(Some(pid.as_raw_nonzero().get() as u32));
+        }
+    }
+
+    fn disarm(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .leader = None;
+    }
+}
+
+/// Called with the original leader still waitable. Permission denial alone is
+/// never proof: inspect the kernel's complete group list, including zombies.
+#[cfg(target_os = "macos")]
+pub(super) fn group_is_quiescent(pgid: rustix::process::Pid) -> io::Result<bool> {
+    use libproc::{
+        bsd_info::BSDInfo,
+        proc_pid::pidinfo,
+        processes::{ProcFilter, pids_by_type},
+    };
+    let group = u32::try_from(pgid.as_raw_nonzero().get()).map_err(io::Error::other)?;
+    let filter = ProcFilter::ByProgramGroup { pgrpid: group };
+    let members = pids_by_type(filter)?;
+    if members.len() >= members.capacity() || members.len() > 4096 {
+        return Err(io::Error::other(
+            "native group enumeration exceeded its bound",
+        ));
+    }
+    if !members.contains(&group) {
+        return Ok(false); // The original waitable leader must pin this group.
+    }
+    let mut stopped = Vec::with_capacity(members.len());
+    for pid in members {
+        let native_pid = i32::try_from(pid).map_err(io::Error::other)?;
+        // Darwin's nonzero argument explicitly includes exited processes.
+        let Ok(info) = pidinfo::<BSDInfo>(native_pid, 1) else {
+            return Ok(false);
+        };
+        if info.pbi_pgid != group || info.pbi_status != nix::libc::SZOMB {
+            return Ok(false);
+        }
+        stopped.push((pid, info.pbi_start_tvsec, info.pbi_start_tvusec));
+    }
+    stopped.sort_unstable();
+    // A member may finish a fork between enumeration and its exit observation.
+    // Once every observed identity is exited, take another complete snapshot:
+    // any new/reused identity requires another termination pass. Exited
+    // identities cannot fork again, so this closes the creation race.
+    let after = pids_by_type(filter)?;
+    if after.len() >= after.capacity() || after.len() > 4096 || !after.contains(&group) {
+        return Ok(false);
+    }
+    for pid in after {
+        let Ok(index) = stopped.binary_search_by_key(&pid, |entry| entry.0) else {
+            return Ok(false);
+        };
+        let native_pid = i32::try_from(pid).map_err(io::Error::other)?;
+        let Ok(info) = pidinfo::<BSDInfo>(native_pid, 1) else {
+            return Ok(false);
+        };
+        if info.pbi_pgid != group
+            || info.pbi_status != nix::libc::SZOMB
+            || stopped[index] != (pid, info.pbi_start_tvsec, info.pbi_start_tvusec)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
@@ -644,6 +848,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame() {
+        for complete in [true, false] {
+            let mut inner = tokio::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            assert!(inner.wait().await.unwrap().success());
+            let (control, mut peer) = tokio::net::UnixStream::pair().unwrap();
+            let tasks = crate::tools::dispatch::ToolTasks::default();
+            let mut lease = tasks.enter();
+            lease.process_started();
+            let mut child = Child {
+                inner,
+                control: Some(control),
+                lease: Some(lease),
+                reported: None,
+                result_bytes: [0; 4],
+                result_read: 0,
+                stopping: false,
+            };
+            let raw = (7_i32 << 8).to_le_bytes();
+            peer.write_all(&raw[..2]).await.unwrap();
+            child.control.as_ref().unwrap().readable().await.unwrap();
+            let mut waiting = Box::pin(child.wait());
+            assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+            drop(waiting);
+            assert_eq!(child.result_read, 2);
+            if complete {
+                peer.write_all(&raw[2..]).await.unwrap();
+                assert_eq!(child.wait().await.unwrap().code(), Some(7));
+            } else {
+                drop(peer);
+                assert!(
+                    child.wait().await.is_err(),
+                    "an exit without a complete frame is not cleanup proof"
+                );
+            }
+            drop(child);
+            assert_eq!(tasks.drain().await.is_ok(), complete);
+        }
+    }
+
+    #[tokio::test]
     async fn helper_preparation_waits_for_readiness_and_remains_cancellable() {
         for authorize in [false, true] {
             let root = tempfile::tempdir().unwrap();
@@ -653,7 +900,7 @@ mod tests {
             let (read, write) = rustix::pipe::pipe().unwrap();
             let mut ready = tokio::fs::File::from_std(std::fs::File::from(read));
             let mut command = tokio::process::Command::new("bash");
-            command.args(["-c", "dd bs=1 count=9 <&3 >/dev/null 2>&1; printf ready; IFS= read -r -n 1 gate <&4; printf RDY! >&3; IFS= read -r -n 1 go <&3; printf executed > escaped"])
+            command.args(["-c", "dd bs=1 count=9 <&3 >/dev/null 2>&1; printf ready; IFS= read -r -n 1 gate <&4; printf RDY! >&3; IFS= read -r -n 1 go <&3; printf executed > escaped; printf '\\000\\000\\000\\000' >&3"])
             .current_dir(root.path()).process_group(0).kill_on_drop(true)
             .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(write)).stderr(std::process::Stdio::inherit());
             command
