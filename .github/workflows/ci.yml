@@ -182,8 +182,11 @@ jobs:
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
-          cargo test --locked -p qq --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
-          cargo test --locked -p qq --bin qq runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
+          cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
+          cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
+          fi
       - name: Native ownership, cancellation and durable observations
         shell: bash
         run: |
