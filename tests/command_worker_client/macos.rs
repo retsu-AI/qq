@@ -71,7 +71,9 @@ async fn fixture_command(
     let workspace = workspace.canonicalize().unwrap();
     let mut read_only = Vec::new();
     if restricted {
-        for path in ["/bin", "/usr", "/System/Library"] {
+        // Modern macOS locates the dyld cache in the OS Cryptex, outside
+        // /System/Library. Runtime inputs remain explicit read-only grants.
+        for path in ["/bin", "/usr", "/System/Library", "/System/Cryptexes/OS"] {
             let path = std::fs::canonicalize(path).unwrap();
             read_only.push(qq_core::command_owner::NativeDirectoryGrant::capture(&path).unwrap());
         }

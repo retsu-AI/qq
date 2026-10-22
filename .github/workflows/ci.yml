@@ -236,7 +236,7 @@ jobs:
               print(path.name)
               try:
                   report = json.loads(path.read_text().split("\n", 1)[1])
-                  for key in ("exception", "termination", "asi"):
+                  for key in ("exception", "termination", "asi", "ktriageinfo", "asiSignatures"):
                       print(key, report.get(key))
                   thread = report.get("threads", [])[report.get("faultingThread", 0)]
                   images = report.get("usedImages", [])
