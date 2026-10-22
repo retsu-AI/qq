@@ -161,7 +161,18 @@ async fn publish_fixture(
         connection.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms) VALUES(?1,?2,?1,?1,?1,'running',0)", params![run.to_string(), session.to_string()])?;
         Ok(())
     }).await.unwrap();
+    let (cancel, _) = watch::channel(false);
+    assert!(
+        runtime
+            .inner
+            .cancellations
+            .lock()
+            .unwrap()
+            .insert(run, cancel)
+            .is_none()
+    );
     let result = task.publish(&runtime.inner, session, run).await;
+    runtime.inner.cancellations.lock().unwrap().remove(&run);
     runtime
         .inner
         .store
@@ -1123,31 +1134,46 @@ impl RuntimeLoader for PublicationReloadGate {
         });
         let load = self.loader.load(request);
         Box::pin(async move {
+            let loaded = load.await?;
             if let Some((entered, release)) = gate {
                 let _ = entered.send(());
                 release.await.unwrap();
             }
-            load.await
+            Ok(loaded)
         })
     }
 }
 
 #[tokio::test]
 async fn cancellation_during_publication_reload_keeps_edits_private() {
-    exercise_publication_cancellation_order(false).await;
+    exercise_publication_cancellation_order(PublicationPause::Reload).await;
 }
 
 #[tokio::test]
 async fn cancellation_after_publication_authorization_preserves_committed_outcome() {
-    exercise_publication_cancellation_order(true).await;
+    exercise_publication_cancellation_order(PublicationPause::Authorized).await;
 }
 
-async fn exercise_publication_cancellation_order(after_authorization: bool) {
+#[tokio::test]
+async fn cancellation_before_publication_authorization_settles_without_filesystem_capacity() {
+    exercise_publication_cancellation_order(PublicationPause::Capacity).await;
+}
+
+#[derive(Clone, Copy)]
+enum PublicationPause {
+    Reload,
+    Capacity,
+    Authorized,
+}
+
+async fn exercise_publication_cancellation_order(pause: PublicationPause) {
+    let after_authorization = matches!(pause, PublicationPause::Authorized);
     let (root, source, _) = tokio::task::spawn_blocking(publication_fixture)
         .await
         .unwrap();
     let (entered, reloading) = tokio::sync::oneshot::channel();
     let (release, gate) = tokio::sync::oneshot::channel();
+    let mut release = Some(release);
     let loader = AttachmentLoader {
         path: "vendor/policy.md".to_owned(),
         edit: true,
@@ -1214,6 +1240,27 @@ async fn exercise_publication_cancellation_order(after_authorization: bool) {
         .await
         .unwrap()
         .unwrap();
+    let held = if matches!(pause, PublicationPause::Capacity) {
+        let permits = crate::workspace::blocking_permits();
+        let held = permits
+            .clone()
+            .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
+            .await
+            .unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        PUBLICATION_WAITERS
+            .lock()
+            .unwrap()
+            .push((source.to_string_lossy().into_owned(), entered));
+        release.take().unwrap().send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        Some(held)
+    } else {
+        None
+    };
     runtime
         .command(
             CommandId::generate().unwrap(),
@@ -1221,8 +1268,15 @@ async fn exercise_publication_cancellation_order(after_authorization: bool) {
         )
         .await
         .unwrap();
-    release.send(()).unwrap();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    if let Some(release) = release {
+        release.send(()).unwrap();
+    }
+    let settle_seconds = if matches!(pause, PublicationPause::Capacity) {
+        1
+    } else {
+        5
+    };
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(settle_seconds), async {
         loop {
             let event = events.next().await.unwrap().unwrap();
             if let SessionEvent::RunFinished { outcome, .. } = event.event {
@@ -1230,9 +1284,23 @@ async fn exercise_publication_cancellation_order(after_authorization: bool) {
             }
         }
     })
-    .await
-    .unwrap();
+    .await;
+    let shutdown_while_held = if matches!(pause, PublicationPause::Capacity) && settled.is_ok() {
+        Some(tokio::time::timeout(std::time::Duration::from_secs(1), runtime.shutdown()).await)
+    } else {
+        None
+    };
+    // The old implementation also gets its permits back so a red regression
+    // cleans up its runtime instead of leaving a blocked publication behind.
+    drop(held);
     runtime.shutdown().await.unwrap();
+    let outcome = settled.expect("cancellation must settle without filesystem capacity");
+    if matches!(pause, PublicationPause::Capacity) {
+        assert!(
+            matches!(shutdown_while_held, Some(Ok(Ok(())))),
+            "shutdown must not need the held filesystem permits: {shutdown_while_held:?}"
+        );
+    }
     assert!(
         if after_authorization {
             matches!(outcome, RunOutcome::Completed)

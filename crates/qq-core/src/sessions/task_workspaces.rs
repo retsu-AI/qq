@@ -31,6 +31,10 @@ struct PublicationGate {
 #[cfg(test)]
 static PUBLICATION_GATES: Mutex<Vec<PublicationGate>> = Mutex::new(Vec::new());
 
+#[cfg(test)]
+static PUBLICATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)>> =
+    Mutex::new(Vec::new());
+
 /// Authority supplied by the server, independently of project/model output.
 /// `directory` is a private control root outside every project and task grant.
 #[derive(Debug, Clone)]
@@ -101,15 +105,52 @@ impl TaskExecution {
         if !self.publisher {
             return Ok(());
         }
+        let mut cancellation = inner
+            .cancellations
+            .lock()
+            .map_err(|_| TaskExecutionError::Invalid("run cancellation registry unavailable"))?
+            .get(&run)
+            .map(watch::Sender::subscribe)
+            .ok_or(TaskExecutionError::Invalid(
+                "publication run has no cancellation owner",
+            ))?;
+        if *cancellation.borrow() {
+            return Err(TaskExecutionError::Stopped);
+        }
         // Configuration is trusted source authority. Reload it after payloads
         // drain so newly protected pack files cannot be installed as output.
         let loaded = inner.loader.load(self.source_request.clone()).await?;
         let task = self.clone();
-        let permit = crate::workspace::blocking_permits()
-            .acquire_owned()
-            .await
-            .map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?;
+        #[cfg(test)]
+        {
+            let observer = {
+                let mut observers = PUBLICATION_WAITERS.lock().unwrap();
+                observers
+                    .iter()
+                    .position(|(source, _)| source == &self.source_request.workspace)
+                    .map(|index| observers.remove(index).1)
+            };
+            if let Some(observer) = observer {
+                let _ = observer.send(());
+            }
+        }
+        let permit = tokio::select! {
+            biased;
+            () = async {
+                loop {
+                    if *cancellation.borrow() { break; }
+                    if cancellation.changed().await.is_err() { break; }
+                }
+            } => return Err(TaskExecutionError::Stopped),
+            permit = crate::workspace::blocking_permits().acquire_owned() => {
+                permit.map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?
+            }
+        };
+        let stopped = cancellation.clone();
         let (outputs, permit) = tokio::task::spawn_blocking(move || {
+            if *stopped.borrow() {
+                return Err(TaskExecutionError::Stopped);
+            }
             let mut record = task
                 .record
                 .lock()

@@ -121,7 +121,8 @@ excluded from automatic publication, while imported source paths remain selected
 
 Completed runs publish after tools and children drain. Publication reloads trusted
 source configuration and retains both imported and current configured-pack
-protections; a newly protected output refuses publication. After preflight, a
+protections; a newly protected output refuses publication. Waiting for filesystem
+capacity remains cancellable until publication is authorized. After preflight, a
 short store transaction checks committed cancellation and current session and
 ancestor permissions, then records publication authorization. Cancellation before
 that decision preserves the private edits. After authorization, installation
