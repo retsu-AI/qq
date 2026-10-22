@@ -1412,8 +1412,14 @@ must pass the held-handle checks independently. Handles request only metadata
 and ACL rights, preserving the workspace's existing no-delete pins. Windows loader access uses the LPAC
 OS baseline and its per-package profile storage remain available. ACL authority follows objects rather than current pathnames, so
 callers must supply private task inputs and publish by copying files. This
-adapter currently requires isolated networking and Host resource policy;
-resource enforcement and default Windows Auto integration are unfinished.
+adapter requires isolated networking and accepts Host or Committed resource
+policy. Committed policy installs a nested job before creating the payload,
+checks the kernel-retained memory/process limits, and includes the trusted
+helper in that budget. It limits committed private memory and processes, not
+threads or Linux charged file cache. The payload job applies a hard CPU cap as
+a percentage of all logical processors; the trusted helper is excluded from
+that CPU cap. No new VM, administrator setup or volume is needed. Default
+Windows Auto integration is unfinished.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
