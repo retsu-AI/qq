@@ -3477,7 +3477,16 @@ fn task_workspace_policy(
                 .into_iter()
                 .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
                 .collect::<Result<_, _>>()?,
-            resources: qq_core::command_owner::NativeResources::Host,
+            resources: qq_core::command_owner::NativeResources::Limited {
+                limits: qq_core::command_owner::NativeResourceLimits {
+                    memory_bytes: 4 * 1024 * 1024 * 1024,
+                    max_processes: 512,
+                    cpu_millicores: u32::try_from(std::thread::available_parallelism()?.get())
+                        .map_err(std::io::Error::other)?
+                        .saturating_mul(1000)
+                        .min(1_000_000),
+                },
+            },
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
                 max_bytes: 256 * 1024 * 1024,

@@ -188,7 +188,7 @@ pub(super) async fn prepare(
             path: source.path().to_owned(),
             identity: NativeWorkspaceIdentity::held(source.root())?,
         };
-        let record: TaskRecord = match saved {
+        let mut record: TaskRecord = match saved {
             Some(saved) => serde_json::from_str(&saved)?,
             None => {
                 if NativeWorkspaceIdentity::capture(&policy.directory.path)?
@@ -207,7 +207,7 @@ pub(super) async fn prepare(
                 )?;
                 let scope = NativeCommandScope {
                     workspace: workspace.directory_grant(),
-                    read_only: policy.read_only,
+                    read_only: policy.read_only.clone(),
                     network: NativeNetwork::Isolated,
                     resources: policy.resources,
                 };
@@ -221,11 +221,17 @@ pub(super) async fn prepare(
         if record.source.path != source_grant.path
             || record.source.identity != source_grant.identity
             || record.workspace.path() != record.scope.workspace.path
+            || record.workspace.directory_grant().identity != record.scope.workspace.identity
         {
             return Err(TaskExecutionError::Invalid(
                 "task record does not match this project",
             ));
         }
+        // A persisted tree retains work, not a permanent grant. Reapply the
+        // trusted host's current limits and readable roots on each admission.
+        record.scope.read_only = policy.read_only;
+        record.scope.network = NativeNetwork::Isolated;
+        record.scope.resources = policy.resources;
         let held = Workspace::open(record.workspace.path())?;
         record
             .scope

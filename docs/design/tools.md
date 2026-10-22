@@ -105,10 +105,12 @@ private tree, retaining caches and unpublished files; ordinary prompts do not
 revive that goal tree. Compaction does not create task copies. Full retains host
 authority.
 
-This integration does not yet qualify unattended safety: production resource
-scopes still use host limits, subsequent task output disk usage is unbounded,
-and automatic restart/continuation of detached work is unfinished. Windows
-restricted filesystem execution remains unavailable and fails closed. Source
+Linux Auto commands request enforced memory, process and CPU limits. Goal work
+retains its private tree across server restart without replaying the original
+command or resetting its goal budget. This integration does not yet qualify
+unattended safety: subsequent task output disk usage is unbounded and ordinary
+non-goal task continuation is unfinished. macOS limited-resource execution and
+Windows restricted filesystem execution remain unavailable and fail closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
 
@@ -183,11 +185,21 @@ readable files and supplied environment values; those remain required before
 Auto enablement.
 
 `NativeResources::Limited` carries explicit memory, native-task and CPU-bandwidth
-limits. Linux uses one cgroup v2 per invocation beneath the trusted embedding
-host's `CommandLauncher.cgroup_root`. That directory must be explicitly
-delegated with the cpu, memory and pids controllers enabled; QQ does not modify
-service-manager configuration or seek elevated privileges. The root identity
-is checked before use. A request without usable delegation is refused.
+limits. Linux uses one cgroup v2 per invocation beneath
+`CommandLauncher.cgroup_root`. The binary obtains a delegated scope from the
+existing systemd user manager, using trusted system executables and the host
+user bus. It moves the worker into a supervisor leaf and enables cpu, memory
+and pids controllers in a separate tasks subtree. Embedding hosts may supply
+their own delegated root. QQ does not modify service-manager configuration or
+seek elevated privileges. Root identities are checked before use; a limited
+request without usable delegation is refused.
+
+The binary's Auto policy limits each invocation to 4 GiB memory, 512 native
+tasks (including threads), and CPU bandwidth equal to the available logical
+CPUs. The worker's tasks subtree also limits the combined fleet to 4,096 native
+tasks, 75% of available memory measured at worker startup, no swap, and 90% of
+available CPU bandwidth. The supervisor remains outside those fleet limits so
+payload exhaustion does not directly kill its durable journal.
 
 All limits are installed and read back before launch. The trusted PID-1 helper
 joins by writing zero to a held membership descriptor before spawning the
@@ -199,8 +211,8 @@ exit; empty groups left by a dead owner are reclaimed on subsequent admission.
 
 Resource scope is required in the persisted command identity, so a retry cannot
 raise limits or remove them. Other native adapters explicitly refuse limited
-execution until implemented. This currently covers individual command trees;
-server/task-wide aggregate budgets and disk capacity are still unfinished.
+execution until implemented. Linux applies both invocation and worker-fleet
+ceilings; per-task aggregate budgets and writable disk capacity remain unfinished.
 The explicit-delegation native test exercises thread exhaustion, memory OOM,
 controller values, stale-group reclamation and cleanup after exit and cancellation. Ordinary CI without
 delegation tests refusal, not successful containment.

@@ -32,11 +32,18 @@ fn completed() -> Value {
 async fn server_restart_finishes_the_same_goal_without_replaying_work_or_resetting_budget() {
     // Nextest supplies the hang timeout for this multi-process fixture.
     for max_runs in [3, 1] {
-        exercise_goal(max_runs).await;
+        exercise_goal(max_runs, false).await;
     }
 }
 
-async fn exercise_goal(max_runs: u32) {
+#[tokio::test]
+async fn default_auto_server_restart_resumes_private_work_without_reexecution() {
+    for max_runs in [3, 1] {
+        exercise_goal(max_runs, true).await;
+    }
+}
+
+async fn exercise_goal(max_runs: u32, auto: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -49,10 +56,18 @@ async fn exercise_goal(max_runs: u32) {
             .success()
     );
     let marker = format!("qq-client-{}", qq_protocol::ToolCallId::generate().unwrap());
-    let listener = tokio::net::UnixListener::bind(workspace.join(&marker)).unwrap();
+    let listener = if auto {
+        None
+    } else {
+        Some(tokio::net::UnixListener::bind(workspace.join(&marker)).unwrap())
+    };
     let binary = std::env::current_exe().unwrap();
     let arguments = json!({"program":binary,"args":["--exact","cli::blocked_command","--nocapture","--skip",marker]}).to_string();
-    let mut replies = vec![tool_reply("exec", arguments)];
+    let mut replies = vec![if auto {
+        tool_reply("shell", json!({"command":"set -e; printf 'once\n' >> executions; mkfifo .qq/task-home/release; printf 'qq-task-ready\n'; read release < .qq/task-home/release; printf native-once > artifact; printf native-result"}).to_string())
+    } else {
+        tool_reply("exec", arguments)
+    }];
     if max_runs > 1 {
         replies.push(tool_reply("update_goal", json!({"status":{"type":"achieved","evidence":"the saved command produced the requested artifact; verify it independently"}}).to_string()));
         replies.push(reply(vec![
@@ -65,15 +80,21 @@ async fn exercise_goal(max_runs: u32) {
         r#"(version: 1, model: "fake/model", providers: {{"fake": Custom(connection: (base_url: "{}/v1", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Fake")}})}})"#,
         provider.base_url
     );
-    let checker = format!(
-        "'{}' --exact goal_recovery::verify_goal_artifact --nocapture --skip qq-goal-verifier",
-        binary.to_str().unwrap().replace('\'', "'\\''")
-    );
-    let mut original = configured_cli(root.path(), &workspace, &config)
+    let checker = if auto {
+        "test \"$(cat artifact)\" = native-once && test \"$(cat executions)\" = once".to_owned()
+    } else {
+        format!(
+            "'{}' --exact goal_recovery::verify_goal_artifact --nocapture --skip qq-goal-verifier",
+            binary.to_str().unwrap().replace('\'', "'\\''")
+        )
+    };
+    let mut command = configured_cli(root.path(), &workspace, &config);
+    command.arg("run");
+    if !auto {
+        command.args(["--approval", "full"]);
+    }
+    let mut original = command
         .args([
-            "run",
-            "--approval",
-            "full",
             "--format",
             "jsonl",
             "--goal",
@@ -89,10 +110,36 @@ async fn exercise_goal(max_runs: u32) {
         ])
         .spawn()
         .unwrap();
-    let (mut stream, _) = listener.accept().await.unwrap();
-    let mut ready = [0; 5];
-    stream.read_exact(&mut ready).await.unwrap();
-    assert_eq!(&ready, b"ready");
+    let mut stream = if let Some(listener) = listener {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut ready = [0; 5];
+        stream.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, b"ready");
+        Some(stream)
+    } else {
+        let mut output = BufReader::new(original.stdout.take().unwrap());
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let mut captured = String::new();
+            loop {
+                let mut line = String::new();
+                assert!(
+                    output.read_line(&mut line).await.unwrap() > 0,
+                    "command ended before its private barrier: {captured}"
+                );
+                let line: Value = serde_json::from_str(&line).unwrap();
+                if line["envelope"]["event"]["type"] == "tool_call_output_delta" {
+                    captured.push_str(line["envelope"]["event"]["chunk"].as_str().unwrap());
+                    assert!(captured.len() <= 128 * 1024);
+                    if captured.contains("qq-task-ready") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the Auto command must reach its private barrier");
+        None
+    };
     let worker = Worker::child_of(original.id().unwrap());
     original.start_kill().unwrap();
     assert_eq!(
@@ -105,6 +152,98 @@ async fn exercise_goal(max_runs: u32) {
     let original_goal: GoalSnapshot = serde_json::from_str(&payload).unwrap();
     assert_eq!(original_goal.budget.max_goal_runs, max_runs);
     assert_eq!(original_goal.status, GoalStatus::Active);
+    let private = if auto {
+        let record: String = db
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [format!(
+                    "qq_task_workspace:{}",
+                    original_goal.pending_run_id.unwrap()
+                )],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut record: Value = serde_json::from_str(&record).unwrap();
+        let resources = worker.resource_root();
+        let groups = std::fs::read_dir(&resources)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| entry.file_type().unwrap().is_dir())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups.len(),
+            1,
+            "the blocked invocation has one resource group"
+        );
+        let group = groups[0].path();
+        for (name, expected) in [
+            ("memory.max", "4294967296"),
+            ("memory.swap.max", "0"),
+            ("pids.max", "512"),
+        ] {
+            assert_eq!(
+                std::fs::read_to_string(group.join(name)).unwrap().trim(),
+                expected
+            );
+        }
+        let cpu = record["scope"]["resources"]["limits"]["cpu_millicores"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(group.join("cpu.max"))
+                .unwrap()
+                .trim(),
+            format!("{} 100000", cpu * 100)
+        );
+        assert!(
+            std::fs::read_to_string(group.join("pids.current"))
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+                > 0,
+            "limits must contain the running invocation, not an empty placeholder group"
+        );
+        assert_eq!(
+            std::fs::read_to_string(resources.join("pids.max"))
+                .unwrap()
+                .trim(),
+            "4096"
+        );
+        assert!(
+            std::fs::read_to_string(resources.join("memory.max"))
+                .unwrap()
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        let task: qq_core::task_workspace::TaskWorkspace =
+            serde_json::from_value(record["workspace"].clone()).unwrap();
+        assert!(
+            !workspace.join("executions").exists(),
+            "in-flight Auto work must stay private"
+        );
+        if max_runs > 1 {
+            // Simulate a tighter host policy after restart. Old persisted
+            // authority must not override the current server's resource limits.
+            record["scope"]["resources"] = json!({"access":"host"});
+            db.execute(
+                "UPDATE metadata SET value=?2 WHERE key=?1",
+                rusqlite::params![
+                    format!(
+                        "qq_task_workspace:{}",
+                        original_goal.pending_run_id.unwrap()
+                    ),
+                    record.to_string()
+                ],
+            )
+            .unwrap();
+        }
+        Some(task.path().to_owned())
+    } else {
+        None
+    };
     drop(db);
 
     // Opening only the server must resume the goal. No resume command or new
@@ -141,7 +280,22 @@ async fn exercise_goal(max_runs: u32) {
     assert_eq!(current.budget, original_goal.budget);
     assert_eq!(current.status, GoalStatus::Active);
     let mut events = client.events(workspace_id, before.cursor).await.unwrap();
-    stream.write_all(b"e").await.unwrap();
+    if let Some(stream) = stream.as_mut() {
+        stream.write_all(b"e").await.unwrap();
+    } else {
+        let release = private.as_ref().unwrap().join(".qq/task-home/release");
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(release)
+                .unwrap()
+                .write_all(b"continue\n")
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    }
     let terminal = loop {
         let event = events.next().await.unwrap().unwrap();
         if let SessionEvent::GoalUpdated { goal } = event.event
@@ -156,12 +310,41 @@ async fn exercise_goal(max_runs: u32) {
         terminal.budget, original_goal.budget,
         "recovery must not renew the deadline or spending limits"
     );
+    if auto && max_runs > 1 {
+        let db = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let record: String = db
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [format!(
+                    "qq_task_workspace:{}",
+                    original_goal.pending_run_id.unwrap()
+                )],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let record: Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(
+            record["scope"]["resources"]["access"], "limited",
+            "restored tasks must use the current host policy"
+        );
+        assert_eq!(
+            record["scope"]["workspace"]["path"],
+            private.as_ref().unwrap().to_str().unwrap(),
+            "restoration must retain the original private tree"
+        );
+    }
     if max_runs > 1 {
         assert_eq!(terminal.status, GoalStatus::Achieved);
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("verified")).unwrap(),
-            "independent-check-passed"
-        );
+        if !auto {
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("verified")).unwrap(),
+                "independent-check-passed"
+            );
+        }
         assert_eq!(terminal.counters.runs, 2);
         assert_eq!(terminal.counters.audits, 1);
     } else {
@@ -172,12 +355,21 @@ async fn exercise_goal(max_runs: u32) {
         assert_eq!(terminal.counters.runs, 1);
         assert!(!workspace.join("verified").exists());
     }
+    let artifact_root = if auto && max_runs == 1 {
+        assert!(
+            !workspace.join("artifact").exists(),
+            "exhausted work stays private for explicit continuation"
+        );
+        private.as_ref().unwrap()
+    } else {
+        &workspace
+    };
     assert_eq!(
-        std::fs::read_to_string(workspace.join("artifact")).unwrap(),
+        std::fs::read_to_string(artifact_root.join("artifact")).unwrap(),
         "native-once"
     );
     assert_eq!(
-        std::fs::read_to_string(workspace.join("executions")).unwrap(),
+        std::fs::read_to_string(artifact_root.join("executions")).unwrap(),
         "once\n"
     );
     drop(events);
