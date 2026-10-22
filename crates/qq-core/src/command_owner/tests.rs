@@ -274,6 +274,7 @@ fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
         shell_policy: ShellPolicy::default(),
         approved_images: Vec::new(),
         network: crate::command_owner::NativeNetwork::Host,
+        resources: crate::command_owner::NativeResources::Host,
         filesystem: crate::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     }
@@ -2271,6 +2272,7 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
     for (network, expected) in [
         (NativeNetwork::Host, "filesystem"),
         (NativeNetwork::Isolated, "network"),
+        (NativeNetwork::Host, "resource"),
     ] {
         let mut request = command(
             workspace.path(),
@@ -2278,7 +2280,15 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
             "echo forbidden>ran",
         );
         request.network = network;
-        if network == NativeNetwork::Host {
+        if expected == "resource" {
+            request.resources = NativeResources::Limited {
+                limits: NativeResourceLimits {
+                    memory_bytes: 32 * 1024 * 1024,
+                    max_processes: 8,
+                    cpu_millicores: 250,
+                },
+            };
+        } else if network == NativeNetwork::Host {
             request.filesystem = NativeFilesystem::Restricted {
                 read_only: Vec::new(),
                 read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],

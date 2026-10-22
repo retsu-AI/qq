@@ -38,6 +38,7 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
             shell_policy: Default::default(),
             approved_images: Vec::new(),
             network: qq_core::command_owner::NativeNetwork::Host,
+            resources: qq_core::command_owner::NativeResources::Host,
             filesystem: qq_core::command_owner::NativeFilesystem::Host,
             not_after_ms: None,
         };
@@ -112,6 +113,7 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: None,
     };
@@ -144,3 +146,7 @@ mod filesystem;
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/network.rs"]
 mod network;
+
+#[cfg(target_os = "linux")]
+#[path = "command_worker_client/resources.rs"]
+mod resources;

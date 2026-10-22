@@ -45,6 +45,7 @@ fn fixture_startup_owner() {
         return;
     };
     let launcher = crate::command_owner::CommandLauncher {
+        cgroup_root: None,
         executable: std::env::current_exe().unwrap(),
         arguments: vec![
             "--exact".into(),

@@ -18,6 +18,7 @@ pub(super) fn request(workspace: &Path, tool: &str, script: &str) -> NativeComma
     NativeCommand {
         environment: NativeEnvironment::capture(&[]).unwrap(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: NativeFilesystem::Restricted {
             read_only: roots
                 .iter()
@@ -42,7 +43,7 @@ pub(super) fn request(workspace: &Path, tool: &str, script: &str) -> NativeComma
 }
 
 pub(super) async fn finish(
-    client: &client::CommandWorker,
+    client: &impl NativeCommandService,
     request: NativeCommand,
 ) -> qq_core::command_owner::CommandSnapshot {
     let id = request.id;
@@ -462,4 +463,36 @@ async fn filesystem_scope_preserves_frozen_path_aliases_without_granting_their_p
             "path-worked"
         );
     }
+}
+
+#[tokio::test]
+async fn resource_scope_without_delegation_refuses_before_payload_and_cannot_be_widened() {
+    use qq_core::command_owner::{NativeResourceLimits, NativeResources};
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let mut command = request(&workspace, "shell", "printf forbidden > ran");
+    command.resources = NativeResources::Limited {
+        limits: NativeResourceLimits {
+            memory_bytes: 64 * 1024 * 1024,
+            max_processes: 8,
+            cpu_millicores: 250,
+        },
+    };
+    let mut missing = serde_json::to_value(&command).unwrap();
+    missing.as_object_mut().unwrap().remove("resources");
+    assert!(serde_json::from_value::<NativeCommand>(missing).is_err());
+    let client = worker(&root.path().join("owner"));
+    let result = finish(&client, command.clone()).await.result.unwrap();
+    command.resources = NativeResources::Host;
+    let retry = client.submit(command).await;
+    client.stop_spawned().await;
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result.text().contains("resource enforcement"),
+        "{}",
+        result.text()
+    );
+    assert!(!workspace.join("ran").exists());
+    assert!(matches!(retry, Err(super::CommandOwnerError::Conflict)));
 }

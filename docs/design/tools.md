@@ -49,7 +49,7 @@ This is a filesystem primitive, not a qualified Auto sandbox. The normal
 approval modes do not select it yet. Grants are additive and include existing
 inodes within a granted root: protecting policy files beneath a writable root,
 external hardlink aliases, authorized network egress, credential
-brokering, resources and concurrent writers still require further enforcement
+brokering, disk capacity, shared task resource budgets and concurrent writers still require further enforcement
 before Auto enablement.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
@@ -63,6 +63,30 @@ spawning any payload, including unrestricted payloads; only standard streams
 and the helper's owned launch descriptors survive the cleanup, with helper
 handles closed on payload exec. Network authority is part of the persisted
 request identity. Unsupported backends refuse isolation explicitly.
+
+
+`NativeResources::Limited` carries explicit memory, native-task and CPU-bandwidth
+limits. Linux uses one cgroup v2 per invocation beneath the trusted embedding
+host's `CommandLauncher.cgroup_root`. That directory must be explicitly
+delegated with the cpu, memory and pids controllers enabled; QQ does not modify
+service-manager configuration or seek elevated privileges. The root identity
+is checked before use. A request without usable delegation is refused.
+
+All limits are installed and read back before launch. The trusted PID-1 helper
+joins by writing zero to a held membership descriptor before spawning the
+payload, then closes that descriptor. Descendants inherit the group. Swap is
+disabled for the group, OOM kills the whole group, and real-time scheduling
+privileges are removed. Limited execution requires the private filesystem root
+and cannot expose writable cgroup mounts. Cleanup is awaited after namespace
+exit; empty groups left by a dead owner are reclaimed on subsequent admission.
+
+Resource scope is required in the persisted command identity, so a retry cannot
+raise limits or remove them. Other native adapters explicitly refuse limited
+execution until implemented. This currently covers individual command trees;
+server/task-wide aggregate budgets and disk capacity are still unfinished.
+The explicit-delegation native test exercises thread exhaustion, memory OOM,
+controller values, stale-group reclamation and cleanup after exit and cancellation. Ordinary CI without
+delegation tests refusal, not successful containment.
 
 ## The Tool Loop
 

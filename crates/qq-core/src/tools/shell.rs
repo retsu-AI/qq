@@ -377,45 +377,50 @@ pub(super) async fn run_shell(
     let preparation_workspace = workspace.clone();
     #[cfg(target_os = "linux")]
     let linux_owner = process.linux_owner().cloned();
-    let mut prepared = match tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let prepared = super::process_context::prepare(
-            native.as_ref().map(|native| &native.environment),
-            preparation_workspace,
-            owned,
-            approved_read_images,
-            process_producer,
-            call_id,
-            &preparation_cancelled,
-            preparation_deadline,
-        )?;
-        #[cfg(target_os = "linux")]
-        if let Some(owner) = &linux_owner {
-            return prepared.owned_linux(owner, native.as_deref());
-        }
-        if native
-            .as_ref()
-            .is_some_and(|native| native.network == crate::command_owner::NativeNetwork::Isolated)
+    let mut prepared =
+        match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let prepared = super::process_context::prepare(
+                native.as_ref().map(|native| &native.environment),
+                preparation_workspace,
+                owned,
+                approved_read_images,
+                process_producer,
+                call_id,
+                &preparation_cancelled,
+                preparation_deadline,
+            )?;
+            #[cfg(target_os = "linux")]
+            if let Some(owner) = &linux_owner {
+                return prepared.owned_linux(owner, native.as_deref());
+            }
+            if native.as_ref().is_some_and(|native| {
+                native.resources != crate::command_owner::NativeResources::Host
+            }) {
+                return Err(super::process_context::PreparationError::ResourcesUnavailable);
+            }
+            if native.as_ref().is_some_and(|native| {
+                native.network == crate::command_owner::NativeNetwork::Isolated
+            }) {
+                return Err(super::process_context::PreparationError::NetworkUnavailable);
+            }
+            if native
+                .as_ref()
+                .is_some_and(|native| native.filesystem.is_restricted())
+            {
+                return Err(super::process_context::PreparationError::FilesystemUnavailable);
+            }
+            Ok::<_, super::process_context::PreparationError>(prepared)
+        })
+        .await
         {
-            return Err(super::process_context::PreparationError::NetworkUnavailable);
-        }
-        if native
-            .as_ref()
-            .is_some_and(|native| native.filesystem.is_restricted())
-        {
-            return Err(super::process_context::PreparationError::FilesystemUnavailable);
-        }
-        Ok::<_, super::process_context::PreparationError>(prepared)
-    })
-    .await
-    {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(error)) if cancelled.is_cancelled() => {
-            return ToolOutput::interrupted(error.to_string());
-        }
-        Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
-        Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
-    };
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) if cancelled.is_cancelled() => {
+                return ToolOutput::interrupted(error.to_string());
+            }
+            Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
+            Err(_) => return ToolOutput::unobserved("process preparation stopped unexpectedly"),
+        };
     if cancelled.is_cancelled() {
         return ToolOutput::interrupted("tool execution was cancelled before spawn");
     }

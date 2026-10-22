@@ -18,6 +18,7 @@ pub(super) const MAX_REFUSAL_BYTES: usize = 1024;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Packet {
+    pub resource_fd: Option<i32>,
     pub filesystem: Option<super::filesystem_root::Filesystem>,
     pub isolated_network: bool,
     pub program: Vec<u8>,
@@ -176,15 +177,15 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    if let Some(fd) = packet.resource_fd
+        && let Err(error) = super::resources::join(fd)
+    {
+        return refuse(&mut ack, b'l', error);
+    }
     if let Some(filesystem) = &packet.filesystem
         && let Err(error) = super::filesystem_root::enter(filesystem)
     {
-        let message = error.to_string();
-        let bytes = &message.as_bytes()[..message.len().min(MAX_REFUSAL_BYTES)];
-        ack.write_all(b"r")?;
-        ack.write_all(&(bytes.len() as u16).to_le_bytes())?;
-        ack.write_all(bytes)?;
-        return Err(error);
+        return refuse(&mut ack, b'r', error);
     }
     protect_supervisor()?;
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
@@ -355,5 +356,14 @@ fn monitor(fields: &str) -> io::Result<u8> {
         )
         .arg(format!("qq-native-exec:{fields}"))
         .exec();
+    Err(error)
+}
+
+fn refuse(ack: &mut File, kind: u8, error: io::Error) -> io::Result<u8> {
+    let message = error.to_string();
+    let bytes = &message.as_bytes()[..message.len().min(MAX_REFUSAL_BYTES)];
+    ack.write_all(&[kind])?;
+    ack.write_all(&(bytes.len() as u16).to_le_bytes())?;
+    ack.write_all(bytes)?;
     Err(error)
 }

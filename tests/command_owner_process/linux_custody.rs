@@ -99,6 +99,7 @@ async fn command_cannot_read_its_supervisors_control_descriptors() {
         workspace: std::fs::canonicalize(workspace.path()).unwrap(), tool: "exec".to_owned(),
         arguments: serde_json::json!({"program": std::env::current_exe().unwrap(), "args": ["--exact", "linux_custody::fixture_supervisor_privacy", "--nocapture", "--skip", format!("qq-custody-{id}")]}).to_string(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         shell_policy: Default::default(), approved_images: Vec::new(), not_after_ms: None,
     };
@@ -176,6 +177,7 @@ async fn exercise_ending(ending: Ending) {
         shell_policy: Default::default(),
         approved_images: Vec::new(),
         network: qq_core::command_owner::NativeNetwork::Host,
+        resources: qq_core::command_owner::NativeResources::Host,
         filesystem: qq_core::command_owner::NativeFilesystem::Host,
         not_after_ms: matches!(ending, Ending::Deadline).then(|| {
             u64::try_from(
