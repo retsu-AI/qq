@@ -15,10 +15,21 @@ const RUN_PREFIX: &str = "qq_task_run:";
 const RECORD_PREFIX: &str = "qq_task_workspace:";
 const GOAL_PREFIX: &str = "qq_task_goal:";
 const PRIVATE_HOME: &str = ".qq/task-home";
+const PUBLICATION_PREFIX: &str = "qq_task_publication:";
 
 #[cfg(test)]
 static PREPARATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)>> =
     Mutex::new(Vec::new());
+
+#[cfg(test)]
+struct PublicationGate {
+    source: String,
+    entered: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+static PUBLICATION_GATES: Mutex<Vec<PublicationGate>> = Mutex::new(Vec::new());
 
 /// Authority supplied by the server, independently of project/model output.
 /// `directory` is a private control root outside every project and task grant.
@@ -85,6 +96,7 @@ impl TaskExecution {
         self: Arc<Self>,
         inner: &SessionRuntimeInner,
         session: SessionId,
+        run: RunId,
     ) -> Result<(), TaskExecutionError> {
         if !self.publisher {
             return Ok(());
@@ -92,24 +104,12 @@ impl TaskExecution {
         // Configuration is trusted source authority. Reload it after payloads
         // drain so newly protected pack files cannot be installed as output.
         let loaded = inner.loader.load(self.source_request.clone()).await?;
-        let policy = inner.store.tool_approval_policy(session).await?;
-        if !matches!(policy.mode, ApprovalMode::Auto | ApprovalMode::Full)
-            || policy
-                .ancestors
-                .iter()
-                .any(|(mode, _)| !matches!(mode, ApprovalMode::Auto | ApprovalMode::Full))
-        {
-            return Err(TaskExecutionError::Invalid(
-                "source publication permission changed",
-            ));
-        }
         let task = self.clone();
         let permit = crate::workspace::blocking_permits()
             .acquire_owned()
             .await
             .map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?;
-        let encoded = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
+        let (outputs, permit) = tokio::task::spawn_blocking(move || {
             let mut record = task
                 .record
                 .lock()
@@ -128,9 +128,38 @@ impl TaskExecution {
             if outputs.len() > record.workspace_limits().max_entries {
                 return Err(TaskExecutionError::Invalid("too many task outputs"));
             }
-            record
-                .workspace
-                .publish(&outputs.into_iter().collect::<Vec<_>>())?;
+            Ok::<_, TaskExecutionError>((outputs.into_iter().collect::<Vec<_>>(), permit))
+        })
+        .await??;
+        // This durable decision orders publication against cancellation. No
+        // store transaction or record lock spans filesystem work. Cancellation
+        // before this point wins; after it, settlement must report the outcome
+        // of the committed publication, including any publication failure.
+        if !authorize_publication(&inner.store, session, run).await? {
+            return Err(TaskExecutionError::Stopped);
+        }
+        #[cfg(test)]
+        {
+            let gate = {
+                let mut gates = PUBLICATION_GATES.lock().unwrap();
+                gates
+                    .iter()
+                    .position(|gate| gate.source == self.source_request.workspace)
+                    .map(|index| gates.remove(index))
+            };
+            if let Some(gate) = gate {
+                let _ = gate.entered.send(());
+                let _ = gate.release.await;
+            }
+        }
+        let task = self.clone();
+        let encoded = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut record = task
+                .record
+                .lock()
+                .map_err(|_| TaskExecutionError::Invalid("task record poisoned"))?;
+            record.workspace.publish(&outputs)?;
             encode(&record)
         })
         .await??;
@@ -142,6 +171,44 @@ impl TaskExecution {
         .await?;
         Ok(())
     }
+}
+
+/// Publication is an irrevocable file-install decision, not permission for a
+/// new agent action. Its marker lives in trusted storage alongside task records.
+async fn authorize_publication(
+    store: &Store,
+    session: SessionId,
+    run: RunId,
+) -> Result<bool, SessionRuntimeError> {
+    store.call_write(Priority::AwaitControl, move |connection| {
+        let transaction = super::store::begin_unit(connection)?;
+        let cancelled = transaction.query_row(
+            "SELECT cancel_requested FROM runs WHERE id=?1 AND session_id=?2 AND status='running' AND outcome_json IS NULL",
+            params![run.to_string(), session.to_string()], |row| row.get::<_, bool>(0),
+        ).optional()?.ok_or(SessionRuntimeError::CONSTRAINT)?;
+        if publication_authorized(&transaction, run)? { return Ok(true); }
+        if cancelled { return Ok(false); }
+        let policy = super::tool_calls::load_tool_approval_policy(&transaction, session)?;
+        if !matches!(policy.mode, ApprovalMode::Auto | ApprovalMode::Full)
+            || policy.ancestors.iter().any(|(mode, _)| !matches!(mode, ApprovalMode::Auto | ApprovalMode::Full))
+        {
+            return Err(SessionRuntimeError::InvalidNativeScope { reason: "source publication permission changed".to_owned() });
+        }
+        transaction.execute("INSERT INTO metadata(key,value) VALUES(?1,'authorized') ON CONFLICT(key) DO NOTHING", [format!("{PUBLICATION_PREFIX}{run}")])?;
+        transaction.commit()?;
+        Ok(true)
+    }).await
+}
+
+pub(super) fn publication_authorized(
+    connection: &Connection,
+    run: RunId,
+) -> Result<bool, SessionRuntimeError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1 AND value='authorized')",
+        [format!("{PUBLICATION_PREFIX}{run}")],
+        |row| row.get(0),
+    )?)
 }
 
 impl TaskRecord {

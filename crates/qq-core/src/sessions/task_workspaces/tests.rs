@@ -151,6 +151,32 @@ async fn open_session(
     (runtime, session_id)
 }
 
+async fn publish_fixture(
+    task: Arc<TaskExecution>,
+    runtime: &SessionRuntime,
+    session: SessionId,
+) -> Result<(), TaskExecutionError> {
+    let run = task.owner;
+    runtime.inner.store.call_write(Priority::AwaitControl, move |connection| {
+        connection.execute("INSERT INTO runs(id,session_id,command_id,user_message_id,assistant_message_id,status,created_at_ms) VALUES(?1,?2,?1,?1,?1,'running',0)", params![run.to_string(), session.to_string()])?;
+        Ok(())
+    }).await.unwrap();
+    let result = task.publish(&runtime.inner, session, run).await;
+    runtime
+        .inner
+        .store
+        .call_write(Priority::AwaitControl, move |connection| {
+            connection.execute(
+                "UPDATE runs SET status='completed' WHERE id=?1",
+                [run.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    result
+}
+
 #[tokio::test]
 async fn publication_delivers_new_ignored_files_without_generated_directories() {
     let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
@@ -177,7 +203,7 @@ async fn publication_delivers_new_ignored_files_without_generated_directories() 
         }),
     )
     .await;
-    task.publish(&runtime.inner, session).await.unwrap();
+    publish_fixture(task, &runtime, session).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(source.join("requested.local"))
             .ok()
@@ -327,7 +353,7 @@ async fn publication_rechecks_current_permission_before_installing_task_edits() 
             )
             .await
             .unwrap();
-        let published = task.clone().publish(&runtime.inner, session_id).await;
+        let published = publish_fixture(task.clone(), &runtime, session_id).await;
         assert_eq!(
             published.is_ok(),
             mode == ApprovalMode::Auto && !protect_pack,
@@ -368,9 +394,7 @@ async fn publication_preserves_private_edits_when_source_disk_is_low() {
     )
     .await;
     let _space = crate::storage::SpaceOverride::new(&source, 0);
-    let error = task
-        .clone()
-        .publish(&runtime.inner, session_id)
+    let error = publish_fixture(task.clone(), &runtime, session_id)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -1076,4 +1100,163 @@ async fn explicit_task_attachments_survive_ignore_rules_and_keep_source_authorit
             }
         }
     }
+}
+
+struct PublicationReloadGate {
+    loader: AttachmentLoader,
+    source_loads: std::sync::atomic::AtomicUsize,
+    entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+impl RuntimeLoader for PublicationReloadGate {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let paused = request.execution_workspace.is_none()
+            && self
+                .source_loads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                == 1;
+        let gate = paused.then(|| {
+            (
+                self.entered.lock().unwrap().take().unwrap(),
+                self.release.lock().unwrap().take().unwrap(),
+            )
+        });
+        let load = self.loader.load(request);
+        Box::pin(async move {
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                release.await.unwrap();
+            }
+            load.await
+        })
+    }
+}
+
+#[tokio::test]
+async fn cancellation_during_publication_reload_keeps_edits_private() {
+    exercise_publication_cancellation_order(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_after_publication_authorization_preserves_committed_outcome() {
+    exercise_publication_cancellation_order(true).await;
+}
+
+async fn exercise_publication_cancellation_order(after_authorization: bool) {
+    let (root, source, _) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let (entered, reloading) = tokio::sync::oneshot::channel();
+    let (release, gate) = tokio::sync::oneshot::channel();
+    let loader = AttachmentLoader {
+        path: "vendor/policy.md".to_owned(),
+        edit: true,
+        prompts: Arc::default(),
+    };
+    let loader: Arc<dyn RuntimeLoader> = if after_authorization {
+        PUBLICATION_GATES.lock().unwrap().push(PublicationGate {
+            source: source.to_string_lossy().into_owned(),
+            entered,
+            release: gate,
+        });
+        Arc::new(loader)
+    } else {
+        Arc::new(PublicationReloadGate {
+            loader,
+            source_loads: std::sync::atomic::AtomicUsize::new(0),
+            entered: Mutex::new(Some(entered)),
+            release: Mutex::new(Some(gate)),
+        })
+    };
+    let (runtime, session) = open_session(root.path(), &source, loader).await;
+    let workspace = runtime
+        .inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            session_workspace(connection, session)
+        })
+        .await
+        .unwrap();
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: workspace,
+            after: EventCursor {
+                store_id: runtime.store_id(),
+                workspace_id: workspace,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    let queued = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::SubmitPrompt {
+                session_id: session,
+                input: vec![
+                    InputPart::text("edit the attachment".to_owned()),
+                    InputPart::WorkspaceFile {
+                        path: "vendor/policy.md".to_owned(),
+                        expected_hash: None,
+                        range: None,
+                    },
+                ],
+                limits: RunLimits::default(),
+                correlation: Correlation::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
+        panic!("prompt")
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), reloading)
+        .await
+        .unwrap()
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+        .unwrap();
+    release.send(()).unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if let SessionEvent::RunFinished { outcome, .. } = event.event {
+                break outcome;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    runtime.shutdown().await.unwrap();
+    assert!(
+        if after_authorization {
+            matches!(outcome, RunOutcome::Completed)
+        } else {
+            matches!(outcome, RunOutcome::Cancelled)
+        },
+        "publication already authorized={after_authorization}: {outcome:?}",
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("vendor/policy.md")).unwrap(),
+        if after_authorization {
+            "updated attachment"
+        } else {
+            "original"
+        },
+        "publication must follow its durable ordering with cancellation"
+    );
+    let tasks = std::fs::read_dir(root.path().join("control"))
+        .unwrap()
+        .map(|task| task.unwrap().path().join("vendor/policy.md"))
+        .collect::<Vec<_>>();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&tasks[0]).unwrap(),
+        "updated attachment"
+    );
 }

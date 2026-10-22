@@ -3934,8 +3934,12 @@ async fn finish_run_accounted(
         .filter(|_| matches!(outcome, RunOutcome::Completed))
     {
         let path = task.scope.workspace.path.clone();
-        match task.publish(inner, claimed.identity.session_id).await {
+        match task
+            .publish(inner, claimed.identity.session_id, claimed.identity.run_id)
+            .await
+        {
             Ok(()) => outcome,
+            Err(super::task_workspaces::TaskExecutionError::Stopped) => RunOutcome::Cancelled,
             Err(error) => internal_failure(&format!(
                 "task edits could not be published; work is retained at {}: {error}",
                 path.display()

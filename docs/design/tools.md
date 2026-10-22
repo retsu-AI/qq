@@ -102,7 +102,12 @@ The binary supplies `SessionRuntimeOptions.task_workspaces` when it uses the
 independent worker. Auto runs import regular project files into a private task
 tree, respecting project ignore files and excluding trust configuration. Built-in
 tools and native commands share that tree; configuration still comes from the
-logical source project. Commands receive a private home/temp directory, explicit
+logical source project. Explicit file attachments are resolved through the source
+project capability with their normal size and hash checks. Editable attachments
+are copied even when ignored; protected configuration is attached as context
+without becoming writable task configuration. Task preparation observes
+cancellation and deadlines while waiting for filesystem capacity.
+Commands receive a private home/temp directory, explicit
 system read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
@@ -114,11 +119,17 @@ are included in publication. New generated directories (`target`, `node_modules`
 `dist`, `build`, `.venv`, `__pycache__`, `.git`) and the private task home remain
 excluded from automatic publication, while imported source paths remain selected.
 
-Completed runs publish after tools and children drain and recheck the session's
-current publication permission. Publication reloads trusted source configuration
-and retains both the imported and current configured-pack protections; a newly
-protected output refuses publication. Failed/cancelled work stays in its private task
-tree. Completion checks acquire the source workspace exclusion before importing
+Completed runs publish after tools and children drain. Publication reloads trusted
+source configuration and retains both imported and current configured-pack
+protections; a newly protected output refuses publication. After preflight, a
+short store transaction checks committed cancellation and current session and
+ancestor permissions, then records publication authorization. Cancellation before
+that decision preserves the private edits. After authorization, installation
+finishes and settlement retains its actual outcome rather than relabeling it as
+cancelled. File installation remains atomic per file; an I/O failure can report
+partially applied outputs. A coordinator restart during publication does not
+attest task completion. Failed work retains the private task tree.
+Completion checks acquire the source workspace exclusion before importing
 the published artifact and execute through the same durable worker; their file
 changes are not published. Successive goal-origin runs reuse the same persisted
 private tree, retaining caches and unpublished files; ordinary prompts do not
@@ -129,6 +140,8 @@ Recovery of a running completion check restores its persisted run-bound scope
 and validates both source and task directory identities before accepting the
 worker result. A missing or replaced bound task never falls back to broader
 source authority; cancellation, budgets and unknown-execution holds still apply.
+Unbound Full and Ask checks recover the original worker's terminal result without
+requiring a restricted scope; recovery never submits replacement execution.
 
 Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
