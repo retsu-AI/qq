@@ -141,6 +141,40 @@ fn payload_probe() {
             std::io::stdin().read_to_string(&mut input).unwrap();
             std::fs::write("stdin-result", input).unwrap();
         }
+        "memory" => {
+            let mut bytes = Vec::<u8>::new();
+            assert!(
+                bytes.try_reserve_exact(512 * 1024 * 1024).is_err(),
+                "job committed-memory limit must reject an allocation larger than the whole job budget"
+            );
+        }
+        "processes" => {
+            let mut children = Vec::new();
+            for _ in 0..6 {
+                match std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "windows::payload_probe",
+                        "--nocapture",
+                        "--skip",
+                        "qq-windows-probe:child",
+                    ])
+                    .spawn()
+                {
+                    Ok(child) => children.push(child),
+                    Err(_) => break,
+                }
+            }
+            let count = children.len();
+            for child in &mut children {
+                let _ = child.kill();
+                child.wait().unwrap();
+            }
+            assert_eq!(count, 2, "four-process job includes the helper and payload");
+        }
+        "child" => loop {
+            std::thread::park();
+        },
         "blocked" => {
             println!("probe-ready");
             std::io::stdout().flush().unwrap();
@@ -321,6 +355,16 @@ async fn restricted_payload_can_start_an_equally_restricted_descendant() {
     restricted_worker_probe("descendants").await;
 }
 
+#[tokio::test]
+async fn committed_memory_limit_is_enforced_by_the_real_worker() {
+    restricted_worker_probe("memory").await;
+}
+
+#[tokio::test]
+async fn process_limit_is_enforced_by_the_real_worker() {
+    restricted_worker_probe("processes").await;
+}
+
 async fn restricted_worker_probe(mode: &str) {
     let aap = tokio::task::spawn_blocking(appcontainer_only_fixture)
         .await
@@ -364,6 +408,13 @@ async fn restricted_worker_probe(mode: &str) {
         // worker's private directory. The writable task root must win.
         read_only
             .push(qq_core::command_owner::NativeDirectoryGrant::capture(workspace.path()).unwrap());
+    }
+    if matches!(mode, "memory" | "processes") {
+        command.resources = qq_core::command_owner::NativeResources::Committed {
+            memory_bytes: 128 * 1024 * 1024,
+            max_processes: 4,
+            cpu_percent: 50,
+        };
     }
     if mode == "shell" {
         command.tool = "shell".to_owned();
