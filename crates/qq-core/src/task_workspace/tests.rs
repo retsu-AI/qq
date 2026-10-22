@@ -352,3 +352,39 @@ async fn detached_task_workspace_is_shared_by_builtin_tools_and_native_commands(
     .await
     .unwrap();
 }
+
+#[test]
+fn detached_task_workspace_rejects_filesystem_ancestor_aliases() {
+    let fixture = Fixture::new();
+    let nested = fixture.source.path.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let held = Workspace::open(&nested).unwrap();
+    assert!(contains_directory(held.root(), fixture.source.identity).unwrap());
+    let sibling = Workspace::open(fixture.source.path.parent().unwrap()).unwrap();
+    assert!(!contains_directory(sibling.root(), fixture.source.identity).unwrap());
+
+    // Default macOS and Windows volumes resolve this alternate spelling to
+    // the same source. Case-sensitive volumes exercise held ancestry above.
+    let alternate = fixture.source.path.with_file_name("SOURCE");
+    if !alternate.exists() {
+        return;
+    }
+    let destination = alternate.join("nested/task");
+    let result = TaskWorkspace::import(
+        &fixture.source,
+        &destination,
+        &[],
+        TaskWorkspaceLimits {
+            max_entries: 16,
+            max_bytes: 1024,
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(TaskWorkspaceError::InvalidInput(
+            "source and destination overlap"
+        ))
+    ));
+    assert!(!destination.exists());
+    assert_eq!(fs::read_dir(&nested).unwrap().count(), 0);
+}

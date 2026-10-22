@@ -58,6 +58,27 @@ pub enum TaskWorkspaceError {
     },
 }
 
+// Compare held filesystem identities, including alternate spellings on
+// case-insensitive volumes. The trusted destination parent may escape its
+// capability solely to check ancestry; payloads never receive these handles.
+fn contains_directory(directory: &Dir, identity: NativeWorkspaceIdentity) -> io::Result<bool> {
+    let mut current = directory.try_clone()?;
+    for _ in 0..4096 {
+        let current_identity = NativeWorkspaceIdentity::held(&current)?;
+        if current_identity == identity {
+            return Ok(true);
+        }
+        let parent = current.open_parent_dir(cap_std::ambient_authority())?;
+        if NativeWorkspaceIdentity::held(&parent)? == current_identity {
+            return Ok(false);
+        }
+        current = parent;
+    }
+    Err(io::Error::other(
+        "destination ancestry exceeds import limit",
+    ))
+}
+
 impl TaskWorkspace {
     /// Copy selected workspace-relative regular files, including dirty and
     /// untracked bytes, into fresh inodes. Inputs are files, not recursive roots.
@@ -120,7 +141,13 @@ impl TaskWorkspace {
                 "destination must name a new directory",
             ))?;
         let parent_workspace = at(parent, Workspace::open(parent))?;
-        if parent.starts_with(&source.path) || source.path.starts_with(destination) {
+        if parent.starts_with(&source.path)
+            || source.path.starts_with(destination)
+            || at(
+                parent,
+                contains_directory(parent_workspace.root(), source.identity),
+            )?
+        {
             return Err(TaskWorkspaceError::InvalidInput(
                 "source and destination overlap",
             ));

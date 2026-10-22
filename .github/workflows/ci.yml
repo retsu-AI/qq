@@ -240,6 +240,7 @@ jobs:
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_preserves_selected_bytes_without_host_aliases
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_filesystem_ancestor_aliases
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_hardlinks_and_cleans_partial_import
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
