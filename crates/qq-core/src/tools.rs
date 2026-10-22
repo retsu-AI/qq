@@ -4758,6 +4758,10 @@ mod tests {
         )
         .await;
 
+        assert_eq!(
+            result.native_outcome,
+            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(0) })
+        );
         assert!(!result.is_error, "unexpected error: {}", result.model_text);
         assert!(result.model_text.contains("out\n"), "{}", result.model_text);
         assert!(result.model_text.contains("err\n"), "{}", result.model_text);
@@ -4786,6 +4790,10 @@ mod tests {
         )
         .await;
 
+        assert_eq!(
+            result.native_outcome,
+            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(7) })
+        );
         assert!(result.is_error);
         assert!(
             result.model_text.contains("before failure"),

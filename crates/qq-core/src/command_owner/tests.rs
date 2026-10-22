@@ -486,6 +486,10 @@ async fn dropping_an_observer_does_not_cancel_or_repeat_a_command() {
     drop(gate);
     drop(start_gate);
     assert_eq!(finished.status, CommandStatus::Finished);
+    assert_eq!(
+        finished.result.as_ref().unwrap().outcome(),
+        Some(NativeCommandOutcome::Exited { code: Some(0) })
+    );
     assert!(!finished.result.as_ref().unwrap().is_error());
     assert!(
         finished
@@ -2135,6 +2139,7 @@ async fn assert_worker_deadline_retains_timeout(arguments: &str) {
     tokio::time::advance(std::time::Duration::from_secs(61)).await;
     tokio::time::resume();
     let finished = wait_finished(&owner, id, after).await.result.unwrap();
+    assert_eq!(finished.outcome(), Some(NativeCommandOutcome::TimedOut));
     owner.shutdown().await.unwrap();
     assert!(
         finished.text().contains("exit=timeout"),
@@ -2190,6 +2195,7 @@ async fn worker_deadline_during_preparation_and_receipt_is_not_user_cancellation
         release.send(()).unwrap();
         let finished = wait_finished(&owner, id, 0).await;
         let result = finished.result.unwrap();
+        assert_eq!(result.outcome(), Some(NativeCommandOutcome::TimedOut));
         owner.shutdown().await.unwrap();
         assert!(
             result.text().contains("exit=timeout"),

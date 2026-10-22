@@ -115,33 +115,67 @@ impl WorkspaceGrantAuthority for Authority {
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_once_executes_without_a_model_and_achieves_durably() {
-    once_check(true).await;
+    once_check(true, false).await;
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn goal_check_consumed_once_failure_requires_new_authority_without_requeue_loop() {
-    once_check(false).await;
+    once_check(false, false).await;
 }
 
 #[cfg(not(unix))]
 #[tokio::test]
 async fn goal_check_unavailable_supervision_consumes_once_and_fails_closed_durably() {
-    once_check(false).await;
+    once_check(false, false).await;
 }
 
-async fn once_check(success: bool) {
+#[tokio::test]
+async fn scoped_goal_check_uses_durable_service_and_typed_success() {
+    once_check(true, true).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scoped_goal_check_uses_typed_failure_even_when_output_claims_success() {
+    once_check(false, true).await;
+}
+
+async fn once_check(success: bool, native: bool) {
     let command = if success {
         "printf checked >> goal-check-marker"
     } else {
         "printf checked >> goal-check-marker; printf '%s%s' check-output- unique; exit 7"
     };
     let directory = TempDir::new().unwrap();
-    let database = directory.path().join("sessions.sqlite3");
+    let database = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("sessions.sqlite3");
     let loads = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
     let mut options = SessionRuntimeOptions::new(database.clone());
     options.grant_authority = Some(Arc::new(Authority(command)));
+    if native {
+        use crate::command_owner::*;
+        let workspace = directory.path().canonicalize().unwrap();
+        options.native_scopes.push(NativeCommandScope {
+            workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
+            read_only: vec![],
+            network: NativeNetwork::Isolated,
+            resources: NativeResources::Limited {
+                limits: NativeResourceLimits {
+                    memory_bytes: 64 * 1024 * 1024,
+                    max_processes: 16,
+                    cpu_millicores: 500,
+                },
+            },
+        });
+        options.native_commands = Some(Arc::new(CheckService {
+            code: if success { 0 } else { 7 },
+        }));
+    }
     let runtime = SessionRuntime::open(
         options,
         Arc::new(Loader {
@@ -227,13 +261,16 @@ async fn once_check(success: bool) {
     })
     .await
     .expect("authorized exit-zero check must execute and achieve the goal");
-    #[cfg(not(unix))]
-    assert!(!directory.path().join("goal-check-marker").exists());
+    if native || !cfg!(unix) {
+        assert!(!directory.path().join("goal-check-marker").exists());
+    }
     #[cfg(unix)]
-    assert_eq!(
-        std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
-        "checked"
-    );
+    if !native {
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("goal-check-marker")).unwrap(),
+            "checked"
+        );
+    }
     assert_eq!(
         achieved.check_authorization,
         Some(qq_protocol::GoalCheckAuthorization::Consumed)
@@ -1799,4 +1836,195 @@ async fn portable_check_group_confirmation_waits_until_the_group_is_absent() {
         "a kill signal is not confirmation that a live group exited"
     );
     waiting.await.unwrap();
+}
+
+struct CheckService {
+    code: i32,
+}
+impl crate::command_owner::NativeCommandService for CheckService {
+    fn identity(&self) -> crate::command_owner::NativeCommandFuture<StoreId> {
+        Box::pin(async { Ok(StoreId::from_bytes([73; 16])) })
+    }
+    fn acknowledge(&self, _: Vec<ToolCallId>) -> crate::command_owner::NativeCommandFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn cancel(&self, _: ToolCallId) -> crate::command_owner::NativeCommandFuture<()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn submit(
+        &self,
+        command: crate::command_owner::NativeCommand,
+    ) -> crate::command_owner::NativeCommandFuture<()> {
+        use crate::command_owner::*;
+        assert!(
+            matches!(command.filesystem, NativeFilesystem::Restricted { read_write, .. } if read_write.len() == 1 && read_write[0].path == command.workspace)
+        );
+        assert!(matches!(command.network, NativeNetwork::Isolated));
+        assert!(matches!(command.resources, NativeResources::Limited { .. }));
+        assert!(command.not_after_ms.is_some());
+        Box::pin(async { Ok(()) })
+    }
+    fn wait(
+        &self,
+        id: ToolCallId,
+        _: u64,
+    ) -> crate::command_owner::NativeCommandFuture<crate::command_owner::CommandSnapshot> {
+        let code = self.code;
+        Box::pin(async move {
+            use crate::command_owner::*;
+            let text = if code == 0 {
+                "shell exit=7".to_owned()
+            } else {
+                format!("shell exit=0 {}check-output-unique", "界\n".repeat(2000))
+            };
+            let mut output = crate::tools::dispatch::bounded_result(text, code != 0);
+            output.native_outcome = Some(NativeCommandOutcome::Exited { code: Some(code) });
+            let result = serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap();
+            Ok(CommandSnapshot {
+                id,
+                version: 1,
+                status: CommandStatus::Finished,
+                process: None,
+                output: String::new(),
+                result: Some(result),
+            })
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() {
+    use crate::command_owner::*;
+    const COMMAND: &str = "printf checked > goal-check-marker; if printf escaped > ../outside; then exit 99; fi; exit 0";
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let workspace = root.join("task");
+    std::fs::create_dir(&workspace).unwrap();
+    let owner = CommandOwner::open(
+        root.join("commands"),
+        "unknown",
+        crate::command_owner::tests::launcher(),
+    )
+    .await
+    .unwrap();
+    let mut scope = NativeCommandScope {
+        workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
+        read_only: vec![],
+        network: NativeNetwork::Isolated,
+        // Resource qualification has a separate delegated-cgroup fixture.
+        resources: NativeResources::Host,
+    };
+    for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
+        if let Ok(path) = Path::new(path).canonicalize()
+            && !scope.read_only.iter().any(|grant| grant.path == path)
+        {
+            scope
+                .read_only
+                .push(NativeDirectoryGrant::capture(&path).unwrap());
+        }
+    }
+    let loads = Arc::new(AtomicUsize::new(0));
+    let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+    options.grant_authority = Some(Arc::new(Authority(COMMAND)));
+    options.native_scopes.push(scope);
+    options.native_commands = Some(Arc::new(owner.clone()));
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(Loader {
+            failure_tail: false,
+            loads: loads.clone(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
+    let receipt = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
+        panic!("missing session")
+    };
+    let receipt = runtime
+        .command(
+            CommandId::generate().unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id": session_id, "objective":"verify isolated task",
+                "check":{"command":COMMAND,"timeout_ms":5000},
+                "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::GoalUpdated { goal, .. } = receipt.outcome else {
+        panic!("missing goal")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: receipt.committed_through,
+        })
+        .unwrap();
+    runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::GoalControl {
+                session_id,
+                expected: qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: goal.revision,
+                },
+                action: qq_protocol::GoalControl::ApproveCheck {
+                    scope: qq_protocol::GoalCheckScope::Once,
+                    command: COMMAND.into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    let (status, output) = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut status = None;
+        let mut output = None;
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            match event.event {
+                SessionEvent::ToolCallFinished { tool_call, .. } if tool_call.name == "shell" => {
+                    output = tool_call.result;
+                }
+                SessionEvent::GoalUpdated { goal } if goal.counters.audits == 1 => {
+                    status = Some(goal.status);
+                }
+                SessionEvent::RunFinished {
+                    origin: Some(qq_protocol::RunOrigin::GoalCheck { .. }),
+                    ..
+                } => break (status.unwrap(), output.unwrap()),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("scoped check completes without another model request");
+    assert!(
+        !root.join("outside").exists(),
+        "check escaped its task workspace"
+    );
+    if output.contains("required Linux filesystem enforcement is unavailable")
+        || output.contains("required Linux network enforcement is unavailable")
+    {
+        assert_ne!(status, qq_protocol::GoalStatus::Achieved);
+        assert!(!workspace.join("goal-check-marker").exists());
+    } else {
+        assert_eq!(status, qq_protocol::GoalStatus::Achieved, "{output}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("goal-check-marker")).unwrap(),
+            "checked"
+        );
+    }
+    assert_eq!(
+        loads.load(Ordering::SeqCst),
+        1,
+        "completion check must not load a model"
+    );
+    runtime.shutdown().await.unwrap();
+    owner.shutdown().await.unwrap();
 }

@@ -1,3 +1,4 @@
+mod native;
 use super::store::Priority;
 use super::*;
 #[cfg(unix)]
@@ -670,7 +671,7 @@ pub(super) fn queue(
 enum Start {
     Expired,
     Waiting,
-    Started(Vec<SessionEventEnvelope>),
+    Started(Vec<SessionEventEnvelope>, Option<ToolCallId>),
     Stop,
 }
 
@@ -679,6 +680,7 @@ fn try_start(
     store_id: StoreId,
     claimed: &ClaimedRun,
     deadline_ms: u64,
+    native: bool,
 ) -> Result<Start, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -741,7 +743,7 @@ fn try_start(
     goal.counters.audits += 1;
     goals::save(&transaction, &goal)?;
     let context = EventContext::for_run(store_id, claimed.identity, now);
-    let events = vec![
+    let mut events = vec![
         append_event(
             &transaction,
             context,
@@ -763,8 +765,15 @@ fn try_start(
             },
         )?,
     ];
+    let call = if native {
+        let (id, call_events) = native::record_call(&transaction, store_id, claimed, now)?;
+        events.extend(call_events);
+        Some(id)
+    } else {
+        None
+    };
     transaction.commit()?;
-    Ok(Start::Started(events))
+    Ok(Start::Started(events, call))
 }
 
 enum Completion {
@@ -1037,10 +1046,11 @@ pub(super) async fn execute(
             }
         }
         let claim = claimed.clone();
+        let native = inner.native_scopes.is_some() && inner.native_commands.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
-                try_start(connection, store_id, &claim, deadline_ms)
+                try_start(connection, store_id, &claim, deadline_ms, native)
             })
             .await;
         match started {
@@ -1067,19 +1077,34 @@ pub(super) async fn execute(
                     ()=tokio::time::sleep_until(deadline)=>{},
                 }
             }
-            Ok(Start::Started(events)) => {
+            Ok(Start::Started(events, call)) => {
                 for event in events {
                     inner.notify(event.cursor)
                 }
                 let cancelled = RunCancellation::new();
-                let process = run_process(
-                    PathBuf::from(&claimed.workspace),
-                    check.command.clone(),
-                    deadline,
-                    cancelled.clone(),
-                    Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
-                    resources.clone(),
-                );
+                let process = async {
+                    if let Some(call) = call {
+                        Ok(native::run(
+                            &inner,
+                            &claimed,
+                            call,
+                            deadline_ms,
+                            cancelled.clone(),
+                            &resources,
+                        )
+                        .await)
+                    } else {
+                        run_process(
+                            PathBuf::from(&claimed.workspace),
+                            check.command.clone(),
+                            deadline,
+                            cancelled.clone(),
+                            Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
+                            resources.clone(),
+                        )
+                        .await
+                    }
+                };
                 tokio::pin!(process);
                 let result = tokio::select! {
                     biased;
@@ -1108,13 +1133,20 @@ pub(super) async fn execute(
             }
         }
     };
-    let teardown = match resources.drain().await {
+    let mut teardown = match resources.drain().await {
         Ok(teardown) => teardown,
         Err(_) => {
             inner.failed.send_replace(true);
             return;
         }
     };
+    if execution::persist_native_results(&inner, &claimed, &mut teardown)
+        .await
+        .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
+    }
     #[cfg(all(test, unix))]
     pause_result(claimed.identity.session_id).await;
     let claim = claimed.clone();

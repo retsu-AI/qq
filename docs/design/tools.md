@@ -83,9 +83,14 @@ the same opened workspace. Missing command services never cause scoped shell
 calls to use the local host fallback. Other workspaces and replaced task roots
 are refused before loading project configuration, then the opened workspace is
 validated again afterward. Side questions use the same checks. Scoped goal
-completion checks currently refuse execution: their legacy host process launcher
-cannot bypass the registered scope. Durable native routing for these checks
-remains required.
+completion checks use the durable native command service with the same registered
+filesystem, network and resource limits. Their invocation and owner identity are
+persisted before submission, and their result before goal settlement. Exact check
+authorization remains separate from ordinary shell grants. Exit, timeout and
+cancellation are typed worker evidence; output text cannot attest success. Missing
+services refuse the check instead of using the legacy host launcher. Startup still
+pauses interrupted checks for explicit recovery; automatic check reconciliation
+remains unfinished.
 
 Registrations persist in session-store metadata before recovery or scheduling.
 An empty registration list restores them on restart. Additional task roots may

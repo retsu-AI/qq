@@ -689,6 +689,8 @@ pub(crate) enum ResultDisposition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_outcome: Option<crate::command_owner::NativeCommandOutcome>,
     /// Only the observer can attest that this is the worker's terminal result.
     #[serde(skip)]
     pub(crate) native_owner: Option<qq_protocol::StoreId>,
@@ -820,6 +822,7 @@ impl ToolOutput {
         let mut result = Self::bounded(content, &super::shell::SHELL_BOUNDS, true);
         // No output was observed before capture; elapsed time is not progress.
         result.result_digest = Sha256::digest(b"qq-native-preparation-timeout-v1").into();
+        result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::TimedOut);
         result.execution_context = self.execution_context;
         if result.execution_context.is_none() {
             result.disposition = ResultDisposition::Refused;
@@ -854,6 +857,7 @@ impl ToolOutput {
             spill,
             execution_context: None,
             native_owner: None,
+            native_outcome: None,
         }
     }
 
@@ -871,6 +875,7 @@ impl ToolOutput {
             spill: None,
             execution_context: None,
             native_owner: None,
+            native_outcome: None,
         }
     }
 
@@ -887,6 +892,7 @@ impl ToolOutput {
             spill: None,
             execution_context: None,
             native_owner: None,
+            native_outcome: None,
         }
     }
 }

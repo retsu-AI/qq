@@ -723,6 +723,7 @@ pub(super) async fn run_shell(
                 }
                 let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
                 result.result_digest = identity.finish(None, None, true);
+                result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::TimedOut);
                 result
             }
             ShellOutcome::OutputFailed(error) => {
@@ -737,7 +738,9 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                ToolOutput::interrupted("tool execution was cancelled")
+                let mut result = ToolOutput::interrupted("tool execution was cancelled");
+                result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Cancelled);
+                result
             }
         }
     }
@@ -955,6 +958,9 @@ fn shell_result(
         }
     };
     result.result_digest = identity.finish(status.code(), signal, false);
+    result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Exited {
+        code: status.code(),
+    });
     result
 }
 
