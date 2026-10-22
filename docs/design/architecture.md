@@ -84,11 +84,14 @@ and the [guide](../guide/troubleshooting.md#diagnostic-tracing) for activation.
 
 QQ is a Cargo workspace whose root package builds the `qq` binary. Library
 crates live under `crates/`, while repository automation lives in `xtask/`.
-`qq-harness` owns the bounded compiled-plan cache (`qq_harness::plan`), the
-configured MCP bridge (`qq_harness::mcp`), and secret-free endpoint
-descriptions; the binary re-exports the first two, and runtime/model loading
-and headless outcome driving live in the root package. Core does not depend on
-harness or application configuration.
+`qq-host` is the composition library: configuration-to-runtime composition
+(`RuntimeFactory`, the `RuntimeLoader`, approval reviewer and workspace grant
+authority, `RuntimeHandler`), authenticated model discovery, the command-worker
+client, the bounded compiled-plan cache (`qq_host::plan`) and the configured MCP
+bridge (`qq_host::mcp`). The binary passes its build identity
+(`qq_host::HostBuild`) in and keeps CLI, TUI and server wiring, headless
+outcome driving and onboarding. Core does not depend on `qq-host` or
+application configuration.
 
 Foreground goal hosting shares session preparation and unattended tool approval
 with ordinary headless runs. It observes the core goal driver, rather than
@@ -104,14 +107,11 @@ Cargo.toml
 src/
   main.rs        process entry and mode dispatch
   cli.rs         argument parsing and command dispatch
-  runtime.rs     configuration-to-runtime composition
   headless.rs    `qq run` durable non-interactive execution
   goals.rs       `qq goal` authenticated server client; no store ownership
-  catalog.rs     authenticated model discovery
   doctor.rs      `qq doctor`
   init.rs        `qq init`
   output.rs      plain-text command output
-  mcp.rs, plan.rs  re-exports of the qq-harness MCP bridge and plan cache
   docs_truth.rs  code/docs consistency tests
 crates/
   qq-auth/
@@ -134,9 +134,13 @@ crates/
   qq-core/
     Cargo.toml
     src/lib.rs
-  qq-harness/
+  qq-host/
     Cargo.toml
     src/lib.rs
+    src/runtime.rs         configuration-to-runtime composition
+    src/catalog.rs         authenticated model discovery
+    src/builtin_auth.rs    built-in provider credential policy (ADR-0064)
+    src/command_worker.rs  client of the out-of-process command worker
     src/plan.rs
     src/mcp.rs
   qq-mcp/
@@ -301,8 +305,8 @@ xtask/
 The direct workspace dependency graph is:
 
 ```text
-qq (composition root)
-qq-harness   -> qq-auth, qq-config, qq-core, qq-mcp, qq-protocol, qq-provider
+qq           -> qq-host, qq-client, qq-tui, qq-server, …
+qq-host      -> qq-auth, qq-config, qq-core, qq-mcp, qq-protocol, qq-provider, qq-server
 qq-server    -> qq-core, qq-protocol
 qq-tui       -> qq-client, qq-core, qq-protocol
 qq-client    -> qq-protocol
@@ -316,7 +320,7 @@ qq-protocol  -> qq-reasoning
 
 Dependencies point toward `qq-protocol` and `qq-provider`; `qq-client` and
 `qq-server` do not depend on one another, and neither `qq-config` nor `qq-auth`
-depends on the other. The root package wires them together. Application
+depends on the other. `qq-host` wires them together. Application
 configuration types must not become a shared dependency imported throughout
 the workspace; the root translates external configuration into each crate's
 settings.
@@ -2166,7 +2170,7 @@ Do not add an agent-framework, plugin, tool-host, context, or addon crate.
 | --- | --- |
 | `qq-config` | Parse and merge agent-profile and addon declarations, validate syntax, retain provenance |
 | `qq-auth` | Resolve provider and addon secret references without exposing secret values to config or protocol |
-| Root package | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
+| `qq-host` | Discover trusted sources, translate external config, compile/cache plans, wire concrete adapters |
 | `qq-provider` | Compile provider recipes; one provider-neutral stream handle plus effective capabilities; sole retry owner |
 | `qq-core` | `CompiledAgentPlan`, descriptor, execution invariants, context-source contracts, tools, run limits, durable outcomes |
 | `qq-mcp` | Bounded MCP capability/catalog snapshots and selected MCP operations |

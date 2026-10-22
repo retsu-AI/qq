@@ -2901,20 +2901,17 @@ dependencies = [
 name = "qq"
 version = "0.1.8"
 dependencies = [
- "base64 0.22.1",
  "clap",
  "directories",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
- "hmac 0.12.1",
  "nix 0.31.3",
  "qq-auth",
  "qq-client",
  "qq-config",
  "qq-core",
- "qq-harness",
- "qq-mcp",
+ "qq-host",
  "qq-protocol",
  "qq-provider",
  "qq-server",
@@ -3047,18 +3044,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "qq-harness"
+name = "qq-host"
 version = "0.1.8"
 dependencies = [
  "axum",
+ "base64 0.22.1",
+ "directories",
  "futures-util",
+ "getrandom 0.3.4",
+ "hmac 0.12.1",
  "qq-auth",
+ "qq-client",
  "qq-config",
  "qq-core",
  "qq-mcp",
  "qq-protocol",
  "qq-provider",
+ "qq-server",
  "reqwest",
+ "ron",
+ "rustix",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",

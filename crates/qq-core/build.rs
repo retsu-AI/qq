@@ -7,7 +7,7 @@ fn main() {
     let mut paths = vec![
         root.join("Cargo.lock"),
         root.join("Cargo.toml"),
-        root.join("src/runtime.rs"),
+        root.join("crates/qq-host/src/runtime.rs"),
         root.join("build.rs"),
     ];
     collect(Path::new("src"), &mut paths);

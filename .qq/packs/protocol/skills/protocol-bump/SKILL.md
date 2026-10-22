@@ -65,8 +65,9 @@ file goes stale.
 7. **Docs.** `docs/design/protocol.md`: the `PROTOCOL_VERSION` block, one
    sentence in the version history paragraph stating what an older client
    sees, the route or type section, and the `fixtures/vN/` path near the end.
-8. **Tests in the root crate.** `src/runtime.rs` and `src/headless.rs` assert
-   `prompt_identity.version` and the descriptor prefix; update if those moved.
+8. **Tests outside the protocol crate.** `crates/qq-host/src/runtime.rs` and
+   `src/headless.rs` assert `prompt_identity.version` and the descriptor
+   prefix; update if those moved.
 
 ## Descriptor change checklist (`qq-core::plan::descriptor`)
 

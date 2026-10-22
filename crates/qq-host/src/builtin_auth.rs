@@ -12,7 +12,7 @@ use qq_config::{BuiltinAudience, BuiltinProvider, SecretRef};
 /// How a built-in provider authenticates: a resolved-once API key bound to
 /// the table's audience, or a credential `qq-auth` resolves per request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BuiltinAuth {
+pub enum BuiltinAuth {
     /// An API key: explicit reference, then `<id>/<profile>`, then the row's
     /// variables, bound to this audience.
     ApiKey { audience: &'static str },
@@ -24,7 +24,7 @@ pub(crate) enum BuiltinAuth {
 }
 
 impl BuiltinAuth {
-    pub(crate) const fn of(provider: &BuiltinProvider) -> Self {
+    pub const fn of(provider: &BuiltinProvider) -> Self {
         match provider.audience {
             BuiltinAudience::Table(audience) => Self::ApiKey { audience },
             BuiltinAudience::OpenAiCodex => Self::OpenAiCodex,
@@ -33,7 +33,7 @@ impl BuiltinAuth {
     }
 
     /// The audience a credential for this provider is bound to.
-    pub(crate) const fn audience(self) -> &'static str {
+    pub const fn audience(self) -> &'static str {
         match self {
             Self::ApiKey { audience } => audience,
             Self::OpenAiCodex => qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT,
