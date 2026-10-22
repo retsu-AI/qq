@@ -27,7 +27,8 @@ retain their own authority.
 
 The runtime skeleton is a private 4 MiB tmpfs with 4,096 inodes. It contains
 only explicit directory mounts, runtime aliases into that tree, private procfs
-for helper startup, and a verified Linux discard device at `/dev/null`.
+for helper startup, a verified Linux discard device at `/dev/null`, and a
+message-queue filesystem belonging to this execution's private IPC namespace.
 Metadata changes outside writable roots are denied. Nested mounts are not
 implicitly imported; their roots need explicit grants. The held working
 directory's identity must survive reconstruction. Frozen PATH values remain
@@ -64,6 +65,30 @@ and the helper's owned launch descriptors survive the cleanup, with helper
 handles closed on payload exec. Network authority is part of the persisted
 request identity. Unsupported backends refuse isolation explicitly.
 
+
+A private root also gets a new IPC namespace. Host System V shared memory,
+semaphores and message queues are outside that namespace. The helper mounts
+only the new namespace's message-queue filesystem at `/dev/mqueue` and grants
+its private operations in Landlock. Host message-queue mounts are refused,
+including read-only grants: receiving a message mutates a queue independently
+of mount write permissions.
+
+Before spawning the payload, the single-threaded helper installs an inherited
+seccomp filter through the safe `seccompiler` interface. Direct kernel-keyring
+calls, BPF and io_uring are denied. Socket creation permits only Unix, IPv4,
+IPv6 and netlink families, still subject to the separate network policy; this
+excludes kernel crypto/key consumers and other host transports. Ioctls permit
+only terminal queries, descriptor settings and file cloning, preventing filesystem-key
+commands through ordinary file descriptors. x32 syscalls are denied; other
+ABI mismatches terminate the payload. Filter installation failure refuses
+execution before model-controlled code runs. The native filter supports
+little-endian x86_64, aarch64 and riscv64; other Linux architectures explicitly
+refuse private execution.
+
+These restrictions block host kernel credential interfaces. They do not broker
+authenticated Git/hosting operations or sanitize credentials in explicitly
+readable files and supplied environment values; those remain required before
+Auto enablement.
 
 `NativeResources::Limited` carries explicit memory, native-task and CPU-bandwidth
 limits. Linux uses one cgroup v2 per invocation beneath the trusted embedding

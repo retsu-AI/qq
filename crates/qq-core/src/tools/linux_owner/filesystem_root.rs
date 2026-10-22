@@ -210,7 +210,7 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
         root_dir.create_dir_all(relative(path(&directory.path))?)?;
     }
     root_dir.create_dir_all("proc")?;
-    root_dir.create_dir_all("dev")?;
+    root_dir.create_dir_all("dev/mqueue")?;
     drop(root_dir.create("dev/null")?);
     for (directory, source) in filesystem.directories.iter().zip(&sources) {
         bind(
@@ -239,6 +239,17 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
     // A read-only device mount still permits discard I/O but forbids inode
     // metadata changes. Only this pinned 1:3 character device gets device I/O.
     bind(&null, &root_dir, Path::new("dev/null"), root, true)?;
+    // This filesystem belongs to the newly created IPC namespace. Never bind
+    // the host's mqueue mount, whose descriptors retain host queue authority.
+    let queues = root_dir.open_dir("dev/mqueue")?;
+    rustix::mount::mount(
+        "qq-private-ipc",
+        format!("/proc/self/fd/{}", queues.as_raw_fd()),
+        "mqueue",
+        MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
+        None,
+    )?;
+    drop(queues);
     drop(root_dir);
     std::env::set_current_dir(namespace_root)?;
     rustix::process::pivot_root(".", ".")

@@ -203,6 +203,9 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     if let Some(filesystem) = packet.filesystem {
         super::filesystem::enforce(filesystem.directories)?;
+        if let Err(error) = super::kernel_isolation::enforce() {
+            return refuse(&mut ack, b'k', error);
+        }
     }
     // PID 1 remains trusted: commands retain ordinary signal/reaping semantics.
     // Exiting PID 1 makes the kernel kill every remaining namespace member.
@@ -346,6 +349,7 @@ fn monitor(fields: &str) -> io::Result<u8> {
         ])
         .args(packet.isolated_network.then_some("--net"))
         .args(packet.filesystem.is_some().then_some("--keep-caps"))
+        .args(packet.filesystem.is_some().then_some("--ipc"))
         .arg("--")
         .arg(std::ffi::OsString::from_vec(packet.launcher_program))
         .args(
