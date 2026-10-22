@@ -2307,9 +2307,10 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
         assert!(result.is_error());
         if cfg!(target_os = "macos") && expected == "filesystem" {
             // The adapter is available, but no executable root was granted.
-            // Refusal must come from the restricted path, never a host retry.
+            // The interpreter/loader can also terminate by signal. Both are
+            // unsuccessful terminal outcomes; neither may run the payload.
             assert!(
-                matches!(result.outcome(), Some(NativeCommandOutcome::Exited { code: Some(code) }) if code != 0),
+                matches!(result.outcome(), Some(NativeCommandOutcome::Exited { code }) if code != Some(0)),
                 "{}",
                 result.text()
             );

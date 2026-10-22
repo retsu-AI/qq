@@ -235,7 +235,16 @@ pub(super) async fn spawn(
         result = async {
             let control = child.control.as_mut().expect("owned startup control");
             control.write_all(&(startup.encoded.len() as u64).to_le_bytes()).await?;
-            control.write_all(&startup.encoded).await
+            control.write_all(&startup.encoded).await?;
+            let mut ready = [0; 4];
+            control.read_exact(&mut ready).await?;
+            if &ready != b"RDY!" {
+                return Err(io::Error::other("invalid native preparation response"));
+            }
+            if cancelled.is_cancelled() || Instant::now() >= deadline {
+                return Err(io::Error::other("native startup stopped"));
+            }
+            control.write_all(&[1]).await
         } => result,
     };
     if let Err(error) = authorized {
@@ -338,6 +347,13 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         return Err(io::Error::other("native working directory changed"));
     }
     let profile = profile(&packet.filesystem, packet.network)?;
+    rustix::process::fchdir(cwd.root())?;
+    control.write_all(b"RDY!")?;
+    let mut authorization = [0];
+    control.read_exact(&mut authorization)?;
+    if authorization != [1] || unix_ms() >= packet.not_after_ms {
+        return Err(io::Error::other("native launch authorization expired"));
+    }
     let mut liveness = control.try_clone()?;
     rustix::io::fcntl_setfd(&liveness, rustix::io::FdFlags::CLOEXEC)?;
     std::thread::Builder::new()
@@ -367,9 +383,11 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
                 .into_iter()
                 .map(|(name, value)| (OsString::from_vec(name), OsString::from_vec(value))),
         );
-    rustix::process::fchdir(cwd.root())?;
     // No new group: the trusted helper remains its leader. The kernel profile
     // denies setsid/setpgid in every payload descendant.
+    if unix_ms() >= packet.not_after_ms {
+        return Err(io::Error::other("native launch authorization expired"));
+    }
     let mut child = command.spawn()?;
     if let Ok(status) = child.wait() {
         // An observer can disappear before this write. Cleanup is mandatory
@@ -437,6 +455,80 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn helper_preparation_waits_for_readiness_and_remains_cancellable() {
+        let root = tempfile::tempdir().unwrap();
+        let (control, inherited) = std::os::unix::net::UnixStream::pair().unwrap();
+        control.set_nonblocking(true).unwrap();
+        let (gate, held) = rustix::pipe::pipe().unwrap();
+        let (read, write) = rustix::pipe::pipe().unwrap();
+        let mut ready = tokio::fs::File::from_std(std::fs::File::from(read));
+        let mut command = tokio::process::Command::new("bash");
+        command.args(["-c", "dd bs=1 count=9 <&3 >/dev/null 2>&1; printf ready; IFS= read -r -n 1 gate <&4; printf RDY! >&3; IFS= read -r -n 1 go <&3; printf executed > escaped"])
+            .current_dir(root.path()).process_group(0).kill_on_drop(true)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::from(write)).stderr(std::process::Stdio::inherit());
+        command
+            .as_std_mut()
+            .fd_mappings(vec![
+                command_fds::FdMapping {
+                    parent_fd: inherited.into(),
+                    child_fd: 3,
+                },
+                command_fds::FdMapping {
+                    parent_fd: gate,
+                    child_fd: 4,
+                },
+            ])
+            .unwrap();
+        let startup = Startup {
+            encoded: vec![b'J'],
+            control: tokio::net::UnixStream::from_std(control).unwrap(),
+        };
+        let tasks = crate::tools::dispatch::ToolTasks::default();
+        let lease = tasks.enter();
+        let cancellation = crate::RunCancellation::new();
+        let cancelled = ToolCancellation::new(cancellation.clone());
+        let execution = tokio::spawn(async move {
+            spawn(
+                command,
+                startup,
+                &lease,
+                &cancelled,
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .await
+        });
+        let mut marker = [0; 5];
+        let preparing = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            ready.read_exact(&mut marker),
+        )
+        .await;
+        cancellation.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution)
+            .await
+            .unwrap()
+            .unwrap();
+        let stopped = result.is_err();
+        let diagnostic = result.as_ref().err().map(ToString::to_string);
+        if let Ok(mut child) = result {
+            child.start_kill().unwrap();
+            child.wait().await.unwrap();
+        }
+        assert!(
+            matches!(preparing, Ok(Ok(_))),
+            "helper preparation marker failed: {preparing:?}; startup: {diagnostic:?}"
+        );
+        assert_eq!(&marker, b"ready");
+        drop(held);
+        tasks.drain().await.unwrap();
+        assert!(
+            stopped,
+            "startup must wait for prepared helper readiness and honor cancellation while another stage owns the gate"
+        );
+        assert!(!root.path().join("escaped").exists());
+    }
+
     #[test]
     fn replaced_directory_is_refused_before_profile_construction() {
         let root = tempfile::tempdir().unwrap();
