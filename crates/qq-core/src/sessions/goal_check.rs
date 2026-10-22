@@ -7,6 +7,7 @@ use crate::tools::process_context;
 use crate::tools::{ProcessGroupGuard, ToolCancellation};
 #[cfg(unix)]
 use crate::workspace::Workspace;
+pub(super) use native::recover_result;
 #[cfg(unix)]
 use std::collections::VecDeque;
 #[cfg(unix)]
@@ -668,14 +669,14 @@ pub(super) fn queue(
     ])
 }
 
-enum Start {
+pub(super) enum Start {
     Expired,
     Waiting,
     Started(Vec<SessionEventEnvelope>, Option<ToolCallId>),
     Stop,
 }
 
-fn try_start(
+pub(super) fn try_start(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
@@ -787,16 +788,36 @@ fn finish(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
-    mut completion: Completion,
+    completion: Completion,
     deadline_ms: u64,
     _teardown: TeardownComplete,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    if run_is_settled(&transaction, claimed.identity.run_id)? {
+    let events = finish_in_transaction(
+        &transaction,
+        store_id,
+        claimed,
+        completion,
+        deadline_ms,
+        SettlementCause::Executor,
+    )?;
+    transaction.commit()?;
+    Ok(events)
+}
+
+fn finish_in_transaction(
+    transaction: &Connection,
+    store_id: StoreId,
+    claimed: &ClaimedRun,
+    mut completion: Completion,
+    deadline_ms: u64,
+    cause: SettlementCause,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    if run_is_settled(transaction, claimed.identity.run_id)? {
         return Ok(Vec::new());
     }
     let now = now_ms();
-    let cancelled = run_cancel_requested(&transaction, claimed.identity.run_id)?;
+    let cancelled = run_cancel_requested(transaction, claimed.identity.run_id)?;
     if now >= deadline_ms
         && let Completion::Process(result) = &mut completion
         && matches!(result.outcome, ProcessOutcome::Exited { .. })
@@ -842,13 +863,13 @@ fn finish(
             claimed.identity.run_id.to_string(), if queued { "queued" } else { "streaming" }, output, now],
     )?;
     let mut events = vec![append_event(
-        &transaction,
+        transaction,
         EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::AssistantMessageStarted {
-            message: load_message(&transaction, message_id)?,
+            message: load_message(transaction, message_id)?,
         },
     )?];
-    if let Some(mut goal) = goals::load_live(&transaction, claimed.identity.session_id)?
+    if let Some(mut goal) = goals::load_live(transaction, claimed.identity.session_id)?
         && claimed
             .goal
             .as_ref()
@@ -934,9 +955,9 @@ fn finish(
                 }
             }
         }
-        goals::save(&transaction, &goal)?;
+        goals::save(transaction, &goal)?;
         events.push(append_event(
-            &transaction,
+            transaction,
             EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::GoalUpdated {
                 goal: Box::new(goal),
@@ -960,7 +981,7 @@ fn finish(
     };
     let settled = if queued {
         finish_queued_run_with_outcome(
-            &transaction,
+            transaction,
             store_id,
             claimed.identity.workspace_id,
             claimed.identity.session_id,
@@ -969,19 +990,13 @@ fn finish(
             now,
         )?
     } else {
-        settle_run(
-            &transaction,
-            store_id,
-            claimed,
-            outcome,
-            None,
-            SettlementCause::Executor,
-        )?
+        settle_run(transaction, store_id, claimed, outcome, None, cause)?
     };
     if let Some(settled) = settled {
         events.extend(settled)
     }
-    transaction.commit()?;
+    // Reclaim the worker result only once the goal and run settlement are durable.
+    transaction.execute("UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE run_id=?1 AND state IN ('completed','failed'))", [claimed.identity.run_id.to_string()])?;
     Ok(events)
 }
 
@@ -1168,6 +1183,9 @@ pub(super) async fn execute(
             for event in events {
                 inner.notify(event.cursor)
             }
+            if let Some(ack) = &inner.native_ack {
+                ack.wake();
+            }
         }
         Err(_) => {
             inner.failed.send_replace(true);
@@ -1199,32 +1217,53 @@ pub(super) fn recover(
     transaction: &Connection,
     store_id: StoreId,
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
-    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0")?;
+    Ok(recover_checks(transaction, store_id, None)?
+        .into_iter()
+        .map(|event| event.cursor)
+        .collect())
+}
+
+pub(super) fn interrupt_native(
+    transaction: &Connection,
+    store_id: StoreId,
+    run: RunId,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    transaction.execute(
+        "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
+        [run.to_string()],
+    )?;
+    recover_checks(transaction, store_id, Some(run))
+}
+
+fn recover_checks(
+    transaction: &Connection,
+    store_id: StoreId,
+    run: Option<RunId>,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    let run = run.map(|run| run.to_string());
+    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0 AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
     let ids = workspaces
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([&run], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(workspaces);
-    transaction.execute("UPDATE runs SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running'",[])?;
+    transaction.execute("UPDATE runs AS r SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)",[&run])?;
     let mut hold_cursors = Vec::new();
     for workspace in ids {
         let workspace = parse_id(&workspace)?;
         if let Some(hold) = interruption(transaction, workspace)? {
-            hold_cursors.push(
-                append_event(
-                    transaction,
-                    EventContext::for_session(store_id, workspace, hold.session_id, None, now_ms()),
-                    SessionEvent::CheckInterruptionChanged {
-                        interruption: Some(hold),
-                    },
-                )?
-                .cursor,
-            );
+            hold_cursors.push(append_event(
+                transaction,
+                EventContext::for_session(store_id, workspace, hold.session_id, None, now_ms()),
+                SessionEvent::CheckInterruptionChanged {
+                    interruption: Some(hold),
+                },
+            )?);
         }
     }
     let mut statement=transaction.prepare("SELECT r.id,r.session_id,s.workspace_id,r.goal_id,r.goal_revision
-        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running'")?;
+        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([&run], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1257,16 +1296,13 @@ pub(super) fn recover(
             };
         }
         goals::save(transaction, &goal)?;
-        cursors.push(
-            append_event(
-                transaction,
-                EventContext::for_session(store_id, parse_id(&workspace)?, session, None, now_ms()),
-                SessionEvent::GoalUpdated {
-                    goal: Box::new(goal),
-                },
-            )?
-            .cursor,
-        );
+        cursors.push(append_event(
+            transaction,
+            EventContext::for_session(store_id, parse_id(&workspace)?, session, None, now_ms()),
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
     }
     Ok(cursors)
 }

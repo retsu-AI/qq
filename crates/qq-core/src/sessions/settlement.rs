@@ -1320,13 +1320,9 @@ pub(super) fn recover_interrupted_runs_except(
     Ok(cursors)
 }
 
-/// Settle only the original run whose independently owned commands drained.
-pub(super) fn recover_running_run(
-    transaction: &Connection,
-    store_id: StoreId,
-    identity: RunIdentity,
-) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
-    let claimed = ClaimedRun {
+/// Reconstruct only settlement ownership; recovery never loads a model plan.
+pub(super) fn recovery_claim(identity: RunIdentity) -> ClaimedRun {
+    ClaimedRun {
         goal_spend_owner: None,
         goal: None,
         goal_initial_notice: None,
@@ -1363,11 +1359,28 @@ pub(super) fn recover_running_run(
         pending_steering: Vec::new(),
         output: None,
         purpose: SessionPurpose::Task,
-    };
+    }
+}
+
+/// Settle only the original run whose independently owned commands drained.
+pub(super) fn recover_running_run(
+    transaction: &Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    let claimed = recovery_claim(identity);
     if run_is_settled(transaction, identity.run_id)? {
+        transaction.execute(
+            "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
+            [identity.run_id.to_string()],
+        )?;
         return Ok(Vec::new());
     }
-    let mut events = Vec::new();
+    let mut events = if identity.kind == RunKind::GoalCheck {
+        super::goal_check::interrupt_native(transaction, store_id, identity.run_id)?
+    } else {
+        Vec::new()
+    };
     supersede_pending_steering(transaction, store_id, identity, now_ms(), &mut events)?;
     events.extend(
         settle_run(

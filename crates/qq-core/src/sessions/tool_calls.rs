@@ -155,6 +155,40 @@ pub(super) fn finish_tool_call(
     native_owner: Option<StoreId>,
 ) -> Result<ToolCallCommit, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
+    let commit = finish_tool_call_in_transaction(
+        &transaction,
+        store_id,
+        identity,
+        tool_call_id,
+        result,
+        is_error,
+        file_states,
+        display,
+        spill,
+        execution_context,
+        native_owner,
+    )?;
+    transaction.commit()?;
+    Ok(commit)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one persisted row update; the caller owns the atomic goal settlement"
+)]
+pub(super) fn finish_tool_call_in_transaction(
+    transaction: &Connection,
+    store_id: StoreId,
+    identity: RunIdentity,
+    tool_call_id: ToolCallId,
+    result: String,
+    is_error: bool,
+    file_states: Vec<FileStateUpdate>,
+    display: Option<ToolCallDisplay>,
+    spill: Option<crate::tools::SpillRecord>,
+    execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
+    native_owner: Option<StoreId>,
+) -> Result<ToolCallCommit, SessionRuntimeError> {
     let (provider_call_id, tool_name, first_result_in_turn, recorded_context) = transaction
         .query_row(
             "SELECT current.provider_call_id, current.name,
@@ -187,7 +221,7 @@ pub(super) fn finish_tool_call(
         false
     } else {
         match reserve_tool_result_capacity(
-            &transaction,
+            transaction,
             identity.run_id,
             &provider_call_id,
             &result,
@@ -246,28 +280,27 @@ pub(super) fn finish_tool_call(
     }
     if let Some(owner) = native_owner {
         let written = transaction.execute(
-            "UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2",
-            params![tool_call_id.to_string(), owner.to_string()],
+            "UPDATE native_command_owners SET result_saved=?3 WHERE tool_call_id=?1 AND owner_id=?2",
+            params![tool_call_id.to_string(), owner.to_string(), identity.kind != RunKind::GoalCheck],
         )?;
         if written != 1 {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
     for update in &file_states {
-        record_session_file(&transaction, identity.session_id, update, now)?;
+        record_session_file(transaction, identity.session_id, update, now)?;
     }
     // The complete output and the result whose marker cites it commit
     // together: a marker never names a handle the store does not hold.
     if let Some(spill) = spill {
-        store_tool_spill(&transaction, identity, tool_call_id, &tool_name, spill, now)?;
+        store_tool_spill(transaction, identity, tool_call_id, &tool_name, spill, now)?;
     }
-    let tool_call = load_tool_call(&transaction, tool_call_id)?;
+    let tool_call = load_tool_call(transaction, tool_call_id)?;
     let event = append_event(
-        &transaction,
+        transaction,
         EventContext::for_run(store_id, identity, now),
         SessionEvent::ToolCallFinished { tool_call },
     )?;
-    transaction.commit()?;
     Ok(ToolCallCommit {
         event,
         context_exhausted,
