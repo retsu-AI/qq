@@ -91,8 +91,9 @@ cancellation are typed worker evidence; output text cannot attest success. Missi
 services refuse the check instead of using the legacy host launcher. On restart,
 QQ observes the original worker journal without resubmitting the command or
 renewing check consent. Live checks retain workspace exclusion and wake the goal
-when their worker finishes. A terminal typed result and its original goal settle
-atomically before the worker may reclaim the observation. Cancellation, expired
+when their worker finishes. Worker observations remain retained until goal/run
+settlement commits. Recovery saves the terminal tool result and its original goal
+in one transaction before acknowledging the worker. Cancellation, expired
 budgets and edited goals still take precedence. Unavailable or replaced workers,
 changed task roots, and missing terminal evidence retain the explicit interrupted
 check hold; legacy host checks still require manual recovery.

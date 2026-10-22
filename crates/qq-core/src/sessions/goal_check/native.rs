@@ -264,70 +264,8 @@ async fn run_inner(
     Ok(ProcessResult { outcome, tail })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity() {
-        stalled_preparation(false).await;
-    }
-
-    #[tokio::test]
-    async fn scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity() {
-        stalled_preparation(true).await;
-    }
-
-    async fn stalled_preparation(expire: bool) {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().canonicalize().unwrap();
-        let scope = Arc::new(crate::command_owner::NativeCommandScope {
-            workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
-            read_only: vec![],
-            network: crate::command_owner::NativeNetwork::Isolated,
-            resources: crate::command_owner::NativeResources::Host,
-        });
-        let permits = crate::workspace::blocking_permits();
-        let held = permits
-            .clone()
-            .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
-            .await
-            .unwrap();
-        let cancellation = RunCancellation::new();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut preparation = Box::pin(prepare_workspace(
-            scope,
-            path,
-            cancellation.clone(),
-            deadline,
-        ));
-        assert!(futures_util::poll!(preparation.as_mut()).is_pending());
-        if expire {
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(61)).await;
-        } else {
-            cancellation.cancel();
-        }
-        let result = tokio::time::timeout(Duration::from_secs(1), preparation.as_mut()).await;
-        drop(preparation);
-        drop(held);
-        assert!(
-            result.is_ok(),
-            "cancellation/deadline must finish while unrelated work still owns every permit"
-        );
-        assert!(
-            result.unwrap().is_err(),
-            "stopped preparation cannot grant a workspace"
-        );
-    }
-}
-
 /// The original worker attested terminal evidence. Save the tool observation
 /// and goal settlement together before making its journal reclaimable.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "persist one recovered invocation with its owner and receipt"
-)]
 pub(in crate::sessions) fn recover_result(
     connection: &mut Connection,
     store_id: StoreId,
@@ -432,4 +370,62 @@ pub(in crate::sessions) fn recover_result(
     }
     transaction.commit()?;
     Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity() {
+        stalled_preparation(false).await;
+    }
+
+    #[tokio::test]
+    async fn scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity() {
+        stalled_preparation(true).await;
+    }
+
+    async fn stalled_preparation(expire: bool) {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let scope = Arc::new(crate::command_owner::NativeCommandScope {
+            workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
+            read_only: vec![],
+            network: crate::command_owner::NativeNetwork::Isolated,
+            resources: crate::command_owner::NativeResources::Host,
+        });
+        let permits = crate::workspace::blocking_permits();
+        let held = permits
+            .clone()
+            .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
+            .await
+            .unwrap();
+        let cancellation = RunCancellation::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut preparation = Box::pin(prepare_workspace(
+            scope,
+            path,
+            cancellation.clone(),
+            deadline,
+        ));
+        assert!(futures_util::poll!(preparation.as_mut()).is_pending());
+        if expire {
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(61)).await;
+        } else {
+            cancellation.cancel();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(1), preparation.as_mut()).await;
+        drop(preparation);
+        drop(held);
+        assert!(
+            result.is_ok(),
+            "cancellation/deadline must finish while unrelated work still owns every permit"
+        );
+        assert!(
+            result.unwrap().is_err(),
+            "stopped preparation cannot grant a workspace"
+        );
+    }
 }
