@@ -420,6 +420,13 @@ async fn prepare_execution(
                     Arc::clone(inner),
                     claimed.clone(),
                     Arc::clone(&resources.children),
+                    loaded
+                        .plan
+                        .descriptor()
+                        .tools
+                        .spawn_model_routes
+                        .clone()
+                        .into(),
                 )
                 .with_write_children(delegation.write_children && claimed.depth == 0),
             ) as Arc<dyn SubagentSpawner>)

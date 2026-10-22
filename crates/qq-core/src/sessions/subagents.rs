@@ -373,6 +373,7 @@ async fn child_cancelled(cancel: &mut watch::Receiver<bool>) {
 pub(super) struct SessionSubagentSpawner {
     inner: Arc<SessionRuntimeInner>,
     parent: ClaimedRun,
+    advertised_models: Arc<[String]>,
     /// Bounds this run's children in flight; excess spawn calls in one turn
     /// wait here rather than erroring.
     slots: Arc<Semaphore>,
@@ -394,6 +395,7 @@ impl SessionSubagentSpawner {
         inner: Arc<SessionRuntimeInner>,
         parent: ClaimedRun,
         tasks: Arc<ChildTasks>,
+        advertised_models: Arc<[String]>,
     ) -> Self {
         let concurrent = parent
             .limits
@@ -408,6 +410,7 @@ impl SessionSubagentSpawner {
         Self {
             inner,
             parent,
+            advertised_models,
             slots: Arc::new(Semaphore::new(concurrent)),
             write_slot: Arc::new(Semaphore::new(1)),
             write_children: false,
@@ -430,6 +433,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
         let parent = self.parent.clone();
         let slots = Arc::clone(&self.slots);
         let budget = SpawnBudget {
+            advertised_models: Arc::clone(&self.advertised_models),
             slots,
             write_slot: Arc::clone(&self.write_slot),
             write_children: self.write_children,
@@ -585,6 +589,7 @@ impl SubagentSpawner for SessionSubagentSpawner {
 
 /// The per-run child bookkeeping one spawn call draws from.
 pub(super) struct SpawnBudget {
+    pub(super) advertised_models: Arc<[String]>,
     pub(super) slots: Arc<Semaphore>,
     pub(super) write_slot: Arc<Semaphore>,
     pub(super) write_children: bool,
@@ -775,6 +780,7 @@ async fn run_owned_child(
     admitted: Option<oneshot::Sender<SessionId>>,
 ) -> SpawnAgentOutcome {
     let SpawnBudget {
+        advertised_models,
         slots,
         write_slot,
         write_children,
@@ -884,11 +890,15 @@ async fn run_owned_child(
             return Err(spawn_error("the sub-agent admission was cancelled"));
         }
         // The spawn-time choke point: every resolved route — explicit argument,
-        // configured worker, or parent fallback — must be authenticated and in
-        // the served model list right now, before any durable child state exists.
+        // configured worker, or parent fallback — must pass current policy,
+        // authentication and catalog admission before durable child state exists.
         if let Err(error) = inner
             .loader
-            .validate_spawn_model(parent.workspace.clone(), selection.clone())
+            .validate_spawn_model(
+                parent.workspace.clone(),
+                selection.clone(),
+                Arc::clone(&advertised_models),
+            )
             .await
         {
             return Err(spawn_error(format!(
@@ -1305,6 +1315,7 @@ impl crate::runtime::AuditHook for SessionAuditHook {
                 inner,
                 parent,
                 SpawnBudget {
+                    advertised_models: Arc::from([]),
                     slots,
                     write_slot: Arc::new(Semaphore::new(1)),
                     write_children: false,

@@ -1935,6 +1935,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         Arc::clone(&runtime.inner),
         parent,
         subagents::SpawnBudget {
+            advertised_models: Arc::from([]),
             slots: Arc::new(Semaphore::new(1)),
             write_slot: Arc::new(Semaphore::new(1)),
             write_children: false,

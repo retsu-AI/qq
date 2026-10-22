@@ -4803,7 +4803,9 @@ impl RuntimeLoader for ValidatingLoader {
         &self,
         _workspace: String,
         selection: ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
+        assert_eq!(advertised.as_ref(), ["test/child", "test/model"]);
         self.validations.lock().unwrap().push(selection);
         let result = match &self.rejection {
             Some(error) => Err(error.clone()),
@@ -4821,7 +4823,16 @@ impl RuntimeLoader for ValidatingLoader {
         };
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_spawn_model_routes(vec![
+                            "test/child".to_owned(),
+                            "test/model".to_owned(),
+                        ]),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),

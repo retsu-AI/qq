@@ -1195,7 +1195,8 @@ impl RuntimeFactory {
     }
 
     /// The spawn-time model gate: accepts exactly the routes the served
-    /// model list (`POST /v1/models` and the pickers) would show right now.
+    /// model list (`POST /v1/models` and the pickers) serves, plus routes
+    /// retained by the parent's compiled catalog.
     /// Route syntax, provider existence, and provider policy were already
     /// rejected by the configuration load that produced `snapshot`; this
     /// adds the authentication check that gates the served list and the
@@ -1206,6 +1207,7 @@ impl RuntimeFactory {
         &self,
         snapshot: &ConfigSnapshot,
         workspace: &str,
+        advertised: &[String],
     ) -> Result<(), RuntimeBuildError> {
         let provider_id = snapshot.model().provider();
         let model_id = snapshot.model().model();
@@ -1217,6 +1219,12 @@ impl RuntimeFactory {
             return Err(RuntimeBuildError::UnauthenticatedProvider(
                 provider_id.to_owned(),
             ));
+        }
+        if advertised
+            .iter()
+            .any(|route| route == snapshot.model().as_str())
+        {
+            return Ok(());
         }
         let cached = self
             .inner
@@ -1255,6 +1263,7 @@ impl RuntimeFactory {
         &self,
         workspace: &str,
         selection: &qq_protocol::ModelSelection,
+        advertised: &[String],
     ) -> Result<(), RuntimeLoadError> {
         let snapshot = self
             .snapshot_for_selection(workspace, selection)
@@ -1262,7 +1271,7 @@ impl RuntimeFactory {
                 kind: error.failure_kind(),
                 message: error.to_string(),
             })?;
-        self.validate_spawn_snapshot(&snapshot, workspace)
+        self.validate_spawn_snapshot(&snapshot, workspace, advertised)
             .map_err(|error| {
                 let mut message = error.to_string();
                 if matches!(error, RuntimeBuildError::UnknownModel { .. })
@@ -2340,11 +2349,12 @@ impl RuntimeLoader for RuntimeFactory {
         &self,
         workspace: String,
         selection: qq_protocol::ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
         let factory = self.clone();
         Box::pin(async move {
             let build = tokio::task::spawn_blocking(move || {
-                factory.validate_spawn_selection(&workspace, &selection)
+                factory.validate_spawn_selection(&workspace, &selection, &advertised)
             })
             .await;
             match build {
@@ -5892,8 +5902,86 @@ mod tests {
                 max_output_tokens: Some(128),
                 organization: None,
             },
+            Arc::from([]),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn spawn_admission_keeps_the_parent_runs_advertised_selection() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+            version: 1, model: "custom/configured",
+            providers: {"custom": Custom(
+                connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                models: {"configured": (name: "Configured")},
+            )},
+        )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let request = LoadRequest::new(workspace.clone())
+            .with_overrides(RuntimeOverrides::new().with_model("custom/selected-for-this-run"));
+        let plan = factory.plan_for(&request).unwrap();
+        assert!(
+            plan.descriptor()
+                .tools
+                .spawn_model_routes
+                .iter()
+                .any(|route| route == "custom/selected-for-this-run")
+        );
+        RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            ModelSelection {
+                model: Some("custom/selected-for-this-run".to_owned()),
+                ..ModelSelection::default()
+            },
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            validate_route(&factory, &workspace, "custom/selected-for-this-run")
+                .await
+                .is_err()
+        );
+        let configuration = fs::read_to_string(fixture.path("global/config.ron")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            configuration.replace("auth: NoAuth", "auth: Bearer(Stored(\"lost\"))"),
+        )
+        .unwrap();
+        let selection = ModelSelection {
+            model: Some("custom/selected-for-this-run".to_owned()),
+            ..ModelSelection::default()
+        };
+        let error = RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            selection.clone(),
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, RunFailureKind::Authentication);
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (denied_providers: ["custom"]))"#,
+        )
+        .unwrap();
+        let error = RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            selection,
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, RunFailureKind::Policy);
     }
 
     #[tokio::test]
@@ -6666,6 +6754,7 @@ mod tests {
                 model: Some("custom/test-model".to_owned()),
                 ..ModelSelection::default()
             },
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
         )
         .await
         .unwrap();
