@@ -30,7 +30,22 @@ const MAX_PACKET: usize = 4 * 1024 * 1024;
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
 #[derive(Clone)]
-pub(super) struct MacosOwner(CommandLauncher);
+pub(super) struct MacosOwner {
+    launcher: CommandLauncher,
+    _image: std::sync::Arc<HelperImage>,
+}
+
+struct HelperImage(Option<tempfile::TempDir>);
+impl Drop for HelperImage {
+    fn drop(&mut self) {
+        let directory = self.0.take();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn_blocking(move || drop(directory)));
+        } else {
+            drop(directory);
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,7 +61,8 @@ struct Packet {
 }
 
 impl MacosOwner {
-    pub(super) fn discover(launcher: CommandLauncher) -> io::Result<Self> {
+    pub(super) fn discover(mut launcher: CommandLauncher) -> io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt as _;
         if rustix::process::getuid().is_root()
             || rustix::process::getuid() != rustix::process::geteuid()
         {
@@ -54,7 +70,8 @@ impl MacosOwner {
                 "macOS command isolation requires an unprivileged owner",
             ));
         }
-        let metadata = launcher.executable.metadata()?;
+        let mut source = std::fs::File::open(&launcher.executable)?;
+        let metadata = source.metadata()?;
         if !launcher.executable.is_absolute()
             || !metadata.is_file()
             || metadata.mode() & 0o111 == 0
@@ -64,7 +81,25 @@ impl MacosOwner {
                 "native helper must be an absolute unprivileged executable",
             ));
         }
-        Ok(Self(launcher))
+        // Never execute the original pathname again: a task may replace it,
+        // an ancestor, or a hardlink to its inode after discovery. A fresh
+        // private copy has no pre-existing aliases in task inputs.
+        let image = tempfile::Builder::new()
+            .prefix("qq-macos-helper-")
+            .tempdir()?;
+        let path = image.path().join("helper");
+        let mut copy = std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        io::copy(&mut source, &mut copy)?;
+        copy.set_permissions(std::fs::Permissions::from_mode(0o500))?;
+        drop(copy);
+        launcher.executable = path.canonicalize()?;
+        Ok(Self {
+            launcher,
+            _image: std::sync::Arc::new(HelperImage(Some(image))),
+        })
     }
 
     pub(super) fn wrap(
@@ -78,6 +113,23 @@ impl MacosOwner {
             return Err(io::Error::other(
                 "macOS aggregate resource enforcement is unavailable",
             ));
+        }
+        if let Some(NativeExecution {
+            filesystem: NativeFilesystem::Restricted { read_write, .. },
+            ..
+        }) = native
+        {
+            for grant in read_write {
+                if self
+                    .launcher
+                    .executable
+                    .starts_with(grant.path.canonicalize()?)
+                {
+                    return Err(io::Error::other(
+                        "writable authority includes the trusted native helper",
+                    ));
+                }
+            }
         }
         let command = command.as_std();
         let packet = Packet {
@@ -115,10 +167,10 @@ impl MacosOwner {
         }
         let (control, inherited) = std::os::unix::net::UnixStream::pair()?;
         control.set_nonblocking(true)?;
-        let mut wrapped = tokio::process::Command::new(&self.0.executable);
+        let mut wrapped = tokio::process::Command::new(&self.launcher.executable);
         wrapped
             .env_clear()
-            .args(&self.0.arguments)
+            .args(&self.launcher.arguments)
             .arg("qq-macos-launch:3");
         wrapped
             .as_std_mut()
@@ -132,6 +184,7 @@ impl MacosOwner {
             Startup {
                 encoded,
                 control: tokio::net::UnixStream::from_std(control)?,
+                _image: self._image.clone(),
             },
         ))
     }
@@ -140,6 +193,7 @@ impl MacosOwner {
 pub(super) struct Startup {
     encoded: Vec<u8>,
     control: tokio::net::UnixStream,
+    _image: std::sync::Arc<HelperImage>,
 }
 
 pub(crate) struct Child {
@@ -460,6 +514,104 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn writable_launcher_cannot_replace_the_trusted_helper() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for attack in ["replace", "symlink", "hardlink", "ancestor"] {
+            let root = tempfile::tempdir().unwrap();
+            let task = root.path().join("task");
+            std::fs::create_dir(&task).unwrap();
+            let source = root.path().join("original");
+            std::fs::write(&source, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let executable = task.join("helper");
+            if attack == "symlink" {
+                std::os::unix::fs::symlink(&source, &executable).unwrap();
+            } else if attack == "hardlink" {
+                std::fs::hard_link(&source, &executable).unwrap();
+            } else {
+                std::fs::copy(&source, &executable).unwrap();
+            }
+            let owner = MacosOwner::discover(CommandLauncher::new(executable.clone())).unwrap();
+            let escaped = root.path().join("escaped");
+            // Replacing the launcher runs before the sandbox or readiness
+            // handshake, so even a helper that refuses startup can escape.
+            if attack == "ancestor" {
+                std::fs::rename(&task, root.path().join("old-task")).unwrap();
+                std::fs::create_dir(&task).unwrap();
+            } else if attack != "hardlink" {
+                std::fs::remove_file(&executable).unwrap();
+            }
+            std::fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\nprintf escaped > '{}'\nexit 1\n",
+                    escaped.display().to_string().replace('\'', "'\\''")
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut native = NativeExecution {
+                environment: crate::command_owner::NativeEnvironment::from_values([]).unwrap(),
+                filesystem: NativeFilesystem::Restricted {
+                    read_only: vec![],
+                    read_write: vec![
+                        crate::command_owner::NativeDirectoryGrant::capture(&task).unwrap(),
+                    ],
+                },
+                network: NativeNetwork::Isolated,
+                resources: NativeResources::Host,
+            };
+            let cwd =
+                cap_std::fs::Dir::open_ambient_dir(&task, cap_std::ambient_authority()).unwrap();
+            let mut payload = tokio::process::Command::new("/bin/sh");
+            payload.arg("-c").arg("exit 0").current_dir(&task);
+            let (mut command, _startup) = owner
+                .wrap(
+                    payload,
+                    &cwd,
+                    Some(&native),
+                    Instant::now() + std::time::Duration::from_secs(60),
+                )
+                .expect("an isolated task must remain launchable");
+            command.kill_on_drop(true);
+            let status = tokio::time::timeout(std::time::Duration::from_secs(5), command.status())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                status.success(),
+                "{attack}: the captured helper must execute"
+            );
+            assert!(
+                !escaped.exists(),
+                "{attack}: a replacement helper ran outside the sandbox"
+            );
+            native.filesystem = NativeFilesystem::Restricted {
+                read_only: vec![],
+                read_write: vec![
+                    crate::command_owner::NativeDirectoryGrant::capture(
+                        owner.launcher.executable.parent().unwrap(),
+                    )
+                    .unwrap(),
+                ],
+            };
+            let mut payload = tokio::process::Command::new("/bin/sh");
+            payload.current_dir(&task);
+            let error = owner
+                .wrap(
+                    payload,
+                    &cwd,
+                    Some(&native),
+                    Instant::now() + std::time::Duration::from_secs(60),
+                )
+                .err()
+                .expect("the private helper must never enter a writable grant");
+            assert!(error.to_string().contains("writable authority includes"));
+        }
+    }
+
+    #[tokio::test]
     async fn helper_preparation_waits_for_readiness_and_remains_cancellable() {
         for authorize in [false, true] {
             let root = tempfile::tempdir().unwrap();
@@ -488,6 +640,7 @@ mod tests {
             let startup = Startup {
                 encoded: vec![b'J'],
                 control: tokio::net::UnixStream::from_std(control).unwrap(),
+                _image: std::sync::Arc::new(HelperImage(Some(tempfile::tempdir().unwrap()))),
             };
             let tasks = crate::tools::dispatch::ToolTasks::default();
             let lease = tasks.enter();

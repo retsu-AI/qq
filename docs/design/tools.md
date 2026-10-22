@@ -1233,7 +1233,10 @@ command running; reopening reconciles its original journal and retains its
 terminal result before the session continues. An active durable goal can then
 schedule its successor within its remaining shared budget.
 
-The macOS adapter starts a trusted helper before the payload. It closes ambient
+The macOS adapter captures a private executable copy when the owner starts,
+so replacing the original helper, its ancestors or existing hardlinks cannot
+replace trusted startup code. Restricted writable grants that include the copy
+are refused. The adapter starts that trusted helper before the payload. It closes ambient
 file descriptors and keeps an owner-liveness channel which payloads do not
 inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
