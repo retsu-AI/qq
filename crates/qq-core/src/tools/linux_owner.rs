@@ -391,9 +391,21 @@ impl Startup {
         use tracing::Instrument as _;
         child.resources = self.resources;
         let acknowledgement = tokio::io::unix::AsyncFd::new(self.acknowledgement)?;
-        let bytes = read_pipe(&acknowledgement, 4)
-            .instrument(tracing::info_span!(target: "qq::diagnostic", "native_namespace"))
-            .await?;
+        let deadline = tokio::time::Instant::from_std(deadline);
+        // Expiry must not interrupt identity capture after the monitor starts.
+        // This grace is for cleanup only: the payload gate remains closed.
+        let bytes = tokio::time::timeout_at(
+            deadline + std::time::Duration::from_secs(2),
+            read_pipe(&acknowledgement, 4)
+                .instrument(tracing::info_span!(target: "qq::diagnostic", "native_namespace")),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native namespace identity timed out",
+            )
+        })??;
         let pid = i32::from_le_bytes(
             bytes
                 .try_into()
@@ -417,61 +429,77 @@ impl Startup {
                 "command startup was cancelled before release",
             ));
         }
-        if std::time::Instant::now() >= deadline {
+        if tokio::time::Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "command startup expired before release",
             ));
         }
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
-        // Identity is now pinned, so cancellation can safely interrupt setup.
-        let ready = tokio::select! {
-            result = read_pipe(&acknowledgement, 1)
-                .instrument(tracing::info_span!(target: "qq::diagnostic", "native_release")) => result?,
+        // With identity pinned, both stop signals can interrupt every part of
+        // payload setup and refusal reporting without losing cleanup authority.
+        let pipe = tokio::select! {
+            biased;
             () = cancelled.cancelled() => return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "command startup was cancelled after release",
             )),
+            () = tokio::time::sleep_until(deadline) => return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "command startup expired after release",
+            )),
+            result = read_launch_acknowledgement(acknowledgement) => result?,
         };
-        match ready.as_slice() {
-            b"g" => {}
-            kind @ (b"r" | b"l" | b"k") => {
-                let context = if kind == b"r" {
-                    "private filesystem"
-                } else if kind == b"l" {
-                    "resource"
-                } else {
-                    "kernel isolation"
-                };
-                let length: [u8; 2] = read_pipe(&acknowledgement, 2)
-                    .await?
-                    .try_into()
-                    .map_err(|_| io::Error::other("invalid native startup refusal"))?;
-                let length = usize::from(u16::from_le_bytes(length));
-                if length > exec::MAX_REFUSAL_BYTES {
-                    return Err(io::Error::other("native startup refusal exceeds its bound"));
-                }
-                let message = read_pipe(&acknowledgement, length).await?;
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "{context} setup failed: {}",
-                        String::from_utf8_lossy(&message)
-                    ),
-                ));
-            }
-            b"e" => {
-                let error: [u8; 4] = read_pipe(&acknowledgement, 4)
-                    .await?
-                    .try_into()
-                    .map_err(|_| io::Error::other("invalid payload launch error"))?;
-                return Err(io::Error::from_raw_os_error(i32::from_le_bytes(error)));
-            }
-            _ => return Err(io::Error::other("native launch was not acknowledged")),
-        }
-        child.status_pipe = Some(acknowledgement.into_inner());
+        child.status_pipe = Some(pipe);
         Ok(())
     }
+}
+
+async fn read_launch_acknowledgement(
+    acknowledgement: tokio::io::unix::AsyncFd<File>,
+) -> io::Result<File> {
+    use tracing::Instrument as _;
+    match read_pipe(&acknowledgement, 1)
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_release"))
+        .await?
+        .as_slice()
+    {
+        b"g" => {}
+        kind @ (b"r" | b"l" | b"k") => {
+            let context = if kind == b"r" {
+                "private filesystem"
+            } else if kind == b"l" {
+                "resource"
+            } else {
+                "kernel isolation"
+            };
+            let length: [u8; 2] = read_pipe(&acknowledgement, 2)
+                .await?
+                .try_into()
+                .map_err(|_| io::Error::other("invalid native startup refusal"))?;
+            let length = usize::from(u16::from_le_bytes(length));
+            if length > exec::MAX_REFUSAL_BYTES {
+                return Err(io::Error::other("native startup refusal exceeds its bound"));
+            }
+            let message = read_pipe(&acknowledgement, length).await?;
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{context} setup failed: {}",
+                    String::from_utf8_lossy(&message)
+                ),
+            ));
+        }
+        b"e" => {
+            let error: [u8; 4] = read_pipe(&acknowledgement, 4)
+                .await?
+                .try_into()
+                .map_err(|_| io::Error::other("invalid payload launch error"))?;
+            return Err(io::Error::from_raw_os_error(i32::from_le_bytes(error)));
+        }
+        _ => return Err(io::Error::other("native launch was not acknowledged")),
+    }
+    Ok(acknowledgement.into_inner())
 }
 
 async fn read_pipe(file: &tokio::io::unix::AsyncFd<File>, length: usize) -> io::Result<Vec<u8>> {
@@ -603,14 +631,9 @@ pub(super) async fn spawn(
         reported_status: None,
         lease: Some(lease),
     };
-    // Cancellation cannot abandon identity capture after the monitor starts:
-    // without PID 1's handle, reaping the monitor cannot prove namespace death.
-    // authorize checks cancellation before releasing the payload. Keep the
-    // startup deadline so a broken helper still fails closed within its bound.
-    let authorized = tokio::select! {
-        result = startup.authorize(&mut child, cancelled, deadline) => result,
-        _ = tokio::time::sleep_until(deadline.into()) => Err(io::Error::new(io::ErrorKind::TimedOut, "command startup timed out")),
-    };
+    // authorize owns deadline handling: it retains identity capture through
+    // stop signals, then refuses release and confirms namespace cleanup.
+    let authorized = startup.authorize(&mut child, cancelled, deadline).await;
     if let Err(error) = authorized {
         child.inner.start_kill()?;
         child.wait().await?;
@@ -757,6 +780,20 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_before_namespace_identity_still_confirms_cleanup() {
+        stopped_before_namespace_identity(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn deadline_before_namespace_identity_still_confirms_cleanup() {
+        stopped_before_namespace_identity(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn missing_namespace_identity_expires_without_claiming_cleanup() {
+        stopped_before_namespace_identity(true, false).await;
+    }
+
+    async fn stopped_before_namespace_identity(expired: bool, identity_delivered: bool) {
         let root = tempfile::tempdir().unwrap();
         let cwd =
             cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
@@ -771,7 +808,7 @@ mod tests {
             .wrap(payload, &cwd, None, None)
             .unwrap();
         // Hold the real identity at the parent's read boundary. The namespace
-        // exists, but cancellation reaches spawn before its identity does.
+        // exists, but cancellation or expiry reaches spawn before its identity.
         let (read, write) = rustix::pipe::pipe_with(
             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
         )
@@ -795,15 +832,46 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-        run.cancel();
-        assert!(futures_util::poll!(launch.as_mut()).is_pending());
-        assert_eq!(rustix::io::write(&write, &identity).unwrap(), 4);
+        if expired {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(if identity_delivered {
+                15
+            } else {
+                17
+            }))
+            .await;
+        } else {
+            run.cancel();
+        }
+        if identity_delivered {
+            assert!(futures_util::poll!(launch.as_mut()).is_pending());
+            assert_eq!(rustix::io::write(&write, &identity).unwrap(), 4);
+        }
+        if expired {
+            tokio::time::resume();
+        }
         let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch)
             .await
             .unwrap();
         drop(process);
-        tasks.drain().await.unwrap();
-        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted);
+        if identity_delivered {
+            tasks.drain().await.unwrap();
+        } else {
+            assert!(matches!(
+                tasks.drain().await,
+                Err(super::super::dispatch::ToolDrainError::UnconfirmedProcessExit)
+            ));
+        }
+        assert_eq!(
+            result.err().unwrap().kind(),
+            if !identity_delivered {
+                io::ErrorKind::Other
+            } else if expired {
+                io::ErrorKind::TimedOut
+            } else {
+                io::ErrorKind::Interrupted
+            },
+        );
         assert!(!root.path().join("forbidden").exists());
     }
 
