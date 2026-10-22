@@ -113,7 +113,11 @@ directories and copying each bounded file chunk. Interrupted imports remove
 their partial private tree before settlement. Restored goal trees adopt the
 current host's file/byte ceilings; a tighter ceiling can refuse publication
 while retaining the private edits.
-Commands receive a private home/temp directory, explicit
+Commands receive a private home/temp directory. On Windows, `HOME` and
+`USERPROFILE` point to that directory, `TMPDIR`/`TEMP`/`TMP` point to its `tmp`
+subdirectory, and `APPDATA`/`LOCALAPPDATA` point to its private `AppData/Roaming`
+and `AppData/Local` subdirectories. These values replace captured host profile
+paths before dispatch. Commands also receive explicit
 system read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
@@ -1476,7 +1480,7 @@ Native containment does not itself grant credential access.
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 - A **cleared environment**: the child starts with `PATH HOME LANG TERM
-  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows), plus variables the call names in `env` (≤ 16) that
+  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA USERPROFILE APPDATA TEMP TMP` on Windows), plus variables the call names in `env` (≤ 16) that
   `policy.shell_env` allows. A name outside the allowlist fails the call
   (`env_not_allowed`) before anything runs. Secrets the server holds never
   reach a child by accident. Native command-owner submissions carry a snapshot
