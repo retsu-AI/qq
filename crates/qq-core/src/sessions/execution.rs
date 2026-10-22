@@ -174,11 +174,17 @@ pub(super) fn observe_execution_stop(run_id: RunId) -> oneshot::Receiver<()> {
 impl RunResources {
     pub(super) fn with_native_commands(
         service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+        scopes: Option<Arc<super::native_scope::NativeScopes>>,
     ) -> Self {
         Self {
-            tools: crate::tools::ToolTasks::with_native_commands(service),
+            tools: crate::tools::ToolTasks::with_native_commands(service)
+                .with_native_scopes(scopes),
             ..Self::default()
         }
+    }
+
+    pub(super) fn has_native_scope(&self) -> bool {
+        self.tools.has_native_scope()
     }
 
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
@@ -697,6 +703,22 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
         return;
     }
+    if let Some(scopes) = &inner.native_scopes
+        && let Err(message) = scopes.admit(Path::new(&claimed.workspace)).await
+    {
+        finish_reserved_run(
+            &inner,
+            &claimed,
+            RunOutcome::Failed {
+                failure: RunFailure {
+                    kind: RunFailureKind::Configuration,
+                    message,
+                },
+            },
+        )
+        .await;
+        return;
+    }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
         Ok(true) => {}
         Ok(false) => {
@@ -859,6 +881,23 @@ pub(super) async fn execute_run(
         )
         .await;
         return;
+    }
+    if let Some(scopes) = &inner.native_scopes {
+        let checked = scopes.validate_opened(loaded.plan.workspace_handle()).await;
+        if let Err(message) = checked {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                RunOutcome::Failed {
+                    failure: RunFailure {
+                        kind: RunFailureKind::Configuration,
+                        message,
+                    },
+                },
+            )
+            .await;
+            return;
+        }
     }
     match goal_policy::refresh(&inner, &claimed, &mut cancellation).await {
         Ok(true) => {}

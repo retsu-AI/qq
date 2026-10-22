@@ -47,7 +47,7 @@ refuse a requested restriction; they never fall back to host execution. The
 safe Rust `landlock` dependency supplies the kernel interface.
 
 This is a filesystem primitive, not a qualified Auto sandbox. The normal
-approval modes do not select it yet. Grants are additive and include existing
+server setup does not create or register task scopes yet. Grants are additive and include existing
 inodes within a granted root: protecting policy files beneath a writable root,
 external hardlink aliases, authorized network egress, credential
 brokering, disk capacity, shared task resource budgets and concurrent writers still require further enforcement
@@ -73,6 +73,29 @@ tree. This opt-in primitive does not yet choose inputs for ordinary sessions,
 support source symlinks/hardlinks, bound subsequent output disk usage, protect
 new shell-created trust configuration, or publish changes back to the original
 checkout. Those remain necessary before Auto enablement.
+
+Embedding hosts register immutable task authority through
+`SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
+explicit read-only roots, native network authority and resource limits. Approved
+shell/exec calls attach those limits to their durable command request; the
+workspace is their only writable filesystem root. Built-in mutation still uses
+the same opened workspace. Missing command services never cause scoped shell
+calls to use the local host fallback. Other workspaces and replaced task roots
+are refused before loading project configuration, then the opened workspace is
+validated again afterward. Side questions use the same checks. Scoped goal
+completion checks currently refuse execution: their legacy host process launcher
+cannot bypass the registered scope. Durable native routing for these checks
+remains required.
+
+Registrations persist in session-store metadata before recovery or scheduling.
+An empty registration list restores them on restart. Additional task roots may
+be registered; an existing root's authority cannot be silently changed. Every
+child session uses the same store-owned restrictions regardless of its model
+profile or approval grants. Corrupt or empty stored scope records refuse startup.
+The metadata has a byte bound and the registry has a capacity bound. Store
+schema 60 prevents older runtimes from ignoring these restrictions. Scope
+retirement/reconfiguration and automatic task-workspace preparation are not yet
+implemented; this remains an opt-in host API, not qualified default Auto.
 
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix

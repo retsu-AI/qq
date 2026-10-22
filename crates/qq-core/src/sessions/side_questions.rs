@@ -464,7 +464,8 @@ impl SessionRuntime {
             id,
         };
         let deadline = started + limits.duration();
-        let tool_tasks = crate::tools::ToolTasks::default();
+        let tool_tasks =
+            crate::tools::ToolTasks::default().with_native_scopes(self.inner.native_scopes.clone());
         // Whether a provider request may have been sent and not committed:
         // its spend is then unknown rather than the last committed total.
         let in_flight = AtomicBool::new(false);
@@ -511,6 +512,14 @@ impl SessionRuntime {
                             return Err(SessionRuntimeError::SideQuestionCancelled);
                         }
                         let workspace = request.workspace.clone();
+                        if let Some(scopes) = &self.inner.native_scopes {
+                            scopes
+                                .admit(Path::new(&workspace))
+                                .await
+                                .map_err(|reason| SessionRuntimeError::InvalidNativeScope {
+                                    reason,
+                                })?;
+                        }
                         let loaded = self
                             .inner
                             .loader
@@ -519,6 +528,14 @@ impl SessionRuntime {
                             .map_err(|_| SessionRuntimeError::Unavailable)?;
                         if loaded.plan.workspace_path() != Path::new(&workspace) {
                             return Err(SessionRuntimeError::CONSTRAINT);
+                        }
+                        if let Some(scopes) = &self.inner.native_scopes {
+                            scopes
+                                .validate_opened(loaded.plan.workspace_handle())
+                                .await
+                                .map_err(|reason| SessionRuntimeError::InvalidNativeScope {
+                                    reason,
+                                })?;
                         }
                         let plan = loaded
                             .plan

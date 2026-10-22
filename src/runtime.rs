@@ -3293,6 +3293,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::CommandLimitReached
         | SessionRuntimeError::Overloaded => ServerHandlerError::Unavailable,
         SessionRuntimeError::InvalidRunLimit
+        | SessionRuntimeError::InvalidNativeScope { .. }
         | SessionRuntimeError::OutputTooLarge
         | SessionRuntimeError::AccountingUnavailable
         | SessionRuntimeError::ShutdownTimedOut

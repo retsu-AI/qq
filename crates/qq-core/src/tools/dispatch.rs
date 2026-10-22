@@ -34,7 +34,10 @@ static TEST_EXECUTION_BARRIER: OnceLock<std::sync::Barrier> = OnceLock::new();
 /// Tracks actual local execution, including work whose result waiter was
 /// dropped. Stop dispatching into the scope before awaiting its drain.
 #[derive(Clone, Default)]
-pub(crate) struct ToolTasks(Arc<ToolTaskState>);
+pub(crate) struct ToolTasks(
+    Arc<ToolTaskState>,
+    Option<Arc<crate::sessions::native_scope::NativeScopes>>,
+);
 
 #[derive(Default)]
 struct ToolTaskState {
@@ -83,6 +86,12 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    pub(crate) fn with_native_scopes(
+        &self,
+        scopes: Option<Arc<crate::sessions::native_scope::NativeScopes>>,
+    ) -> Self {
+        Self(Arc::clone(&self.0), scopes)
+    }
     pub(crate) fn saved_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
         self.0
             .native_results
@@ -123,23 +132,33 @@ impl ToolTasks {
         }
     }
 
+    pub(crate) fn has_native_scope(&self) -> bool {
+        self.1.is_some()
+    }
+
     pub(crate) fn with_native_commands(
         service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     ) -> Self {
-        Self(Arc::new(ToolTaskState {
-            native_commands: service,
-            ..ToolTaskState::default()
-        }))
+        Self(
+            Arc::new(ToolTaskState {
+                native_commands: service,
+                ..ToolTaskState::default()
+            }),
+            None,
+        )
     }
 
     #[cfg(target_os = "linux")]
     pub(crate) fn owned_linux(
         launcher: crate::command_owner::CommandLauncher,
     ) -> std::io::Result<Self> {
-        Ok(Self(Arc::new(ToolTaskState {
-            linux_owner: Some(super::linux_owner::LinuxOwner::discover(launcher)?),
-            ..ToolTaskState::default()
-        })))
+        Ok(Self(
+            Arc::new(ToolTaskState {
+                linux_owner: Some(super::linux_owner::LinuxOwner::discover(launcher)?),
+                ..ToolTaskState::default()
+            }),
+            None,
+        ))
     }
     pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
@@ -446,6 +465,15 @@ pub(crate) async fn execute_with_images(
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::refused("tool arguments exceed the 64 KiB limit");
     }
+    let scope = match tasks
+        .1
+        .as_ref()
+        .map(|scopes| scopes.get(workspace.path()))
+        .transpose()
+    {
+        Ok(scope) => scope,
+        Err(reason) => return ToolOutput::refused(reason),
+    };
     let cancelled = ToolCancellation::new(cancelled);
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
     // Fetch awaits sockets, not files: it runs on the async runtime like
@@ -556,11 +584,15 @@ pub(crate) async fn execute_with_images(
                     Ok(Err(error)) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
                     Err(error) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
                 };
+                if let Some(scope) = &scope
+                    && let Err(error) = scope.validate_workspace(workspace.path(), workspace_identity) {
+                    return ToolOutput::refused(error.to_string());
+                }
                 let request = crate::command_owner::NativeCommand {
                     environment,
-                    network: crate::command_owner::NativeNetwork::Host,
-                    resources: crate::command_owner::NativeResources::Host,
-                    filesystem: crate::command_owner::NativeFilesystem::Host,
+                    network: scope.as_ref().map_or(crate::command_owner::NativeNetwork::Host, |scope| scope.network),
+                    resources: scope.as_ref().map_or(crate::command_owner::NativeResources::Host, |scope| scope.resources),
+                    filesystem: scope.as_ref().map_or(crate::command_owner::NativeFilesystem::Host, |scope| scope.filesystem()),
                     id,
                     workspace: workspace.path().to_owned(),
                     workspace_identity,
@@ -580,6 +612,9 @@ pub(crate) async fn execute_with_images(
                 .await;
             }
 
+            if tasks.1.is_some() {
+                return ToolOutput::refused("scoped execution requires the durable native command service");
+            }
             let launch = match (&shell_arguments, &exec_arguments) {
                 (Some(shell), _) => Launch::Shell(shell),
                 (_, Some(exec)) => Launch::Exec(exec),
@@ -613,6 +648,13 @@ pub(crate) async fn execute_with_images(
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _lease = lease;
+        if let Some(scope) = scope {
+            let checked = crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())
+                .and_then(|identity| scope.validate_workspace(workspace.path(), identity));
+            if let Err(error) = checked {
+                return ToolOutput::refused(error.to_string());
+            }
+        }
         execute_blocking(&workspace, &file_state, &name, &arguments, &cancelled)
     })
     .await
