@@ -48,6 +48,7 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+pub mod task_workspace;
 mod tools;
 
 #[doc(hidden)]

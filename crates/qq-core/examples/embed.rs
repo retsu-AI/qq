@@ -1,6 +1,10 @@
-//! A credential-free durable session, including an approved file write.
+//! A credential-free durable session editing a detached task workspace.
 use futures_util::StreamExt;
 use qq_core::*;
+use qq_core::{
+    command_owner::NativeDirectoryGrant,
+    task_workspace::{TaskWorkspace, TaskWorkspaceLimits},
+};
 use qq_protocol::*;
 use qq_provider::test_support::ScriptedProvider;
 use std::{sync::Arc, time::Duration};
@@ -14,7 +18,25 @@ impl RuntimeLoader for Loader {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let workspace = directory.path().canonicalize()?;
+    let root = directory.path().canonicalize()?;
+    let staged_root = root.clone();
+    let detached = tokio::task::spawn_blocking(move || {
+        let source = staged_root.join("source");
+        std::fs::create_dir(&source)?;
+        std::fs::write(source.join("input.txt"), "local uncommitted bytes")?;
+        TaskWorkspace::import(
+            &NativeDirectoryGrant::capture(&source)?,
+            &staged_root.join("task"),
+            &["input.txt".into()],
+            TaskWorkspaceLimits {
+                max_entries: 16,
+                max_bytes: 1024,
+            },
+        )
+        .map_err(std::io::Error::other)
+    })
+    .await??;
+    let workspace = detached.path().to_owned();
     let provider = ScriptedProvider::tool_then_text(
         "write_file",
         r#"{"path":"hello.txt","content":"hello","create_only":true}"#,
@@ -27,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     let sessions = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        SessionRuntimeOptions::new(root.join("sessions.sqlite3")),
         Arc::new(Loader(loaded)),
     )
     .await?;
@@ -92,8 +114,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if outcome != RunOutcome::Completed {
         return Err(format!("run stopped: {outcome:?}").into());
     }
-    let text = std::fs::read_to_string(workspace.join("hello.txt"))?;
+    let text = tokio::task::spawn_blocking(move || {
+        assert!(!root.join("source/hello.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("input.txt"))?,
+            "local uncommitted bytes"
+        );
+        std::fs::read_to_string(workspace.join("hello.txt"))
+    })
+    .await??;
     assert_eq!(text, "hello");
-    println!("completed: wrote hello.txt after approval");
+    println!("completed: wrote hello.txt in the task workspace; source unchanged");
     Ok(())
 }

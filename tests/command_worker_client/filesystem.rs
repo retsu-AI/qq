@@ -75,6 +75,72 @@ pub(super) fn worker(path: &Path) -> client::CommandWorker {
 }
 
 #[tokio::test]
+async fn detached_task_workspace_confines_edits_without_modifying_source_inputs() {
+    use qq_core::task_workspace::{TaskWorkspace, TaskWorkspaceLimits};
+    let (root, source, detached) = tokio::task::spawn_blocking(|| {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let source = path.join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("input"), "dirty input").unwrap();
+        let detached = TaskWorkspace::import(
+            &NativeDirectoryGrant::capture(&source).unwrap(),
+            &path.join("task"),
+            &["input".into()],
+            TaskWorkspaceLimits {
+                max_entries: 16,
+                max_bytes: 1024,
+            },
+        )
+        .unwrap();
+        (root, source, detached)
+    })
+    .await
+    .unwrap();
+    let client = worker(&root.path().join("owner"));
+    let script = format!(
+        "cat input; printf task-edit > input; cat '{}'; printf escaped > '{}'; printf finished",
+        source.join("input").display(),
+        source.join("escape").display(),
+    );
+    let result = finish(&client, request(detached.path(), "shell", &script))
+        .await
+        .result
+        .unwrap();
+    client.stop_spawned().await;
+    tokio::task::spawn_blocking(move || {
+        assert_eq!(
+            std::fs::read_to_string(source.join("input")).unwrap(),
+            "dirty input"
+        );
+        assert!(!source.join("escape").exists());
+        if result.is_error() {
+            assert!(
+                result
+                    .text()
+                    .contains("required Linux filesystem enforcement is unavailable"),
+                "{}",
+                result.text()
+            );
+            assert_eq!(
+                std::fs::read_to_string(detached.path().join("input")).unwrap(),
+                "dirty input"
+            );
+        } else {
+            assert!(result.text().contains("dirty input"), "{}", result.text());
+            assert!(result.text().contains("finished"), "{}", result.text());
+            assert_eq!(
+                std::fs::read_to_string(detached.path().join("input")).unwrap(),
+                "task-edit"
+            );
+        }
+        drop(root);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn filesystem_scope_confines_shells_and_descendants_without_restricting_worker() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
