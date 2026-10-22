@@ -19,6 +19,7 @@ use thiserror::Error;
 
 use crate::{
     command_owner::{NativeDirectoryGrant, NativeWorkspaceIdentity},
+    plan::CompiledAgentPlan,
     workspace::Workspace,
 };
 
@@ -39,6 +40,7 @@ pub struct TaskWorkspaceLimits {
 pub struct TaskWorkspace {
     grant: NativeDirectoryGrant,
     source: NativeDirectoryGrant,
+    protected_pack_roots: Vec<PathBuf>,
     baseline: BTreeMap<PathBuf, FileVersion>,
     limits: TaskWorkspaceLimits,
 }
@@ -104,6 +106,8 @@ fn contains_directory(directory: &Dir, identity: NativeWorkspaceIdentity) -> io:
 }
 
 impl TaskWorkspace {
+    /// Import from a trusted source plan, retaining its configured pack protections
+    /// in the persistent publication record.
     /// Copy selected workspace-relative regular files, including dirty and
     /// untracked bytes, into fresh inodes. Inputs are files, not recursive roots.
     /// Symlinks, reparse points, hardlinks, special files and trust configuration
@@ -111,7 +115,7 @@ impl TaskWorkspace {
     /// remove only the newly created destination, without reading file contents
     /// through a symlink or externally linked input.
     pub fn import(
-        source: &NativeDirectoryGrant,
+        source_plan: &CompiledAgentPlan,
         destination: &Path,
         inputs: &[PathBuf],
         limits: TaskWorkspaceLimits,
@@ -122,12 +126,15 @@ impl TaskWorkspace {
         if inputs.len() > limits.max_entries {
             return Err(TaskWorkspaceError::LimitExceeded);
         }
-        let workspace = at(&source.path, Workspace::open(&source.path))?;
-        if at(
-            &source.path,
-            NativeWorkspaceIdentity::held(workspace.root()),
-        )? != source.identity
-        {
+        let workspace = source_plan.workspace_handle();
+        let source = NativeDirectoryGrant {
+            path: workspace.path().to_owned(),
+            identity: at(
+                workspace.path(),
+                NativeWorkspaceIdentity::held(workspace.root()),
+            )?,
+        };
+        if at(&source.path, NativeWorkspaceIdentity::capture(&source.path))? != source.identity {
             return Err(TaskWorkspaceError::Changed(source.path.clone()));
         }
         let mut selected = BTreeSet::new();
@@ -213,6 +220,7 @@ impl TaskWorkspace {
                     identity,
                 },
                 source: source.clone(),
+                protected_pack_roots: workspace.protected_pack_roots().to_vec(),
                 baseline,
                 limits,
             })
@@ -256,7 +264,16 @@ impl TaskWorkspace {
         {
             return Err(TaskWorkspaceError::LimitExceeded);
         }
-        let source = at(&self.source.path, Workspace::open(&self.source.path))?;
+        let protected_roots = self
+            .protected_pack_roots
+            .iter()
+            .map(|relative| self.source.path.join(relative))
+            .collect::<Vec<_>>();
+        let source = at(
+            &self.source.path,
+            Workspace::open(&self.source.path)
+                .and_then(|workspace| workspace.with_protected_pack_roots(&protected_roots)),
+        )?;
         let task = at(&self.grant.path, Workspace::open(&self.grant.path))?;
         for (workspace, grant) in [(&source, &self.source), (&task, &self.grant)] {
             if at(&grant.path, NativeWorkspaceIdentity::held(workspace.root()))? != grant.identity {

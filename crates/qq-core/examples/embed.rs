@@ -2,10 +2,7 @@
 use futures_util::StreamExt;
 use qq_core::*;
 use qq_core::{
-    command_owner::{
-        NativeCommandScope, NativeDirectoryGrant, NativeNetwork, NativeResourceLimits,
-        NativeResources,
-    },
+    command_owner::{NativeCommandScope, NativeNetwork, NativeResourceLimits, NativeResources},
     task_workspace::{TaskWorkspace, TaskWorkspaceLimits},
 };
 use qq_protocol::*;
@@ -27,8 +24,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let source = staged_root.join("source");
         std::fs::create_dir(&source)?;
         std::fs::write(source.join("input.txt"), "local uncommitted bytes")?;
+        let source_runtime = qq_core::Runtime::new(
+            qq_provider::test_support::ScriptedProvider::new(vec![]),
+            "demo",
+            256,
+        )
+        .map_err(std::io::Error::other)?;
+        let source_plan = qq_core::plan::CompiledAgentPlan::compile_blocking(
+            qq_core::plan::AgentProfile::embedded(&source_runtime, source.clone()),
+        )
+        .map_err(std::io::Error::other)?;
         TaskWorkspace::import(
-            &NativeDirectoryGrant::capture(&source)?,
+            &source_plan,
             &staged_root.join("task"),
             &["input.txt".into()],
             TaskWorkspaceLimits {

@@ -4,6 +4,7 @@ use std::fs;
 struct Fixture {
     _root: tempfile::TempDir,
     source: NativeDirectoryGrant,
+    plan: std::sync::Arc<crate::plan::CompiledAgentPlan>,
     destination: PathBuf,
 }
 
@@ -13,7 +14,18 @@ impl Fixture {
         let path = root.path().canonicalize().unwrap();
         fs::create_dir(path.join("source")).unwrap();
         let source = NativeDirectoryGrant::capture(&path.join("source")).unwrap();
+        let runtime = crate::Runtime::new(
+            qq_provider::test_support::ScriptedProvider::new(vec![]),
+            "demo",
+            256,
+        )
+        .unwrap();
+        let plan = crate::plan::CompiledAgentPlan::compile_blocking(
+            crate::plan::AgentProfile::embedded(&runtime, source.path.clone()),
+        )
+        .unwrap();
         Self {
+            plan,
             _root: root,
             source,
             destination: path.join("task"),
@@ -22,7 +34,7 @@ impl Fixture {
 
     fn import(&self, inputs: &[&str], bytes: u64) -> Result<TaskWorkspace, TaskWorkspaceError> {
         TaskWorkspace::import(
-            &self.source,
+            &self.plan,
             &self.destination,
             &inputs.iter().map(PathBuf::from).collect::<Vec<_>>(),
             TaskWorkspaceLimits {
@@ -589,6 +601,62 @@ fn publication_lock_probe() {
 }
 
 #[test]
+fn task_workspace_preserves_configured_pack_protections_after_restore() {
+    let mut fixture = Fixture::new();
+    let pack = fixture.source.path.join("vendor/reviewer");
+    fs::create_dir_all(&pack).unwrap();
+    fs::write(pack.join("policy.md"), "trusted policy").unwrap();
+    fs::write(fixture.source.path.join("a"), "original").unwrap();
+    let runtime = crate::Runtime::new(
+        qq_provider::test_support::ScriptedProvider::new(vec![]),
+        "demo",
+        256,
+    )
+    .unwrap();
+    let plan = crate::plan::CompiledAgentPlan::compile_blocking(
+        crate::plan::AgentProfile::embedded(&runtime, fixture.source.path.clone())
+            .with_protected_pack_roots(vec![pack.clone()]),
+    )
+    .unwrap();
+    assert!(
+        plan.workspace_handle()
+            .check_write_path(
+                "vendor/reviewer/policy.md",
+                Path::new("vendor/reviewer/policy.md")
+            )
+            .is_err()
+    );
+    fixture.plan = plan;
+    assert!(matches!(
+        fixture.import(&["vendor/reviewer/policy.md"], 1024),
+        Err(TaskWorkspaceError::InvalidInput(_))
+    ));
+    assert!(!fixture.destination.exists());
+    let task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "agent change").unwrap();
+    fs::create_dir_all(task.path().join("vendor/reviewer")).unwrap();
+    fs::write(
+        task.path().join("vendor/reviewer/policy.md"),
+        "untrusted policy",
+    )
+    .unwrap();
+    let saved = serde_json::to_vec(&task).unwrap();
+    let mut restored: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    assert!(matches!(
+        restored.publish(&["a", "vendor/reviewer/policy.md"].map(PathBuf::from)),
+        Err(TaskWorkspaceError::InvalidInput(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(pack.join("policy.md")).unwrap(),
+        "trusted policy"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "original"
+    );
+}
+
+#[test]
 fn publication_cannot_install_policy_or_git_trust_files() {
     for protected in [
         ".git/config",
@@ -714,7 +782,7 @@ fn detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination() {
     assert!(!fixture.destination.exists());
     assert!(matches!(
         TaskWorkspace::import(
-            &fixture.source,
+            &fixture.plan,
             &fixture.destination,
             &[PathBuf::from("a"), PathBuf::from("b")],
             TaskWorkspaceLimits {
@@ -726,7 +794,7 @@ fn detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination() {
     ));
     assert!(matches!(
         TaskWorkspace::import(
-            &fixture.source,
+            &fixture.plan,
             &fixture.destination,
             &[PathBuf::from("a/b/c")],
             TaskWorkspaceLimits {
@@ -865,11 +933,12 @@ async fn detached_task_workspace_is_shared_by_builtin_tools_and_native_commands(
     use std::sync::Arc;
     let fixture = tokio::task::spawn_blocking(Fixture::new).await.unwrap();
     let source = fixture.source.clone();
+    let source_plan = fixture.plan.clone();
     let destination = fixture.destination.clone();
     let detached = tokio::task::spawn_blocking(move || {
         fs::write(source.path.join("input"), "local edit").unwrap();
         TaskWorkspace::import(
-            &source,
+            &source_plan,
             &destination,
             &["input".into()],
             TaskWorkspaceLimits {
@@ -985,7 +1054,7 @@ fn detached_task_workspace_rejects_filesystem_ancestor_aliases() {
     }
     let destination = alternate.join("nested/task");
     let result = TaskWorkspace::import(
-        &fixture.source,
+        &fixture.plan,
         &destination,
         &[],
         TaskWorkspaceLimits {

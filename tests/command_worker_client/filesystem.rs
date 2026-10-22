@@ -83,8 +83,18 @@ async fn detached_task_workspace_confines_edits_without_modifying_source_inputs(
         let source = path.join("source");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("input"), "dirty input").unwrap();
+        let source_runtime = qq_core::Runtime::new(
+            qq_provider::test_support::ScriptedProvider::new(vec![]),
+            "demo",
+            256,
+        )
+        .unwrap();
+        let source_plan = qq_core::plan::CompiledAgentPlan::compile_blocking(
+            qq_core::plan::AgentProfile::embedded(&source_runtime, source.clone()),
+        )
+        .unwrap();
         let detached = TaskWorkspace::import(
-            &NativeDirectoryGrant::capture(&source).unwrap(),
+            &source_plan,
             &path.join("task"),
             &["input".into()],
             TaskWorkspaceLimits {

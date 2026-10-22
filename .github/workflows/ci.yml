@@ -281,6 +281,7 @@ jobs:
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_handles_deletion_without_deleting_changed_source_bytes
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_task_and_source_aliases_before_changing_files
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_reports_partial_failure_and_retries_the_saved_baseline
+          bash .github/scripts/test-exact.sh task_workspace::tests::task_workspace_preserves_configured_pack_protections_after_restore
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_cannot_install_policy_or_git_trust_files
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_bounds_output_bytes_and_retained_entries_before_applying
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_refuses_replaced_source_and_task_roots
