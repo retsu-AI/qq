@@ -41,20 +41,23 @@ Proof: existing adapter header/redaction tests unchanged in behavior;
 
 ## PR 3 — The built-in table owns provider policy
 
-- One root `builtin_auth(provider)` replacing the `match provider.audience`
-  blocks in `src/runtime.rs` and `src/catalog.rs` (authenticated check,
-  profile scoping, `HttpAuth` choice, secure-store probe, body shape).
-- The "authenticated" check calls the same resolver as requests, so an
-  invalid stored xAI OAuth record is not reported as authenticated.
-- Pass xAI's variable and login remedies from the table into `qq-auth`
-  (ADR-0064 §6: no new dependency edge).
+- One root `BuiltinAuth` (`src/builtin_auth.rs`) replacing the
+  `match provider.audience` blocks in `src/runtime.rs`, `src/catalog.rs`,
+  `src/doctor.rs` and `src/main.rs` (audience, authenticated check, profile
+  scoping, `HttpAuth` choice, secure-store probe, body shape, digest marker).
+- The "authenticated" check parses a stored OAuth login as a request would,
+  without refreshing it, so an unreadable stored xAI or Codex login is not
+  reported as authenticated.
+- xAI's fallback variable is one `qq-auth` constant that a root test checks
+  against the table row (ADR-0064 §6: no new dependency edge).
 - Plan descriptor reports the explicit xAI reference when one is set.
-- xtask canary endpoints and ids checked against the table by a test.
-- Open question: resolve API keys per request (logout/rotation without a
+- xtask canary endpoints checked against the table by a test (`qq-config`
+  as an xtask dev-dependency only).
+- Deferred: resolve API keys per request (logout/rotation without a
   restart) instead of once at build time.
 
-Proof: a test that fails today for the invalid-xAI-OAuth status; digest pins
-(`builtin_provider_patches_keep_their_trust_digests`) unchanged.
+Proof: a test that fails before the fix for unreadable stored OAuth logins;
+the digest markers pinned per row; trust digests unchanged.
 
 ## PR 4 — Discovery reuses request auth
 

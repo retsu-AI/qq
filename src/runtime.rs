@@ -7,12 +7,11 @@ use std::{
     sync::Arc,
 };
 
-use qq_auth::{AuthError, CredentialStore, Secret, resolve_provider_credential_with_aliases};
+use qq_auth::{AuthError, CredentialStore, Secret};
 use qq_config::{
-    AwsAuth, BedrockAuth, BuiltinAudience, BuiltinProvider, ClientSnapshot, ConfigError,
-    ConfigLoader, ConfigSnapshot, EndpointMode, HttpAccess, HttpCredential, LoadRequest,
-    ProcessTrust, PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth, ProviderConfig,
-    RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
+    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
+    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
@@ -44,6 +43,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    builtin_auth::{self, BuiltinAuth},
     catalog::{DiscoveredModel, ModelDiscovery},
     plan::{
         CompiledGeneration, LiveBindings, PlanCache, PlanCacheError, PlanCacheLimits, PlanKey,
@@ -1121,23 +1121,14 @@ impl RuntimeFactory {
                     provider,
                     api_key,
                     profile,
-                } => match provider.audience {
-                    BuiltinAudience::OpenAiCodex => self
-                        .inner
-                        .credentials
-                        .resolve_with_endpoint(
-                            &qq_config::SecretRef::Stored(provider.stored_name(profile.as_deref())),
-                            Some(qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
-                        )
-                        .is_ok(),
-                    BuiltinAudience::Table(_) | BuiltinAudience::XAi => resolve_builtin_api_key(
+                } => BuiltinAuth::of(provider)
+                    .check(
                         &self.inner.credentials,
                         provider,
                         api_key.as_ref(),
                         profile.as_deref(),
                     )
                     .is_ok(),
-                },
             },
             Some(
                 ProviderAccess::AmazonBedrock { auth, .. }
@@ -1789,12 +1780,9 @@ impl RuntimeFactory {
             ProviderAccess::Http(access) => match access.auth() {
                 HttpCredential::Builtin {
                     provider, profile, ..
-                } => match provider.audience {
-                    BuiltinAudience::OpenAiCodex | BuiltinAudience::XAi => {
-                        Some(profile.as_deref().unwrap_or("default").to_owned())
-                    }
-                    BuiltinAudience::Table(_) => None,
-                },
+                } => BuiltinAuth::of(provider)
+                    .is_profile_scoped()
+                    .then(|| builtin_auth::profile_name(profile.as_deref()).to_owned()),
                 HttpCredential::Configured(_) => None,
             },
             ProviderAccess::AmazonBedrock { auth, .. }
@@ -1895,9 +1883,9 @@ impl RuntimeFactory {
                 provider,
                 api_key,
                 profile,
-            } => match provider.audience {
-                BuiltinAudience::Table(_) => {
-                    let secret = resolve_builtin_api_key(
+            } => match BuiltinAuth::of(provider) {
+                BuiltinAuth::ApiKey { .. } => {
+                    let secret = builtin_auth::resolve_api_key(
                         &self.inner.credentials,
                         provider,
                         api_key.as_ref(),
@@ -1931,8 +1919,8 @@ impl RuntimeFactory {
                         credential,
                     )
                 }
-                BuiltinAudience::OpenAiCodex => {
-                    let profile = profile.as_deref().unwrap_or("default");
+                BuiltinAuth::OpenAiCodex => {
+                    let profile = builtin_auth::profile_name(profile.as_deref());
                     (
                         HttpAuth::RequestTimeCodex(
                             self.inner.credentials.codex_request_credentials(profile),
@@ -1941,16 +1929,22 @@ impl RuntimeFactory {
                         CredentialReference::Profile(profile.to_owned()),
                     )
                 }
-                BuiltinAudience::XAi => {
-                    let profile = profile.as_deref().unwrap_or("default");
+                BuiltinAuth::XAi => {
+                    let profile_name = builtin_auth::profile_name(profile.as_deref());
+                    // An explicit `api_key:` is the credential; otherwise the
+                    // profile names it.
+                    let credential = api_key.as_ref().map_or_else(
+                        || CredentialReference::Profile(profile_name.to_owned()),
+                        credential_reference,
+                    );
                     (
                         HttpAuth::RequestTimeBearer(
                             self.inner
                                 .credentials
-                                .xai_request_credentials(profile, api_key.clone()),
+                                .xai_request_credentials(profile_name, api_key.clone()),
                         ),
                         "bearer".to_owned(),
-                        CredentialReference::Profile(profile.to_owned()),
+                        credential,
                     )
                 }
             },
@@ -3547,18 +3541,13 @@ fn provider_request_shape_identity(
                 }
                 // Each row keeps the marker its pre-ADR-0064 credential
                 // variant wrote, so every version 1 identity stands.
-                HttpCredential::Builtin { provider, .. } => match provider.audience {
-                    BuiltinAudience::Table(audience) => {
-                        update_digest(&mut digest, b"built-in-api-key");
+                HttpCredential::Builtin { provider, .. } => {
+                    let auth = BuiltinAuth::of(provider);
+                    update_digest(&mut digest, auth.digest_marker());
+                    if let BuiltinAuth::ApiKey { audience } = auth {
                         update_digest(&mut digest, audience.as_bytes());
                     }
-                    BuiltinAudience::OpenAiCodex => {
-                        update_digest(&mut digest, b"request-time-codex");
-                    }
-                    BuiltinAudience::XAi => {
-                        update_digest(&mut digest, b"request-time-bearer");
-                    }
-                },
+                }
             }
             // The body shape is digested in its own right, so two routes that
             // send different Responses bodies can never share an identity.
@@ -3599,7 +3588,7 @@ fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
 fn implied_body_shape(auth: &HttpCredential) -> ResponsesBodyShape {
     match auth {
         HttpCredential::Builtin { provider, .. }
-            if provider.audience == BuiltinAudience::OpenAiCodex =>
+            if BuiltinAuth::of(provider) == BuiltinAuth::OpenAiCodex =>
         {
             ResponsesBodyShape::Codex
         }
@@ -3651,40 +3640,6 @@ fn http_protocol(provider: &str, api: ProviderApi) -> Result<HttpProtocol, Runti
 fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
     digest.update(value);
-}
-
-/// The audience a built-in provider's credential is bound to: the table's
-/// for an API-key preset, `qq-auth`'s for a provider whose credential it
-/// owns (ADR-0064 §1). The root is the only place the two meet.
-pub(crate) const fn builtin_audience(provider: &BuiltinProvider) -> &'static str {
-    match provider.audience {
-        BuiltinAudience::Table(audience) => audience,
-        BuiltinAudience::OpenAiCodex => qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT,
-        BuiltinAudience::XAi => qq_auth::XAI_CREDENTIAL_ENDPOINT,
-    }
-}
-
-/// Resolves a built-in provider's API key in precedence order: the explicit
-/// reference, the stored `<id>/<profile>` credential, then the row's
-/// variables, all bound to the row's audience.
-pub(crate) fn resolve_builtin_api_key(
-    store: &CredentialStore,
-    provider: &BuiltinProvider,
-    api_key: Option<&qq_config::SecretRef>,
-    profile: Option<&str>,
-) -> Result<Secret, AuthError> {
-    let (variable, aliases) = provider
-        .variables
-        .split_first()
-        .map_or(("", &[][..]), |(first, rest)| (*first, rest));
-    resolve_provider_credential_with_aliases(
-        store,
-        api_key,
-        &provider.stored_name(profile),
-        variable,
-        aliases,
-        Some(builtin_audience(provider)),
-    )
 }
 
 /// Checks cancellation before starting the next blocking preparation phase.
@@ -3873,6 +3828,28 @@ mod tests {
 
     #[derive(Default)]
     pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
+
+    /// A stored Codex login for `account_id` that parses as a request would
+    /// read it: an ID token whose claims name the account.
+    pub(super) fn stored_codex_login(account_id: &str) -> Vec<u8> {
+        let claims = serde_json::to_vec(&serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "chatgpt_account_is_fedramp": false
+            }
+        }))
+        .unwrap();
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "id_token": format!("e30.{}.signature", URL_SAFE_NO_PAD.encode(claims)),
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "account_id": account_id,
+            "is_fedramp": false,
+            "refreshed_at": 1
+        }))
+        .unwrap()
+    }
 
     impl KeyringBackend for MemoryKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
@@ -6078,6 +6055,74 @@ mod tests {
             .unwrap();
     }
 
+    /// A stored OAuth login counts as authenticated only if a request could
+    /// use it: unreadable stored bytes fail the spawn gate up front instead
+    /// of failing the first request. An expired login still passes, because
+    /// a request refreshes it, and the gate itself never refreshes.
+    #[tokio::test]
+    async fn spawn_validation_rejects_unreadable_stored_oauth_logins() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+                version: 1,
+                model: "openai/gpt-5.6",
+                providers: {
+                    "openai-codex": OpenAiCodex(
+                        profile: "work",
+                        models: {"gpt-test": (name: "Codex test")},
+                    ),
+                    "xai": XAi(profile: "work"),
+                },
+            )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory_with_credentials(credentials.clone());
+        for (name, kind, audience) in [
+            ("xai/work", "xai-oauth", "https://api.x.ai"),
+            ("openai-codex/work", "openai-codex", "https://chatgpt.com"),
+        ] {
+            credentials
+                .set_with_metadata(
+                    name,
+                    b"not a stored login",
+                    false,
+                    Some(kind),
+                    Some(audience),
+                )
+                .unwrap();
+        }
+        for route in ["xai/grok-4.5", "openai-codex/gpt-test"] {
+            let error = validate_route(&factory, &workspace, route)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, RunFailureKind::Authentication, "{route}");
+        }
+
+        let expired = serde_json::json!({
+            "version": 1,
+            "access_token": "expired-access-token",
+            "refresh_token": "refresh-token",
+            "expires_at": 1,
+        });
+        credentials
+            .set_with_metadata(
+                "xai/work",
+                serde_json::to_vec(&expired).unwrap(),
+                false,
+                Some("xai-oauth"),
+                Some("https://api.x.ai"),
+            )
+            .unwrap();
+        validate_route(&factory, &workspace, "xai/grok-4.5")
+            .await
+            .unwrap();
+    }
     #[tokio::test]
     async fn spawn_validation_rejects_policy_denied_providers() {
         let fixture = RuntimeFixture::new();
@@ -7037,10 +7082,15 @@ mod tests {
             CredentialPaths::new(fixture.path("data")),
             Arc::new(MemoryKeyring::default()),
         );
-        credentials.set_with_metadata("openai-codex/default", serde_json::to_vec(&serde_json::json!({
-            "version": 1, "id_token": "id", "access_token": "access", "refresh_token": "refresh",
-            "account_id": "test", "is_fedramp": false, "refreshed_at": 1
-        })).unwrap(), false, Some("openai-codex"), Some("https://chatgpt.com")).unwrap();
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                stored_codex_login("test"),
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
         let factory = fixture.factory_with_credentials(credentials);
         let snapshot = factory
             .load(&fixture.request(
@@ -7238,6 +7288,38 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
+    /// The plan descriptor names the credential that applies: an explicit
+    /// xAI `api_key:` reference when one is configured, otherwise the
+    /// profile `qq-auth` resolves.
+    #[test]
+    fn xai_descriptor_names_an_explicit_reference_over_the_profile() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory_with_credentials(CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        ));
+        for (providers, expected) in [
+            (
+                r#""xai": XAi(api_key: Env("MY_XAI_KEY"), profile: "work")"#,
+                CredentialReference::Environment("MY_XAI_KEY".to_owned()),
+            ),
+            (
+                r#""xai": XAi(profile: "work")"#,
+                CredentialReference::Profile("work".to_owned()),
+            ),
+        ] {
+            let request = fixture.request(format!(
+                r#"(version: 1, model: "xai/grok-4.6", providers: {{ {providers} }})"#
+            ));
+            let plan = factory.plan_for(&request).unwrap();
+            assert_eq!(
+                plan.descriptor().provider.credential,
+                expected,
+                "{providers}"
+            );
+            assert_eq!(plan.descriptor().provider.auth_scheme, "bearer");
+        }
+    }
     #[test]
     fn runtime_cache_identity_includes_effective_context_window() {
         let fixture = RuntimeFixture::new();

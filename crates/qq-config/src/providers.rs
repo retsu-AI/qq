@@ -101,6 +101,9 @@ pub struct BuiltinProvider {
     pub login: &'static [LoginMethod],
     pub init_model: &'static str,
     pub discovery: ModelDiscoveryShape,
+    /// The endpoint requests go to, and whether it is a base or exact URL.
+    pub endpoint: &'static str,
+    pub endpoint_mode: EndpointMode,
 }
 
 impl BuiltinProvider {
@@ -158,6 +161,8 @@ impl BuiltinHttpProvider {
             login: self.login,
             init_model: self.init_model,
             discovery: self.discovery,
+            endpoint: self.endpoint,
+            endpoint_mode: self.endpoint_mode,
         }
     }
 }

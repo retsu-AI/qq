@@ -11,11 +11,11 @@ use std::{
 use hmac::{Hmac, Mac};
 use qq_auth::{CredentialStore, Secret};
 use qq_config::{
-    BuiltinAudience, EndpointMode, HttpAccess, HttpCredential, ModelDiscoveryShape, ProviderApi,
-    ProviderAuth, ProviderConfig, ProviderKind, SecretRef,
+    EndpointMode, HttpAccess, HttpCredential, ModelDiscoveryShape, ProviderApi, ProviderAuth,
+    ProviderConfig, ProviderKind, SecretRef,
 };
 
-use crate::runtime::resolve_builtin_api_key;
+use crate::builtin_auth::{self, BuiltinAuth};
 use reqwest::{Url, blocking::RequestBuilder, header::AUTHORIZATION};
 use sha2::Sha256;
 use thiserror::Error;
@@ -361,12 +361,7 @@ fn cache_probe_requires_secure_store(auth: &HttpCredential) -> bool {
         ) => matches!(reference, SecretRef::Stored(_)),
         HttpCredential::Builtin {
             provider, api_key, ..
-        } => match provider.audience {
-            BuiltinAudience::Table(_) => {
-                api_key.is_none() || matches!(api_key, Some(SecretRef::Stored(_)))
-            }
-            BuiltinAudience::OpenAiCodex | BuiltinAudience::XAi => true,
-        },
+        } => BuiltinAuth::of(provider).cache_probe_reads_store(api_key.as_ref()),
     }
 }
 
@@ -397,14 +392,14 @@ fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<Di
             profile,
         } => {
             let profile = profile.as_deref();
-            match provider.audience {
-                BuiltinAudience::Table(_) => Some(DiscoveryAuth::ApiKey(
-                    resolve_builtin_api_key(credentials, provider, api_key.as_ref(), profile)
+            match BuiltinAuth::of(provider) {
+                BuiltinAuth::ApiKey { .. } => Some(DiscoveryAuth::ApiKey(
+                    builtin_auth::resolve_api_key(credentials, provider, api_key.as_ref(), profile)
                         .ok()?,
                 )),
-                BuiltinAudience::OpenAiCodex => {
+                BuiltinAuth::OpenAiCodex => {
                     let credential = credentials
-                        .resolve_codex(profile.unwrap_or("default"))
+                        .resolve_codex(builtin_auth::profile_name(profile))
                         .ok()?;
                     Some(DiscoveryAuth::Codex {
                         access_token: credential.access_token().clone(),
@@ -412,9 +407,9 @@ fn resolve_auth(access: &HttpAccess, credentials: &CredentialStore) -> Option<Di
                         is_fedramp: credential.is_fedramp(),
                     })
                 }
-                BuiltinAudience::XAi => Some(DiscoveryAuth::Bearer(
+                BuiltinAuth::XAi => Some(DiscoveryAuth::Bearer(
                     credentials
-                        .resolve_xai(profile.unwrap_or("default"), api_key.as_ref())
+                        .resolve_xai(builtin_auth::profile_name(profile), api_key.as_ref())
                         .ok()?,
                 )),
             }
