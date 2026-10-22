@@ -98,7 +98,7 @@ async fn open_session(
     let policy = tokio::task::spawn_blocking(move || {
         std::fs::create_dir(&control).unwrap();
         TaskWorkspacePolicy {
-            directory: NativeDirectoryGrant::capture(&control).unwrap(),
+            directory: NativeDirectoryGrant::capture(&control.canonicalize().unwrap()).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,
             limits: TaskWorkspaceLimits {
