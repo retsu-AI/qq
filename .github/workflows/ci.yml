@@ -215,6 +215,7 @@ jobs:
           cargo build --locked -p qq-server --example command_owner_launcher
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
+            bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::memory_budget_is_rounded_down_and_retained_by_the_kernel
             cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
             bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs
             bash .github/scripts/test-exact.sh tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers

@@ -190,3 +190,17 @@ async fn budgeted_exit_notification_survives_a_dropped_wait() {
     drop(lease);
     tasks.drain().await.unwrap();
 }
+
+#[test]
+fn memory_budget_is_rounded_down_and_retained_by_the_kernel() {
+    let requested = 128 * 1024 * 1024 + 1;
+    let fleet = Fleet::create(requested, 64, CPU_PERCENT).unwrap();
+    let job = fleet.job.lock().unwrap();
+    let actual: firehazard::job::object::ExtendedLimitInformation =
+        firehazard::query_information_job_object(&job).unwrap();
+    let page = winsafe::GetSystemInfo().dwPageSize as usize;
+    assert_eq!(actual.job_memory_limit % page, 0);
+    assert!(actual.job_memory_limit <= requested as usize);
+    assert!(requested as usize - actual.job_memory_limit < page);
+    assert!(Fleet::create(1, 64, CPU_PERCENT).is_err());
+}

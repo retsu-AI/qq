@@ -487,7 +487,7 @@ async fn restricted_worker_probe(mode: &str) {
     }
     if matches!(mode, "memory" | "aggregate-memory" | "processes") {
         command.resources = qq_core::command_owner::NativeResources::Committed {
-            memory_bytes: if mode == "aggregate-memory" { 256 } else { 128 } * 1024 * 1024,
+            memory_bytes: if mode == "aggregate-memory" { 256 } else { 128 } * 1024 * 1024 + 1,
             max_processes: 4,
             cpu_percent: 50,
         };
