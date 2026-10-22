@@ -129,6 +129,7 @@ struct PreparedExecution {
 #[derive(Clone, Default)]
 pub(super) struct RunResources {
     tools: crate::tools::ToolTasks,
+    task: Arc<std::sync::OnceLock<Arc<super::task_workspaces::TaskExecution>>>,
     children: Arc<ChildTasks>,
     #[cfg(test)]
     run_id: Option<RunId>,
@@ -146,13 +147,16 @@ pub(super) enum ExecutionCleanupError {
 /// to settle a started run, so a terminal event cannot be published while
 /// execution is still in flight; only `RunResources::drain` / `stop` mint it.
 #[derive(Clone, Debug)]
-pub(super) struct TeardownComplete(Vec<(ToolCallId, crate::tools::ToolOutput)>);
+pub(super) struct TeardownComplete(
+    Vec<(ToolCallId, crate::tools::ToolOutput)>,
+    Option<Arc<super::task_workspaces::TaskExecution>>,
+);
 
 impl TeardownComplete {
     /// Store-level tests settle claims that never ran anything.
     #[cfg(test)]
     pub(super) const fn nothing_ran() -> Self {
-        Self(Vec::new())
+        Self(Vec::new(), None)
     }
 }
 
@@ -185,6 +189,29 @@ impl RunResources {
         self.tools.clone()
     }
 
+    pub(super) fn bind_task(
+        &mut self,
+        task: Arc<super::task_workspaces::TaskExecution>,
+    ) -> Result<Arc<super::native_scope::NativeScopes>, SessionRuntimeError> {
+        let scopes = super::native_scope::NativeScopes::single(task.scope.clone())?;
+        if self.task.get().is_some()
+            || !self.tools.set_task_home(task.home())
+            || self.task.set(task).is_err()
+        {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        self.tools = self.tools.with_native_scopes(Some(scopes.clone()));
+        Ok(scopes)
+    }
+
+    pub(super) fn task_scope(&self) -> Option<Arc<crate::command_owner::NativeCommandScope>> {
+        self.task.get().map(|task| Arc::new(task.scope.clone()))
+    }
+
+    pub(super) fn task_home(&self) -> Option<PathBuf> {
+        self.task.get().map(|task| task.home())
+    }
+
     pub(super) fn has_native_scope(&self) -> bool {
         self.tools.has_native_scope()
     }
@@ -201,7 +228,10 @@ impl RunResources {
     pub(super) async fn drain(&self) -> Result<TeardownComplete, ExecutionCleanupError> {
         let (tools, children) = tokio::join!(self.tools.drain(), self.children.drain());
         match (tools, children) {
-            (Ok(()), Ok(_)) => Ok(TeardownComplete(self.tools.drain_native_results())),
+            (Ok(()), Ok(_)) => Ok(TeardownComplete(
+                self.tools.drain_native_results(),
+                self.task.get().cloned(),
+            )),
             (Err(error), _) => Err(ExecutionCleanupError::Tools(error)),
             (_, Err(error)) => Err(ExecutionCleanupError::Children(error)),
         }
@@ -278,6 +308,7 @@ async fn prepare_execution(
             cancellation.clone(),
             loaded.plan.network_policy(),
             loaded.plan.approval_delegate(),
+            resources.task.get().is_some(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on
@@ -685,7 +716,7 @@ pub(super) async fn execute_run(
     inner: Arc<SessionRuntimeInner>,
     mut claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    resources: RunResources,
+    mut resources: RunResources,
 ) {
     let native_store = inner.store.clone();
     let native_identity = claimed.identity;
@@ -823,7 +854,7 @@ pub(super) async fn execute_run(
         },
         load_progress.clone(),
     );
-    let loaded = tokio::select! {
+    let mut loaded = tokio::select! {
         biased;
         () = RunDeadline::wait(deadline) => {
             let unfinished_stage = load_progress.stage();
@@ -888,7 +919,65 @@ pub(super) async fn execute_run(
         .await;
         return;
     }
-    if let Some(scopes) = &inner.native_scopes {
+    let task = match super::task_workspaces::prepare(&inner, &claimed, loaded.plan.clone()).await {
+        Ok(task) => task,
+        Err(error) => {
+            finish_reserved_run(
+                &inner,
+                &claimed,
+                internal_failure(&format!("task preparation failed: {error}")),
+            )
+            .await;
+            return;
+        }
+    };
+    if let Some(task) = task {
+        let scopes = match resources.bind_task(task.clone()) {
+            Ok(scopes) => scopes,
+            Err(error) => {
+                finish_reserved_run(&inner, &claimed, internal_failure(&error.to_string())).await;
+                return;
+            }
+        };
+        let progress = RuntimeLoadProgress::default();
+        let mut load = inner.loader.load_with_progress(
+            RuntimeLoadRequest {
+                execution_workspace: Some(task.directory_grant()),
+                workspace: claimed.workspace.clone(),
+                model: claimed.model.clone(),
+                profile: claimed.profile.clone(),
+                reasoning_effort: claimed.reasoning_effort,
+            },
+            progress.clone(),
+        );
+        loaded = tokio::select! {
+            biased;
+            () = RunDeadline::wait(deadline) => {
+                progress.cancel(); let _ = load.await;
+                finish_reserved_run(&inner, &claimed, RunOutcome::BudgetExhausted { exhaustion: Box::new(deadline.expect("finite deadline").exhaustion()) }).await;
+                return;
+            }
+            changed = cancellation.changed() => {
+                progress.cancel(); let _ = load.await;
+                if changed.is_ok() { finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await; }
+                return;
+            }
+            result = &mut load => match result {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    finish_reserved_run(&inner, &claimed, RunOutcome::Failed {failure: RunFailure {kind:error.kind, message:error.message}}).await;
+                    return;
+                }
+            }
+        };
+        if let Err(message) = scopes.validate_opened(loaded.plan.workspace_handle()).await {
+            finish_reserved_run(&inner, &claimed, internal_failure(&message)).await;
+            return;
+        }
+    }
+    if resources.task.get().is_none()
+        && let Some(scopes) = &inner.native_scopes
+    {
         let checked = scopes.validate_opened(loaded.plan.workspace_handle()).await;
         if let Err(message) = checked {
             finish_reserved_run(
@@ -3743,6 +3832,22 @@ async fn finish_run_accounted(
         inner.failed.send_replace(true);
         return;
     }
+    let outcome = if let Some(task) = teardown
+        .1
+        .take()
+        .filter(|_| matches!(outcome, RunOutcome::Completed))
+    {
+        let path = task.scope.workspace.path.clone();
+        match task.publish(inner, claimed.identity.session_id).await {
+            Ok(()) => outcome,
+            Err(error) => internal_failure(&format!(
+                "task edits could not be published; work is retained at {}: {error}",
+                path.display()
+            )),
+        }
+    } else {
+        outcome
+    };
     match inner
         .store
         .finish_run(claimed, outcome, accounting, teardown)

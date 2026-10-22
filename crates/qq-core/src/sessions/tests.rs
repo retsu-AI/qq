@@ -1473,6 +1473,7 @@ async fn approval_harness_with_clocks(
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            task_workspaces: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),

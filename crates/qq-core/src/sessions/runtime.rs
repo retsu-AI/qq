@@ -494,6 +494,9 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
+    /// Import Auto work into private task trees and publish after teardown.
+    /// Native commands must enforce the returned task scope or refuse execution.
+    pub task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
     /// Host-authorized task workspaces. Registrations persist and are inherited
     /// by all sessions/children using the store; an empty list restores them.
     pub native_scopes: Vec<crate::command_owner::NativeCommandScope>,
@@ -538,6 +541,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("approval_reviewer", &self.approval_reviewer.is_some())
             .field("native_commands", &self.native_commands.is_some())
             .field("native_scopes", &self.native_scopes.len())
+            .field("task_workspaces", &self.task_workspaces.is_some())
             .finish()
     }
 }
@@ -549,6 +553,7 @@ impl SessionRuntimeOptions {
             database_path,
             native_commands: None,
             native_scopes: Vec::new(),
+            task_workspaces: None,
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -586,6 +591,7 @@ pub struct SessionRuntime {
 }
 
 pub(super) struct SessionRuntimeInner {
+    pub(super) task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
     pub(super) native_scopes: Option<Arc<super::native_scope::NativeScopes>>,
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
@@ -796,6 +802,7 @@ impl SessionRuntime {
             super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
         });
         let inner = Arc::new(SessionRuntimeInner {
+            task_workspaces: options.task_workspaces,
             native_scopes,
             native_ack,
             native_recovery: std::sync::OnceLock::new(),

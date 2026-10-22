@@ -1499,8 +1499,9 @@ pub(super) fn execute_command(
                         run_id,
                         tool_call_id,
                     )?;
+                    let task_scoped = super::task_workspaces::is_bound(&transaction, run_id)?;
                     for (mode, grants) in &ancestors {
-                        refusal = match approval::evaluate(*mode, &name, &class, grants) {
+                        refusal = match approval::evaluate_in_task(*mode, &name, &class, grants, task_scoped) {
                             approval::PolicyDecision::Execute
                             | approval::PolicyDecision::AskUser { .. } => continue,
                             // The pending response supplies the fresh human

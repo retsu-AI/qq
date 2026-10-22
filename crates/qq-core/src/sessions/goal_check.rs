@@ -1004,7 +1004,7 @@ pub(super) async fn execute(
     inner: Arc<runtime::SessionRuntimeInner>,
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    resources: execution::RunResources,
+    mut resources: execution::RunResources,
 ) {
     let Some(captured) = claimed.goal.as_ref() else {
         inner.failed.send_replace(true);
@@ -1061,7 +1061,7 @@ pub(super) async fn execute(
             }
         }
         let claim = claimed.clone();
-        let native = inner.native_scopes.is_some() && inner.native_commands.is_some();
+        let native = inner.native_commands.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
@@ -1105,7 +1105,7 @@ pub(super) async fn execute(
                             call,
                             deadline_ms,
                             cancelled.clone(),
-                            &resources,
+                            &mut resources,
                         )
                         .await)
                     } else {

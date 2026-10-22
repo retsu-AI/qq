@@ -104,7 +104,7 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
     SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
-    SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
+    SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
     WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.

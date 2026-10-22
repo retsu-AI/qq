@@ -273,6 +273,14 @@ impl TaskWorkspace {
         self.grant.clone()
     }
 
+    pub(crate) fn limits(&self) -> TaskWorkspaceLimits {
+        self.limits
+    }
+
+    pub(crate) fn input_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.baseline.keys()
+    }
+
     /// Publish selected outputs after every task process and child has stopped.
     /// Validate all outputs and expected source versions before changing files.
     /// Each file is installed atomically; an I/O failure reports any earlier

@@ -86,10 +86,28 @@ Serialized task records contain source authority and belong in trusted storage
 outside the writable task tree. The embedding example exercises the import,
 session edit and publication path.
 
-This primitive does not yet choose inputs or publish automatically for ordinary
-sessions, support source symlinks/hardlinks, bound subsequent output disk usage,
-or protect new shell-created trust configuration inside the task tree. Those
-remain necessary before Auto enablement.
+The binary supplies `SessionRuntimeOptions.task_workspaces` when it uses the
+independent worker. Auto runs import regular project files into a private task
+tree, respecting project ignore files and excluding trust configuration. Built-in
+tools and native commands share that tree; configuration still comes from the
+logical source project. Commands receive a private home/temp directory, explicit
+system read roots, isolated networking and the captured task write root. A native
+backend that cannot enforce that scope refuses execution. Commands inside this
+boundary need no additional Auto approval unless a forbidden rule or internal
+child supervision requires it. Ask and Read-only retain their own rules.
+
+Completed runs publish after tools and children drain and recheck the session's
+current publication permission. Failed/cancelled work stays in its private task
+tree. Completion checks acquire the source workspace exclusion before importing
+the published artifact and execute through the same durable worker; their file
+changes are not published. Full retains host authority.
+
+This integration does not yet qualify unattended safety: production resource
+scopes still use host limits, subsequent task output disk usage is unbounded,
+and automatic restart/continuation of detached work is unfinished. Windows
+restricted filesystem execution remains unavailable and fails closed. Source
+symlinks are omitted and hardlinked regular inputs are refused. Scoped network
+and credential operations still require separate trusted adapters.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,

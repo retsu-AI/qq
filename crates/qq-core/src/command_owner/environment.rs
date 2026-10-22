@@ -87,6 +87,21 @@ impl NativeEnvironment {
         Ok(environment)
     }
 
+    pub(crate) fn with_task_home(
+        mut self,
+        home: &std::path::Path,
+    ) -> Result<Self, CommandOwnerError> {
+        self.0
+            .retain(|(name, _)| !same_name(name, "HOME") && !same_name(name, "TMPDIR"));
+        let overrides = Self::from_values([
+            ("HOME".to_owned(), home.as_os_str().to_owned()),
+            ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
+        ])?;
+        self.0.extend(overrides.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
         if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
             return Err(CommandOwnerError::Invalid);

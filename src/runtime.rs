@@ -1705,7 +1705,10 @@ impl RuntimeFactory {
                     snapshot
                         .packs()
                         .values()
-                        .map(|pack| pack.directory().to_owned())
+                        .map(|pack| match pack.directory().strip_prefix(request.cwd()) {
+                            Ok(relative) => workspace.join(relative),
+                            Err(_) => pack.directory().to_owned(),
+                        })
                         .collect(),
                 );
         if let Some(effort) = snapshot.reasoning_effort() {
@@ -3110,6 +3113,19 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
+        if native_commands.is_some() {
+            let directory = factory
+                .inner
+                .config
+                .paths()
+                .data_dir()
+                .join("task-workspaces");
+            options.task_workspaces = Some(
+                tokio::task::spawn_blocking(move || task_workspace_policy(&directory))
+                    .await
+                    .map_err(RuntimeHandlerError::TaskPreparation)??,
+            );
+        }
         options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
@@ -3394,6 +3410,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[error("task workspace preparation stopped: {0}")]
+    TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
     NativeCommands(#[from] qq_core::command_owner::CommandOwnerError),
     #[error(transparent)]
@@ -3402,6 +3420,74 @@ pub enum RuntimeHandlerError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Sessions(#[from] SessionRuntimeError),
+}
+
+fn task_workspace_policy(
+    directory: &Path,
+) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
+    let prepare = || -> std::io::Result<_> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(directory)?;
+        let directory = directory.canonicalize()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::metadata(&directory)?;
+            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "task control directory must be private and owned by this user",
+                ));
+            }
+        }
+        let mut read_only = std::collections::BTreeSet::new();
+        #[cfg(unix)]
+        for candidate in [
+            "/usr/bin",
+            "/usr/sbin",
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/share",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/nix/store",
+            "/System/Library",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            match std::fs::canonicalize(candidate) {
+                Ok(path) => {
+                    read_only.insert(path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(qq_core::TaskWorkspacePolicy {
+            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
+            read_only: read_only
+                .into_iter()
+                .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
+                .collect::<Result<_, _>>()?,
+            resources: qq_core::command_owner::NativeResources::Host,
+            limits: qq_core::task_workspace::TaskWorkspaceLimits {
+                max_entries: 16_384,
+                max_bytes: 256 * 1024 * 1024,
+            },
+        })
+    };
+    prepare().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
+        path: directory.to_owned(),
+        source,
+    })
 }
 
 /// Translates the configured roster into the protocol shape, decorating each

@@ -10,6 +10,7 @@ pub(super) struct SessionToolGate {
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
     delegate: approval::ApprovalDelegate,
+    task_scoped: bool,
 }
 
 impl SessionToolGate {
@@ -19,6 +20,7 @@ impl SessionToolGate {
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
         delegate: approval::ApprovalDelegate,
+        task_scoped: bool,
     ) -> Self {
         Self {
             inner,
@@ -26,6 +28,7 @@ impl SessionToolGate {
             cancellation,
             network,
             delegate,
+            task_scoped,
         }
     }
 }
@@ -38,6 +41,7 @@ impl ToolGate for SessionToolGate {
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
+        let task_scoped = self.task_scoped;
         Box::pin(async move {
             let policy = match inner
                 .store
@@ -61,7 +65,7 @@ impl ToolGate for SessionToolGate {
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             let mut mode = mode;
             for (parent_mode, parent_grants) in ancestors {
-                let message = match approval::evaluate(parent_mode, &call.name, &class, &parent_grants) {
+                let message = match approval::evaluate_in_task(parent_mode, &call.name, &class, &parent_grants, task_scoped) {
                     approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
                     approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask => {
                         // Ask applies to each child action too: only the human
@@ -84,7 +88,8 @@ impl ToolGate for SessionToolGate {
                     Err(error) => approval_persistence_failure(error),
                 };
             }
-            let decision = approval::evaluate(mode, &call.name, &class, &grants);
+            let decision =
+                approval::evaluate_in_task(mode, &call.name, &class, &grants, task_scoped);
             // Write children retain mandatory supervision independently of the
             // user's approval mode. The parent's policy was checked above.
             let decision = if supervised

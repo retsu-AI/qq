@@ -950,6 +950,76 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     }
 }
 
+/// A detached task may run arbitrary non-forbidden programs within its native
+/// filesystem and network boundary. This never grants host execution: dispatch
+/// must retain the task scope and the native backend must enforce it or refuse.
+pub(crate) fn evaluate_in_task(
+    mode: ApprovalMode,
+    name: &str,
+    class: &ToolClass,
+    grants: &SessionGrants,
+    task_scoped: bool,
+) -> PolicyDecision {
+    let decision = evaluate(mode, name, class, grants);
+    if task_scoped
+        && mode == ApprovalMode::Auto
+        && matches!(class, ToolClass::Shell { .. })
+        && matches!(decision, PolicyDecision::RequireApproval)
+    {
+        PolicyDecision::Execute
+    } else {
+        decision
+    }
+}
+
+#[cfg(test)]
+mod task_policy_tests {
+    use super::*;
+
+    #[test]
+    fn task_shell_authority_preserves_modes_and_forbidden_floor() {
+        let shell = ToolClass::Shell {
+            command: "rm temporary".to_owned(),
+            cwd: None,
+            read_only: false,
+        };
+        let grants = SessionGrants::default();
+        assert_eq!(
+            evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, false),
+            PolicyDecision::RequireApproval
+        );
+        assert_eq!(
+            evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, true),
+            PolicyDecision::Execute
+        );
+        assert_eq!(
+            evaluate_in_task(ApprovalMode::Ask, "shell", &shell, &grants, true),
+            PolicyDecision::RequireApproval
+        );
+        assert!(matches!(
+            evaluate_in_task(ApprovalMode::ReadOnly, "shell", &shell, &grants, true),
+            PolicyDecision::Deny { .. }
+        ));
+        let forbidden = ToolClass::Shell {
+            command: "rm -rf /".to_owned(),
+            cwd: None,
+            read_only: false,
+        };
+        assert!(matches!(
+            evaluate_in_task(ApprovalMode::Auto, "shell", &forbidden, &grants, true),
+            PolicyDecision::Forbidden { .. }
+        ));
+        let network = ToolClass::Network {
+            host: Some("example.com".to_owned()),
+            refusal: None,
+        };
+        assert_eq!(
+            evaluate_in_task(ApprovalMode::Auto, "fetch", &network, &grants, true),
+            PolicyDecision::RequireApproval
+        );
+    }
+}
+
 /// Decides whether one classified tool call executes, waits for approval, or
 /// is denied outright under the session's approval mode and recorded grants.
 pub(crate) fn evaluate(

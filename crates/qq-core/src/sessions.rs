@@ -82,8 +82,10 @@ mod snapshots;
 mod store;
 mod streaming;
 mod subagents;
+mod task_workspaces;
 #[cfg(test)]
 mod tests;
+pub use task_workspaces::TaskWorkspacePolicy;
 mod tool_calls;
 mod transcript;
 
