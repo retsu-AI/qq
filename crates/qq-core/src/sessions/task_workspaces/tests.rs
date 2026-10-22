@@ -225,6 +225,113 @@ async fn publication_delivers_new_ignored_files_without_generated_directories() 
     runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn restored_goal_task_respects_tightened_publication_byte_limit() {
+    restored_goal_task_respects_tightened_publication_limits(true).await;
+}
+
+#[tokio::test]
+async fn restored_goal_task_respects_tightened_publication_entry_limit() {
+    restored_goal_task_respects_tightened_publication_limits(false).await;
+}
+
+async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let loader: Arc<dyn RuntimeLoader> = Arc::new(PublicationLoader {
+        protect_pack: false,
+    });
+    let (runtime, session) = open_session(root.path(), &source, loader.clone()).await;
+    let goal = qq_protocol::GoalId::generate().unwrap();
+    let owner = task.owner;
+    let encoded = encode(&task.record.lock().unwrap()).unwrap();
+    save(
+        &runtime.inner.store,
+        format!("{RECORD_PREFIX}{owner}"),
+        encoded,
+    )
+    .await
+    .unwrap();
+    save(
+        &runtime.inner.store,
+        format!("{GOAL_PREFIX}{goal}"),
+        owner.to_string(),
+    )
+    .await
+    .unwrap();
+    let mut policy = runtime.inner.task_workspaces.clone().unwrap();
+    runtime.shutdown().await.unwrap();
+    runtime.close().await.unwrap();
+    drop(runtime);
+    // Retained edits predate the tighter policy and must remain recoverable.
+    let retained = if bytes {
+        vec![(PathBuf::from("vendor/policy.md"), "x".repeat(128))]
+    } else {
+        (0..4)
+            .map(|index| (PathBuf::from(format!("new-{index}.txt")), "new".to_owned()))
+            .collect()
+    };
+    for (path, contents) in &retained {
+        std::fs::write(task.scope.workspace.path.join(path), contents).unwrap();
+    }
+    if bytes {
+        policy.limits.max_bytes = 64;
+    } else {
+        policy.limits.max_entries = 4;
+    }
+    let mut options = SessionRuntimeOptions::new(root.path().join("sessions.sqlite3"));
+    options.task_workspaces = Some(policy);
+    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
+    let workspace = runtime
+        .inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            session_workspace(connection, session)
+        })
+        .await
+        .unwrap();
+    let mut claim = super::super::settlement::recovery_claim(RunIdentity {
+        workspace_id: workspace,
+        session_id: session,
+        run_id: RunId::generate().unwrap(),
+        command_id: CommandId::generate().unwrap(),
+        kind: RunKind::Prompt,
+        child: false,
+    });
+    claim.workspace = source.to_string_lossy().into_owned();
+    claim.approval_mode = ApprovalMode::Auto;
+    claim.origin = Some(qq_protocol::RunOrigin::Goal {
+        goal_id: goal,
+        revision: 1,
+    });
+    let plan = loader.load(task.source_request.clone()).await.unwrap().plan;
+    let restored = prepare(&runtime.inner, &claim, plan, &RunCancellation::new(), None)
+        .await
+        .unwrap()
+        .expect("goal continuation restores its retained task");
+    assert_eq!(restored.scope.workspace.path, task.scope.workspace.path);
+    let published = publish_fixture(restored, &runtime, session).await;
+    runtime.shutdown().await.unwrap();
+    assert!(
+        published.is_err(),
+        "saved authority exceeded the current host limit: {published:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("vendor/policy.md")).unwrap(),
+        "original"
+    );
+    for (path, contents) in retained {
+        assert_eq!(
+            std::fs::read_to_string(task.scope.workspace.path.join(&path)).unwrap(),
+            contents
+        );
+        if path != Path::new("vendor/policy.md") {
+            assert!(!source.join(path).exists());
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn task_selection_never_blocks_reading_special_ignore_files() {
@@ -284,6 +391,35 @@ fn task_selection_never_blocks_reading_special_ignore_files() {
             }
         }
     }
+}
+
+#[test]
+fn task_selection_stops_inside_a_directory_listing() {
+    use std::cell::Cell;
+    let root = tempfile::tempdir().unwrap();
+    for index in 0..128 {
+        std::fs::write(root.path().join(format!("file-{index}")), "input").unwrap();
+    }
+    let workspace = Workspace::open(root.path()).unwrap();
+    let checks = Cell::new(0usize);
+    let stopped = || {
+        checks.set(checks.get() + 1);
+        checks.get() >= 4
+    };
+    let result = files_until(
+        &workspace,
+        TaskWorkspaceLimits {
+            max_entries: 256,
+            max_bytes: 1024,
+        },
+        true,
+        &stopped,
+    );
+    assert!(
+        matches!(result, Err(TaskExecutionError::Stopped)),
+        "{result:?}"
+    );
+    assert!(checks.get() < 128, "stopping must not finish the listing");
 }
 
 #[test]

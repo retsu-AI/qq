@@ -106,7 +106,11 @@ logical source project. Explicit file attachments are resolved through the sourc
 project capability with their normal size and hash checks. Editable attachments
 are copied even when ignored; protected configuration is attached as context
 without becoming writable task configuration. Task preparation observes
-cancellation and deadlines while waiting for filesystem capacity.
+cancellation and deadlines while waiting for filesystem capacity, enumerating
+directories and copying each bounded file chunk. Interrupted imports remove
+their partial private tree before settlement. Restored goal trees adopt the
+current host's file/byte ceilings; a tighter ceiling can refuse publication
+while retaining the private edits.
 Commands receive a private home/temp directory, explicit
 system read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this

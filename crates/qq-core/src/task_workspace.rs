@@ -78,6 +78,8 @@ struct FileVersion {
 
 #[derive(Debug, Error)]
 pub enum TaskWorkspaceError {
+    #[error("task workspace operation was cancelled or expired")]
+    Stopped,
     #[error("invalid task workspace input: {0}")]
     InvalidInput(&'static str),
     #[error("task workspace limit exceeded")]
@@ -144,6 +146,19 @@ impl TaskWorkspace {
         inputs: &[PathBuf],
         limits: TaskWorkspaceLimits,
     ) -> Result<Self, TaskWorkspaceError> {
+        Self::import_until(source, destination, inputs, limits, &|| false)
+    }
+
+    pub(crate) fn import_until(
+        source: &TaskWorkspaceSource,
+        destination: &Path,
+        inputs: &[PathBuf],
+        limits: TaskWorkspaceLimits,
+        stopped: &dyn Fn() -> bool,
+    ) -> Result<Self, TaskWorkspaceError> {
+        if stopped() {
+            return Err(TaskWorkspaceError::Stopped);
+        }
         if limits.max_entries == 0 || limits.max_entries > 65_536 || limits.max_bytes == 0 {
             return Err(TaskWorkspaceError::InvalidInput("invalid import limits"));
         }
@@ -167,6 +182,9 @@ impl TaskWorkspace {
         let mut selected = BTreeSet::new();
         let mut entries = BTreeSet::new();
         for input in inputs {
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
+            }
             validate_path(input)?;
             if !selected.insert(input.clone()) {
                 return Err(TaskWorkspaceError::InvalidInput("duplicate input"));
@@ -226,10 +244,16 @@ impl TaskWorkspace {
             let mut remaining = limits.max_bytes;
             let mut baseline = BTreeMap::new();
             for input in selected {
+                if stopped() {
+                    return Err(TaskWorkspaceError::Stopped);
+                }
                 baseline.insert(
                     input.clone(),
-                    copy_file(workspace.root(), &output, &input, &mut remaining)?,
+                    copy_file(workspace.root(), &output, &input, &mut remaining, stopped)?,
                 );
+            }
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
             }
             // The admitted root must still be the name the host originally
             // selected. This detects replacement; it is not a filesystem freeze.
@@ -275,6 +299,19 @@ impl TaskWorkspace {
 
     pub(crate) fn limits(&self) -> TaskWorkspaceLimits {
         self.limits
+    }
+
+    pub(crate) fn apply_limits(
+        &mut self,
+        limits: TaskWorkspaceLimits,
+    ) -> Result<(), TaskWorkspaceError> {
+        if limits.max_entries == 0 || limits.max_entries > 65_536 || limits.max_bytes == 0 {
+            return Err(TaskWorkspaceError::InvalidInput("invalid task limits"));
+        }
+        // Retained files remain recoverable; publication preflights them
+        // against the current trusted ceiling before changing the source.
+        self.limits = limits;
+        Ok(())
     }
 
     pub(crate) fn input_paths(&self) -> impl Iterator<Item = &PathBuf> {
@@ -651,6 +688,7 @@ fn copy_file(
     output: &Dir,
     path: &Path,
     remaining: &mut u64,
+    stopped: &dyn Fn() -> bool,
 ) -> Result<FileVersion, TaskWorkspaceError> {
     let source_parent = at(path, file_parent(source, path, false))?;
     let name = path.file_name().expect("validated file path");
@@ -676,6 +714,9 @@ fn copy_file(
     let mut copied = 0u64;
     let mut digest = Sha256::new();
     loop {
+        if stopped() {
+            return Err(TaskWorkspaceError::Stopped);
+        }
         // Read at most one byte beyond the admitted size, even if the source
         // grows indefinitely. Sparse files consume the same logical-byte budget.
         let count = buffer.len().min(
@@ -690,9 +731,15 @@ fn copy_file(
         if read as u64 > before.len() - copied {
             return Err(TaskWorkspaceError::Changed(path.to_owned()));
         }
+        if stopped() {
+            return Err(TaskWorkspaceError::Stopped);
+        }
         at(path, target.write_all(&buffer[..read]))?;
         digest.update(&buffer[..read]);
         copied += read as u64;
+    }
+    if stopped() {
+        return Err(TaskWorkspaceError::Stopped);
     }
     check_unchanged(path, &before, &at(path, input.metadata())?)?;
     check_unchanged(

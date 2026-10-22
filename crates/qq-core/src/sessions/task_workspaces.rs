@@ -56,7 +56,7 @@ pub(super) enum TaskExecutionError {
     #[error("task workspace I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
-    Workspace(#[from] TaskWorkspaceError),
+    Workspace(TaskWorkspaceError),
     #[error("task workspace traversal failed: {0}")]
     Traverse(#[from] crate::tools::walk::ListError),
     #[error("task record could not be encoded or decoded: {0}")]
@@ -67,6 +67,15 @@ pub(super) enum TaskExecutionError {
     Runtime(#[from] RuntimeLoadError),
     #[error("task workspace preparation stopped: {0}")]
     Join(#[from] tokio::task::JoinError),
+}
+
+impl From<TaskWorkspaceError> for TaskExecutionError {
+    fn from(error: TaskWorkspaceError) -> Self {
+        match error {
+            TaskWorkspaceError::Stopped => Self::Stopped,
+            error => Self::Workspace(error),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,7 +157,8 @@ impl TaskExecution {
         };
         let stopped = cancellation.clone();
         let (outputs, permit) = tokio::task::spawn_blocking(move || {
-            if *stopped.borrow() {
+            let is_stopped = || *stopped.borrow();
+            if is_stopped() {
                 return Err(TaskExecutionError::Stopped);
             }
             let mut record = task
@@ -165,7 +175,12 @@ impl TaskExecution {
                 record.workspace_limits().max_bytes,
             )?;
             let mut outputs: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
-            outputs.extend(files(&root, record.workspace_limits(), false)?);
+            outputs.extend(files_until(
+                &root,
+                record.workspace_limits(),
+                false,
+                &is_stopped,
+            )?);
             if outputs.len() > record.workspace_limits().max_entries {
                 return Err(TaskExecutionError::Invalid("too many task outputs"));
             }
@@ -354,10 +369,13 @@ pub(super) async fn prepare(
         .collect::<Vec<_>>();
     let prepared = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-            stopped.expire();
-        }
-        if stopped.is_cancelled() {
+        let is_stopped = || {
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                stopped.expire();
+            }
+            stopped.is_cancelled()
+        };
+        if is_stopped() {
             return Err(TaskExecutionError::Stopped);
         }
         let source = source_plan.workspace_handle();
@@ -378,11 +396,16 @@ pub(super) async fn prepare(
                 let control = Workspace::open(&policy.directory.path)?;
                 crate::storage::check_blocking(&control, policy.limits.max_bytes)?;
                 let mut inputs: BTreeSet<_> =
-                    files(&source, policy.limits, true)?.into_iter().collect();
+                    files_until(&source, policy.limits, true, &is_stopped)?
+                        .into_iter()
+                        .collect();
                 // Explicit human inputs override ignore rules. Editable files
                 // get private copies and publication baselines; protected
                 // configuration remains source authority and is only attached.
                 for path in attachments {
+                    if is_stopped() {
+                        return Err(TaskExecutionError::Stopped);
+                    }
                     if let Ok(relative) = source.contained_path(&path)
                         && source.check_write_path(&path, &relative).is_ok()
                         && source.root().is_file(&relative)
@@ -390,11 +413,12 @@ pub(super) async fn prepare(
                         inputs.insert(relative);
                     }
                 }
-                let workspace = TaskWorkspace::import(
+                let workspace = TaskWorkspace::import_until(
                     &TaskWorkspaceSource::from_plan(&source_plan)?,
                     &policy.directory.path.join(owner.to_string()),
                     &inputs.into_iter().collect::<Vec<_>>(),
                     policy.limits,
+                    &is_stopped,
                 )?;
                 let scope = NativeCommandScope {
                     workspace: workspace.directory_grant(),
@@ -423,6 +447,7 @@ pub(super) async fn prepare(
         record.scope.read_only = policy.read_only;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
+        record.workspace.apply_limits(policy.limits)?;
         record
             .workspace
             .protect_source(&TaskWorkspaceSource::from_plan(&source_plan)?)?;
@@ -432,6 +457,9 @@ pub(super) async fn prepare(
             .validate_workspace(held.path(), NativeWorkspaceIdentity::held(held.root())?)?;
         crate::storage::check_blocking(&held, 0)?;
         for protected in source.protected_pack_roots() {
+            if is_stopped() {
+                return Err(TaskExecutionError::Stopped);
+            }
             if !protected.as_os_str().is_empty() {
                 held.root().create_dir_all(protected)?;
             }
@@ -512,20 +540,36 @@ pub(super) async fn prepare_check(
     Ok(())
 }
 
+#[cfg(test)]
 fn files(
     workspace: &Workspace,
     limits: TaskWorkspaceLimits,
     inputs: bool,
 ) -> Result<Vec<PathBuf>, TaskExecutionError> {
+    files_until(workspace, limits, inputs, &|| false)
+}
+
+fn files_until(
+    workspace: &Workspace,
+    limits: TaskWorkspaceLimits,
+    inputs: bool,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Vec<PathBuf>, TaskExecutionError> {
     use crate::tools::walk::{
         EntryKind, GENERATED_DIRECTORIES, IgnoreStack, ListingLimits, list_children_bounded,
     };
+    if stopped() {
+        return Err(TaskExecutionError::Stopped);
+    }
     let mut ignores = IgnoreStack::for_task_files(workspace, inputs);
     let mut pending = vec![Some(".".to_owned())];
     let mut visited = 0usize;
     let mut path_bytes = 0usize;
     let mut selected = Vec::new();
     while let Some(directory) = pending.pop() {
+        if stopped() {
+            return Err(TaskExecutionError::Stopped);
+        }
         let Some(directory) = directory else {
             ignores.leave();
             continue;
@@ -540,11 +584,18 @@ fn files(
                 max_entries: limits.max_entries.saturating_sub(visited),
                 max_bytes: MAX_RECORD_BYTES.saturating_sub(path_bytes),
                 deadline: None,
-                cancelled: None,
+                cancelled: Some(stopped),
                 #[cfg(test)]
                 observe: None,
             }),
-        )?;
+        )
+        .map_err(|error| {
+            if stopped() {
+                TaskExecutionError::Stopped
+            } else {
+                TaskExecutionError::Traverse(error)
+            }
+        })?;
         if unreadable != 0 {
             return Err(TaskExecutionError::Invalid(
                 "task filenames must be Unicode",
@@ -553,6 +604,9 @@ fn files(
         visited += children.len();
         pending.push(None);
         for child in children.into_iter().rev() {
+            if stopped() {
+                return Err(TaskExecutionError::Stopped);
+            }
             path_bytes = path_bytes.saturating_add(child.path.len());
             if path_bytes > MAX_RECORD_BYTES {
                 return Err(TaskExecutionError::Invalid(

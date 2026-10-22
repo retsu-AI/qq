@@ -336,7 +336,7 @@ impl Walker<'_> {
                 max_entries: 100_000,
                 max_bytes: 32 * 1024 * 1024,
                 deadline: Some(self.budget.deadline),
-                cancelled: Some(self.cancelled),
+                cancelled: Some(&|| self.cancelled.is_cancelled()),
                 #[cfg(test)]
                 observe: None,
             }),

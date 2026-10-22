@@ -17,6 +17,7 @@ use ignore::{
     overrides::{Override, OverrideBuilder},
 };
 
+#[cfg(test)]
 use super::dispatch::ToolCancellation;
 use crate::workspace::Workspace;
 
@@ -111,14 +112,14 @@ pub(crate) struct ListingLimits<'a> {
     pub(crate) max_entries: usize,
     pub(crate) max_bytes: usize,
     pub(crate) deadline: Option<Instant>,
-    pub(crate) cancelled: Option<&'a ToolCancellation>,
+    pub(crate) cancelled: Option<&'a dyn Fn() -> bool>,
     #[cfg(test)]
     pub(crate) observe: Option<&'a dyn Fn(usize)>,
 }
 
 impl ListingLimits<'_> {
     fn check(&self, dir: &str, entries: usize, bytes: usize) -> Result<(), ListError> {
-        let reason = if self.cancelled.is_some_and(ToolCancellation::is_cancelled) {
+        let reason = if self.cancelled.is_some_and(|cancelled| cancelled()) {
             ListingStop::Cancelled
         } else if self
             .deadline
@@ -569,7 +570,7 @@ mod tests {
                 max_entries: 100,
                 max_bytes: 100_000,
                 deadline: Some(Instant::now() + std::time::Duration::from_secs(10)),
-                cancelled: Some(&cancelled),
+                cancelled: Some(&|| cancelled.is_cancelled()),
                 observe: Some(&observe),
             }),
         )
@@ -624,7 +625,7 @@ mod tests {
                         max_entries,
                         max_bytes,
                         deadline: Some(deadline),
-                        cancelled: Some(&cancelled),
+                        cancelled: Some(&|| cancelled.is_cancelled()),
                         observe: None,
                     })
                 )
