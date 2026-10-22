@@ -1,4 +1,5 @@
 //! Entry point for the command process; no provider or agent runtime opens here.
+//! The coordinator's client of this process lives in `qq_host`'s command worker.
 
 #[cfg(target_os = "linux")]
 mod delegation;
