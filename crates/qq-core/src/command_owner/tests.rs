@@ -1318,8 +1318,8 @@ async fn exercise_cancel_response_loss(wait_for_descendant: bool) {
             let mut request = command(workspace.path(), id, "unused");
             #[cfg(unix)]
             {
-                // Do not cancel a merely queued command: the live shell must
-                // already own a descendant when cancellation is committed.
+                // Preserve the original startup race as well as the case
+                // where the shell already owns a running descendant.
                 request.arguments = if wait_for_descendant {
                     r#"{"command":"sleep 300 & printf ready; wait"}"#.to_owned()
                 } else {

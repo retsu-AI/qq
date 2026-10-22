@@ -112,6 +112,7 @@ impl Subscriber for DiagnosticSubscriber {
                     | "native_workspace"
                     | "native_dispatch"
                     | "native_prepare"
+                    | "native_producer_identity"
                     | "native_start"
                     | "native_namespace"
                     | "native_release"

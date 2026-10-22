@@ -377,7 +377,13 @@ mod tests {
                         target: "qq::diagnostic", "native_prepare",
                         command = "SECRET_COMMAND", path = "SECRET_PATH"
                     );
-                    native.in_scope(|| tracing::warn!("SECRET_NATIVE_ERROR"));
+                    native.in_scope(|| {
+                        let identity = tracing::info_span!(
+                            target: "qq::diagnostic", "native_producer_identity",
+                            image = "SECRET_IMAGE"
+                        );
+                        identity.in_scope(|| tracing::warn!("SECRET_NATIVE_ERROR"));
+                    });
                 });
             });
         });
@@ -399,9 +405,11 @@ mod tests {
         assert!(records.iter().any(
             |record| record["span"]["name"] == "run" && record["fields"]["message"] == "close"
         ));
-        assert!(records.iter().any(|record| {
-            record["span"]["name"] == "native_prepare" && record["fields"]["message"] == "close"
-        }));
+        for name in ["native_prepare", "native_producer_identity"] {
+            assert!(records.iter().any(|record| {
+                record["span"]["name"] == name && record["fields"]["message"] == "close"
+            }));
+        }
     }
 
     #[cfg(unix)]
