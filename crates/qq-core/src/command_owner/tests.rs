@@ -1307,12 +1307,37 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
     owner
         .submit({
             let mut request = command(workspace.path(), id, "unused");
-            request.arguments = crate::tools::PANIC_SHELL_ARGUMENTS.to_owned();
+            #[cfg(unix)]
+            {
+                // Do not cancel a merely queued command: the live shell must
+                // already own a descendant when cancellation is committed.
+                request.arguments = r#"{"command":"sleep 300 & printf ready; wait"}"#.to_owned();
+            }
+            #[cfg(windows)]
+            {
+                request.arguments = crate::tools::PANIC_SHELL_ARGUMENTS.to_owned();
+            }
             request
         })
         .await
         .unwrap();
-    let running = owner.wait(id, 0).await.unwrap();
+    let running = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut version = 0;
+        loop {
+            let snapshot = owner.wait(id, version).await.unwrap();
+            #[cfg(unix)]
+            let ready = snapshot.output.contains("ready");
+            #[cfg(windows)]
+            let ready = snapshot.process.is_some();
+            if ready {
+                break snapshot;
+            }
+            assert_ne!(snapshot.status, CommandStatus::Finished);
+            version = snapshot.version;
+        }
+    })
+    .await
+    .expect("cancellation fixture must reach a live command");
     let (entered, committed) = tokio::sync::oneshot::channel();
     let (release, gate) = tokio::sync::oneshot::channel();
     CANCELLATION_HOOKS.lock().unwrap().push(AdmissionHook {
