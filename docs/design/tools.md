@@ -100,7 +100,10 @@ Completed runs publish after tools and children drain and recheck the session's
 current publication permission. Failed/cancelled work stays in its private task
 tree. Completion checks acquire the source workspace exclusion before importing
 the published artifact and execute through the same durable worker; their file
-changes are not published. Full retains host authority.
+changes are not published. Successive goal-origin runs reuse the same persisted
+private tree, retaining caches and unpublished files; ordinary prompts do not
+revive that goal tree. Compaction does not create task copies. Full retains host
+authority.
 
 This integration does not yet qualify unattended safety: production resource
 scopes still use host limits, subsequent task output disk usage is unbounded,

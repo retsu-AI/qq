@@ -13,6 +13,7 @@ use std::{collections::BTreeSet, io};
 const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const RUN_PREFIX: &str = "qq_task_run:";
 const RECORD_PREFIX: &str = "qq_task_workspace:";
+const GOAL_PREFIX: &str = "qq_task_goal:";
 const PRIVATE_HOME: &str = ".qq/task-home";
 
 /// Authority supplied by the server, independently of project/model output.
@@ -137,6 +138,9 @@ pub(super) async fn prepare(
     let Some(policy) = inner.task_workspaces.clone() else {
         return Ok(None);
     };
+    if claimed.identity.kind == RunKind::Compaction {
+        return Ok(None);
+    }
     let session = claimed.identity.session_id.to_string();
     let parent: Option<String> = inner.store.call(Priority::AwaitControl, move |connection| {
         Ok(connection.query_row(
@@ -148,15 +152,30 @@ pub(super) async fn prepare(
         return Ok(None);
     }
     let publisher = parent.is_none();
-    let owner = match parent {
+    // Only goal-origin work resumes a goal's tree. Ordinary prompts and
+    // completion checks do not revive it; checks import the published artifact.
+    let goal_key = match claimed.origin.as_ref() {
+        Some(qq_protocol::RunOrigin::Goal { goal_id, .. }) if publisher => {
+            Some(format!("{GOAL_PREFIX}{goal_id}"))
+        }
+        _ => None,
+    };
+    let goal_owner = match &goal_key {
+        Some(key) => read(&inner.store, key.clone()).await?,
+        None => None,
+    };
+    let existing = parent.or(goal_owner);
+    let owner = match existing.as_deref() {
         Some(owner) => owner
             .parse()
             .map_err(|_| TaskExecutionError::Invalid("invalid task owner"))?,
         None => claimed.identity.run_id,
     };
     let saved = read(&inner.store, format!("{RECORD_PREFIX}{owner}")).await?;
-    if !publisher && saved.is_none() {
-        return Err(TaskExecutionError::Invalid("parent task record is missing"));
+    if existing.is_some() && saved.is_none() {
+        return Err(TaskExecutionError::Invalid(
+            "existing task record is missing",
+        ));
     }
     let permit = crate::workspace::blocking_permits()
         .acquire_owned()
@@ -236,6 +255,9 @@ pub(super) async fn prepare(
         owner.to_string(),
     )
     .await?;
+    if let Some(key) = goal_key {
+        save(&inner.store, key, owner.to_string()).await?;
+    }
     Ok(Some(prepared.0))
 }
 
@@ -295,6 +317,7 @@ fn files(
     let mut builder = ignore::WalkBuilder::new(&root);
     builder
         .hidden(false)
+        .parents(false)
         .git_global(false)
         .git_exclude(false)
         .require_git(false)

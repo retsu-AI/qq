@@ -7,17 +7,27 @@ use std::{path::Path, process::Stdio, time::Duration};
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_cannot_overwrite_host_files_through_a_project_symlink() {
-    exercise_default_auto(None).await;
+    exercise_default_auto(None, false).await;
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_completion_check_uses_the_detached_native_boundary() {
-    exercise_default_auto(Some("printf check-write > alias; test -f result.txt")).await;
+    exercise_default_auto(
+        Some("printf check-write > alias; test -f result.txt"),
+        false,
+    )
+    .await;
 }
 
 #[cfg(target_os = "linux")]
-async fn exercise_default_auto(check: Option<&str>) {
+#[tokio::test]
+async fn default_auto_goal_continuations_reuse_the_same_private_task_files() {
+    exercise_default_auto(Some("test -f result.txt"), true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn exercise_default_auto(check: Option<&str>, continuation: bool) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().canonicalize().unwrap();
     let workspace = home.join("workspace");
@@ -49,9 +59,22 @@ async fn exercise_default_auto(check: Option<&str>) {
     let completed = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let mut replies = vec![reply(vec![
         json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":""}}),
-        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":r#"{"command":"printf overwritten > alias; rm alias; printf task-output > result.txt; printf task-command-ran"}"#}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":r#"{"command":"printf overwritten > alias; rm alias; printf task-output > result.txt; printf cache-retained > .qq/task-home/cache-proof; printf task-command-ran"}"#}}),
         completed.clone(),
     ])];
+    if continuation {
+        replies.push(reply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_wait","call_id":"call_wait","name":"update_goal","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_wait","call_id":"call_wait","name":"update_goal","arguments":json!({"wait":{"seconds":0,"reason":"continue the next bounded run"}}).to_string()}}),
+            completed.clone(),
+        ]));
+        replies.push(reply(vec![json!({"type":"response.output_text.delta","delta":"artifact published; continue verification next run"}),completed.clone()]));
+        replies.push(reply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_resume","call_id":"call_resume","name":"shell","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_resume","call_id":"call_resume","name":"shell","arguments":r#"{"command":"cat .qq/task-home/cache-proof"}"#}}),
+            completed.clone(),
+        ]));
+    }
     if check.is_some() {
         replies.push(reply(vec![
             json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"update_goal","arguments":""}}),
@@ -80,7 +103,7 @@ async fn exercise_default_auto(check: Option<&str>) {
             "--goal-check-approval",
             "for-goal",
             "--goal-max-runs",
-            "3",
+            "4",
             "--goal-deadline",
             "1m",
         ]);
@@ -127,9 +150,42 @@ async fn exercise_default_auto(check: Option<&str>) {
         .unwrap();
     assert_eq!(
         captured.len(),
-        if check.is_some() { 3 } else { 2 },
+        if continuation {
+            6
+        } else if check.is_some() {
+            3
+        } else {
+            2
+        },
         "the model must receive the command outcome"
     );
+    assert!(
+        !workspace.join(".qq/task-home").exists(),
+        "private caches must not publish into the project"
+    );
+    if continuation {
+        let request = captured[4].json_body();
+        let result = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "call_resume")
+            .unwrap();
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("cache-retained"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_dir(home.join("data/qq/task-workspaces"))
+                .unwrap()
+                .count(),
+            2,
+            "a goal shares one work tree across runs; verification gets a fresh copy"
+        );
+    }
     if check.is_some() {
         assert!(
             String::from_utf8_lossy(&output.stdout).contains("\"type\":\"achieved\""),
