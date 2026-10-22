@@ -202,7 +202,7 @@ policy: (
 | `allow_tools` | any layer except an organization manifest | tool names approved for the workspace. Grants layer: `"name"` adds, `Remove("name")` drops one a lower layer added |
 | `allow_shell_prefixes` | any layer except an organization manifest | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
 | `allow_hosts` | any layer except an organization manifest | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
-| `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows) |
+| `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT LOCALAPPDATA USERPROFILE APPDATA TEMP TMP` on Windows) |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |

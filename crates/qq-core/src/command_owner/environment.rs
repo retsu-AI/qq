@@ -91,13 +91,34 @@ impl NativeEnvironment {
         mut self,
         home: &std::path::Path,
     ) -> Result<Self, CommandOwnerError> {
-        self.0
-            .retain(|(name, _)| !same_name(name, "HOME") && !same_name(name, "TMPDIR"));
-        let overrides = Self::from_values([
+        let overrides = vec![
             ("HOME".to_owned(), home.as_os_str().to_owned()),
             ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
-        ])?;
-        self.0.extend(overrides.0);
+        ];
+        #[cfg(windows)]
+        let overrides = {
+            let mut values = overrides;
+            values.extend([
+                ("USERPROFILE".to_owned(), home.as_os_str().to_owned()),
+                ("TEMP".to_owned(), home.join("tmp").into_os_string()),
+                ("TMP".to_owned(), home.join("tmp").into_os_string()),
+                (
+                    "APPDATA".to_owned(),
+                    home.join("AppData/Roaming").into_os_string(),
+                ),
+                (
+                    "LOCALAPPDATA".to_owned(),
+                    home.join("AppData/Local").into_os_string(),
+                ),
+            ]);
+            values
+        };
+        self.0.retain(|(name, _)| {
+            !overrides
+                .iter()
+                .any(|(replacement, _)| same_name(name, replacement))
+        });
+        self.0.extend(Self::from_values(overrides)?.0);
         self.normalize()?;
         Ok(self)
     }
@@ -214,6 +235,31 @@ mod tests {
             NativeEnvironment::capture(&vec!["UNSET".to_owned(); crate::MAX_SHELL_ENV_NAMES + 1])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn task_home_replaces_host_profile_and_scratch_values() {
+        let snapshot = NativeEnvironment::from_values(
+            crate::BASE_ENV
+                .iter()
+                .map(|name| ((*name).to_owned(), OsString::from("host-value"))),
+        )
+        .unwrap();
+        let home = std::path::Path::new("private-task-home");
+        let environment = snapshot.with_task_home(home).unwrap();
+        assert_eq!(environment.get("HOME"), Some(home.into()));
+        assert_eq!(environment.get("TMPDIR"), Some(home.join("tmp").into()));
+        assert_eq!(environment.get("PATH"), Some("host-value".into()));
+        #[cfg(windows)]
+        for (name, path) in [
+            ("USERPROFILE", home.to_path_buf()),
+            ("TEMP", home.join("tmp")),
+            ("TMP", home.join("tmp")),
+            ("APPDATA", home.join("AppData/Roaming")),
+            ("LOCALAPPDATA", home.join("AppData/Local")),
+        ] {
+            assert_eq!(environment.get(name), Some(path.into_os_string()));
+        }
     }
 
     #[cfg(unix)]

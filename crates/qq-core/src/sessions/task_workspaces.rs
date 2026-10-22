@@ -522,6 +522,11 @@ pub(super) async fn prepare(
             }
         }
         held.root().create_dir_all(format!("{PRIVATE_HOME}/tmp"))?;
+        #[cfg(windows)]
+        for directory in ["AppData/Local", "AppData/Roaming"] {
+            held.root()
+                .create_dir_all(format!("{PRIVATE_HOME}/{directory}"))?;
+        }
         let encoded = encode(&record)?;
         Ok::<_, TaskExecutionError>((
             Arc::new(TaskExecution {
