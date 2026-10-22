@@ -352,11 +352,20 @@ impl TaskWorkspace {
                             &source,
                             &target,
                             &file.bytes,
+                            current.as_ref().map(|file| crate::workspace::ExpectedFile {
+                                bytes: &file.bytes,
+                                permissions: &file.permissions,
+                            }),
                             permissions,
                         )
-                        .map_err(|error| TaskWorkspaceError::Io {
-                            path: path.clone(),
-                            source: io::Error::other(error),
+                        .map_err(|error| match error {
+                            crate::workspace::atomic_write::AtomicWriteError::Changed => {
+                                TaskWorkspaceError::Conflict(path.clone())
+                            }
+                            error => TaskWorkspaceError::Io {
+                                path: path.clone(),
+                                source: io::Error::other(error),
+                            },
                         })?;
                     } else {
                         at(&path, source.revalidate_write_target(&target))?;

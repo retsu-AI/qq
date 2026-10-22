@@ -73,6 +73,10 @@ to the source. It checks every output and expected source version before
 installing changes, rejects links and trust paths, and preserves unrelated
 source edits. Installs are atomic per file; later failures report earlier
 applies, and a saved baseline recognizes already-installed bytes on retry.
+The shared writer rechecks source bytes after staging and creates Unix temporary
+files with mode `0600`. On Windows, staging denies shared opens until it installs
+the destination access list (or a user-only list for a new file); the replacement
+protects that list from broader parent inheritance.
 A kernel lock at `.qq/task-publication.lock` serializes QQ publishers across
 server processes. Other editors need not honor that lock, so apply-time checks
 detect observed races rather than providing a filesystem-wide transaction.

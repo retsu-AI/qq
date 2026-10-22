@@ -7,7 +7,8 @@ use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
 use crate::workspace::{
-    FileState, FileStateUpdate, Workspace, WriteTarget, apply_atomically, content_hash,
+    ExpectedFile, FileState, FileStateUpdate, Workspace, WriteTarget, apply_atomically,
+    content_hash,
 };
 
 #[cfg(test)]
@@ -456,6 +457,10 @@ pub(super) fn edit_file(
             workspace,
             &file.target,
             file.text.as_bytes(),
+            Some(ExpectedFile {
+                bytes: &file.original.bytes,
+                permissions: &file.original.permissions,
+            }),
             Some(file.original.permissions.clone()),
         ) {
             drop(guard);

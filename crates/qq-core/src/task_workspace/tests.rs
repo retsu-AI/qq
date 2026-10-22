@@ -104,6 +104,236 @@ fn publication_preserves_other_source_edits_and_can_resume_from_a_saved_record()
     assert!(retried.publish(&paths).unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn publication_preserves_a_human_edit_made_while_staging() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "original").unwrap();
+    let mut task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "agent change").unwrap();
+    let (entered, release) = crate::workspace::hold_tool_apply(&fixture.source.path);
+    let publication = tokio::task::spawn_blocking(move || task.publish(&[PathBuf::from("a")]));
+    entered.await.unwrap();
+    fs::write(fixture.source.path.join("a"), "human change").unwrap();
+    release.send(()).unwrap();
+    let result = publication.await.unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "human change"
+    );
+    assert!(matches!(result, Err(TaskWorkspaceError::Conflict(path)) if path == Path::new("a")));
+    assert!(!fs::read_dir(&fixture.source.path).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".qq-apply-")
+    }));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn publication_preserves_a_human_permission_change_while_staging() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "original").unwrap();
+    fs::set_permissions(
+        fixture.source.path.join("a"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let mut task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "agent change").unwrap();
+    let (entered, release) = crate::workspace::hold_tool_apply(&fixture.source.path);
+    let publication = tokio::task::spawn_blocking(move || task.publish(&[PathBuf::from("a")]));
+    entered.await.unwrap();
+    fs::set_permissions(
+        fixture.source.path.join("a"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    release.send(()).unwrap();
+    let result = publication.await.unwrap();
+    assert_eq!(
+        fs::metadata(fixture.source.path.join("a"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert!(matches!(result, Err(TaskWorkspaceError::Conflict(path)) if path == Path::new("a")));
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "original"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn publication_stages_private_bytes_in_a_private_file() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "private original").unwrap();
+    fs::set_permissions(
+        fixture.source.path.join("a"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let mut task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "private agent change").unwrap();
+    let (entered, release) = crate::workspace::atomic_write::hold_tool_create(&fixture.source.path);
+    let publication = tokio::task::spawn_blocking(move || task.publish(&[PathBuf::from("a")]));
+    entered.await.unwrap();
+    let staged = fs::read_dir(&fixture.source.path)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".qq-apply-")
+        })
+        .unwrap();
+    let mode = staged.metadata().unwrap().permissions().mode() & 0o777;
+    release.send(()).unwrap();
+    publication.await.unwrap().unwrap();
+    assert_eq!(mode & 0o077, 0, "staging exposed private bytes");
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "private agent change"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn publication_preserves_windows_private_access() {
+    use windows_permissions::{
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::{GetSecurityInfo, SetSecurityInfo},
+    };
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "private original").unwrap();
+    let user = win_custody::current_user_sid_string().unwrap();
+    let security: windows_permissions::LocalBox<windows_permissions::SecurityDescriptor> =
+        format!("D:P(A;;FA;;;{user})").parse().unwrap();
+    use std::os::windows::fs::OpenOptionsExt as _;
+    let mut source = fs::OpenOptions::new()
+        .access_mode(0x0006_0000)
+        .open(fixture.source.path.join("a"))
+        .unwrap();
+    SetSecurityInfo(
+        &mut source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        security.dacl(),
+        None,
+    )
+    .unwrap();
+    drop(source);
+    let mut task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "private agent change").unwrap();
+    let (entered, release) = crate::workspace::atomic_write::hold_tool_create(&fixture.source.path);
+    let publication = tokio::task::spawn_blocking(move || task.publish(&[PathBuf::from("a")]));
+    entered.await.unwrap();
+    let staged = fs::read_dir(&fixture.source.path)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".qq-apply-")
+        })
+        .unwrap();
+    let exposed = fs::File::open(staged.path());
+    release.send(()).unwrap();
+    publication.await.unwrap().unwrap();
+    assert!(
+        exposed.is_err(),
+        "staged bytes were openable before securing the DACL"
+    );
+    let file = fs::File::open(fixture.source.path.join("a")).unwrap();
+    let actual = GetSecurityInfo(
+        &file,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl,
+    )
+    .unwrap();
+    assert_eq!(actual.as_sddl().unwrap(), security.as_sddl().unwrap());
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "private agent change"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn publication_preserves_windows_access_change_while_staging() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_permissions::{
+        constants::{SeObjectType, SecurityInformation},
+        wrappers::{GetSecurityInfo, SetSecurityInfo},
+    };
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "original").unwrap();
+    let mut source = fs::OpenOptions::new()
+        .access_mode(0x0006_0000)
+        .open(fixture.source.path.join("a"))
+        .unwrap();
+    let original = GetSecurityInfo(
+        &source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl,
+    )
+    .unwrap();
+    let user = win_custody::current_user_sid_string().unwrap();
+    let edited: windows_permissions::LocalBox<windows_permissions::SecurityDescriptor> =
+        format!("D:P(A;;FR;;;{user})").parse().unwrap();
+    let mut task = fixture.import(&["a"], 1024).unwrap();
+    fs::write(task.path().join("a"), "agent change").unwrap();
+    let (entered, release) = crate::workspace::hold_tool_apply(&fixture.source.path);
+    let publication = tokio::task::spawn_blocking(move || task.publish(&[PathBuf::from("a")]));
+    entered.await.unwrap();
+    SetSecurityInfo(
+        &mut source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        edited.dacl(),
+        None,
+    )
+    .unwrap();
+    release.send(()).unwrap();
+    let result = publication.await.unwrap();
+    let actual = GetSecurityInfo(
+        &source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl,
+    )
+    .unwrap();
+    // Restore fixture access even when an assertion below fails.
+    SetSecurityInfo(
+        &mut source,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        original.dacl(),
+        None,
+    )
+    .unwrap();
+    drop(source);
+    assert_eq!(actual.as_sddl().unwrap(), edited.as_sddl().unwrap());
+    assert!(matches!(result, Err(TaskWorkspaceError::Conflict(path)) if path == Path::new("a")));
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "original"
+    );
+}
+
 #[test]
 fn publication_preflights_conflicts_before_installing_any_output() {
     let fixture = Fixture::new();
@@ -344,7 +574,12 @@ fn publication_lock_probe() {
 
 #[test]
 fn publication_cannot_install_policy_or_git_trust_files() {
-    for protected in [".git/config", ".qq/config.ron", "../outside"] {
+    for protected in [
+        ".git/config",
+        ".qq/config.ron",
+        ".qq/task-publication.lock",
+        "../outside",
+    ] {
         let fixture = Fixture::new();
         fs::write(fixture.source.path.join("a"), "original").unwrap();
         let mut task = fixture.import(&["a"], 1024).unwrap();
@@ -528,6 +763,7 @@ fn detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_root
         ".git/config",
         "qq.ron",
         ".qq/config.ron",
+        ".qq/task-publication.lock",
         "nested/.git/HEAD",
     ] {
         let fixture = Fixture::new();

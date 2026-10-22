@@ -6,7 +6,9 @@ use std::{
 use qq_protocol::ToolCallDisplay;
 use serde::Deserialize;
 
-use crate::workspace::{FileState, FileStateUpdate, Workspace, apply_atomically, content_hash};
+use crate::workspace::{
+    ExpectedFile, FileState, FileStateUpdate, Workspace, apply_atomically, content_hash,
+};
 
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
@@ -118,7 +120,11 @@ pub(super) fn write_file(
                 workspace,
                 &target,
                 arguments.content.as_bytes(),
-                Some(current.permissions),
+                Some(ExpectedFile {
+                    bytes: &current.bytes,
+                    permissions: &current.permissions,
+                }),
+                Some(current.permissions.clone()),
             ) {
                 return ToolOutput::error(error.to_string());
             }
@@ -130,7 +136,7 @@ pub(super) fn write_file(
         Ok(_) => return ToolOutput::error("not_a_file: path is not a regular file"),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if let Err(error) =
-                apply_atomically(workspace, &target, arguments.content.as_bytes(), None)
+                apply_atomically(workspace, &target, arguments.content.as_bytes(), None, None)
             {
                 return ToolOutput::error(error.to_string());
             }
