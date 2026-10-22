@@ -225,6 +225,8 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::recovery_marks_an_unconfirmed_command_lost_and_never_replays_it
           bash .github/scripts/test-exact.sh command_owner::tests::owner_enforces_the_task_deadline_without_a_live_observer
           bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_workspace_validation_capacity
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_storage_admission_capacity
           bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands

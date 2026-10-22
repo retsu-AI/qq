@@ -4,6 +4,112 @@ use std::path::Path;
 use super::*;
 
 #[tokio::test]
+async fn cancellation_and_deadline_settle_without_workspace_validation_capacity() {
+    stopped_admission_keeps_no_execution_slot(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_and_deadline_settle_without_storage_admission_capacity() {
+    stopped_admission_keeps_no_execution_slot(true).await;
+}
+
+async fn stopped_admission_keeps_no_execution_slot(after_validation: bool) {
+    for deadline in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+            .await
+            .unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let mut request = command(workspace.path(), id, "echo unexpected > ran");
+        request.filesystem = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+        };
+        if deadline {
+            request.not_after_ms = Some(
+                u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()
+                    + 60_000,
+            );
+        }
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let hooks = if after_validation {
+            &STORAGE_ADMISSION_HOOKS
+        } else {
+            &PREPARATION_HOOKS
+        };
+        hooks.lock().unwrap().push(AdmissionHook {
+            id,
+            entered,
+            release: released,
+        });
+        owner.submit(request).await.unwrap();
+        waiting.await.unwrap();
+        let capacity = crate::workspace::blocking_permits();
+        let permits = capacity
+            .clone()
+            .acquire_many_owned(u32::try_from(capacity.available_permits()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(capacity.available_permits(), 0);
+        release.send(()).unwrap();
+        let cancellation = if deadline {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+            tokio::time::resume();
+            None
+        } else {
+            let owner = owner.clone();
+            Some(tokio::spawn(async move { owner.cancel(id).await }))
+        };
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_finished(&owner, id, 0),
+        )
+        .await;
+        let shutdown = if terminal.is_ok() {
+            Some(tokio::time::timeout(std::time::Duration::from_secs(5), owner.shutdown()).await)
+        } else {
+            None
+        };
+        // Always release fixture capacity, including on the unfixed path.
+        drop(permits);
+        if let Some(cancellation) = cancellation {
+            cancellation.await.unwrap().unwrap();
+        }
+        owner.shutdown().await.unwrap();
+        let terminal =
+            terminal.expect("stopped pre-launch work must settle without filesystem capacity");
+        shutdown
+            .unwrap()
+            .expect("shutdown must not retain a stopped execution slot")
+            .unwrap();
+        assert_eq!(terminal.status, CommandStatus::Finished);
+        assert!(terminal.process.is_none());
+        let result = terminal.result.unwrap();
+        if deadline {
+            assert_eq!(
+                result.0.native_outcome,
+                Some(NativeCommandOutcome::TimedOut)
+            );
+        } else {
+            assert_eq!(
+                result.0.disposition,
+                crate::tools::ResultDisposition::Interrupted
+            );
+        }
+        assert!(!workspace.path().join("ran").exists());
+    }
+}
+
+#[tokio::test]
 async fn scoped_command_refuses_low_disk_space_before_launch() {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();

@@ -1350,6 +1350,12 @@ command running; reopening reconciles its original journal and retains its
 terminal result before the session continues. An active durable goal can then
 schedule its successor within its remaining shared budget.
 
+Worker journal I/O has its own bounded capacity, independent of project
+filesystem operations. Pre-launch workspace validation and the free-space probe
+share one cancellable, deadline-bound filesystem admission. A command waiting
+for that capacity can settle cancellation or expiry and release its execution
+slot without acquiring a filesystem permit.
+
 The macOS adapter captures a private executable copy when the owner starts,
 so replacing the original helper, its ancestors or existing hardlinks cannot
 replace trusted startup code. Restricted writable grants that include the copy

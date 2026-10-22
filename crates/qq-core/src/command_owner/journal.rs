@@ -10,8 +10,29 @@ use std::{
 use super::{ADMISSION_HOOKS, CANCELLATION_HOOKS, wait_at_commit};
 use super::{
     CommandOwnerError, CommandSnapshot, CommandStatus, ExecutionContextReceipt,
-    MAX_LIVE_OUTPUT_BYTES, MAX_RETAINED, ToolOutput, blocking,
+    MAX_LIVE_OUTPUT_BYTES, MAX_RETAINED, ToolOutput,
 };
+
+// Durable control must retain capacity when project filesystem reads stall.
+// Bound journal I/O independently across owners, in addition to each journal's
+// serial transaction permit; neither pool may starve the other.
+async fn blocking<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, CommandOwnerError> + Send + 'static,
+) -> Result<T, CommandOwnerError> {
+    static CAPACITY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let permit = CAPACITY
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(8)))
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| CommandOwnerError::Unavailable)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(|_| CommandOwnerError::Unavailable)?
+}
 
 #[derive(Clone)]
 pub(super) struct Journal(Arc<JournalState>);
