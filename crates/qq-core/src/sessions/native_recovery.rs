@@ -328,9 +328,12 @@ async fn observe_existing(
         ) {
             if pending.identity.kind == RunKind::GoalCheck {
                 let scopes = scopes.as_ref().ok_or(SessionRuntimeError::Unavailable)?;
-                scopes
-                    .admit(&pending.workspace)
+                // Validation only reads directory identity. If filesystem work
+                // stalls, retain the journal and take the interrupted-check path
+                // rather than holding recovery and shutdown indefinitely.
+                tokio::time::timeout(STARTUP_OBSERVATION, scopes.admit(&pending.workspace))
                     .await
+                    .map_err(|_| SessionRuntimeError::Unavailable)?
                     .map_err(|reason| SessionRuntimeError::InvalidNativeScope { reason })?;
             }
             return save_terminal(store, pending, snapshot, owner).await;

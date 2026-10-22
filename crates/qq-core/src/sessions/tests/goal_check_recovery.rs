@@ -600,6 +600,91 @@ async fn native_check_reopen_observes_live_execution_and_wakes_on_completion() {
     assert!(acknowledgements.lock().unwrap().contains(&id));
 }
 
+#[tokio::test]
+async fn native_check_recovery_bounds_stalled_workspace_validation() {
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().canonicalize().unwrap();
+    let database = path.join("sessions.sqlite3");
+    let store = Store::open(database.clone()).await.unwrap();
+    let (claim, id) = pending_check(&store, &path, OWNER).await;
+    store.close().await.unwrap();
+    let permits = crate::workspace::blocking_permits();
+    let held = permits
+        .clone()
+        .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
+        .await
+        .unwrap();
+    let (state, _) = watch::channel(CommandSnapshot {
+        id,
+        version: 1,
+        status: CommandStatus::Finished,
+        process: None,
+        output: String::new(),
+        result: Some(serde_json::from_value(serde_json::to_value(result(0)).unwrap()).unwrap()),
+    });
+    let acknowledgements = Arc::new(StdMutex::new(Vec::new()));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let mut options = SessionRuntimeOptions::new(database);
+    options.native_commands = Some(Arc::new(LiveWorker {
+        state,
+        entered: entered.clone(),
+        acknowledgements: acknowledgements.clone(),
+    }));
+    let loader = Arc::new(ScriptedRunsLoader {
+        requests: Arc::default(),
+        runs: vec![],
+        loads: StdMutex::new(0),
+    });
+    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
+    entered.notified().await;
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: claim.identity.workspace_id,
+            after: EventCursor {
+                store_id: runtime.store_id(),
+                workspace_id: claim.identity.workspace_id,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    let settled = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if matches!(event.event, SessionEvent::RunFinished {run_id, outcome: RunOutcome::Interrupted, ..} if run_id == claim.identity.run_id) { break; }
+        }
+    }).await;
+    let snapshot = runtime
+        .snapshot(SnapshotRequest::new(
+            claim.identity.workspace_id,
+            Some(claim.identity.session_id),
+            256,
+            256,
+        ))
+        .await
+        .unwrap()
+        .focused
+        .unwrap();
+    drop(held);
+    runtime.shutdown().await.unwrap();
+    assert!(
+        settled.is_ok(),
+        "recovery must release run ownership while filesystem capacity is still exhausted"
+    );
+    assert!(matches!(
+        snapshot.goal.unwrap().status,
+        qq_protocol::GoalStatus::Paused {
+            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                cause: qq_protocol::GoalNeedsUser::CheckInterrupted
+            }
+        }
+    ));
+    assert!(
+        acknowledgements.lock().unwrap().is_empty(),
+        "unverified evidence must stay in the worker journal"
+    );
+    assert_eq!(*loader.loads.lock().unwrap(), 0);
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn native_check_real_linux_result_survives_coordinator_loss_without_reexecution() {

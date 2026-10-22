@@ -266,6 +266,7 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_bounds_stalled_workspace_validation
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity
       - name: Private command transport and worker process
