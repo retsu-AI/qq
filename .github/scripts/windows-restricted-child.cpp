@@ -95,6 +95,13 @@ static int inspect() {
     for (DWORD i = 0; i < groups->GroupCount; ++i) {
         std::cout << "capability=" << sid_text(groups->Groups[i].Sid) << "; attributes=" << groups->Groups[i].Attributes << std::endl;
     }
+    auto restricted = information(token.value, TokenRestrictedSids);
+    const auto* restricting = reinterpret_cast<const TOKEN_GROUPS*>(restricted.data());
+    if (restricting->GroupCount > 128) throw std::runtime_error("too many restricting SIDs");
+    std::cout << "restricting-count=" << restricting->GroupCount << std::endl;
+    for (DWORD i = 0; i < restricting->GroupCount; ++i) {
+        std::cout << "restricting=" << sid_text(restricting->Groups[i].Sid) << std::endl;
+    }
     DWORD lpac = 0, size = 0;
     const BOOL available = GetTokenInformation(token.value, TokenIsLessPrivilegedAppContainer, &lpac, sizeof(lpac), &size);
     std::cout << "lpac-query-available=" << available << "; lpac=" << lpac << std::endl;
@@ -104,7 +111,7 @@ static int inspect() {
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
-        if (argc != 4) throw std::runtime_error("expected node path, payload path, restriction mode");
+        if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
         Handle current;
         require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &current.value), "OpenProcessToken");
         contained(current.value);
@@ -112,14 +119,16 @@ int wmain(int argc, wchar_t** argv) {
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
         const std::wstring mode(argv[3]);
+        const bool write_sid = mode == L"write-sid" || mode == L"write-sid-lpac";
+        if (argc != (write_sid ? 5 : 4)) throw std::runtime_error("unexpected restriction arguments");
         const bool reduce_capabilities = mode == L"reduce-capabilities" || mode == L"reduce-capabilities-lpac";
         const bool disable_marker = mode == L"disable-marker" || mode == L"disable-marker-lpac";
-        const bool lpac = mode == L"lpac-inherit" || mode == L"lpac-recreate" || mode == L"disable-marker-lpac" || mode == L"reduce-capabilities-lpac";
+        const bool lpac = mode == L"lpac-inherit" || mode == L"lpac-recreate" || mode == L"disable-marker-lpac" || mode == L"reduce-capabilities-lpac" || mode == L"write-sid-lpac";
         const bool with_package = mode == L"package" || mode == L"package-arap" ||
             mode == L"package-arap-registry" || mode == L"package-write";
         const bool with_arap = mode == L"arap" || mode == L"package-arap" || mode == L"package-arap-registry";
         const bool with_registry = mode == L"package-arap-registry" || mode == L"lpac-recreate" || reduce_capabilities;
-        if (!lpac && !reduce_capabilities && !disable_marker && !with_package && !with_arap && mode != L"control" && mode != L"user") {
+        if (!lpac && !write_sid && !reduce_capabilities && !disable_marker && !with_package && !with_arap && mode != L"control" && mode != L"user") {
             throw std::runtime_error("unknown token restriction mode");
         }
         std::vector<SID_AND_ATTRIBUTES> sids;
@@ -139,6 +148,13 @@ int wmain(int argc, wchar_t** argv) {
             require(ConvertStringSidToSidW(L"S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681", &allocated), "registryRead SID");
             registry.reset(allocated);
             if (!lpac && !reduce_capabilities) sids.push_back({ registry.get(), 0 });
+        }
+        std::unique_ptr<void, decltype(free_sid)> write_restriction(nullptr, free_sid);
+        if (write_sid) {
+            PSID allocated = nullptr;
+            require(ConvertStringSidToSidW(argv[4], &allocated), "ordinary write restricting SID");
+            write_restriction.reset(allocated);
+            sids.push_back({ write_restriction.get(), 0 });
         }
         std::unique_ptr<void, decltype(free_sid)> marker(nullptr, free_sid);
         SID_AND_ATTRIBUTES disabled{};
@@ -174,14 +190,22 @@ int wmain(int argc, wchar_t** argv) {
                 throw std::runtime_error("new token retained unexpected capabilities");
             }
             std::cout << "child token has only registryRead capability" << std::endl;
-        } else if (!lpac || disable_marker) {
-            const DWORD flags = DISABLE_MAX_PRIVILEGE | (mode == L"package-write" ? WRITE_RESTRICTED : 0);
+        } else if (!lpac || disable_marker || write_sid) {
+            const DWORD flags = DISABLE_MAX_PRIVILEGE | ((mode == L"package-write" || write_sid) ? WRITE_RESTRICTED : 0);
             require(CreateRestrictedToken(current.value, flags, disable_marker ? 1 : 0, disable_marker ? &disabled : nullptr, 0, nullptr,
                 static_cast<DWORD>(sids.size()), sids.empty() ? nullptr : sids.data(), &restricted.value), "CreateRestrictedToken");
             contained(restricted.value);
             const DWORD after = restricting_count(restricted.value);
             std::cout << "token restriction: before=" << restricting_count(current.value) << "; after=" << after << std::endl;
             if (mode != L"control" && !disable_marker && after == 0) throw std::runtime_error("restriction produced no restricting SIDs");
+            if (write_sid) {
+                auto entries = information(restricted.value, TokenRestrictedSids);
+                const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(entries.data());
+                if (groups->GroupCount != 1 || !EqualSid(groups->Groups[0].Sid, write_restriction.get())) {
+                    throw std::runtime_error("write restriction did not retain exactly the task SID");
+                }
+            }
+
         }
         auto block = environment();
         const std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" \"" + std::wstring(argv[2]) + L"\"";
@@ -220,7 +244,7 @@ int wmain(int argc, wchar_t** argv) {
                     &capabilities, sizeof(capabilities), nullptr, nullptr), "UpdateProcThreadAttribute(capabilities)");
             }
             const DWORD flags = CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-            const BOOL created = (disable_marker || reduce_capabilities)
+            const BOOL created = (disable_marker || reduce_capabilities || write_sid)
                 ? CreateProcessAsUserW(restricted.value, argv[1], mutable_command.data(), nullptr, nullptr, TRUE,
                     flags, block.data(), nullptr, &startup.StartupInfo, &process)
                 : CreateProcessW(argv[1], mutable_command.data(), nullptr, nullptr, TRUE,

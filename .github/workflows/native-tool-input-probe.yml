@@ -85,6 +85,21 @@ jobs:
           New-Item -ItemType Directory -Force $probeDirectory | Out-Null
           npm install --prefix $probeDirectory --ignore-scripts --no-audit --no-fund @microsoft/mxc-sdk@1.0.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Only this disposable task tree receives the ordinary restricting
+          # SID. Installed tools, OS roots, and the outside canaries do not.
+          $sidBytes = [Guid]::NewGuid().ToByteArray()
+          $sidParts = @(0, 4, 8, 12 | ForEach-Object { [BitConverter]::ToUInt32($sidBytes, $_) })
+          $writeSid = 'S-1-5-21-' + ($sidParts -join '-')
+          $writeIdentity = [System.Security.Principal.SecurityIdentifier]::new($writeSid)
+          $writeScope = Join-Path $probeDirectory 'task-write-scope'
+          New-Item -ItemType Directory -Force $writeScope | Out-Null
+          $taskAcl = Get-Acl -LiteralPath $writeScope
+          $taskAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            $writeIdentity, [System.Security.AccessControl.FileSystemRights]::Modify,
+            'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+          Set-Acl -LiteralPath $writeScope -AclObject $taskAcl
+          $env:QQ_NATIVE_WRITE_SCOPE = $writeScope
+          $env:QQ_NATIVE_WRITE_SID = $writeSid
           Copy-Item .github/scripts/windows-native-api-probe.mjs $probeDirectory
           Copy-Item .github/scripts/windows-restricted-child.cpp $probeDirectory
           $tools = @((Get-Command node.exe).Source, (Get-Command cargo.exe).Source)

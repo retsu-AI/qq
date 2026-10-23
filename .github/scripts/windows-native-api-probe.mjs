@@ -13,7 +13,10 @@ assert.equal(process.platform, 'win32');
 // The C# launcher verifies the exact primary token before creating this process.
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-native-api-'));
-const workspace = path.join(root, 'task');
+const workspace = process.env.QQ_NATIVE_WRITE_SCOPE;
+const writeSid = process.env.QQ_NATIVE_WRITE_SID;
+assert.ok(workspace && path.isAbsolute(workspace), 'the host must provide the private write scope');
+assert.match(writeSid ?? '', /^S-1-5-21-(?:[0-9]+-){3}[0-9]+$/);
 const home = path.join(workspace, 'home');
 const softwareRoot = path.join(root, 'installed-input');
 fs.mkdirSync(softwareRoot);
@@ -261,6 +264,10 @@ const cases = [
     payload: true,
   })),
 ];
+for (const mode of ['write-sid', 'write-sid-lpac']) {
+  cases.push({ name: 'restricted-' + mode, payload: true,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(relayPath)} ${mode} ${quote(writeSid)}` });
+}
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -352,5 +359,6 @@ try {
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
+  fs.rmSync(workspace, { recursive: true, force: true });
   fs.rmSync(root, { recursive: true, force: true });
 }
