@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           after=$(git rev-parse HEAD)
-          before=59043bbc140ba4d1ba14f35201b008d7c7be66c7
+          before=257a344962019a6ba4a00fb69e054db800e9fc7a
           selector=command_owner::environment::tests::windows_task_home_supports_shell_profile_paths_and_called_batches
           git fetch --no-tags --depth=1 origin "$before"
           git checkout --detach "$before"
