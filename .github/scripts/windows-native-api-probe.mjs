@@ -248,7 +248,7 @@ async function runWithNativePolicy(request, inheritParent = false, control = fal
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
         QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid,
-        QQ_NATIVE_PAYLOAD_NODE: tools.node, QQ_NATIVE_PAYLOAD_SCRIPT: path.join(workspace, 'payload.cjs'),
+        QQ_NATIVE_PAYLOAD_NODE: tools.node, QQ_NATIVE_PAYLOAD_SCRIPT: path.join(workspace, 'contained-relay.cjs'),
         QQ_NATIVE_PRIVATE_CREDENTIAL: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL,
         QQ_NATIVE_SOFTWARE_FILE: softwareFile,
         QQ_NATIVE_PUBLIC_WRITABLE_GUID: volume.guid + publicWritable.slice(3),
@@ -626,6 +626,8 @@ try {
     'the write control must actually modify the same outside file before restricted write denial can qualify');
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.privateRead, false,
     'the private credential control must remain unreadable despite public file reads');
+  assert.equal(outcomes.find(outcome => outcome.name === 'restricted-native-policy-projected-payload-public-input')?.qualified, true,
+    'A read-only grant must not admit native-path writes to an OS-public input');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('restricted-') && outcome.qualified),
     'No additional token restriction ran real tools with task-scoped writes and private credential denial');
 } finally {
