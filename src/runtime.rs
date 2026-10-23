@@ -1,5 +1,7 @@
 //! Application configuration to model-runtime composition.
 
+#[cfg(any(windows, test))]
+mod windows_toolchain;
 #[cfg(windows)]
 mod windows_tools;
 

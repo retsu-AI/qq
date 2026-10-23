@@ -7,8 +7,8 @@ use std::ffi::OsString;
 #[serde(transparent)]
 pub struct NativeEnvironment(Vec<(String, Value)>);
 
-// Reserve bounded slots for task-owned tool settings and private Cargo storage.
-const MAX_ENTRIES: usize = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES + 4;
+// Reserve bounded slots for Rustup/MSVC settings and private Cargo storage.
+const MAX_ENTRIES: usize = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES + 8;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,7 +291,6 @@ mod tests {
         assert!(!format!("{invocation:?}").contains("captured-tool-inputs"));
     }
 
-    #[cfg(windows)]
     #[test]
     fn private_tool_settings_preserve_the_full_per_call_environment_allowance() {
         let environment = NativeEnvironment::from_values(
@@ -307,14 +306,18 @@ mod tests {
         let trusted = NativeEnvironment::from_values([
             ("RUSTUP_HOME".to_owned(), "trusted-toolchain".into()),
             ("RUSTUP_TOOLCHAIN".to_owned(), "selected-toolchain".into()),
+            ("LIB".to_owned(), "captured-libraries".into()),
+            ("INCLUDE".to_owned(), "captured-headers".into()),
+            ("CARGO_HOME".to_owned(), "host-cargo".into()),
         ])
         .unwrap();
-        let private = std::path::Path::new(r"C:\private-task");
+        let private = std::env::temp_dir().join("qq-private-task-home");
         let environment = environment
             .with_overrides(&trusted)
             .unwrap()
-            .with_task_home(private)
+            .with_task_home(&private)
             .unwrap();
+        #[cfg(windows)]
         assert_eq!(
             environment.get("CARGO_HOME"),
             Some(private.join(".cargo").into_os_string())
@@ -323,6 +326,8 @@ mod tests {
             environment.get("RUSTUP_HOME"),
             Some("trusted-toolchain".into())
         );
+        assert_eq!(environment.get("LIB"), Some("captured-libraries".into()));
+        assert_eq!(environment.get("INCLUDE"), Some("captured-headers".into()));
         for n in 0..crate::MAX_SHELL_ENV_NAMES {
             assert_eq!(
                 environment.get(&format!("CUSTOM_{n}")),

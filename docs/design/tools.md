@@ -1459,8 +1459,12 @@ when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
 Exec programs retain their original directory spelling.
 Windows Auto captures installed tool directories and public SDK trees as
-read-only inputs. Rustup settings persist with the task and apply to shell and
-completion checks; Cargo uses a private task home. Roots overlapping the source
+read-only inputs. Bounded file-based discovery selects a complete native MSVC
+toolset and Windows SDK, without running discovery programs on the host. It
+captures the compiler PATH and LIB/INCLUDE search paths; explicitly configured
+library/header paths take precedence over discovered defaults. Rustup settings
+persist with the task and apply to shell and completion checks; Cargo uses a
+private task home. Roots overlapping the source
 checkout are excluded to preserve its protected configuration boundary. Captured
 settings do not add filesystem authority when current host grants are revoked.
 Native containment does not itself grant credential access.
