@@ -1,0 +1,44 @@
+name: Windows startup admission regression
+
+on:
+  push:
+    branches: [test/windows-startup-regression]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  startup-admission:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: startup-admission-${{ matrix.os }}
+      - name: Prove cancelled startup resumes without the final check
+        shell: bash
+        run: |
+          git checkout e64e7a4c87ef12c02d55db712808b0625bed5c01
+          set +e
+          cargo test --locked -p qq-core tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume -- --exact --nocapture > "$RUNNER_TEMP/startup-before.log" 2>&1
+          result=$?
+          set -e
+          cat "$RUNNER_TEMP/startup-before.log"
+          test "$result" -ne 0
+          grep -F 'cancellation: suspended payload was incorrectly resumed' "$RUNNER_TEMP/startup-before.log"
+      - name: Verify cancellation and deadline rejection before resume
+        shell: bash
+        run: |
+          git checkout "$GITHUB_SHA"
+          bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
