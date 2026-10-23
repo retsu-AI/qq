@@ -82,7 +82,7 @@ fn capture(pipe: std::fs::File) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
         const LIMIT: usize = 32 * 1024;
         let mut pipe = pipe;
         let mut bytes = Vec::new();
-        pipe.by_ref()
+        std::io::Read::by_ref(&mut pipe)
             .take((LIMIT + 1) as u64)
             .read_to_end(&mut bytes)
             .unwrap();
