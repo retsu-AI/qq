@@ -223,6 +223,7 @@ tempfile.workspace = true
 nix = { workspace = true, features = ["event"] }
 
 [target.'cfg(windows)'.dev-dependencies]
+firehazard_sid = { package = "firehazard", git = "https://github.com/MaulingMonkey/firehazard", rev = "1b5818d8fa6c489addb8cbb133a62ab917cc1715" }
 rappct.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true
