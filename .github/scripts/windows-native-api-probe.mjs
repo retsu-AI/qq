@@ -227,7 +227,7 @@ async function projectionRoot(request) {
   return projection;
 }
 
-async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false, taskAcl = false, lowLabel = false) {
+async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false, taskAcl = false, lowLabel = false, normalMap = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
   const volume = await volumeMetadata();
   const projection = projected ? await projectionRoot(request) : undefined;
@@ -244,7 +244,7 @@ async function runWithNativePolicy(request, inheritParent = false, control = fal
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, taskAcl ? (lowLabel ? 'host-policy-task-acl-low' : 'host-policy-task-acl') : projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, normalMap ? (afterReady ? 'host-normal-projected-after-ready' : 'host-normal-projected') : taskAcl ? (lowLabel ? 'host-policy-task-acl-low' : 'host-policy-task-acl') : projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
         QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid,
@@ -513,6 +513,11 @@ cases.push({ name: 'restricted-native-policy-projected-after-startup', payload: 
   nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, nativePolicyAfterReady: true, command: relayCommand });
 cases.push({ name: 'restricted-task-package-acl', payload: false, nativePolicy: true, taskAcl: true, command: relayCommand });
 cases.push({ name: 'restricted-task-package-acl-low', payload: false, nativePolicy: true, taskAcl: true, lowLabel: true, command: relayCommand });
+for (const afterReady of [false, true]) {
+  cases.push({ name: 'normal-device-map-control-' + (afterReady ? 'initialized' : 'suspended'),
+    payload: false, nativePolicy: true, nativePolicyProjected: true, nativePolicyAfterReady: afterReady,
+    normalMap: true, command: relayCommand });
+}
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -539,7 +544,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady, test.taskAcl, test.lowLabel) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady, test.taskAcl, test.lowLabel, test.normalMap) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

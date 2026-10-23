@@ -91,6 +91,13 @@ static std::string sid_text(PSID sid) {
 static int inspect() {
     Handle token;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value), "inspect token");
+    wchar_t normal_control[8]{};
+    if (GetEnvironmentVariableW(L"QQ_NATIVE_EXPECT_NORMAL", normal_control, 8)) {
+        const auto kind = information(token.value, TokenIsAppContainer);
+        if (*reinterpret_cast<const DWORD*>(kind.data())) throw std::runtime_error("normal control unexpectedly contained");
+        std::cout << "normal-host-control=1" << std::endl;
+        return 0;
+    }
     contained(token.value);
     auto package = information(token.value, TokenAppContainerSid);
     std::cout << "appcontainer=1; package=" << sid_text(reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer) << std::endl;
@@ -539,7 +546,7 @@ static void grant_task_directory(PSID package, const wchar_t* directory, bool lo
     }
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false, bool normal_control = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -597,13 +604,13 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
         host_restrictions = information(restricted_host.value, TokenRestrictedSids);
     }
     SIZE_T size = 0;
-    const DWORD attribute_count = (lpac ? 2 : 1) + 1;
+    const DWORD attribute_count = (normal_control ? 0 : (lpac ? 2 : 1)) + 1;
     InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &size);
     if (!size || size > 65536) throw std::runtime_error("invalid policy attribute size");
     std::vector<BYTE> storage(size);
     auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
     require(InitializeProcThreadAttributeList(attributes, attribute_count, 0, &size), "policy attributes");
-    if (!UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000, &environment.value, sizeof(environment.value), nullptr, nullptr)) {
+    if (!normal_control && !UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000, &environment.value, sizeof(environment.value), nullptr, nullptr)) {
         const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
         require(FALSE, "source native policy attribute");
     }
@@ -651,6 +658,7 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
         require(FALSE, "native source stdio allowlist");
     }
     if (task_acl) additions[L"QQ_NATIVE_TASK_ACL"] = L"1";
+    if (normal_control) additions[L"QQ_NATIVE_EXPECT_NORMAL"] = L"1";
     auto source_environment = ::environment(additions);
     std::wstring initial_directory(workspace);
     if (task_acl) {
@@ -673,7 +681,7 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     process.value = source.hProcess;
     thread.value = source.hThread;
     require(OpenProcessToken(process.value, TOKEN_QUERY, &token.value), "native policy source token");
-    contained(token.value);
+    if (!normal_control) contained(token.value);
     if (restrict_host) {
         const auto retained = information(token.value, TokenRestrictedSids);
         const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(retained.data());
@@ -682,8 +690,10 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
             throw std::runtime_error("native creation changed the exact write restriction");
         }
     }
-    const auto package = information(token.value, TokenAppContainerSid);
-    const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
+    const auto package = information(token.value, normal_control ? TokenUser : TokenAppContainerSid);
+    const auto sid = normal_control
+        ? reinterpret_cast<const TOKEN_USER*>(package.data())->User.Sid
+        : reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     grant_private_desktop(sid);
     if (task_acl) grant_task_directory(sid, workspace, low_label);
     PrivateDeviceMap device_map;
@@ -738,6 +748,10 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        // Fixed inspector only. This normal-token control never launches the
+        // untrusted payload or counts as a contained execution result.
+        if (argc == 3 && std::wstring(argv[1]) == L"host-normal-projected") return host_create_policy(argv[2], false, true, false, false, true, false, false, false, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"host-normal-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl") return host_create_policy(argv[2], false, true, true, false, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl-low") return host_create_policy(argv[2], false, true, true, false, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true);
