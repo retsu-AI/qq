@@ -43,7 +43,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test explicit desktop option and retained buffer
         shell: pwsh
-        run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG test --locked -p rappct desktop_tests
+        run: cargo test --manifest-path (Join-Path $env:RUNNER_TEMP 'rappct-private-desktop/Cargo.toml') --locked --lib desktop_tests
       - name: Compile the safe API composition
         shell: pwsh
         run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG build --locked -p qq-core --example windows_host_token
