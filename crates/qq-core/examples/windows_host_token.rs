@@ -254,13 +254,26 @@ mod proof {
     }
 
     fn launch_lpac(root: &Path, mode: &str) -> io::Result<()> {
-        launch_lpac_as(root, mode, None)
+        let user = win_custody::current_user_sid_string()?;
+        let capabilities = read_identities(root)?;
+        let name = format!("qq.control-ui.{mode}.{}", std::process::id());
+        // The outer ordinary broker's UI grants only its user. Each control
+        // needs its own package-authorized UI rather than inheriting that UI.
+        // Keep these owned objects through the bounded broker process lifetime.
+        let ui = std::mem::ManuallyDrop::new(PrivateUi::create(
+            &name,
+            &user,
+            &user,
+            capabilities.package.as_string(),
+        )?);
+        launch_lpac_as(root, mode, None, &ui.path)
     }
 
     fn launch_lpac_as(
         root: &Path,
         mode: &str,
-        primary: Option<(std::os::windows::io::BorrowedHandle<'_>, &str)>,
+        primary: Option<std::os::windows::io::BorrowedHandle<'_>>,
+        desktop: &str,
     ) -> io::Result<()> {
         let token = firehazard::open_process_token(
             firehazard::get_current_process(),
@@ -333,15 +346,11 @@ mod proof {
                 ..Default::default()
             }),
             startup_timeout: None,
+            desktop: Some(desktop.into()),
             ..Default::default()
         };
-        let options = if let Some((token, desktop)) = primary {
-            rappct::LaunchOptions {
-                desktop: Some(desktop.into()),
-                ..options
-            }
-            .try_with_primary_token(token)
-            .map_err(err)?
+        let options = if let Some(token) = primary {
+            options.try_with_primary_token(token).map_err(err)?
         } else {
             options
         };
@@ -1121,7 +1130,7 @@ mod proof {
             return Err(err("filtered host lacks enabled SeChangeNotifyPrivilege"));
         }
         verify_ordinary_broker("immediately before CreateProcessAsUserW")?;
-        launch_lpac_as(root, "filtered", Some((filtered.as_handle(), desktop_path)))
+        launch_lpac_as(root, "filtered", Some(filtered.as_handle()), desktop_path)
     }
     #[cfg(test)]
     mod capture_tests {
