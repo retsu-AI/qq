@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::{
     ffi::OsString,
-    io::Read as _,
     os::{fd::AsRawFd as _, unix::ffi::OsStringExt as _},
 };
 use std::{
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     ops::{Deref, DerefMut},
     os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _, process::ExitStatusExt as _},
     process::ExitStatus,
