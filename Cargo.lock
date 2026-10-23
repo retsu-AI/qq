@@ -2919,6 +2919,7 @@ dependencies = [
  "qq-provider",
  "qq-server",
  "qq-tui",
+ "rappct",
  "reqwest",
  "ron",
  "rpassword",
@@ -2933,6 +2934,9 @@ dependencies = [
  "tracing",
  "tracing-core",
  "webbrowser",
+ "win-custody",
+ "windows-permissions",
+ "winsafe",
 ]
 
 [[package]]
@@ -3005,6 +3009,8 @@ dependencies = [
  "cap-std",
  "command-fds",
  "crossbeam-channel",
+ "directories",
+ "dunce",
  "fs4",
  "futures-core",
  "futures-util",
@@ -3017,6 +3023,7 @@ dependencies = [
  "nix 0.31.3",
  "qq-protocol",
  "qq-provider",
+ "rappct",
  "regex",
  "reqwest",
  "rusqlite",
@@ -3319,6 +3326,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rappct"
+version = "0.14.0"
+source = "git+https://github.com/cpjet64/rappct?rev=c02f9dd960645522009da3827a79bdc99f50c9c1#c02f9dd960645522009da3827a79bdc99f50c9c1"
+dependencies = [
+ "thiserror 2.0.19",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -5308,6 +5324,12 @@ dependencies = [
  "cfg-if",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
 
 [[package]]
 name = "winx"

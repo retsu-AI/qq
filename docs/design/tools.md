@@ -156,7 +156,7 @@ retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
 non-goal task continuation is unfinished. macOS limited-resource execution and
-Windows restricted filesystem execution remain unavailable and fail closed. Source
+default Windows Auto containment remain unavailable and fail closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
 
@@ -1383,9 +1383,36 @@ status never confirms quiescence. Exited zombies may await collection by the OS,
 but live members keep cleanup unconfirmed. Loader-injection environment
 variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
-requesting those limits fails closed. Restricted Windows scopes remain refused.
-This worker integration provides process ownership, not filesystem, network,
-credential or resource isolation.
+requesting those limits fails closed.
+
+The Windows adapter launches restricted requests in zero-capability LPAC inside
+QQ's existing owned command job. Its trusted helper obtains the user's local
+application-data directory from Windows for its startup environment. The payload
+keeps its frozen environment, including Windows' required `SYSTEMROOT` and
+`LOCALAPPDATA`. These profile-path values do not grant file access: the LPAC token
+still denies the user's unrelated profile files. The trusted helper starts the payload suspended,
+with only its explicit stdin/stdout/stderr handles, then awaits the worker's
+release byte. Cancellation or a deadline during preparation drains the command
+job before returning. Captured user stdin begins after the exact unbuffered
+protocol prefix. Full exit codes and output remain observable through the
+existing durable worker.
+
+Windows object ACL grants are prepared through held, non-reparse handles with
+bounded traversal. Writable grants are applied before overlapping read-only
+grants. Non-system hardlinks and reparse points are refused. Directory grants
+are inherited by newly created objects. Grants update the held kernel object
+without requesting a recursive file-object ACL update; each existing object
+must pass the held-handle checks independently. Handles request only metadata
+and ACL rights, preserving the workspace's existing no-delete pins. Windows loader access uses the LPAC
+OS baseline and its per-package profile storage remain available. ACL authority follows objects rather than current pathnames, so
+callers must supply private task inputs and publish by copying files. This
+adapter currently requires isolated networking and Host resource policy;
+resource enforcement and default Windows Auto integration are unfinished.
+Native cmd shells receive a DOS-compatible working-directory spelling only
+when it names the same pinned directory. UNC and extended-only shell directories
+are refused before launch instead of allowing cmd to fall back to a host directory.
+Exec programs retain their original directory spelling.
+Native containment does not itself grant credential access.
 
 `shell` runs one command via `tokio::process::Command` with:
 
@@ -1415,7 +1442,7 @@ credential or resource isolation.
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 - A **cleared environment**: the child starts with `PATH HOME LANG TERM
-  TMPDIR` only, plus variables the call names in `env` (≤ 16) that
+  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows), plus variables the call names in `env` (≤ 16) that
   `policy.shell_env` allows. A name outside the allowlist fails the call
   (`env_not_allowed`) before anything runs. Secrets the server holds never
   reach a child by accident. Native command-owner submissions carry a snapshot

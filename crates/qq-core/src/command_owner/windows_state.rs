@@ -19,7 +19,7 @@ pub(super) const SHARE_READ_WRITE: u32 = 3;
 const READ_CONTROL_AND_ATTRIBUTES: u32 = 0x0002_0080;
 const FILE_ATTRIBUTE_REPARSE_POINT: u64 = 0x400;
 
-pub(super) fn directory(path: &Path) -> Result<File, CommandOwnerError> {
+pub(crate) fn directory(path: &Path) -> Result<File, CommandOwnerError> {
     let file = OpenOptions::new()
         .access_mode(READ_CONTROL_AND_ATTRIBUTES)
         .share_mode(SHARE_READ_WRITE)

@@ -381,6 +381,8 @@ pub(super) async fn run_shell(
     let linux_owner = process.linux_owner().cloned();
     #[cfg(target_os = "macos")]
     let macos_owner = process.macos_owner().cloned();
+    #[cfg(windows)]
+    let windows_owner = process.windows_owner().cloned();
     use tracing::Instrument as _;
     let mut prepared =
         match tokio::task::spawn_blocking(move || {
@@ -402,6 +404,10 @@ pub(super) async fn run_shell(
             #[cfg(target_os = "macos")]
             if let Some(owner) = &macos_owner {
                 return prepared.owned_macos(owner, native.as_deref(), preparation_deadline);
+            }
+            #[cfg(windows)]
+            if let Some(owner) = &windows_owner {
+                return prepared.owned_windows(owner, native.as_deref(), preparation_deadline);
             }
             if native.as_ref().is_some_and(|native| {
                 native.resources != crate::command_owner::NativeResources::Host
