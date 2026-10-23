@@ -507,19 +507,7 @@ pub(super) fn complete_compaction(
                 u64::try_from(after_bytes).unwrap_or(u64::MAX),
             ],
         )?;
-        // Bounded history, newest rows kept; no eager deletion beyond it so
-        // a future rollback command can restore the previous compaction.
-        transaction.execute(
-            "DELETE FROM session_compactions
-                 WHERE session_id = ?1 AND rowid NOT IN (
-                     SELECT rowid FROM session_compactions WHERE session_id = ?1
-                     ORDER BY rowid DESC LIMIT ?2
-                 )",
-            params![
-                claimed.identity.session_id.to_string(),
-                COMPACTION_HISTORY_ROWS
-            ],
-        )?;
+        prune_compaction_history(&transaction, claimed.identity.session_id)?;
         // The compaction request measured the context that was just
         // replaced, not the summary now occupying the session. Keep the
         // session unknown until its next prompt turn reports exact usage.
@@ -578,6 +566,46 @@ pub(super) fn complete_compaction(
 pub(super) struct CompactionRow {
     pub(super) summary: String,
     pub(super) cutoff_ordinal: u64,
+}
+
+/// Keep recent rollback checkpoints plus the projection they build on. A
+/// marker is live state, not just rollback history: dropping a session marker
+/// or a retained run's marker resurrects raw turns the live request replaced.
+///
+/// Before the oldest recent checkpoint, retain the session prefix and one
+/// in-run marker per prompt after that prefix's cutoff. Those baseline rows
+/// reconstruct every view reached by undoing the recent checkpoints. Older
+/// versions and runs covered by the baseline prefix are no longer needed.
+pub(super) fn prune_compaction_history(
+    connection: &Connection,
+    session_id: SessionId,
+) -> Result<(), SessionRuntimeError> {
+    connection.execute(
+        "WITH recent AS MATERIALIZED (
+             SELECT rowid AS id FROM session_compactions WHERE session_id = ?1
+             ORDER BY rowid DESC LIMIT ?2
+         ), baseline AS MATERIALIZED (
+             SELECT rowid AS id, cutoff_ordinal FROM session_compactions
+             WHERE session_id = ?1 AND scope_run_id IS NULL
+               AND rowid < (SELECT MIN(id) FROM recent)
+             ORDER BY rowid DESC LIMIT 1
+         ), retained AS MATERIALIZED (
+             SELECT id FROM recent
+             UNION ALL SELECT id FROM baseline
+             UNION ALL
+             SELECT MAX(c.rowid) FROM session_compactions c
+             JOIN runs r ON r.id = c.scope_run_id
+             JOIN messages m ON m.id = r.user_message_id
+             WHERE c.session_id = ?1 AND r.session_id = ?1
+               AND c.rowid < (SELECT MIN(id) FROM recent)
+               AND m.ordinal > COALESCE((SELECT cutoff_ordinal FROM baseline), 0)
+             GROUP BY c.scope_run_id
+         )
+         DELETE FROM session_compactions
+         WHERE session_id = ?1 AND rowid NOT IN (SELECT id FROM retained)",
+        params![session_id.to_string(), COMPACTION_HISTORY_ROWS],
+    )?;
+    Ok(())
 }
 
 /// The newest between-run marker. In-run markers (`scope_run_id` set) are
@@ -886,16 +914,7 @@ pub(super) fn complete_in_run_compaction(
                     u64::try_from(after_bytes).unwrap_or(u64::MAX),
                 ],
             )?;
-            // Same bounded history as between-run markers; rollback pops the
-            // newest row of either kind.
-            transaction.execute(
-                "DELETE FROM session_compactions
-                     WHERE session_id = ?1 AND rowid NOT IN (
-                         SELECT rowid FROM session_compactions WHERE session_id = ?1
-                         ORDER BY rowid DESC LIMIT ?2
-                     )",
-                params![session.to_string(), COMPACTION_HISTORY_ROWS],
-            )?;
+            prune_compaction_history(&transaction, session)?;
             // The prompt run's measured occupancy described the context it
             // just replaced; the next turn's usage re-seeds it.
             transaction.execute(

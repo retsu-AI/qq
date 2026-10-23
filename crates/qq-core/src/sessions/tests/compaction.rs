@@ -3026,7 +3026,7 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(retained, COMPACTION_HISTORY_ROWS);
+    assert_eq!(retained, COMPACTION_HISTORY_ROWS + 1);
 }
 
 #[tokio::test]
@@ -5453,6 +5453,215 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
 
 /// Marker text the scripted summarizer treats as "never reply".
 const STALL_SUMMARY: &str = "__STALL__";
+
+#[test]
+fn compaction_retention_preserves_recent_rollback_views_and_reclaims_covered_runs() {
+    let (_directory, mut connection, session, runs) =
+        record_fixture(&(0..6).map(|i| format!("task {i}")).collect::<Vec<_>>());
+    for run in &runs {
+        for turn in 1..=5 {
+            connection
+                .execute(
+                    "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json)
+                 VALUES (?1, ?2, ?3)",
+                    params![
+                        run.to_string(),
+                        turn,
+                        serde_json::to_string(&vec![PersistedContentBlock::Text {
+                            text: format!("raw turn {turn}")
+                        }])
+                        .unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    let markers = [
+        (Some(0), 1),
+        (None, 2),
+        (Some(1), 1),
+        (Some(1), 2),
+        (Some(1), 3),
+        (Some(1), 4),
+        (Some(2), 1),
+        (Some(3), 1),
+        (Some(4), 1),
+        (Some(4), 2),
+        (Some(4), 3),
+        (Some(4), 4),
+        (None, 10),
+        (Some(5), 1),
+        (Some(5), 2),
+        (Some(5), 3),
+        (Some(5), 4),
+        (None, 12),
+        (None, 12),
+        (None, 12),
+        (None, 12),
+    ];
+    for (index, (scope, cutoff)) in markers.into_iter().enumerate() {
+        connection.execute(
+            "INSERT INTO session_compactions(session_id, run_id, summary,
+                 cutoff_ordinal, before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7)",
+            params![session.to_string(), RunId::generate().unwrap().to_string(), format!("marker {index}"),
+                if scope.is_none() { cutoff } else { 0 }, index,
+                scope.map(|i| runs[i].to_string()), scope.map(|_| cutoff)],
+        ).unwrap();
+
+        // Compare actual assembled messages before and after collection,
+        // including each of the three rollback states, in one transaction.
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch("SAVEPOINT before_collection")
+            .unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..=COMPACTION_HISTORY_ROWS {
+            expected.push(load_model_context(&transaction, session, u64::MAX).unwrap());
+            transaction
+                .execute(
+                    "DELETE FROM session_compactions WHERE session_id = ?1
+                AND rowid = (SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1)",
+                    [session.to_string()],
+                )
+                .unwrap();
+        }
+        transaction
+            .execute_batch("ROLLBACK TO before_collection; RELEASE before_collection")
+            .unwrap();
+        prune_compaction_history(&transaction, session).unwrap();
+        let retained: usize = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained <= 4 + runs.len(), "step {index}: {retained}");
+        transaction
+            .execute_batch("SAVEPOINT after_collection")
+            .unwrap();
+        for (rollback, expected) in expected.iter().enumerate() {
+            assert_eq!(
+                &load_model_context(&transaction, session, u64::MAX).unwrap(),
+                expected,
+                "step {index}, rollback {rollback}"
+            );
+            transaction
+                .execute(
+                    "DELETE FROM session_compactions WHERE session_id = ?1
+                AND rowid = (SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1)",
+                    [session.to_string()],
+                )
+                .unwrap();
+        }
+        transaction
+            .execute_batch("ROLLBACK TO after_collection; RELEASE after_collection")
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    let (total, scoped): (u32, u32) = connection
+        .query_row(
+            "SELECT COUNT(*), COUNT(scope_run_id) FROM session_compactions WHERE session_id = ?1",
+            [session.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (total, scoped),
+        (4, 0),
+        "covered runs and obsolete marker versions are reclaimed"
+    );
+}
+
+#[tokio::test]
+async fn repeated_in_run_compaction_retains_the_session_prefix_after_restart() {
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![
+                AutoCompactScript::Text("initial reply".to_owned()),
+                AutoCompactScript::Text(valid_summary("session prefix")),
+                AutoCompactScript::WritesRepeatedlyWithSummaries {
+                    turns: 32,
+                    text: "task complete".to_owned(),
+                    summary: valid_summary("active work"),
+                },
+            ],
+            loads: StdMutex::new(0),
+            context_window: Some(12 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let initial = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "original task".to_owned(),
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(initial)).await;
+    let prefix = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(prefix)).await;
+    assert_eq!(
+        finished_outcome(&observed, prefix),
+        Some(RunOutcome::Completed)
+    );
+    collect_through_compacted(&mut harness.events).await;
+
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "continue the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    assert!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+            .count()
+            >= 3
+    );
+    let mut expected = harness
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages()
+        .to_vec();
+    expected.push(Message::assistant("task complete"));
+    let session = harness.session_id;
+    let database = harness.workspace_path.join("sessions.sqlite3");
+    harness.runtime.close().await.unwrap();
+
+    let (mut connection, _) = open_database(&database).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let prefix = latest_compaction(&transaction, session)
+        .unwrap()
+        .expect("in-run compaction must retain the session prefix");
+    assert!(prefix.summary.contains("session prefix"));
+    let replayed = load_model_context(&transaction, session, u64::MAX).unwrap();
+    assert_eq!(
+        replayed, expected,
+        "restart must preserve the live request and completed reply"
+    );
+    let calls: u32 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 32, "compaction must not repeat tool effects");
+}
 
 #[tokio::test]
 async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_compaction() {
