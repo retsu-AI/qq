@@ -103,13 +103,18 @@ const copiedNode = path.join(workspace, 'node-control.exe');
 fs.copyFileSync(tools.node, copiedNode);
 const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
+const namespacedEnvironment = Object.fromEntries(Object.entries(environment).map(([name, value]) =>
+  [name, ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'CARGO_HOME', 'RUSTUP_HOME'].includes(name)
+    ? path.toNamespacedPath(value) : value]));
+const qqEnvironment = { ...namespacedEnvironment, PATH: process.env.PATH };
+delete qqEnvironment.PATHEXT;
+const cmd = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
 const cases = [
-  { name: 'cmd-default-ui', command: `${quote(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'))} /d /c echo native-api-cmd`, payload: false },
-  { name: 'node-default-ui', command: payloadCommand(tools.node), payload: true },
-  { name: 'node-base-ui', command: payloadCommand(tools.node), payload: true, ui: baseUi },
-  { name: 'copied-node-default-ui', command: payloadCommand(copiedNode), payload: true },
-  { name: 'node-base-ui-ancestor-metadata', command: payloadCommand(tools.node), payload: true, ui: baseUi, ancestorMetadata: true },
-  { name: 'copied-node-base-ui', command: payloadCommand(copiedNode), payload: true, ui: baseUi },
+  { name: 'baseline-short-paths', command: payloadCommand(tools.node), payload: true },
+  { name: 'namespaced-environment', command: payloadCommand(tools.node), payload: true, environment: namespacedEnvironment },
+  { name: 'namespaced-grants', command: payloadCommand(tools.node), payload: true, namespacedGrants: true },
+  { name: 'qq-environment-and-grants', command: payloadCommand(tools.node), payload: true, environment: qqEnvironment, namespacedGrants: true },
+  { name: 'qq-cmd-environment-and-grants', command: `${quote(cmd)} /d /s /c "${payloadCommand(tools.node)}"`, payload: true, environment: qqEnvironment, namespacedGrants: true },
 ];
 const outcomes = [];
 try {
@@ -122,15 +127,18 @@ try {
       output = await run({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
-          ...(test.ancestorMetadata ? { filesystem: { enumeratePaths: [...ancestorPaths] } } : {}),
+          filesystem: { enumeratePaths: [...ancestorPaths].map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value) },
         } },
         command: test.command,
         workingDirectory: workspace,
         inheritDefaultEnvironment: false,
-        environment,
-        filesystem: { readonlyPaths, readwritePaths: [workspace] },
+        environment: test.environment ?? environment,
+        filesystem: {
+          readonlyPaths: readonlyPaths.map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value),
+          readwritePaths: [test.namespacedGrants ? path.toNamespacedPath(workspace) : workspace],
+        },
         network: { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } },
-        ...(test.ui ? { ui: test.ui } : {}),
+        ui: baseUi,
         timeoutMs: 60_000,
       });
     } catch (error) {
