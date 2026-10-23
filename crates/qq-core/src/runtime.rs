@@ -36,9 +36,9 @@ pub(crate) use gate::{GateDecision, ToolGate, ToolGateFuture};
 #[cfg(test)]
 pub(crate) use history::SEARCH_HISTORY_TOOL;
 pub(crate) use history::{
-    HISTORY_SCAN_BUDGET_BYTES, HistoryMatch, HistorySearch, HistorySearchFuture, HistorySearcher,
-    MAX_HISTORY_MATCHES, SearchHistoryArgs, excerpt_around, render_history_matches,
-    search_history_spec,
+    HISTORY_SCAN_BUDGET_BYTES, HISTORY_SCAN_STEPS, HistoryCursor, HistoryMatch, HistorySearch,
+    HistorySearchFuture, HistorySearcher, MAX_HISTORY_MATCHES, SearchHistoryArgs, excerpt_around,
+    render_history_matches, search_history_spec,
 };
 #[cfg(test)]
 pub(crate) use progress::STALL_REPORT_CALLS;

@@ -1583,9 +1583,14 @@ compacting one run cannot evict another run's live summary. Superseded versions
 and runs covered by that baseline prefix are reclaimed. A summary that is empty,
 missing a required section, or fails to shrink the measured assembly settles as
 a policy failure while the prior compaction stays in force. `search_history`
-is the recall path that makes aggressive compaction safe: session runs may search the complete durable
-transcript, including spans compaction replaced, for bounded cited excerpts.
-Direct runs have no durable transcript and do not see the tool.
+searches persisted user inputs, applied steering, assistant replies and tool results,
+including compacted spans and earlier committed work in the current run. Retrieval
+calls and results are excluded to avoid matching query echoes. Each page uses
+indexed keyset seeks with byte and step budgets; `next_cursor` continues from the
+next unvisited source when either budget or the match limit ends the page. One
+persisted unit may exceed the byte budget; it is examined before advancing so
+large turns cannot hide older history. Direct runs have no durable transcript
+and do not see the tool.
 
 Future model requests, capacity accounting, and compaction all consume the same
 provider-neutral projection of that durable state. The projection retains
