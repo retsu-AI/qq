@@ -68,7 +68,15 @@ fn payload_probe() {
     }
     std::fs::write("probe-pid", std::process::id().to_string()).unwrap();
     match mode {
-        "files" | "overlap" | "profile" => {
+        "files" | "overlap" | "profile" | "software" => {
+            if mode == "software" {
+                let installed = std::fs::read_to_string("software-input-path").unwrap();
+                assert_eq!(
+                    std::fs::read_to_string(&installed).unwrap(),
+                    "installed tool input"
+                );
+                assert!(std::fs::write(&installed, "damaged tool").is_err());
+            }
             if let Some(expected_package) = arguments.get(index + 1) {
                 assert_eq!(
                     token.package_sid.as_ref().unwrap().as_string(),
@@ -397,6 +405,11 @@ async fn restricted_network_is_enforced_by_the_real_worker() {
 }
 
 #[tokio::test]
+async fn trusted_software_hardlinks_are_readable_without_write_authority() {
+    restricted_worker_probe("software").await;
+}
+
+#[tokio::test]
 async fn native_arguments_survive_worker_transport() {
     restricted_worker_probe("arguments").await;
 }
@@ -474,6 +487,31 @@ async fn restricted_worker_probe(mode: &str) {
     let registry_secret = registry::HostSecret::create(workspace.path());
     let worker = worker(root.path());
     let mut command = request(workspace.path(), mode, &aap.path().join("aap-only"));
+    let software = if mode == "software" {
+        let directory = tempfile::tempdir().unwrap();
+        let original = root.path().join("installed-tool-input");
+        std::fs::write(&original, "installed tool input").unwrap();
+        let acl = file_access_list(&original).await;
+        let alias = directory.path().join("input");
+        std::fs::hard_link(&original, &alias).unwrap();
+        std::fs::write(
+            workspace.path().join("software-input-path"),
+            alias.to_str().unwrap(),
+        )
+        .unwrap();
+        let qq_core::command_owner::NativeFilesystem::Restricted { read_only, .. } =
+            &mut command.filesystem
+        else {
+            unreachable!()
+        };
+        read_only.push(
+            qq_core::command_owner::NativeDirectoryGrant::capture_software(directory.path())
+                .unwrap(),
+        );
+        Some((directory, original, acl))
+    } else {
+        None
+    };
     if mode == "overlap" {
         let qq_core::command_owner::NativeFilesystem::Restricted { read_only, .. } =
             &mut command.filesystem
@@ -528,6 +566,17 @@ async fn restricted_worker_probe(mode: &str) {
     );
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "host secret");
     registry_secret.assert_unchanged();
+    if let Some((_directory, original, acl)) = software {
+        assert_eq!(
+            std::fs::read_to_string(&original).unwrap(),
+            "installed tool input"
+        );
+        assert_eq!(
+            file_access_list(&original).await,
+            acl,
+            "software access must not change the host inode's ACL"
+        );
+    }
     if mode == "stdin" {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("stdin-result")).unwrap(),

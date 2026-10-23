@@ -165,7 +165,8 @@ pub(super) fn prepare(
 }
 
 /// Hold each admitted root against replacement without modifying its ACL.
-/// Writable inputs still require independent, non-reparse file objects.
+/// Ordinary inputs require independent, non-reparse file objects. Only trusted
+/// software roots may skip that traversal, and only with read-only authority.
 pub(super) fn hold(scope: &NativeFilesystem, deadline: u64) -> io::Result<Vec<File>> {
     let NativeFilesystem::Restricted {
         read_only,
@@ -176,12 +177,14 @@ pub(super) fn hold(scope: &NativeFilesystem, deadline: u64) -> io::Result<Vec<Fi
     };
     let mut held = Vec::new();
     let mut count = 0;
+    let system = system_root()?;
     for grant in read_write.iter().chain(read_only) {
         let root = open(&grant.path, false)?;
         validate_root(grant, &root)?;
         if read_write
             .iter()
             .any(|writable| writable.identity == grant.identity)
+            || (!grant.trusted_software && !system_read(grant, system.as_deref()))
         {
             inspect(root.try_clone()?, &mut count, deadline)?;
         }

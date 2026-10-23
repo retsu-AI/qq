@@ -48,6 +48,7 @@ impl TaskWorkspaceSource {
         let workspace = plan.workspace_handle();
         Ok(Self {
             directory: NativeDirectoryGrant {
+                trusted_software: false,
                 path: workspace.path().to_owned(),
                 identity: NativeWorkspaceIdentity::held(workspace.root())?,
             },
@@ -267,6 +268,7 @@ impl TaskWorkspace {
             }
             Ok(Self {
                 grant: NativeDirectoryGrant {
+                    trusted_software: false,
                     path: destination.to_owned(),
                     identity,
                 },

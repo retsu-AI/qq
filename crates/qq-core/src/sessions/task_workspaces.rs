@@ -422,6 +422,7 @@ pub(super) async fn prepare(
         }
         let source = source_plan.workspace_handle();
         let source_grant = NativeDirectoryGrant {
+            trusted_software: false,
             path: source.path().to_owned(),
             identity: NativeWorkspaceIdentity::held(source.root())?,
         };

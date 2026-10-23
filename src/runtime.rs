@@ -3484,7 +3484,16 @@ fn task_workspace_policy(
             directory: directory_grant,
             read_only: read_only
                 .into_iter()
-                .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
+                .map(|path| {
+                    #[cfg(windows)]
+                    {
+                        qq_core::command_owner::NativeDirectoryGrant::capture_software(&path)
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        qq_core::command_owner::NativeDirectoryGrant::capture(&path)
+                    }
+                })
                 .collect::<Result<_, _>>()?,
             #[cfg(target_os = "linux")]
             resources: qq_core::command_owner::NativeResources::Limited {

@@ -12,6 +12,15 @@ use std::{
 pub struct NativeDirectoryGrant {
     pub path: PathBuf,
     pub identity: NativeWorkspaceIdentity,
+    /// Host-approved installed software, never a model-selected input tree.
+    /// Windows' native policy may read existing aliases in this read-only tree
+    /// without recursively inspecting it. Writable grants always reject aliases.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub trusted_software: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl NativeDirectoryGrant {
@@ -50,8 +59,18 @@ impl NativeDirectoryGrant {
             Ok(Self {
                 path: path.to_owned(),
                 identity,
+                trusted_software: false,
             })
         }
+    }
+
+    /// Authorize a public software installation as read-only input. The host
+    /// must trust its existing contents, including aliases, independently of
+    /// model output. This never exempts writable grants from alias inspection.
+    pub fn capture_software(path: &Path) -> io::Result<Self> {
+        let mut grant = Self::capture(path)?;
+        grant.trusted_software = true;
+        Ok(grant)
     }
 
     /// The caller must authorize this canonical directory independently of
@@ -60,6 +79,7 @@ impl NativeDirectoryGrant {
         Ok(Self {
             path: path.to_owned(),
             identity: NativeWorkspaceIdentity::capture(path)?,
+            trusted_software: false,
         })
     }
 }
@@ -74,8 +94,8 @@ impl NativeDirectoryGrant {
 /// its loader baseline also permits listing the root directory itself.
 /// It does not create a private mount tree. Windows uses the process-security
 /// environment API when version 1.1 is available, with explicit paths and no host
-/// ACL augmentation. That path inspects writable inputs for aliases, while public
-/// read-only installation trees are not recursively inspected. Otherwise it uses LPAC with the
+/// ACL augmentation. That path inspects ordinary inputs for aliases; only
+/// explicitly trusted read-only software trees avoid recursive inspection. Otherwise it uses LPAC with the
 /// registryRead and identity-bound read-only root capabilities. Writable grants
 /// use task-specific package SIDs. It requires isolated networking and accepts
 /// Host or Committed resource policy. Non-system roots must contain regular, unaliased

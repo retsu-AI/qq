@@ -1398,8 +1398,9 @@ metadata enumeration for Node path resolution. User32 initialization remains
 available; clipboard and input injection are disabled in the requested policy.
 The adapter refuses launch if the API reports warnings, unsupported enumeration,
 or a requirement to augment host ACLs. It holds each root against replacement
-and inspects writable inputs for reparse points and hardlinks without changing
-host tool ACLs. Read-only installation trees are not recursively inspected.
+and inspects ordinary inputs for reparse points and hardlinks without changing
+host tool ACLs. Only explicitly host-approved, read-only software installation
+trees skip recursive inspection; writable grants never receive that exception.
 The payload does not exist until the worker releases authorization. Memory,
 process and CPU jobs include the helper and descendants; the enclosing command
 job owns cancellation and cleanup. This path has not yet passed QQ's native
