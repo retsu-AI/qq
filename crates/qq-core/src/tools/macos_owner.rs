@@ -595,8 +595,9 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
                 .into_iter()
                 .map(|(name, value)| (OsString::from_vec(name), OsString::from_vec(value))),
         );
-    // Keep this trusted guardian outside the group it must terminate. The
-    // sandboxed child leads a new group and cannot change it or create another.
+    // Keep this trusted guardian outside the payload group it must terminate.
+    // Seatbelt authority is inherited even when a descendant leaves this group;
+    // process-group cleanup alone does not account for detached descendants.
     use std::os::unix::process::CommandExt as _;
     command.process_group(0);
     if unix_ms() >= packet.not_after_ms {
@@ -802,6 +803,13 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
                 ));
+                if writable {
+                    // An enclosing writable grant must not allow replacing a
+                    // nested authority root. Contents remain fully writable.
+                    profile.push_str(&format!(
+                        "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {quoted})))\n"
+                    ));
+                }
                 for ancestor in grant.path.ancestors().skip(1) {
                     let quoted = serde_json::to_string(
                         ancestor
