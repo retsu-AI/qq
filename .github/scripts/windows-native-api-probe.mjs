@@ -9,13 +9,7 @@ import path from 'node:path';
 import { run } from '@microsoft/mxc-sdk/v1';
 
 assert.equal(process.platform, 'win32');
-const role = spawnSync(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
-  '-NoProfile', '-NonInteractive', '-Command',
-  '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
-], { encoding: 'utf8', timeout: 10_000 });
-assert.equal(role.status, 0, role.stderr);
-console.log(JSON.stringify({ phase: 'host-role', administrator: role.stdout.trim() }));
-assert.equal(role.stdout.trim(), 'False', 'native API must work without an administrator token');
+// The C# launcher verifies the exact primary token before creating this process.
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-native-api-'));
 const workspace = path.join(root, 'task');
@@ -23,8 +17,9 @@ const home = path.join(workspace, 'home');
 fs.mkdirSync(path.join(home, 'tmp'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true });
-const secret = path.join(root, 'outside-canary.txt');
-fs.writeFileSync(secret, 'outside-canary');
+const secret = process.env.QQ_NATIVE_SCOPE_CANARY;
+assert.ok(secret, 'the host must provide a canary with explicit public AppContainer read access');
+assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
 function installed(name) {
   const found = process.env.PATH.split(path.delimiter)
     .filter(directory => path.isAbsolute(directory))
@@ -103,18 +98,13 @@ const copiedNode = path.join(workspace, 'node-control.exe');
 fs.copyFileSync(tools.node, copiedNode);
 const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
-const namespacedEnvironment = Object.fromEntries(Object.entries(environment).map(([name, value]) =>
-  [name, ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'CARGO_HOME', 'RUSTUP_HOME'].includes(name)
-    ? path.toNamespacedPath(value) : value]));
-const qqEnvironment = { ...namespacedEnvironment, PATH: process.env.PATH };
-delete qqEnvironment.PATHEXT;
-const cmd = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
+const volumeRoots = [...new Set([...readonlyPaths, workspace].map(value => path.parse(value).root))];
 const cases = [
-  { name: 'baseline-short-paths', command: payloadCommand(tools.node), payload: true },
-  { name: 'namespaced-environment', command: payloadCommand(tools.node), payload: true, environment: namespacedEnvironment },
-  { name: 'namespaced-grants', command: payloadCommand(tools.node), payload: true, namespacedGrants: true },
-  { name: 'qq-environment-and-grants', command: payloadCommand(tools.node), payload: true, environment: qqEnvironment, namespacedGrants: true },
-  { name: 'qq-cmd-environment-and-grants', command: `${quote(cmd)} /d /s /c "${payloadCommand(tools.node)}"`, payload: true, environment: qqEnvironment, namespacedGrants: true },
+  { name: 'public-read-baseline', command: payloadCommand(tools.node), payload: true },
+  { name: 'deny-volume-roots-with-ancestor-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots },
+  { name: 'deny-volume-roots-without-root-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots,
+    enumeratePaths: [...ancestorPaths].filter(value => !volumeRoots.includes(value)) },
+  { name: 'deny-canary-explicitly', command: payloadCommand(tools.node), payload: true, deniedPaths: [secret] },
 ];
 const outcomes = [];
 try {
@@ -127,7 +117,7 @@ try {
       output = await run({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
-          filesystem: { enumeratePaths: [...ancestorPaths].map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value) },
+          filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },
         } },
         command: test.command,
         workingDirectory: workspace,
@@ -135,7 +125,8 @@ try {
         environment: test.environment ?? environment,
         filesystem: {
           readonlyPaths: readonlyPaths.map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value),
-          readwritePaths: [test.namespacedGrants ? path.toNamespacedPath(workspace) : workspace],
+          readwritePaths: [workspace],
+          deniedPaths: test.deniedPaths ?? [],
         },
         network: { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } },
         ui: baseUi,
@@ -168,7 +159,8 @@ try {
   }
   assert.equal(requests, 0);
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
-  assert.ok(outcomes.some(outcome => outcome.qualified), 'No native API candidate completed the tool/denial fixture');
+  assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-roots') && outcome.qualified),
+    'No volume-deny candidate both ran real tools and denied the public outside canary');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));

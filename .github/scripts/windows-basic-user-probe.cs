@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
 public static class BasicUserProbe {
@@ -50,6 +51,10 @@ public static class BasicUserProbe {
     try {
       SafeAccessTokenHandle token;
       if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out token, 0, IntPtr.Zero)) throw Error();
+      bool administrator = WindowsIdentity.RunImpersonated(token, () =>
+        new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator));
+      Console.WriteLine("Basic-user token administrator: " + administrator);
+      if (administrator) throw new InvalidOperationException("Fixture token still has administrator authority");
       using (token)
       using (var output = new FileStream(log, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Inheritable))
       using (var input = CreateFile(@"\\.\NUL", 0x80000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {

@@ -90,6 +90,15 @@ jobs:
           $rustup = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
           $roots = @($env:SystemRoot, $rustup) + $tools + @($tools | ForEach-Object { Split-Path $_ })
           $before = @($roots | ForEach-Object { (Get-Acl -LiteralPath $_).Sddl })
+          $canary = Join-Path $probeDirectory 'outside-canary.txt'
+          [System.IO.File]::WriteAllText($canary, 'outside-canary')
+          $acl = Get-Acl -LiteralPath $canary
+          foreach ($sid in @('S-1-15-2-1', 'S-1-15-3-1024-530591407-3118584226-222893001-1659895842-537460181-133087082-1363364250-4100990745')) {
+            $identity = [System.Security.Principal.SecurityIdentifier]::new($sid)
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
+          }
+          Set-Acl -LiteralPath $canary -AclObject $acl
+          $env:QQ_NATIVE_SCOPE_CANARY = $canary
           Add-Type -Path .github/scripts/windows-basic-user-probe.cs
           $log = Join-Path $probeDirectory 'basic-user.log'
           $code = [BasicUserProbe]::Run($tools[0], (Join-Path $probeDirectory 'windows-native-api-probe.mjs'), $log)
