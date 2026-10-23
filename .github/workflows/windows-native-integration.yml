@@ -27,7 +27,8 @@ jobs:
         run: cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
       - name: Durable worker cancellation, recovery and resource containment
         if: ${{ !cancelled() }}
-        run: cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
       - name: Captured environment, restart and completion checks
         if: ${{ !cancelled() }}
         run: |
