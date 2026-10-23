@@ -717,6 +717,59 @@ async fn structured_tracing(home: &Home) -> Result<(), String> {
 }
 
 async fn run_command_deadlines(home: &Home) -> Result<(), String> {
+    let paths = home
+        .run("http://127.0.0.1:1/v1", &["config", "paths"])
+        .await?;
+    ensure!(paths.status == Some(0), "config paths: {}", paths.stderr);
+    let data = paths
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("data:"))
+        .and_then(|line| line.trim().rsplit_once(" ("))
+        .map(|(path, _)| PathBuf::from(path))
+        .ok_or("config paths omitted the data directory")?;
+    ensure!(
+        data.starts_with(&home.root),
+        "fixture data directory escaped the isolated home: {}",
+        data.display()
+    );
+    // Own the fixture worker explicitly. Production workers intentionally
+    // outlive CLI invocations; a smoke worker must not outlive its isolated home
+    // or keep the private executable open when the next smoke run replaces it.
+    let stderr = fs::File::create(home.root.join("worker.stderr"))
+        .map_err(|error| format!("create worker.stderr: {error}"))?;
+    let mut worker = home
+        .command("http://127.0.0.1:1/v1")
+        .arg("_command-owner")
+        .arg("--state-dir")
+        .arg(data.join("command-owner-v3"))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| format!("start fixture worker: {error}"))?;
+    let result = async {
+        let stdout = worker.stdout.take().ok_or("worker stdout unavailable")?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        tokio::time::timeout(COMMAND_TIMEOUT, reader.read_line(&mut line))
+            .await
+            .map_err(|_| "fixture worker readiness timed out".to_owned())?
+            .map_err(|error| format!("read fixture worker readiness: {error}"))?;
+        ensure!(
+            line.starts_with("qq command owner listening at "),
+            "unexpected worker readiness: {line:?}"
+        );
+        run_command_deadline_cases(home).await
+    }
+    .await;
+    // Stop only the child owned by this scenario, including on assertion failure.
+    worker
+        .kill()
+        .await
+        .map_err(|error| format!("reap fixture worker: {error}"))?;
+    result
+}
+
+async fn run_command_deadline_cases(home: &Home) -> Result<(), String> {
     for (name, arguments) in [
         (
             "shell",

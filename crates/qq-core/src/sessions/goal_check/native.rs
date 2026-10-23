@@ -9,6 +9,8 @@ enum CheckError {
 
     #[error("native scope is unavailable")]
     ScopeUnavailable,
+    #[error("completion-check task preparation failed: {0}")]
+    Task(#[from] crate::sessions::task_workspaces::TaskExecutionError),
     #[error("native command service is unavailable")]
     ServiceUnavailable,
     #[error("native completion-check scope refused: {0}")]
@@ -80,7 +82,7 @@ fn ensure_active(
 }
 
 async fn prepare_workspace(
-    scope: Arc<crate::command_owner::NativeCommandScope>,
+    scope: Option<Arc<crate::command_owner::NativeCommandScope>>,
     path: PathBuf,
     cancellation: RunCancellation,
     deadline: tokio::time::Instant,
@@ -99,7 +101,9 @@ async fn prepare_workspace(
         ensure_active(&stopped, deadline)?;
         let workspace = crate::workspace::Workspace::open(&path)?;
         let identity = crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())?;
-        scope.validate_workspace(workspace.path(), identity)?;
+        if let Some(scope) = &scope {
+            scope.validate_workspace(workspace.path(), identity)?;
+        }
         Ok::<_, CheckError>(identity)
     });
     // This task only opens and validates directories. It cannot admit a process.
@@ -118,7 +122,7 @@ pub(super) async fn run(
     id: ToolCallId,
     deadline_ms: u64,
     cancellation: RunCancellation,
-    resources: &execution::RunResources,
+    resources: &mut execution::RunResources,
 ) -> ProcessResult {
     let Some((_, deadline)) = claimed.check_deadline else {
         return ProcessResult {
@@ -150,7 +154,11 @@ pub(super) async fn run(
         Err(reason) => ProcessResult {
             outcome: if cancellation.timed_out() {
                 ProcessOutcome::TimedOut
-            } else if matches!(reason, CheckError::Stopped) {
+            } else if matches!(
+                reason,
+                CheckError::Stopped
+                    | CheckError::Task(super::super::task_workspaces::TaskExecutionError::Stopped)
+            ) {
                 ProcessOutcome::Cancelled
             } else {
                 ProcessOutcome::Failed
@@ -166,20 +174,44 @@ async fn run_inner(
     id: ToolCallId,
     deadline_ms: u64,
     cancellation: RunCancellation,
-    resources: &execution::RunResources,
+    resources: &mut execution::RunResources,
 ) -> Result<ProcessResult, CheckError> {
-    let scopes = inner
-        .native_scopes
-        .as_ref()
-        .ok_or(CheckError::ScopeUnavailable)?;
-    let scope = scopes
-        .get(Path::new(&claimed.workspace))
-        .map_err(CheckError::Scope)?;
+    let deadline = claimed
+        .check_deadline
+        .ok_or(CheckError::ScopeUnavailable)?
+        .1;
+    super::super::task_workspaces::prepare_check(
+        inner,
+        claimed,
+        &cancellation,
+        deadline,
+        resources,
+    )
+    .await?;
+    ensure_active(&cancellation, deadline)?;
+    let scope = match resources.task_scope() {
+        Some(scope) => Some(scope),
+        None => inner
+            .native_scopes
+            .as_ref()
+            .map(|scopes| scopes.get(Path::new(&claimed.workspace)))
+            .transpose()
+            .map_err(CheckError::Scope)?,
+    };
+    if scope.is_none()
+        && inner.task_workspaces.is_some()
+        && claimed.approval_mode == ApprovalMode::Auto
+    {
+        return Err(CheckError::ScopeUnavailable);
+    }
     let service = inner
         .native_commands
         .clone()
         .ok_or(CheckError::ServiceUnavailable)?;
-    let path = PathBuf::from(&claimed.workspace);
+    let path = scope.as_ref().map_or_else(
+        || PathBuf::from(&claimed.workspace),
+        |scope| scope.workspace.path.clone(),
+    );
     let workspace_identity = prepare_workspace(
         scope.clone(),
         path,
@@ -206,16 +238,36 @@ async fn run_inner(
             .ok_or(CheckError::ScopeUnavailable)?
             .1,
     )?;
+    let environment = NativeEnvironment::capture(&[])?;
+    let environment = match resources.task_home() {
+        Some(home) => environment.with_task_home(&home)?,
+        None => environment,
+    };
     let request = NativeCommand {
         id,
-        workspace: PathBuf::from(&claimed.workspace),
+        workspace: scope.as_ref().map_or_else(
+            || PathBuf::from(&claimed.workspace),
+            |scope| scope.workspace.path.clone(),
+        ),
         workspace_identity,
         tool: "shell".into(),
         arguments,
-        environment: NativeEnvironment::capture(&[])?,
-        filesystem: scope.filesystem(),
-        network: scope.network,
-        resources: scope.resources,
+        environment,
+        filesystem: scope
+            .as_ref()
+            .map_or(crate::command_owner::NativeFilesystem::Host, |scope| {
+                scope.filesystem()
+            }),
+        network: scope
+            .as_ref()
+            .map_or(crate::command_owner::NativeNetwork::Host, |scope| {
+                scope.network
+            }),
+        resources: scope
+            .as_ref()
+            .map_or(crate::command_owner::NativeResources::Host, |scope| {
+                scope.resources
+            }),
         shell_policy: crate::runtime::ShellPolicy::default(),
         approved_images: Vec::new(),
         not_after_ms: Some(deadline_ms),
@@ -279,6 +331,11 @@ pub(in crate::sessions) fn recover_result(
     if identity.kind != RunKind::GoalCheck {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
+    if result.native_outcome.is_none() {
+        // Missing typed evidence is not a completed audit. Let recovery settle
+        // the model interruption while retaining the invocation and check hold.
+        return Err(SessionRuntimeError::Unavailable);
+    }
     let (state, previous, is_error, previous_context): (String,Option<String>,bool,Option<String>) = transaction.query_row(
         "SELECT state,result,is_error,execution_context_json FROM tool_calls WHERE id=?1 AND run_id=?2",
         params![id.to_string(),identity.run_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
@@ -300,7 +357,8 @@ pub(in crate::sessions) fn recover_result(
     }
     let tail = result.model_text[start..].to_owned();
     let mut events = Vec::new();
-    if state == "running" {
+    let settled = run_is_settled(&transaction, identity.run_id)?;
+    if state == "running" || (matches!(state.as_str(), "interrupted" | "failed") && settled) {
         events.push(
             tool_calls::finish_tool_call_in_transaction(
                 &transaction,
@@ -329,7 +387,17 @@ pub(in crate::sessions) fn recover_result(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    if let Some(outcome) = outcome {
+    if settled {
+        // Retain late original-owner evidence without reinterpreting an already
+        // interrupted check, its goal, budget, or human acknowledgment hold.
+        let saved = transaction.execute(
+            "UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2 AND result_saved=0",
+            params![id.to_string(), owner.to_string()],
+        )?;
+        if saved != 1 && events.is_empty() {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    } else if let Some(outcome) = outcome {
         let (captured, origin): (String,String) = transaction.query_row(
             "SELECT goal_snapshot_json,origin_json FROM runs WHERE id=?1 AND session_id=?2 AND kind='goal_check'",
             params![identity.run_id.to_string(),identity.session_id.to_string()], |row|Ok((row.get(0)?,row.get(1)?)),
@@ -404,7 +472,7 @@ mod tests {
         let cancellation = RunCancellation::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut preparation = Box::pin(prepare_workspace(
-            scope,
+            Some(scope),
             path,
             cancellation.clone(),
             deadline,

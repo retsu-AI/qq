@@ -62,6 +62,7 @@ crossbeam-channel = "0.5"
 directories = "6"
 futures-core = "0.3"
 futures-util = "0.3"
+fs4 = { version = "1.1", default-features = false }
 getrandom = "0.3"
 goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 hmac = "0.12"
@@ -69,6 +70,7 @@ http-body = "1"
 httpdate = "1"
 ignore = "0.4"
 keyring = "4"
+libproc = "0.14.11"
 qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
 qq-config = { path = "crates/qq-config" }
@@ -189,6 +191,12 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
+# Producer receipts hash the executable once. Unoptimized SHA-2 can keep a
+# clean debug worker's first command queued for seconds, especially under CI
+# contention. Preserve the identity check without slowing command admission.
+[profile.dev.package.sha2]
+opt-level = 3
+
 [features]
 # Feature manifests for the shipped binary. `default` is the full profile with
 # every supported provider family. The minimal embedding profile is
@@ -204,3 +212,6 @@ base64.workspace = true
 ron.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+nix = { workspace = true, features = ["event"] }

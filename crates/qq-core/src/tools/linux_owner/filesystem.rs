@@ -67,20 +67,18 @@ pub(super) fn prepare(
     // Probe without restricting this worker. Unsupported kernels refuse before
     // launch, with a useful result instead of an unexplained helper exit.
     drop(ruleset()?);
+    super::network::prepare()?;
     Ok((rules, descriptors))
 }
 
 pub(super) fn enforce(directories: Vec<Directory>) -> io::Result<()> {
-    let abi = ABI::V9;
+    let abi = ABI::V6;
     let mut ruleset = ruleset()?;
     for directory in directories {
         let fd = super::exec::inherited(directory.fd, false)?;
         let access = if directory.writable {
             AccessFs::from_all(abi)
-                & !(AccessFs::MakeChar
-                    | AccessFs::MakeBlock
-                    | AccessFs::IoctlDev
-                    | AccessFs::ResolveUnix)
+                & !(AccessFs::MakeChar | AccessFs::MakeBlock | AccessFs::IoctlDev)
         } else {
             AccessFs::from_read(abi)
         };
@@ -123,12 +121,12 @@ pub(super) fn enforce(directories: Vec<Directory>) -> io::Result<()> {
 struct Unavailable(#[source] landlock::RulesetError);
 
 fn ruleset() -> io::Result<landlock::RulesetCreated> {
-    // ABI 9 is required to deny pathname Unix sockets exposing host services.
-    // HardRequirement forbids dropping restrictions on older kernels.
+    // Unix socket access is enforced separately by network::enforce, using
+    // either its pathname rule or a mandatory socket-creation filter.
     let create = || {
         Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
-            .handle_access(AccessFs::from_all(ABI::V9))?
+            .handle_access(AccessFs::from_all(ABI::V6))?
             .scope(Scope::AbstractUnixSocket | Scope::Signal)?
             .create()
     };

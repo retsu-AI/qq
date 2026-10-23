@@ -156,16 +156,10 @@ pub(crate) async fn observe(
                 };
             }
             CommandStatus::Lost => {
-                // The replacement owner has no live invocation to drain. Its
-                // terminal loss evidence must still be saved before retirement.
-                lease.process_reaped();
-                if let Some(error) = persistence_error {
-                    return ToolOutput::unobserved(error);
-                }
-                let mut result = lost_output(&snapshot.output);
-                result.native_owner = Some(owner);
-                lease.save_native_result(id, &result);
-                return result;
+                // A restarted journal cannot attest that the original native
+                // process/group drained. Retain the binding and unconfirmed
+                // lease; never acknowledge Lost as an observed completion.
+                return lost_output(&snapshot.output);
             }
             CommandStatus::Queued | CommandStatus::Running => {}
         }

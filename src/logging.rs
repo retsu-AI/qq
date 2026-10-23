@@ -373,6 +373,17 @@ mod tests {
                     let provider = tracing::info_span!(target: "qq::diagnostic", "provider");
                     provider
                         .in_scope(|| tracing::warn!(target: "provider", "SECRET_PROVIDER_BODY"));
+                    let native = tracing::info_span!(
+                        target: "qq::diagnostic", "native_prepare",
+                        command = "SECRET_COMMAND", path = "SECRET_PATH"
+                    );
+                    native.in_scope(|| {
+                        let identity = tracing::info_span!(
+                            target: "qq::diagnostic", "native_producer_identity",
+                            image = "SECRET_IMAGE"
+                        );
+                        identity.in_scope(|| tracing::warn!("SECRET_NATIVE_ERROR"));
+                    });
                 });
             });
         });
@@ -394,6 +405,11 @@ mod tests {
         assert!(records.iter().any(
             |record| record["span"]["name"] == "run" && record["fields"]["message"] == "close"
         ));
+        for name in ["native_prepare", "native_producer_identity"] {
+            assert!(records.iter().any(|record| {
+                record["span"]["name"] == name && record["fields"]["message"] == "close"
+            }));
+        }
     }
 
     #[cfg(unix)]

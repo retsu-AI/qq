@@ -721,7 +721,9 @@ pub(super) fn try_start(
         AND (s.active_run_id IS NOT NULL OR (s.preparing_run_id IS NOT NULL AND s.preparing_run_id!=?2 AND EXISTS(SELECT 1 FROM runs preparing WHERE preparing.id=s.preparing_run_id AND preparing.kind!='goal_check'))))
         OR EXISTS(SELECT 1 FROM side_questions q JOIN sessions s ON s.id=q.session_id WHERE s.workspace_id=?1 AND q.state='running')",
         params![claimed.identity.workspace_id.to_string(),claimed.identity.run_id.to_string()],|row|row.get(0))?;
-    if busy {
+    if busy
+        || super::native_recovery::workspace_blocked(&transaction, claimed.identity.workspace_id)?
+    {
         return Ok(Start::Waiting);
     }
     let started = transaction.execute(
@@ -1004,7 +1006,7 @@ pub(super) async fn execute(
     inner: Arc<runtime::SessionRuntimeInner>,
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    resources: execution::RunResources,
+    mut resources: execution::RunResources,
 ) {
     let Some(captured) = claimed.goal.as_ref() else {
         inner.failed.send_replace(true);
@@ -1061,7 +1063,7 @@ pub(super) async fn execute(
             }
         }
         let claim = claimed.clone();
-        let native = inner.native_scopes.is_some() && inner.native_commands.is_some();
+        let native = inner.native_commands.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
@@ -1105,7 +1107,7 @@ pub(super) async fn execute(
                             call,
                             deadline_ms,
                             cancelled.clone(),
-                            &resources,
+                            &mut resources,
                         )
                         .await)
                     } else {

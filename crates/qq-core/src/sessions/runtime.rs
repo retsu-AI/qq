@@ -494,6 +494,9 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
+    /// Import Auto work into private task trees and publish after teardown.
+    /// Native commands must enforce the returned task scope or refuse execution.
+    pub task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
     /// Host-authorized task workspaces. Registrations persist and are inherited
     /// by all sessions/children using the store; an empty list restores them.
     pub native_scopes: Vec<crate::command_owner::NativeCommandScope>,
@@ -538,6 +541,7 @@ impl std::fmt::Debug for SessionRuntimeOptions {
             .field("approval_reviewer", &self.approval_reviewer.is_some())
             .field("native_commands", &self.native_commands.is_some())
             .field("native_scopes", &self.native_scopes.len())
+            .field("task_workspaces", &self.task_workspaces.is_some())
             .finish()
     }
 }
@@ -549,6 +553,7 @@ impl SessionRuntimeOptions {
             database_path,
             native_commands: None,
             native_scopes: Vec::new(),
+            task_workspaces: None,
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -586,6 +591,7 @@ pub struct SessionRuntime {
 }
 
 pub(super) struct SessionRuntimeInner {
+    pub(super) task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
     pub(super) native_scopes: Option<Arc<super::native_scope::NativeScopes>>,
     pub(super) store: Store,
     pub(super) loader: Arc<dyn RuntimeLoader>,
@@ -796,6 +802,7 @@ impl SessionRuntime {
             super::native_ack::Acknowledgements::start(store.clone(), Arc::clone(service))
         });
         let inner = Arc::new(SessionRuntimeInner {
+            task_workspaces: options.task_workspaces,
             native_scopes,
             native_ack,
             native_recovery: std::sync::OnceLock::new(),
@@ -1311,20 +1318,19 @@ impl SessionRuntime {
             .is_some_and(|recovery| recovery.contains(run))
     }
 
-    /// Wait for this session's commands inherited from the previous coordinator.
-    /// Other sessions and ordinary live runs are unaffected. No effects replay
-    /// and the worker keeps the original invocation's deadline.
+    /// Wait for inherited commands and unresolved native custody in this
+    /// workspace. No effects replay; original invocation deadlines remain fixed.
     pub async fn await_recovered_commands(
         &self,
         workspace: WorkspaceId,
         session: SessionId,
     ) -> Result<(), SessionRuntimeError> {
-        let Some(recovery) = self.inner.native_recovery.get() else {
-            return Ok(());
-        };
+        let recovery = self.inner.native_recovery.get();
         let mut settlements = self.inner.settlements.subscribe();
+        let mut shutdown = self.inner.shutdown.subscribe();
+        let mut failed = self.inner.failed.subscribe();
         loop {
-            let active =
+            let (active, blocked) =
                 self.inner
                     .store
                     .call(store::Priority::Control, move |connection| {
@@ -1333,19 +1339,29 @@ impl SessionRuntime {
                     params![session.to_string(), workspace.to_string()],
                     |row| row.get::<_, Option<String>>(0),
                 ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
-                        run.map(|run| parse_id::<RunId>(&run)).transpose()
+                        Ok((
+                            run.map(|run| parse_id::<RunId>(&run)).transpose()?,
+                            super::native_recovery::workspace_blocked(connection, workspace)?,
+                        ))
                     })
                     .await?;
-            if active.is_none_or(|run| !recovery.contains(run)) {
+            if !blocked
+                && active.is_none_or(|run| recovery.is_none_or(|recovery| !recovery.contains(run)))
+            {
                 return Ok(());
             }
-            if *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+            if recovery.is_none() || *failed.borrow() || *shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
-            settlements
-                .changed()
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
+            // Shutdown can stop observation after its final database commit
+            // but before its settlement notification. Recheck durable state
+            // on lifecycle changes as well as completed observations.
+            tokio::select! {
+                changed = settlements.changed() => changed,
+                changed = shutdown.changed() => changed,
+                changed = failed.changed() => changed,
+            }
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
         }
     }
 
@@ -1412,6 +1428,9 @@ impl SessionRuntime {
                 if *self.inner.failed.borrow() {
                     return Err(SessionRuntimeError::Unavailable);
                 }
+                if let Some(recovery) = self.inner.native_recovery.get() {
+                    recovery.stop().await;
+                }
                 if let Some(acknowledgements) = &self.inner.native_ack {
                     acknowledgements.shutdown().await;
                 }
@@ -1452,6 +1471,7 @@ impl SessionRuntime {
 
     /// Retains accepted runs until they settle naturally. An explicit interrupt
     /// requests ordinary shutdown, cancelling and draining the remaining work.
+    /// External shutdown or runtime failure interrupts the wait as unavailable.
     pub async fn close_when_idle(
         &self,
         interrupt: impl std::future::Future<Output = ()>,
@@ -1462,9 +1482,11 @@ impl SessionRuntime {
             self.inner.draining.store(true, Ordering::Release);
         }
         let mut settlements = self.inner.settlements.subscribe();
+        let mut failed = self.inner.failed.subscribe();
+        let mut shutdown = self.inner.shutdown.subscribe();
         loop {
             let lifecycle = self.inner.lifecycle.write().await;
-            if *self.inner.failed.borrow() {
+            if *failed.borrow() || *shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
             let unfinished = tokio::select! {
@@ -1485,6 +1507,12 @@ impl SessionRuntime {
                 biased;
                 () = interrupt.as_mut() => return self.close().await,
                 changed = settlements.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+                changed = failed.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+                changed = shutdown.changed() => {
                     changed.map_err(|_| SessionRuntimeError::Unavailable)?;
                 }
             }
@@ -1701,6 +1729,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error(
+        "native command capacity reached: at most 10000 unresolved invocations may be retained; original worker completion is required"
+    )]
+    NativeCommandCapacity,
     #[error("invalid native execution scope: {reason}")]
     InvalidNativeScope { reason: String },
     #[error("goal identity or revision conflicts with the current goal")]

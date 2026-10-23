@@ -587,20 +587,53 @@ impl CommandOwner {
         cancellation: RunCancellation,
         task_deadline: Option<tokio::time::Instant>,
     ) -> Result<ToolOutput, CommandOwnerError> {
+        use tracing::Instrument as _;
         let started = tokio::time::Instant::now();
         let tool = request.tool.clone();
         let path = request.workspace;
         let expected_workspace = request.workspace_identity;
-        let workspace = match blocking(move || {
+        let restricted = matches!(&request.filesystem, NativeFilesystem::Restricted { .. });
+        let expired = async {
+            match task_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::pin!(expired);
+        #[cfg(test)]
+        wait_at_async_hook(&PREPARATION_HOOKS, request.id).await;
+        // Validation and the reserve probe share one filesystem admission.
+        // This work only reads metadata; abandoning its observer cannot launch
+        // a payload or mutate files, even if a started OS read finishes later.
+        let preparation = blocking(move || {
             let workspace = crate::workspace::Workspace::open(&path)?;
             if NativeWorkspaceIdentity::held(workspace.root())? != expected_workspace {
                 return Err(CommandOwnerError::WorkspaceChanged);
             }
-            Ok(workspace)
+            let pressure = if restricted {
+                crate::storage::check_blocking(&workspace, 0).err()
+            } else {
+                None
+            };
+            Ok((workspace, pressure))
         })
-        .await
-        {
-            Ok(workspace) => workspace,
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_workspace"));
+        let prepared = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            () = &mut expired => { cancellation.expire(); None }
+            prepared = preparation => Some(prepared),
+        };
+        let Some(prepared) = prepared else {
+            let output = ToolOutput::interrupted("tool execution was cancelled");
+            return Ok(if cancellation.timed_out() {
+                output.expired_before_capture(&tool, started.elapsed())
+            } else {
+                output
+            });
+        };
+        let (workspace, pressure) = match prepared {
+            Ok(prepared) => prepared,
             Err(CommandOwnerError::Io(error)) => {
                 return Ok(ToolOutput::refused(format!(
                     "could not open command workspace: {error}"
@@ -613,6 +646,22 @@ impl CommandOwner {
             }
             Err(error) => return Err(error),
         };
+        #[cfg(test)]
+        wait_at_async_hook(&STORAGE_ADMISSION_HOOKS, request.id).await;
+        if let Some(pressure) = pressure {
+            return Ok(ToolOutput::refused(pressure.to_string()));
+        }
+        let guarded_workspace = match &request.filesystem {
+            NativeFilesystem::Restricted { .. } => Some(workspace.clone()),
+            NativeFilesystem::Host => None,
+        };
+        let pressure = async move {
+            match guarded_workspace {
+                Some(workspace) => crate::storage::watch(workspace).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(pressure);
         let cancelled = self.0.journal.cancel_requested(request.id).await?;
         if cancelled {
             cancellation.cancel();
@@ -639,18 +688,17 @@ impl CommandOwner {
             Arc::new(images),
             Arc::clone(&self.0.producer),
             Some(request.id),
-        );
+        )
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_dispatch"));
         tokio::pin!(execution);
-        let expired = async {
-            match task_deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::pin!(expired);
         let mut output = tokio::select! {
             biased;
             () = &mut expired => { cancellation.expire(); execution.await }
+            pressure = &mut pressure => {
+                cancellation.cancel();
+                // Reap the native process tree before recording a terminal result.
+                execution.await.stopped_for_storage(&pressure.to_string())
+            }
             output = &mut execution => output,
         };
         self.0.tools.check().map_err(CommandOwnerError::Cleanup)?;
@@ -688,6 +736,8 @@ impl CommandOwner {
             .unwrap_or_else(|error| error.into_inner())
             .get(&id)
             .map(|job| job.changed.subscribe());
+        #[cfg(test)]
+        wait_at_async_hook(&WAIT_SUBSCRIPTION_HOOKS, id).await;
         loop {
             if *failed.borrow() {
                 return Err(CommandOwnerError::Unavailable);
@@ -702,7 +752,20 @@ impl CommandOwner {
                 return Ok(snapshot);
             }
             let Some(changed) = &mut changed else {
-                return Err(CommandOwnerError::Unavailable);
+                // Admission can register its watcher while the snapshot is
+                // being read. Subscribe, then read again so that transition
+                // cannot leave a live command without an observer.
+                changed = self
+                    .0
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&id)
+                    .map(|job| job.changed.subscribe());
+                if changed.is_none() {
+                    return Err(CommandOwnerError::Unavailable);
+                }
+                continue;
             };
             tokio::select! {
                 result = changed.changed() => if result.is_err() { return Err(CommandOwnerError::Unavailable); },
@@ -959,6 +1022,12 @@ static ADMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 static CANCELLATION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
+static PREPARATION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static STORAGE_ADMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
 fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
     let hook = {
         let mut hooks = hooks.lock().unwrap();
@@ -975,6 +1044,8 @@ fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
 
 #[cfg(test)]
 static OUTPUT_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static WAIT_SUBSCRIPTION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 #[cfg(test)]
 static SUBMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 #[cfg(test)]

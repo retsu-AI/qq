@@ -46,6 +46,73 @@ impl Fixture {
 }
 
 #[test]
+fn detached_task_workspace_stopped_import_creates_no_destination() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("a"), "source bytes").unwrap();
+    let result = TaskWorkspace::import_until(
+        &fixture.admission,
+        &fixture.destination,
+        &[PathBuf::from("a")],
+        TaskWorkspaceLimits {
+            max_entries: 16,
+            max_bytes: 1024,
+        },
+        &|| true,
+    );
+    assert!(matches!(result, Err(TaskWorkspaceError::Stopped)));
+    assert!(!fixture.destination.exists());
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("a")).unwrap(),
+        "source bytes"
+    );
+}
+
+#[test]
+fn detached_task_workspace_stops_during_copy_and_removes_partial_destination() {
+    use std::cell::Cell;
+
+    let fixture = Fixture::new();
+    let original = vec![b'x'; 3 * 64 * 1024 + 1];
+    fs::write(fixture.source.path.join("a"), &original).unwrap();
+    fs::write(fixture.source.path.join("z"), "later source bytes").unwrap();
+    let observed_partial_copy = Cell::new(false);
+    let observed_later_file = Cell::new(false);
+    let stopped = || {
+        observed_later_file
+            .set(observed_later_file.get() || fixture.destination.join("z").exists());
+        if let Ok(metadata) = fs::metadata(fixture.destination.join("a"))
+            && metadata.len() > 0
+            && metadata.len() < original.len() as u64
+        {
+            observed_partial_copy.set(true);
+        }
+        observed_partial_copy.get()
+    };
+    let result = TaskWorkspace::import_until(
+        &fixture.admission,
+        &fixture.destination,
+        &[PathBuf::from("a"), PathBuf::from("z")],
+        TaskWorkspaceLimits {
+            max_entries: 16,
+            max_bytes: original.len() as u64 + 1024,
+        },
+        &stopped,
+    );
+    assert!(matches!(result, Err(TaskWorkspaceError::Stopped)));
+    assert!(
+        observed_partial_copy.get(),
+        "cancellation must be checked before the selected file finishes copying"
+    );
+    assert!(!observed_later_file.get());
+    assert!(!fixture.destination.exists());
+    assert_eq!(fs::read(fixture.source.path.join("a")).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(fixture.source.path.join("z")).unwrap(),
+        "later source bytes"
+    );
+}
+
+#[test]
 fn detached_task_workspace_preserves_selected_bytes_without_host_aliases() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.source.path.join("src")).unwrap();
@@ -642,6 +709,15 @@ fn task_workspace_preserves_configured_pack_protections_after_restore() {
     .unwrap();
     let saved = serde_json::to_vec(&task).unwrap();
     let mut restored: TaskWorkspace = serde_json::from_slice(&saved).unwrap();
+    // Removing a pack from current configuration must not remove the trust
+    // protection captured when this task imported its files.
+    let current = crate::plan::CompiledAgentPlan::compile_blocking(
+        crate::plan::AgentProfile::embedded(&runtime, fixture.source.path.clone()),
+    )
+    .unwrap();
+    restored
+        .protect_source(&TaskWorkspaceSource::from_plan(&current).unwrap())
+        .unwrap();
     assert!(matches!(
         restored.publish(&["a", "vendor/reviewer/policy.md"].map(PathBuf::from)),
         Err(TaskWorkspaceError::InvalidInput(_))

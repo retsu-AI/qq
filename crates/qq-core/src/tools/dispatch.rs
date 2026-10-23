@@ -47,6 +47,7 @@ struct ToolTaskState {
     macos_owner: Option<super::macos_owner::MacosOwner>,
     native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     native_deadline_ms: std::sync::atomic::AtomicU64,
+    task_home: OnceLock<std::path::PathBuf>,
     process_recorder: OnceLock<ProcessRecorder>,
     native_recorder: OnceLock<NativeRecorder>,
     native_results:
@@ -88,6 +89,10 @@ pub enum ToolDrainError {
 }
 
 impl ToolTasks {
+    pub(crate) fn set_task_home(&self, home: std::path::PathBuf) -> bool {
+        self.0.task_home.set(home).is_ok()
+    }
+
     pub(crate) fn with_native_scopes(
         &self,
         scopes: Option<Arc<crate::sessions::native_scope::NativeScopes>>,
@@ -594,6 +599,12 @@ pub(crate) async fn execute_with_images(
                     Ok(environment) => environment,
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
+                let environment = if let Some(home) = tasks.0.task_home.get() {
+                    match environment.with_task_home(home) {
+                        Ok(environment) => environment,
+                        Err(error) => return ToolOutput::refused(error.to_string()),
+                    }
+                } else { environment };
                 let held_workspace = workspace.clone();
                 let workspace_identity = match tokio::task::spawn_blocking(move || {
                     crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())
@@ -827,6 +838,22 @@ impl ToolOutput {
         let mut result = Self::error(message);
         result.disposition = ResultDisposition::Interrupted;
         result
+    }
+
+    pub(crate) fn stopped_for_storage(mut self, reason: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"qq-storage-stop-v1");
+        digest.update(self.result_digest);
+        digest.update(reason.as_bytes());
+        self.result_digest = digest.finalize().into();
+        self.model_text = bound_text(
+            format!("{reason}\n{}", self.model_text),
+            &Bounds::DEFAULT,
+            None,
+        )
+        .text;
+        self.is_error = true;
+        self
     }
 
     /// Normalize worker expiry before the shell's capture loop has a result.

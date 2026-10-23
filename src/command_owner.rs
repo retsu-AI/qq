@@ -3,6 +3,9 @@
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) mod client;
 
+#[cfg(target_os = "linux")]
+mod delegation;
+
 use std::{error::Error, io, path::PathBuf};
 
 use qq_core::command_owner::CommandOwner;
@@ -40,10 +43,23 @@ pub async fn run(directory: PathBuf) -> Result<(), Box<dyn Error>> {
         }
         ReserveOutcome::Reserved(reservation) => reservation,
     };
+    let launcher = qq_core::command_owner::CommandLauncher::new(std::env::current_exe()?);
+    #[cfg(target_os = "linux")]
+    let launcher = {
+        let mut launcher = launcher;
+        launcher.cgroup_root = match delegation::prepare().await {
+            Ok(root) => Some(root),
+            Err(error) => {
+                tracing::warn!(%error, "Linux resource delegation unavailable; limited commands will be refused");
+                None
+            }
+        };
+        launcher
+    };
     let owner = CommandOwner::open(
         directory.join("commands"),
         env!("QQ_SOURCE_REVISION"),
-        qq_core::command_owner::CommandLauncher::new(std::env::current_exe()?),
+        launcher,
     )
     .await?;
     let mut server = match reservation.start_command_owner(owner.clone()) {

@@ -202,30 +202,27 @@ pub(crate) async fn assert_panicked_process_exits(pid: u32) {
 
 #[cfg(all(test, windows))]
 pub(crate) async fn assert_panicked_process_exits(pid: u32) {
-    // This observes only the fixture's numeric PID. It cannot turn an
-    // unconfirmed production cleanup result into confirmed quiescence.
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $observedProcess = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         if ($null -eq $observedProcess) {{ exit 0 }}; \
-         if ($observedProcess.WaitForExit(10000)) {{ exit 0 }}; \
-         [Console]::Error.WriteLine('the owned shell did not exit after panic'); exit 1"
-    );
-    let observed = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        tokio::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .kill_on_drop(true)
-            .output(),
-    )
+    // Observe the kernel process object directly. Launching PowerShell adds a
+    // second process startup to the timeout and cannot strengthen this proof.
+    // This fixture observation never confirms production tool quiescence.
+    tokio::task::spawn_blocking(move || {
+        let process = match win_custody::Process::open(pid, win_custody::ProcessAccess::Synchronize)
+        {
+            Ok(process) => process,
+            // ERROR_INVALID_PARAMETER means the process left the PID table.
+            Err(error) if error.raw_os_error() == Some(87) => return,
+            Err(error) => panic!("cannot observe the panicked fixture's process: {error}"),
+        };
+        assert_eq!(
+            process
+                .wait(Some(std::time::Duration::from_secs(10)))
+                .unwrap(),
+            win_custody::WaitOutcome::Signaled,
+            "the owned process must still exit after panic",
+        );
+    })
     .await
-    .expect("the Windows process-exit observer must finish")
-    .expect("PowerShell must observe the panicked fixture's process");
-    assert!(
-        observed.status.success(),
-        "the owned process must still exit after panic: {}",
-        String::from_utf8_lossy(&observed.stderr)
-    );
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -5397,7 +5394,18 @@ mod tests {
             .expect("cancellation must remain live with a full output queue")
             .unwrap();
         assert!(result.is_error);
-        assert_eq!(result.model_text, "tool execution was cancelled");
+        assert!(result.model_text.starts_with("shell exit=cancelled "));
+        assert!(
+            result
+                .model_text
+                .contains("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        );
+        assert!(
+            result
+                .model_text
+                .ends_with("tool execution was cancelled; its process group was killed")
+        );
+        assert!(result.model_text.len() <= shell::SHELL_BOUNDS.max_bytes);
         assert_eq!(result.disposition, ResultDisposition::Interrupted);
     }
 

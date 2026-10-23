@@ -11,10 +11,7 @@ use std::io;
 ))]
 pub(super) fn enforce() -> io::Result<()> {
     use nix::libc;
-    use seccompiler::{
-        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
-        SeccompRule,
-    };
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule};
     // Key serials and owner permissions cross user namespaces. io_uring and
     // BPF provide indirect kernel command paths outside the syscall rules below.
     let mut rules = [
@@ -82,6 +79,20 @@ pub(super) fn enforce() -> io::Result<()> {
             .map_err(io::Error::other)?,
         ],
     );
+    apply(rules)
+}
+
+#[cfg(all(
+    target_endian = "little",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+))]
+fn apply(rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>>) -> io::Result<()> {
+    use nix::libc;
+    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
     let program: BpfProgram = SeccompFilter::new(
         rules,
         SeccompAction::Allow,
@@ -137,5 +148,78 @@ pub(super) fn enforce() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "kernel isolation is unavailable on this architecture",
+    ))
+}
+
+/// Older Landlock cannot mediate pathname socket addresses. Stream and
+/// sequenced-packet pairs cannot be retargeted; datagram pairs can.
+#[cfg(all(
+    target_endian = "little",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+))]
+pub(super) fn deny_addressable_unix_sockets() -> io::Result<()> {
+    use nix::libc;
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule};
+    let unix = || {
+        SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            libc::AF_UNIX as u64,
+        )
+    };
+    let socket =
+        SeccompRule::new(vec![unix().map_err(io::Error::other)?]).map_err(io::Error::other)?;
+    let mut conditions = vec![unix().map_err(io::Error::other)?];
+    for kind in [libc::SOCK_STREAM, libc::SOCK_SEQPACKET] {
+        for flags in [
+            0,
+            libc::SOCK_CLOEXEC,
+            libc::SOCK_NONBLOCK,
+            libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        ] {
+            conditions.push(
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    (kind | flags) as u64,
+                )
+                .map_err(io::Error::other)?,
+            );
+        }
+    }
+    let pair = SeccompRule::new(conditions).map_err(io::Error::other)?;
+    // io_uring can create sockets without entering socket(2), so it cannot
+    // remain available behind a syscall-based socket boundary.
+    let mut rules = [
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
+    ]
+    .into_iter()
+    .map(|number| (number, Vec::new()))
+    .collect::<std::collections::BTreeMap<_, _>>();
+    rules.insert(libc::SYS_socket, vec![socket]);
+    rules.insert(libc::SYS_socketpair, vec![pair]);
+    apply(rules)
+}
+
+#[cfg(not(all(
+    target_endian = "little",
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
+)))]
+pub(super) fn deny_addressable_unix_sockets() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Unix socket isolation is unavailable on this architecture",
     ))
 }

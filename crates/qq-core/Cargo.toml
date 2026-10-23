@@ -18,6 +18,7 @@ cap-primitives.workspace = true
 crossbeam-channel.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+fs4.workspace = true
 htmd = { workspace = true, optional = true }
 ignore.workspace = true
 ipnet.workspace = true
@@ -38,10 +39,11 @@ tree-sitter-bash.workspace = true
 url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "event", "pipe", "thread"] }
+rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 command-fds.workspace = true
+libproc.workspace = true
 nix.workspace = true
 tempfile.workspace = true
 
@@ -70,6 +72,9 @@ qq-provider = { workspace = true, features = ["test-support"] }
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["net"] }
 
 [[bench]]
 name = "tool_dispatch"

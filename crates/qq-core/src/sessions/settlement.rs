@@ -1413,11 +1413,13 @@ pub(super) fn cancellation_wins(
         [run_id.to_string()],
         |row| row.get::<_, bool>(0),
     )?;
-    Ok(if requested {
-        RunOutcome::Cancelled
-    } else {
-        outcome
-    })
+    Ok(
+        if requested && !super::task_workspaces::publication_authorized(transaction, run_id)? {
+            RunOutcome::Cancelled
+        } else {
+            outcome
+        },
+    )
 }
 
 pub(super) fn outcome_states(outcome: &RunOutcome) -> (&'static str, &'static str) {

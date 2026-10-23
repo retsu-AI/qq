@@ -65,6 +65,10 @@ jobs:
           fi
           unshare --version
           unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- /bin/true
+          # Hosted runners do not necessarily have an interactive login. Start
+          # their existing user manager so native tests exercise delegation.
+          sudo systemctl start "user@$(id -u).service"
+          test -S "/run/user/$(id -u)/bus"
       - name: Exact-test coverage guard
         run: bash .github/scripts/test-exact-test.sh
       - name: Turn recorder CLI regressions
@@ -187,6 +191,18 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
+      - name: Native macOS Clippy
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          cargo clippy --locked -p qq-core --all-targets -- -D warnings
+          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+      - name: macOS group quiescence
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
+          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
       - name: Native ownership, cancellation and durable observations
         shell: bash
         run: |
@@ -197,6 +213,7 @@ jobs:
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied
           fi
           bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
@@ -208,6 +225,8 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::recovery_marks_an_unconfirmed_command_lost_and_never_replays_it
           bash .github/scripts/test-exact.sh command_owner::tests::owner_enforces_the_task_deadline_without_a_live_observer
           bash .github/scripts/test-exact.sh command_owner::tests::cancellation_before_admission_prevents_a_late_launch
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_workspace_validation_capacity
+          bash .github/scripts/test-exact.sh command_owner::tests::cancellation_and_deadline_settle_without_storage_admission_capacity
           bash .github/scripts/test-exact.sh command_owner::tests::a_missing_workspace_refuses_that_command_without_stopping_other_work
           bash .github/scripts/test-exact.sh command_owner::tests::unsupported_journal_version_is_preserved_and_refused
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledged_results_release_capacity_without_replaying_retired_commands
@@ -238,6 +257,7 @@ jobs:
         if: failure() && runner.os == 'macOS'
         shell: bash
         run: |
+          /bin/ps -axo pid=,ppid=,pgid=,stat=,uid=
           /usr/bin/log show --last 5m --style compact --predicate 'subsystem == "com.apple.sandbox.reporting" OR process == "sandboxd"' | tail -n 150
           python3 - <<'PYTHON'
           import json
@@ -271,6 +291,27 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_is_bounded_atomic_and_never_discards_running_work
           bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound
           bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
+      - name: Native session recovery custody
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            bash .github/scripts/test-exact.sh sessions::tests::shared_session_harnesses_accept_an_aliased_temporary_base
+          fi
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_effects
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_releases_only_fully_drained_workspaces_without_reaccounting
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::transient_native_outage_recovers_same_owner_without_another_restart
+          bash .github/scripts/test-exact.sh sessions::tests::execution_context::lost_native_commands_retain_unconfirmed_custody_without_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::reopening_retains_lost_uncertainty_but_reclaims_unadmitted_invocations
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_prompt_start
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_check_start
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_interrupted_check_result_preserves_goal_and_human_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_failed_check_result_preserves_goal_and_human_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_removes_failed_placeholder_spill_when_original_has_no_spill
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_replaces_failed_unobserved_placeholder_without_reaccounting
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unresolved_native_capacity_preserves_existing_bindings_and_reopens_after_saved_evidence
+          bash .github/scripts/test-exact.sh sessions::tests::commands::session_deletion_preserves_unresolved_native_custody_and_ownership
       - name: Exercise the embedding caller
         run: cargo run --locked -p qq-core --example command_owner
       - name: Detached task workspace import and shared tool files
@@ -280,6 +321,13 @@ jobs:
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_filesystem_ancestor_aliases
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_hardlinks_and_cleans_partial_import
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_bounds_bytes_files_and_keeps_existing_destination
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_stopped_import_creates_no_destination
+          bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_stops_during_copy_and_removes_partial_destination
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_stops_inside_a_directory_listing
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_byte_limit
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_entry_limit
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_imports_published_ignored_outputs_from_current_source
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_filters_current_pack_protections_and_refuses_invalid_publication_provenance
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_is_shared_by_builtin_tools_and_native_commands
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_other_source_edits_and_can_resume_from_a_saved_record
@@ -307,6 +355,11 @@ jobs:
       - name: Persisted native task authority
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::publication_delivers_new_ignored_files_without_generated_directories
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_import_selection_keeps_dotfiles_and_nested_ignore_rules_with_bounds
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_never_blocks_reading_special_ignore_files
+          fi
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_never_falls_back_without_a_command_service
           bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_rejects_unregistered_workspaces_before_provider_execution

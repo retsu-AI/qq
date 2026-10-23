@@ -4,6 +4,202 @@ use qq_provider::test_support::LoopbackServer;
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn default_auto_cannot_overwrite_host_files_through_a_project_symlink() {
+    exercise_default_auto(None, false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn default_auto_completion_check_uses_the_detached_native_boundary() {
+    exercise_default_auto(
+        Some("printf check-write > alias; test -f result.txt"),
+        false,
+    )
+    .await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn default_auto_goal_continuations_reuse_the_same_private_task_files() {
+    exercise_default_auto(Some("test -f result.txt"), true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn exercise_default_auto(check: Option<&str>, continuation: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let workspace = home.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["-c", "init.templateDir=", "init", "-q", "--template="])
+            .arg(&workspace)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let secret = home.join("host-secret");
+    std::fs::write(&secret, "host bytes").unwrap();
+    std::os::unix::fs::symlink(&secret, workspace.join("alias")).unwrap();
+    let worker = client::CommandWorker::new(
+        home.join("data/qq/command-owner-v3"),
+        env!("CARGO_BIN_EXE_qq").into(),
+        concat!(
+            env!("CARGO_PKG_VERSION"),
+            "+",
+            env!("QQ_BUILD_REVISION"),
+            ".",
+            env!("QQ_BUILD_DATE")
+        ),
+    )
+    .unwrap();
+    worker.identity().await.unwrap();
+    let completed = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
+    let mut replies = vec![reply(vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":""}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":r#"{"command":"printf overwritten > alias; rm alias; printf task-output > result.txt; printf cache-retained > .qq/task-home/cache-proof; printf task-command-ran"}"#}}),
+        completed.clone(),
+    ])];
+    if continuation {
+        replies.push(reply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_wait","call_id":"call_wait","name":"update_goal","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_wait","call_id":"call_wait","name":"update_goal","arguments":json!({"wait":{"seconds":0,"reason":"continue the next bounded run"}}).to_string()}}),
+            completed.clone(),
+        ]));
+        replies.push(reply(vec![json!({"type":"response.output_text.delta","delta":"artifact published; continue verification next run"}),completed.clone()]));
+        replies.push(reply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_resume","call_id":"call_resume","name":"shell","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_resume","call_id":"call_resume","name":"shell","arguments":r#"{"command":"cat .qq/task-home/cache-proof"}"#}}),
+            completed.clone(),
+        ]));
+    }
+    if check.is_some() {
+        replies.push(reply(vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"update_goal","arguments":""}}),
+            json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"update_goal","arguments":json!({"status":{"type":"achieved","evidence":"result.txt contains the requested output"}}).to_string()}}),
+            completed.clone(),
+        ]));
+    }
+    replies.push(reply(vec![
+        json!({"type":"response.output_text.delta","delta":"finished"}),
+        completed,
+    ]));
+    let provider = LoopbackServer::respond_sequence_with_timeout(replies, Duration::from_secs(60));
+    let config = format!(
+        r#"(version: 1, model: "fake/model", providers: {{"fake": Custom(connection: (base_url: "{}/v1", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Fake")}})}})"#,
+        provider.base_url
+    );
+    // Omit --approval: this must exercise the ordinary Auto default.
+    let mut command = configured_cli(&home, &workspace, &config);
+    command.args(["run", "--format", "jsonl"]);
+    if let Some(check) = check {
+        command.args([
+            "--goal",
+            "write result.txt and verify the finished artifact",
+            "--check",
+            check,
+            "--goal-check-approval",
+            "for-goal",
+            "--goal-max-runs",
+            "4",
+            "--goal-deadline",
+            "1m",
+        ]);
+    } else {
+        command.arg("write the requested file");
+    }
+    let output = tokio::time::timeout(Duration::from_secs(30), command.output()).await;
+    worker.stop_spawned().await;
+    let output = match output {
+        Ok(output) => output.unwrap(),
+        Err(error) => {
+            let retained = root.keep();
+            panic!(
+                "Auto did not finish: {error}; fixture retained at {}",
+                retained.display()
+            );
+        }
+    };
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "host bytes",
+        "Auto must contain an allowed shell redirect to its task files"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("result.txt")).unwrap_or_else(|error| panic!(
+            "{error}; stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )),
+        "task-output"
+    );
+    assert!(
+        std::fs::symlink_metadata(workspace.join("alias"))
+            .unwrap()
+            .is_symlink()
+    );
+    let captured = tokio::task::spawn_blocking(move || provider.capture_all())
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.len(),
+        if continuation {
+            6
+        } else if check.is_some() {
+            3
+        } else {
+            2
+        },
+        "the model must receive the command outcome"
+    );
+    assert!(
+        !workspace.join(".qq/task-home").exists(),
+        "private caches must not publish into the project"
+    );
+    if continuation {
+        let request = captured[4].json_body();
+        let result = request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "call_resume")
+            .unwrap();
+        assert!(
+            result["output"]
+                .as_str()
+                .unwrap()
+                .contains("cache-retained"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_dir(home.join("data/qq/task-workspaces"))
+                .unwrap()
+                .count(),
+            2,
+            "a goal shares one work tree across runs; verification gets a fresh copy"
+        );
+    }
+    if check.is_some() {
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"type\":\"achieved\""),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    assert!(
+        captured[1].body().contains("task-command-ran"),
+        "{}",
+        captured[1].body()
+    );
+}
+
 #[tokio::test]
 async fn real_cli_persists_native_ownership_and_releases_worker_results() {
     let root = tempfile::tempdir().unwrap();

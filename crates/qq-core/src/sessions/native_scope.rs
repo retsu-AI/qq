@@ -15,6 +15,12 @@ const KEY: &str = "native_command_scopes";
 pub(crate) struct NativeScopes(BTreeMap<PathBuf, Arc<NativeCommandScope>>);
 
 impl NativeScopes {
+    pub(crate) fn single(scope: NativeCommandScope) -> Result<Arc<Self>, SessionRuntimeError> {
+        let mut scopes = BTreeMap::new();
+        insert(&mut scopes, scope)?;
+        Ok(Arc::new(Self(scopes)))
+    }
+
     /// Reject an unregistered or replaced root before project code is loaded.
     pub(crate) async fn admit(&self, path: &Path) -> Result<(), String> {
         let scope = self.get(path)?;

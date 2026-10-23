@@ -178,12 +178,43 @@ impl NativeCommandService for Worker {
 
 #[tokio::test]
 async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent() {
-    for result_saved in [false, true] {
+    for (result_saved, detached_task, host_mode) in [
+        (false, false, None),
+        (true, false, None),
+        (false, true, None),
+        (true, true, None),
+        (false, false, Some(ApprovalMode::Full)),
+        (true, false, Some(ApprovalMode::Full)),
+        (false, false, Some(ApprovalMode::Ask)),
+        (true, false, Some(ApprovalMode::Ask)),
+    ] {
         let directory = TempDir::new().unwrap();
         let path = directory.path().canonicalize().unwrap();
         let database = path.join("sessions.sqlite3");
         let store = Store::open(database.clone()).await.unwrap();
-        let (claim, id) = pending_check(&store, &path, OWNER).await;
+        let source = path.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let (claim, id) = pending_check(&store, &source, OWNER).await;
+        let task_policy = if detached_task {
+            Some(persist_detached_check_scope(&store, &claim, &path, &source).await)
+        } else {
+            None
+        };
+        if let Some(mode) = host_mode {
+            let session = claim.identity.session_id;
+            store
+                .call_write(Priority::Control, move |connection| {
+                    connection
+                        .execute("DELETE FROM metadata WHERE key='native_command_scopes'", [])?;
+                    connection.execute(
+                        "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                        params![session.to_string(), approval_mode_str(mode)],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
         let run = claim.identity.run_id;
         if result_saved {
             store
@@ -224,6 +255,7 @@ async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
         });
         let mut options = SessionRuntimeOptions::new(database.clone());
         options.native_commands = Some(Arc::new(worker));
+        options.task_workspaces = task_policy;
         let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
         let mut events = runtime
             .subscribe(SubscribeRequest {
@@ -270,7 +302,7 @@ async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
         assert_eq!(
             goal.status,
             qq_protocol::GoalStatus::Achieved,
-            "saved result: {result_saved}"
+            "saved result: {result_saved}, detached task: {detached_task}, host mode: {host_mode:?}"
         );
         assert_eq!(goal.counters.audits, 1);
         assert_eq!(
@@ -286,12 +318,57 @@ async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent
     }
 }
 
+async fn persist_detached_check_scope(
+    store: &Store,
+    claim: &ClaimedRun,
+    root: &Path,
+    source: &Path,
+) -> crate::sessions::TaskWorkspacePolicy {
+    let root = root.to_owned();
+    let source = source.to_owned();
+    let (record, policy) = tokio::task::spawn_blocking(move || {
+        let runtime = crate::Runtime::new(qq_provider::test_support::ScriptedProvider::new(vec![]), "demo", 256).unwrap();
+        let plan = crate::plan::CompiledAgentPlan::compile_blocking(crate::plan::AgentProfile::embedded(&runtime, source.clone())).unwrap();
+        let limits = crate::task_workspace::TaskWorkspaceLimits { max_entries: 16, max_bytes: 1024 };
+        let workspace = crate::task_workspace::TaskWorkspace::import(&crate::task_workspace::TaskWorkspaceSource::from_plan(&plan).unwrap(), &root.join("detached-task"), &[], limits).unwrap();
+        let scope = NativeCommandScope {
+            workspace: workspace.directory_grant(),
+            read_only: vec![],
+            network: NativeNetwork::Isolated,
+            resources: NativeResources::Host,
+        };
+        let record = serde_json::json!({"source": NativeDirectoryGrant::capture(&source).unwrap(), "workspace": workspace, "scope": scope}).to_string();
+        let control = root.join("task-control");
+        std::fs::create_dir(&control).unwrap();
+        (record, crate::sessions::TaskWorkspacePolicy { directory: NativeDirectoryGrant::capture(&control).unwrap(), read_only: vec![], resources: NativeResources::Host, limits })
+    }).await.unwrap();
+    let run = claim.identity.run_id;
+    store
+        .call_write(Priority::Control, move |connection| {
+            connection.execute("DELETE FROM metadata WHERE key='native_command_scopes'", [])?;
+            connection.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                params![format!("qq_task_run:{run}"), run.to_string()],
+            )?;
+            connection.execute(
+                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+                params![format!("qq_task_workspace:{run}"), record],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    policy
+}
+
 #[derive(Debug, Clone, Copy)]
 enum Fault {
     Cancelled,
     Expired,
     Edited,
     ReplacedWorkspace,
+    ReplacedTaskWorkspace,
+    MissingTaskRecord,
     UnprovenOutcome,
     MissingService,
     ReplacedWorker,
@@ -300,16 +377,27 @@ enum Fault {
 
 #[tokio::test]
 async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds() {
-    for fault in [
+    for (fault, detached_task) in [
         Fault::Cancelled,
         Fault::Expired,
         Fault::Edited,
         Fault::ReplacedWorkspace,
+        Fault::ReplacedTaskWorkspace,
+        Fault::MissingTaskRecord,
         Fault::UnprovenOutcome,
         Fault::MissingService,
         Fault::ReplacedWorker,
         Fault::UnavailableWorker,
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|fault| [(fault, false), (fault, true)])
+    .filter(|(fault, detached)| {
+        *detached
+            || !matches!(
+                fault,
+                Fault::ReplacedTaskWorkspace | Fault::MissingTaskRecord
+            )
+    }) {
         let directory = TempDir::new().unwrap();
         let path = directory.path().canonicalize().unwrap();
         let workspace = path.join("task");
@@ -317,6 +405,26 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
         let database = path.join("sessions.sqlite3");
         let store = Store::open(database.clone()).await.unwrap();
         let (claim, id) = pending_check(&store, &workspace, OWNER).await;
+        let task_policy = if detached_task {
+            Some(persist_detached_check_scope(&store, &claim, &path, &workspace).await)
+        } else {
+            None
+        };
+        if matches!(fault, Fault::MissingTaskRecord) {
+            // A separate broad source registration must not hide a missing
+            // record for an execution already bound to a detached task.
+            crate::sessions::native_scope::load(
+                &store,
+                vec![NativeCommandScope {
+                    workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
+                    read_only: vec![],
+                    network: NativeNetwork::Isolated,
+                    resources: NativeResources::Host,
+                }],
+            )
+            .await
+            .unwrap();
+        }
         let run = claim.identity.run_id;
         let session = claim.identity.session_id;
         store
@@ -341,6 +449,12 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
                         }
                         crate::sessions::goals::save(connection, &goal)?;
                     }
+                    Fault::MissingTaskRecord => {
+                        connection.execute(
+                            "DELETE FROM metadata WHERE key=?1",
+                            [format!("qq_task_workspace:{run}")],
+                        )?;
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -351,6 +465,11 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
         if matches!(fault, Fault::ReplacedWorkspace) {
             std::fs::rename(&workspace, path.join("old-task")).unwrap();
             std::fs::create_dir(&workspace).unwrap();
+        }
+        if matches!(fault, Fault::ReplacedTaskWorkspace) {
+            let task = path.join("detached-task");
+            std::fs::rename(&task, path.join("original-detached-task")).unwrap();
+            std::fs::create_dir(&task).unwrap();
         }
         let mut output = result(0);
         if matches!(fault, Fault::UnprovenOutcome) {
@@ -372,6 +491,7 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
             },
         };
         let mut options = SessionRuntimeOptions::new(database);
+        options.task_workspaces = task_policy;
         if !matches!(fault, Fault::MissingService) {
             options.native_commands = Some(Arc::new(worker));
         }
@@ -444,6 +564,8 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
         let unknown = matches!(
             fault,
             Fault::ReplacedWorkspace
+                | Fault::ReplacedTaskWorkspace
+                | Fault::MissingTaskRecord
                 | Fault::UnprovenOutcome
                 | Fault::MissingService
                 | Fault::ReplacedWorker

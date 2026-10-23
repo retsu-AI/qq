@@ -381,6 +381,7 @@ pub(super) async fn run_shell(
     let linux_owner = process.linux_owner().cloned();
     #[cfg(target_os = "macos")]
     let macos_owner = process.macos_owner().cloned();
+    use tracing::Instrument as _;
     let mut prepared =
         match tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -420,6 +421,7 @@ pub(super) async fn run_shell(
             }
             Ok::<_, super::process_context::PreparationError>(prepared)
         })
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_prepare"))
         .await
         {
             Ok(Ok(prepared)) => prepared,
@@ -453,6 +455,7 @@ pub(super) async fn run_shell(
             cancelled,
             preparation_deadline,
         )
+        .instrument(tracing::info_span!(target: "qq::diagnostic", "native_start"))
         .await
     {
         Ok(started) => started,
@@ -465,6 +468,12 @@ pub(super) async fn run_shell(
     // Unix commands lead their own process group. Windows children own a
     // kernel job which follows descendants across process-group changes.
     let mut guard = ProcessGroupGuard::new(child.id());
+    #[cfg(target_os = "macos")]
+    if child.owns_payload_group() {
+        // The guardian has its own group. Its private exit receipt proves
+        // payload cleanup; killing this group would destroy that guardian.
+        guard.disarm();
+    }
     #[cfg(all(test, unix))]
     {
         let hook = {
@@ -746,7 +755,19 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let mut result = ToolOutput::interrupted("tool execution was cancelled");
+                let mut content = Header::new(launch.header_tool(), None)
+                    .field("exit", "cancelled")
+                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+                    .field("bytes", capture.total())
+                    .into_line();
+                content.push_str(&capture.into_output());
+                if !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                content.push_str("tool execution was cancelled; its process group was killed");
+                let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
+                result.disposition = ResultDisposition::Interrupted;
+                result.result_digest = identity.finish(None, None, false);
                 result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Cancelled);
                 result
             }
@@ -792,7 +813,7 @@ async fn stop_shell(
             "could not terminate the command process group: {error}"
         ));
     }
-    #[cfg(not(unix))]
+    #[cfg(any(not(unix), target_os = "macos"))]
     if let Err(error) = child.start_kill() {
         return Err(format!("could not terminate the command: {error}"));
     }
@@ -1045,15 +1066,17 @@ impl ProcessGroupGuard {
     async fn confirm_stopped(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let Some(pgid) = self.killed_pgid {
-            return super::native_exit::confirm(move || {
-                match rustix::process::test_kill_process_group(pgid) {
-                    Err(rustix::io::Errno::SRCH) => Ok(true),
-                    Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
-                    Err(error) => Err(error.into()),
-                    Ok(()) => Ok(false),
-                }
-            })
-            .await;
+            let result =
+                super::native_exit::confirm(
+                    move || match rustix::process::test_kill_process_group(pgid) {
+                        Err(rustix::io::Errno::SRCH) => Ok(true),
+                        Err(rustix::io::Errno::PERM) if cfg!(target_os = "macos") => Ok(false),
+                        Err(error) => Err(error.into()),
+                        Ok(()) => Ok(false),
+                    },
+                )
+                .await;
+            return result;
         }
         Ok(())
     }

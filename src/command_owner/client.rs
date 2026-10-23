@@ -67,6 +67,12 @@ impl CommandWorker {
         }
     }
 
+    #[cfg(all(test, target_os = "linux"))]
+    #[allow(dead_code, reason = "native integration failure diagnostics")]
+    pub(crate) fn diagnostic_directory(&self) -> PathBuf {
+        self.0.directory.join("diagnostics")
+    }
+
     async fn connection(&self) -> Result<ServerConnection, CommandOwnerError> {
         if let Some(connection) = self
             .0
@@ -100,6 +106,10 @@ impl CommandWorker {
                     .map_err(io_error)??;
                 let mut command = tokio::process::Command::new(&self.0.executable);
                 command.env_clear();
+                #[cfg(all(test, target_os = "linux"))]
+                command
+                    .env("QQ_LOG", "info")
+                    .env("XDG_STATE_HOME", self.diagnostic_directory());
                 for name in qq_core::BASE_ENV.into_iter().chain([
                     "SYSTEMROOT",
                     "WINDIR",

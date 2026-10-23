@@ -198,7 +198,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         retained.extend(filesystem.directories.iter().map(|directory| directory.fd));
     }
     close_ambient_descriptors(&retained)?;
-    if packet.isolated_network {
+    if packet.isolated_network || packet.filesystem.is_some() {
         super::network::enforce()?;
     }
     if let Some(filesystem) = packet.filesystem {

@@ -13,8 +13,23 @@ fn payload_probe() {
         "groups" => {
             assert_eq!(
                 rustix::process::getpgrp(),
+                rustix::process::getpid(),
+                "the payload must lead its owned group"
+            );
+            assert_ne!(
+                rustix::process::getpgrp(),
                 rustix::process::getppid().unwrap(),
-                "the payload must stay in its trusted helper's group"
+                "the trusted guardian must remain outside the payload group"
+            );
+            assert!(
+                matches!(
+                    rustix::process::kill_process(
+                        rustix::process::getppid().unwrap(),
+                        rustix::process::Signal::KILL
+                    ),
+                    Err(rustix::io::Errno::PERM)
+                ),
+                "a payload must not kill its trusted cleanup guardian"
             );
             assert!(matches!(
                 rustix::process::setsid(),
@@ -24,6 +39,40 @@ fn payload_probe() {
                 rustix::process::setpgid(None, None),
                 Err(rustix::io::Errno::PERM)
             ));
+        }
+        "guardian-loss" => {
+            use std::io::{Read as _, Write as _};
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "macos::payload_probe",
+                    "--nocapture",
+                    "--skip",
+                    "qq-macos-probe:descendant-wait",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let mut stream = std::os::unix::net::UnixStream::connect("parent.sock").unwrap();
+            for pid in [
+                std::process::id(),
+                rustix::process::getppid().unwrap().as_raw_nonzero().get() as u32,
+                child.id(),
+            ] {
+                stream.write_all(&pid.to_le_bytes()).unwrap();
+            }
+            let mut release = [0];
+            let _ = stream.read_exact(&mut release);
+            child.wait().unwrap();
+        }
+        "descendant-wait" => {
+            use std::io::{Read as _, Write as _};
+            let mut stream = std::os::unix::net::UnixStream::connect("descendant.sock").unwrap();
+            stream.write_all(&std::process::id().to_le_bytes()).unwrap();
+            let mut release = [0];
+            stream.read_exact(&mut release).unwrap();
         }
         "network" => {
             let address = std::fs::read_to_string("tcp-address")
@@ -220,4 +269,144 @@ async fn restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_w
             "task"
         );
     }
+}
+
+#[tokio::test]
+async fn worker_death_leaves_the_guardian_alive_until_every_payload_process_exits() {
+    use nix::sys::event::{EvFlags, EventFilter, FilterFlag, KEvent, Kqueue};
+    use tokio::io::AsyncReadExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap();
+    let parent = tokio::net::UnixListener::bind(workspace.join("parent.sock")).unwrap();
+    let descendant = tokio::net::UnixListener::bind(workspace.join("descendant.sock")).unwrap();
+    let worker = client::CommandWorker::new(
+        root.path().join("worker"),
+        env!("CARGO_BIN_EXE_qq").into(),
+        concat!(
+            env!("CARGO_PKG_VERSION"),
+            "+",
+            env!("QQ_BUILD_REVISION"),
+            ".",
+            env!("QQ_BUILD_DATE")
+        ),
+    )
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let request = NativeCommand {
+            id: ToolCallId::generate().map_err(std::io::Error::other)?,
+            workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
+                &workspace,
+            )?,
+            workspace,
+            tool: "exec".to_owned(),
+            arguments: probe("guardian-loss").to_string(),
+            environment: NativeEnvironment::capture(&[]).map_err(std::io::Error::other)?,
+            shell_policy: Default::default(),
+            approved_images: vec![],
+            network: qq_core::command_owner::NativeNetwork::Host,
+            filesystem: qq_core::command_owner::NativeFilesystem::Host,
+            resources: qq_core::command_owner::NativeResources::Host,
+            not_after_ms: None,
+        };
+        worker
+            .submit(request)
+            .await
+            .map_err(std::io::Error::other)?;
+        let ((mut parent, _), (mut descendant, _)) =
+            tokio::try_join!(parent.accept(), descendant.accept())?;
+        let mut parent_frame = [0; 12];
+        let mut descendant_frame = [0; 4];
+        parent.read_exact(&mut parent_frame).await?;
+        descendant.read_exact(&mut descendant_frame).await?;
+        if parent_frame[8..] != descendant_frame {
+            return Err(std::io::Error::other(
+                "descendant readiness did not match its parent's child",
+            ));
+        }
+        let pids = parent_frame
+            .chunks_exact(4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()) as usize)
+            .collect::<std::collections::BTreeSet<_>>();
+        if pids.len() != 3 || pids.contains(&0) {
+            return Err(std::io::Error::other(
+                "fixture did not identify three live owned processes",
+            ));
+        }
+        let queue = Kqueue::new()?;
+        let changes = pids
+            .iter()
+            .map(|pid| {
+                KEvent::new(
+                    *pid,
+                    EventFilter::EVFILT_PROC,
+                    EvFlags::EV_ADD | EvFlags::EV_ONESHOT,
+                    FilterFlag::NOTE_EXIT,
+                    0,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        queue.kevent(
+            &changes,
+            &mut [],
+            Some(nix::libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }),
+        )?;
+        // Each process is still held by a separate private socket. Closing
+        // the coordinator cannot accidentally release these fixture waits.
+        worker.stop_spawned().await;
+        let exited = tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let mut pending = pids;
+            let mut events = [KEvent::new(
+                0,
+                EventFilter::EVFILT_PROC,
+                EvFlags::empty(),
+                FilterFlag::empty(),
+                0,
+                0,
+            ); 3];
+            while !pending.is_empty() {
+                let remaining = deadline
+                    .checked_duration_since(std::time::Instant::now())
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!("owned processes did not exit: {pending:?}"))
+                    })?;
+                let timeout = nix::libc::timespec {
+                    tv_sec: remaining.as_secs() as i64,
+                    tv_nsec: i64::from(remaining.subsec_nanos()),
+                };
+                let count = match queue.kevent(&[], &mut events, Some(timeout)) {
+                    Ok(count) => count,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(error) => return Err(std::io::Error::from(error)),
+                };
+                for event in &events[..count] {
+                    if event.flags().contains(EvFlags::EV_ERROR)
+                        || !event.fflags().contains(FilterFlag::NOTE_EXIT)
+                    {
+                        return Err(std::io::Error::other(format!(
+                            "invalid native process-exit event: {event:?}"
+                        )));
+                    }
+                    pending.remove(&event.ident());
+                }
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await
+        .map_err(std::io::Error::other)?;
+        // Release fixture channels even if the old implementation orphaned a
+        // descendant. No cleanup ever signals a PID from a terminal receipt.
+        drop(parent);
+        drop(descendant);
+        exited
+    })
+    .await;
+    worker.stop_spawned().await;
+    result
+        .expect("native worker-loss fixture exceeded its deadline")
+        .unwrap();
 }

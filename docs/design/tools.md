@@ -41,17 +41,29 @@ root, which makes Linux reject further user-namespace creation and prevents
 regaining mount authority to undo read-only mounts. Setup failures return a
 bounded refusal before the payload starts.
 
-This path requires fully enforced Landlock ABI 9, including pathname Unix
-socket restrictions. Unsupported kernels and unimplemented platform backends
-refuse a requested restriction; they never fall back to host execution. The
-safe Rust `landlock` dependency supplies the kernel interface.
+This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
+restrictions are available, an additional Landlock rule denies host socket
+connections. Otherwise a seccomp filter denies creation of addressable Unix
+sockets and datagram pairs, while preserving connected stream and
+sequence-packet pairs (including close-on-exec and nonblocking variants).
+These connected pairs cannot be retargeted to host services. The filter also denies io_uring entry points,
+which could otherwise create sockets outside socket(2). On this older-kernel
+path, local abstract Unix listeners are unavailable; subprocess stream-pair
+communication still works, including Rust's fork/exec startup channel.
+Unsupported required enforcement and unimplemented platform backends refuse
+execution. The safe Rust `landlock` and `seccompiler`
+dependencies supply the kernel interfaces.
 
-This is a filesystem primitive, not a qualified Auto sandbox. The normal
-server setup does not create or register task scopes yet. Grants are additive and include existing
-inodes within a granted root: protecting policy files beneath a writable root,
-external hardlink aliases, authorized network egress, credential
-brokering, disk capacity, shared task resource budgets and concurrent writers still require further enforcement
-before Auto enablement.
+On Linux, the binary creates detached task scopes for ordinary Auto runs and
+their children. Built-ins use the private task tree; native commands receive its
+filesystem, network and resource scope. Configuration is loaded from the
+source project. Completed root runs publish checked file changes after their
+commands and children drain; failed or interrupted work stays private.
+Unsupported requested native restrictions fail closed. Default Auto integration
+is enabled on Linux first. Other platforms retain their existing permission
+behavior until macOS resource limits and Windows containment are implemented
+and qualified. Authorized network egress, credential brokering, per-task aggregate
+resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
@@ -86,10 +98,67 @@ Serialized task records contain source authority and belong in trusted storage
 outside the writable task tree. The embedding example exercises the import,
 session edit and publication path.
 
-This primitive does not yet choose inputs or publish automatically for ordinary
-sessions, support source symlinks/hardlinks, bound subsequent output disk usage,
-or protect new shell-created trust configuration inside the task tree. Those
-remain necessary before Auto enablement.
+The binary supplies `SessionRuntimeOptions.task_workspaces` when it uses the
+independent worker. Auto runs import regular project files into a private task
+tree, respecting project ignore files and excluding trust configuration. Built-in
+tools and native commands share that tree; configuration still comes from the
+logical source project. Explicit file attachments are resolved through the source
+project capability with their normal size and hash checks. Editable attachments
+are copied even when ignored; protected configuration is attached as context
+without becoming writable task configuration. Task preparation observes
+cancellation and deadlines while waiting for filesystem capacity, enumerating
+directories and copying each bounded file chunk. Interrupted imports remove
+their partial private tree before settlement. Restored goal trees adopt the
+current host's file/byte ceilings; a tighter ceiling can refuse publication
+while retaining the private edits.
+Commands receive a private home/temp directory, explicit
+system read roots, isolated networking and the captured task write root. A native
+backend that cannot enforce that scope refuses execution. Commands inside this
+boundary need no additional Auto approval unless a forbidden rule or internal
+child supervision requires it. Ask and Read-only retain their own rules.
+
+Task traversal reads bounded regular ignore files through directory capabilities;
+special files and symlinks cannot block ignore loading. New ignored output files
+are included in publication. New generated directories (`target`, `node_modules`,
+`dist`, `build`, `.venv`, `__pycache__`, `.git`) and the private task home remain
+excluded from automatic publication, while imported source paths remain selected.
+
+Completed runs publish after tools and children drain. Publication reloads trusted
+source configuration and retains both imported and current configured-pack
+protections; a newly protected output refuses publication. Waiting for filesystem
+capacity remains cancellable until publication is authorized. After preflight, a
+short store transaction checks committed cancellation and current session and
+ancestor permissions, then records publication authorization. Cancellation before
+that decision preserves the private edits. After authorization, installation
+finishes and settlement retains its actual outcome rather than relabeling it as
+cancelled. File installation remains atomic per file; an I/O failure can report
+partially applied outputs. A coordinator restart during publication does not
+attest task completion. Failed work retains the private task tree.
+Completion checks acquire the source workspace exclusion before importing
+the published artifact, including ignored paths from the validated publication
+record. They copy current source bytes, preserve source deletions and current
+protections, and do not require or reuse the old private tree. They execute
+through the same durable worker; their file
+changes are not published. Successive goal-origin runs reuse the same persisted
+private tree, retaining caches and unpublished files; ordinary prompts do not
+revive that goal tree. Compaction does not create task copies. Full retains host
+authority.
+
+Recovery of a running completion check restores its persisted run-bound scope
+and validates both source and task directory identities before accepting the
+worker result. A missing or replaced bound task never falls back to broader
+source authority; cancellation, budgets and unknown-execution holds still apply.
+Unbound Full and Ask checks recover the original worker's terminal result without
+requiring a restricted scope; recovery never submits replacement execution.
+
+Linux Auto commands request enforced memory, process and CPU limits. Goal work
+retains its private tree across server restart without replaying the original
+command or resetting its goal budget. This integration does not yet qualify
+unattended safety: subsequent task output disk usage is unbounded and ordinary
+non-goal task continuation is unfinished. macOS limited-resource execution and
+Windows restricted filesystem execution remain unavailable and fail closed. Source
+symlinks are omitted and hardlinked regular inputs are refused. Scoped network
+and credential operations still require separate trusted adapters.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
@@ -99,7 +168,11 @@ workspace is their only writable filesystem root. Built-in mutation still uses
 the same opened workspace. Missing command services never cause scoped shell
 calls to use the local host fallback. Other workspaces and replaced task roots
 are refused before loading project configuration, then the opened workspace is
-validated again afterward. Side questions use the same checks. Scoped goal
+validated again afterward. Side questions resolve an active run's trusted task
+record and inspect its private edits using the same identity checks, while
+configuration still comes from the source project. Missing task records and
+replaced roots are refused; an Auto run still preparing its task returns busy
+instead of inspecting the source project. Scoped goal
 completion checks use the durable native command service with the same registered
 filesystem, network and resource limits. Their invocation and owner identity are
 persisted before submission, and their result before goal settlement. Exact check
@@ -162,11 +235,21 @@ readable files and supplied environment values; those remain required before
 Auto enablement.
 
 `NativeResources::Limited` carries explicit memory, native-task and CPU-bandwidth
-limits. Linux uses one cgroup v2 per invocation beneath the trusted embedding
-host's `CommandLauncher.cgroup_root`. That directory must be explicitly
-delegated with the cpu, memory and pids controllers enabled; QQ does not modify
-service-manager configuration or seek elevated privileges. The root identity
-is checked before use. A request without usable delegation is refused.
+limits. Linux uses one cgroup v2 per invocation beneath
+`CommandLauncher.cgroup_root`. The binary obtains a delegated scope from the
+existing systemd user manager, using trusted system executables and the host
+user bus. It moves the worker into a supervisor leaf and enables cpu, memory
+and pids controllers in a separate tasks subtree. Embedding hosts may supply
+their own delegated root. QQ does not modify service-manager configuration or
+seek elevated privileges. Root identities are checked before use; a limited
+request without usable delegation is refused.
+
+The binary's Auto policy limits each invocation to 4 GiB memory, 512 native
+tasks (including threads), and CPU bandwidth equal to the available logical
+CPUs. The worker's tasks subtree also limits the combined fleet to 4,096 native
+tasks, 75% of available memory measured at worker startup, no swap, and 90% of
+available CPU bandwidth. The supervisor remains outside those fleet limits so
+payload exhaustion does not directly kill its durable journal.
 
 All limits are installed and read back before launch. The trusted PID-1 helper
 joins by writing zero to a held membership descriptor before spawning the
@@ -178,11 +261,28 @@ exit; empty groups left by a dead owner are reclaimed on subsequent admission.
 
 Resource scope is required in the persisted command identity, so a retry cannot
 raise limits or remove them. Other native adapters explicitly refuse limited
-execution until implemented. This currently covers individual command trees;
-server/task-wide aggregate budgets and disk capacity are still unfinished.
-The explicit-delegation native test exercises thread exhaustion, memory OOM,
-controller values, stale-group reclamation and cleanup after exit and cancellation. Ordinary CI without
-delegation tests refusal, not successful containment.
+execution until implemented. Linux applies both invocation and worker-fleet
+ceilings; per-task aggregate budgets and hard writable disk quotas remain unfinished.
+The native resource test uses the production delegation bootstrap and exercises
+thread exhaustion, memory OOM, controller values, stale-group reclamation and
+cleanup after exit and cancellation. Positive qualification requires a supported
+kernel and working user-manager delegation. Refusal tests cover unavailable
+delegation separately; they do not prove successful containment.
+
+### Disk-space safeguard
+
+Restricted native commands check available space before launch and once per
+second while running. Below a 512 MiB free-space reserve, the independent
+worker cancels the command, waits for native cleanup, and retains its captured
+output and stop reason. This continues while the coordinator is disconnected.
+The session runtime also stops private task work under disk pressure. Import
+and publication require the reserve plus their configured copy-size ceiling;
+failed publication retains the private edits.
+
+This requires no volumes, administrator access or filesystem setup. It is a
+best-effort safeguard, not a quota: concurrent writers and writes between
+checks can overshoot the reserve. Host-authority native commands do not use
+this guard.
 
 ## The Tool Loop
 
@@ -1257,6 +1357,12 @@ command running; reopening reconciles its original journal and retains its
 terminal result before the session continues. An active durable goal can then
 schedule its successor within its remaining shared budget.
 
+Worker journal I/O has its own bounded capacity, independent of project
+filesystem operations. Pre-launch workspace validation and the free-space probe
+share one cancellable, deadline-bound filesystem admission. A command waiting
+for that capacity can settle cancellation or expiry and release its execution
+slot without acquiring a filesystem permit.
+
 The macOS adapter captures a private executable copy when the owner starts,
 so replacing the original helper, its ancestors or existing hardlinks cannot
 replace trusted startup code. Restricted writable grants that include the copy
@@ -1267,9 +1373,14 @@ network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
 Descendants cannot call
-`setsid` or `setpgid`; the helper retains the group identity until terminating
-the group, including on owner disconnect. A terminal payload status is returned
-through the private channel before group teardown. Loader-injection environment
+`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
+so terminating payloads cannot kill their cleanup owner. It retains the exited
+leader without reaping it, repeatedly terminates remaining members, and checks
+two kernel snapshots for exited process identities before reaping. This also
+covers forks racing with cancellation and worker loss. A terminal payload status
+is returned through the private channel only after cleanup; a missing or partial
+status never confirms quiescence. Exited zombies may await collection by the OS,
+but live members keep cleanup unconfirmed. Loader-injection environment
 variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
 requesting those limits fails closed. Restricted Windows scopes remain refused.
@@ -1345,9 +1456,14 @@ saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
 (or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
 Acknowledgement atomically removes terminal output, receipts and results while
 retaining compact command IDs and request hashes that prevent re-execution.
-A terminal `Lost` observation is saved as an unobserved result, including its
-retained output prefix, before acknowledgement.
-The 10,000-observation limit therefore counts unacknowledged commands; compact
+`Lost` means the journal no longer owns a live invocation; it does not attest
+that its original process group finished cleanup. Sessions retain that binding
+without acknowledging it or releasing its workspace for reuse. A live observer
+also keeps its teardown unconfirmed.
+Worker journals retain at most 10,000 unacknowledged commands. The session store
+also bounds unresolved native bindings to 10,000 across worker generations;
+new admission refuses capacity exhaustion before submission, and recovery
+reports overflow rather than silently omitting obligations. Compact
 retired identities continue to grow with history. Running commands cannot be
 acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
@@ -1356,14 +1472,24 @@ acknowledgement intent with the actual terminal result. Only then can worker
 observations be reclaimed. Reopening captures pending native invocation IDs and
 observes their original journal in the background, retaining the original run
 until those invocations drain. Server startup does not wait for a worker.
-The observer retains process receipts and terminal output, acknowledges only
-saved results, and handles explicit cancellation through the original worker.
+An unavailable or mismatched worker interrupts model execution while its unsaved
+native obligations remain durable. Those obligations block conflicting workspace
+admission, including goal continuation and completion checks, across restarts.
+Other workspaces can continue. Observation retries the same owner with bounded
+backoff; bounded wait quanta prevent long commands from starving other retained
+observations. Shutdown stops and joins observation before closing session storage.
+Authenticated late results retain receipts and output without reopening the
+settled model run, changing its accounting, republishing artifacts, or clearing
+a completion-check acknowledgment hold. The workspace remains blocked until all
+original invocations have confirmed terminal results. A journal `Lost` entry
+cannot supply that confirmation. The observer acknowledges only saved results
+and handles explicit cancellation through the original worker.
 An invocation bound before admission is fenced with durable cancellation if
 its journal entry is absent, preventing a delayed admission from starting it.
 No command is submitted again and its original deadline remains in force.
 Explicit CLI resume waits for inherited commands; queued prompts start only
-after their results are saved. Interrupting that wait cancels and drains the
-inherited run and pauses its owning live goal. Observation-only recovered runs
+after their results are saved. If the inherited run remains active,
+interrupting that wait cancels and drains it and pauses its owning live goal. Observation-only recovered runs
 reject steering; queued pre-crash steering is published as superseded when the
 run settles. The interrupted model run settles; the durable goal driver can
 then queue a successor for the same active goal within its remaining shared

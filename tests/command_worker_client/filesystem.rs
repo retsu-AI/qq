@@ -543,7 +543,9 @@ async fn filesystem_scope_preserves_frozen_path_aliases_without_granting_their_p
 
 #[tokio::test]
 async fn resource_scope_without_delegation_refuses_before_payload_and_cannot_be_widened() {
-    use qq_core::command_owner::{NativeResourceLimits, NativeResources};
+    use qq_core::command_owner::{
+        CommandLauncher, CommandOwner, NativeResourceLimits, NativeResources,
+    };
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -558,11 +560,19 @@ async fn resource_scope_without_delegation_refuses_before_payload_and_cannot_be_
     let mut missing = serde_json::to_value(&command).unwrap();
     missing.as_object_mut().unwrap().remove("resources");
     assert!(serde_json::from_value::<NativeCommand>(missing).is_err());
-    let client = worker(&root.path().join("owner"));
+    // The binary now obtains delegation from the user service manager. This
+    // embedding owner deliberately supplies none, regardless of host support.
+    let client = CommandOwner::open(
+        root.path().join("owner"),
+        "unknown",
+        CommandLauncher::new(env!("CARGO_BIN_EXE_qq").into()),
+    )
+    .await
+    .unwrap();
     let result = finish(&client, command.clone()).await.result.unwrap();
     command.resources = NativeResources::Host;
     let retry = client.submit(command).await;
-    client.stop_spawned().await;
+    client.shutdown().await.unwrap();
     assert!(result.is_error(), "{}", result.text());
     assert!(
         result.text().contains("resource enforcement"),

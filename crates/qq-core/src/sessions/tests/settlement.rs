@@ -2011,6 +2011,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            task_workspaces: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
@@ -2087,6 +2088,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            task_workspaces: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
@@ -3299,10 +3301,60 @@ async fn rejects_cross_workspace_focus_and_oversized_pages() {
 
 #[tokio::test]
 async fn schedules_ready_sessions_fairly() {
+    struct FairnessLoader {
+        requests: Arc<StdMutex<Vec<ModelRequest>>>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+    impl RuntimeLoader for FairnessLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            struct FairnessProvider {
+                requests: Arc<StdMutex<Vec<ModelRequest>>>,
+                entered: Arc<tokio::sync::Notify>,
+                release: Arc<tokio::sync::Notify>,
+            }
+            impl Provider for FairnessProvider {
+                fn stream(&self, request: ModelRequest) -> ProviderStream {
+                    let first = {
+                        let mut requests = self.requests.lock().unwrap();
+                        let first = requests.is_empty();
+                        requests.push(request);
+                        first
+                    };
+                    let entered = Arc::clone(&self.entered);
+                    let release = Arc::clone(&self.release);
+                    Box::pin(async_stream! {
+                        if first {
+                            entered.notify_one();
+                            release.notified().await;
+                        }
+                        yield Ok(qq_provider::ProviderEvent::OutputTextDelta { text: "answer".to_owned() });
+                        yield Ok(qq_provider::ProviderEvent::Completed { usage: None });
+                    })
+                }
+            }
+            let provider = FairnessProvider {
+                requests: Arc::clone(&self.requests),
+                entered: Arc::clone(&self.entered),
+                release: Arc::clone(&self.release),
+            };
+            Box::pin(async move {
+                Runtime::new(provider, "test-model", 256)
+                    .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                    .map_err(|error| RuntimeLoadError {
+                        kind: RunFailureKind::Configuration,
+                        message: error.to_string(),
+                    })
+            })
+        }
+    }
     let directory = tempfile::tempdir().unwrap();
     let requests = Arc::new(StdMutex::new(Vec::new()));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            task_workspaces: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
@@ -3314,8 +3366,10 @@ async fn schedules_ready_sessions_fairly() {
             grant_authority: None,
             approval_reviewer: None,
         },
-        Arc::new(CapturingLoader {
+        Arc::new(FairnessLoader {
             requests: Arc::clone(&requests),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
         }),
     )
     .await
@@ -3354,15 +3408,9 @@ async fn schedules_ready_sessions_fairly() {
         )
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = events.next().await {
-            if matches!(event.unwrap().event, SessionEvent::RunStarted { .. }) {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
+    entered.notified().await;
+    // Keep the first run active until both competing sessions are queued.
+    // A timed provider delay cannot establish that condition under load.
     for (session_id, prompt) in [(first_session, "first-b"), (second_session, "second-a")] {
         runtime
             .command(
@@ -3378,19 +3426,19 @@ async fn schedules_ready_sessions_fairly() {
             .await
             .unwrap();
     }
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    release.notify_one();
     let mut finished = 0;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = events.next().await {
-            if matches!(event.unwrap().event, SessionEvent::RunFinished { .. }) {
-                finished += 1;
-                if finished == 3 {
-                    break;
-                }
-            }
+    while finished < 3 {
+        let event = events
+            .next()
+            .await
+            .expect("session event stream closed")
+            .unwrap();
+        if matches!(event.event, SessionEvent::RunFinished { .. }) {
+            finished += 1;
         }
-    })
-    .await
-    .unwrap();
+    }
 
     let captured = requests.lock().unwrap();
     assert_eq!(captured.len(), 3);

@@ -3,6 +3,213 @@ use std::path::Path;
 
 use super::*;
 
+#[tokio::test]
+async fn cancellation_and_deadline_settle_without_workspace_validation_capacity() {
+    stopped_admission_keeps_no_execution_slot(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_and_deadline_settle_without_storage_admission_capacity() {
+    stopped_admission_keeps_no_execution_slot(true).await;
+}
+
+async fn stopped_admission_keeps_no_execution_slot(after_validation: bool) {
+    for deadline in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+            .await
+            .unwrap();
+        let id = ToolCallId::generate().unwrap();
+        let mut request = command(workspace.path(), id, "echo unexpected > ran");
+        request.filesystem = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+        };
+        if deadline {
+            request.not_after_ms = Some(
+                u64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                )
+                .unwrap()
+                    + 60_000,
+            );
+        }
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let hooks = if after_validation {
+            &STORAGE_ADMISSION_HOOKS
+        } else {
+            &PREPARATION_HOOKS
+        };
+        hooks.lock().unwrap().push(AdmissionHook {
+            id,
+            entered,
+            release: released,
+        });
+        owner.submit(request).await.unwrap();
+        waiting.await.unwrap();
+        let capacity = crate::workspace::blocking_permits();
+        let permits = capacity
+            .clone()
+            .acquire_many_owned(u32::try_from(capacity.available_permits()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(capacity.available_permits(), 0);
+        release.send(()).unwrap();
+        let cancellation = if deadline {
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(61)).await;
+            tokio::time::resume();
+            None
+        } else {
+            let owner = owner.clone();
+            Some(tokio::spawn(async move { owner.cancel(id).await }))
+        };
+        let terminal = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wait_finished(&owner, id, 0),
+        )
+        .await;
+        let shutdown = if terminal.is_ok() {
+            Some(tokio::time::timeout(std::time::Duration::from_secs(5), owner.shutdown()).await)
+        } else {
+            None
+        };
+        // Always release fixture capacity, including on the unfixed path.
+        drop(permits);
+        if let Some(cancellation) = cancellation {
+            cancellation.await.unwrap().unwrap();
+        }
+        owner.shutdown().await.unwrap();
+        let terminal =
+            terminal.expect("stopped pre-launch work must settle without filesystem capacity");
+        shutdown
+            .unwrap()
+            .expect("shutdown must not retain a stopped execution slot")
+            .unwrap();
+        assert_eq!(terminal.status, CommandStatus::Finished);
+        assert!(terminal.process.is_none());
+        let result = terminal.result.unwrap();
+        if deadline {
+            assert_eq!(
+                result.0.native_outcome,
+                Some(NativeCommandOutcome::TimedOut)
+            );
+        } else {
+            assert_eq!(
+                result.0.disposition,
+                crate::tools::ResultDisposition::Interrupted
+            );
+        }
+        assert!(!workspace.path().join("ran").exists());
+    }
+}
+
+#[tokio::test]
+async fn scoped_command_refuses_low_disk_space_before_launch() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _space = crate::storage::SpaceOverride::new(workspace.path(), 0);
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "echo unexpected > ran");
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: vec![],
+        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+    };
+    owner.submit(request).await.unwrap();
+    let result = wait_finished(&owner, id, 0).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(result.is_error());
+    assert!(!workspace.path().join("ran").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_command_is_reaped_when_disk_space_drops() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
+    let release = workspace.path().join("release");
+    crate::tools::create_test_fifo(&release).await;
+    let _gate = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&release)
+        .unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(
+        workspace.path(),
+        id,
+        "printf ready; read token < release; echo unexpected > ran",
+    );
+    let mut roots = Vec::new();
+    for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
+        if let Ok(path) = Path::new(path).canonicalize()
+            && !roots.contains(&path)
+        {
+            roots.push(path);
+        }
+    }
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: roots
+            .iter()
+            .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+            .collect(),
+        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+    };
+    owner.submit(request).await.unwrap();
+    let mut after = 0;
+    let running = loop {
+        let observed = owner.wait(id, after).await.unwrap();
+        assert_ne!(
+            observed.status,
+            CommandStatus::Finished,
+            "{:?}",
+            observed.result
+        );
+        if observed.output.contains("ready") {
+            break observed;
+        }
+        after = observed.version;
+    };
+    space.set(0);
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    tokio::time::resume();
+    let finished = wait_finished(&owner, id, running.version).await;
+    owner.shutdown().await.unwrap();
+    let result = finished.result.unwrap();
+    assert!(result.is_error());
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(
+        result.text().contains("ready"),
+        "captured output must be preserved"
+    );
+    let pid = running.process.unwrap().0.facts().pid;
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    assert!(rustix::process::test_kill_process(pid).is_err());
+    assert!(!workspace.path().join("ran").exists());
+}
+
 #[tokio::test(start_paused = true)]
 async fn cancellation_during_cold_admission_keeps_submission_progressing() {
     use crate::{
@@ -1197,6 +1404,15 @@ async fn owned_payload_retains_the_workers_host_supplementary_groups() {
 #[cfg(any(unix, windows))]
 #[tokio::test]
 async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
+    let attempts = if cfg!(target_os = "macos") { 32 } else { 1 };
+    for _ in 0..attempts {
+        exercise_cancel_response_loss(false).await;
+        exercise_cancel_response_loss(true).await;
+    }
+}
+
+#[cfg(any(unix, windows))]
+async fn exercise_cancel_response_loss(wait_for_descendant: bool) {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
@@ -1206,12 +1422,45 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
     owner
         .submit({
             let mut request = command(workspace.path(), id, "unused");
-            request.arguments = crate::tools::PANIC_SHELL_ARGUMENTS.to_owned();
+            #[cfg(unix)]
+            {
+                // Preserve the original startup race as well as the case
+                // where the shell already owns a running descendant.
+                request.arguments = if wait_for_descendant {
+                    r#"{"command":"sleep 300 & printf ready; wait"}"#.to_owned()
+                } else {
+                    crate::tools::PANIC_SHELL_ARGUMENTS.to_owned()
+                };
+            }
+            #[cfg(windows)]
+            {
+                request.arguments = crate::tools::PANIC_SHELL_ARGUMENTS.to_owned();
+            }
             request
         })
         .await
         .unwrap();
-    let running = owner.wait(id, 0).await.unwrap();
+    let running = if !wait_for_descendant {
+        owner.wait(id, 0).await.unwrap()
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut version = 0;
+            loop {
+                let snapshot = owner.wait(id, version).await.unwrap();
+                #[cfg(unix)]
+                let ready = snapshot.output.contains("ready");
+                #[cfg(windows)]
+                let ready = snapshot.process.is_some();
+                if ready {
+                    break snapshot;
+                }
+                assert_ne!(snapshot.status, CommandStatus::Finished);
+                version = snapshot.version;
+            }
+        })
+        .await
+        .expect("cancellation fixture must reach a live command")
+    };
     let (entered, committed) = tokio::sync::oneshot::channel();
     let (release, gate) = tokio::sync::oneshot::channel();
     CANCELLATION_HOOKS.lock().unwrap().push(AdmissionHook {
@@ -1233,7 +1482,11 @@ async fn losing_the_cancel_response_does_not_abandon_committed_cancellation() {
         owner.wait(id, running.version),
     )
     .await;
-    owner.shutdown().await.unwrap();
+    let shutdown = owner.shutdown().await;
+    assert!(
+        shutdown.is_ok(),
+        "cancellation cleanup failed: descendant={wait_for_descendant}, shutdown={shutdown:?}, terminal={terminal:?}"
+    );
     assert!(
         terminal.is_ok(),
         "the owner must deliver a committed cancellation after its caller disconnects"
@@ -2393,4 +2646,51 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
         assert!(!workspace.path().join("ran").exists());
     }
     owner.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn observer_started_during_admission_keeps_tracking_the_command() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let (subscribed, subscription) = tokio::sync::oneshot::channel();
+    let (observe, observation) = tokio::sync::oneshot::channel();
+    WAIT_SUBSCRIPTION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered: subscribed,
+        release: observation,
+    });
+    let mut observer = Box::pin(owner.wait(id, u64::MAX));
+    assert!(futures_util::poll!(observer.as_mut()).is_pending());
+    subscription.await.unwrap();
+    let (preparing, preparation) = tokio::sync::oneshot::channel();
+    let (execute, execution) = tokio::sync::oneshot::channel();
+    PREPARATION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered: preparing,
+        release: execution,
+    });
+    owner
+        .submit(command(workspace.path(), id, "echo admission-observed"))
+        .await
+        .unwrap();
+    preparation.await.unwrap();
+    observe.send(()).unwrap();
+    // Poll through the released hook to queue the first snapshot. The following
+    // snapshot queues behind it on the journal's FIFO permit, proving that the
+    // observer has read the live state before execution can finish.
+    assert!(futures_util::poll!(observer.as_mut()).is_pending());
+    assert_eq!(
+        owner.snapshot(id).await.unwrap().status,
+        CommandStatus::Queued
+    );
+    execute.send(()).unwrap();
+    let result = observer.await;
+    owner.shutdown().await.unwrap();
+    let result = result.expect("a live admission must retain its observer");
+    assert_eq!(result.status, CommandStatus::Finished);
+    assert!(result.result.unwrap().text().contains("admission-observed"));
 }
