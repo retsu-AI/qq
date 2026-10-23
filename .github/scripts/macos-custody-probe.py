@@ -79,6 +79,21 @@ class Kernel:
         self.signal = self.lib.proc_signal_with_audittoken
         self.signal.argtypes = [C.POINTER(AuditToken), C.c_int]
         self.signal.restype = C.c_int
+        self.system = C.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.usage = self.system.coalition_info_resource_usage
+        self.usage.argtypes = [C.c_uint64, C.c_void_p, C.c_size_t]
+        self.usage.restype = C.c_int
+
+    def active_tasks(self, coalition):
+        # XNU copies MIN(requested size, struct size); these two counters are
+        # the stable prefix of coalition_resource_usage, read under its lock.
+        counters = (C.c_uint64 * 2)()
+        C.set_errno(0)
+        if self.usage(coalition, C.byref(counters), C.sizeof(counters)) != 0:
+            raise OSError(C.get_errno(), "coalition resource usage failed")
+        started, exited = counters
+        assert started > 0 and exited <= started, "invalid coalition task counters"
+        return started - exited
 
     def info(self, pid, flavor, result):
         C.set_errno(0)
@@ -179,8 +194,11 @@ class ExitWatch:
         self.pending.add(pid)
 
     def drain(self, timeout):
+        self.wait_for(set(self.pending), timeout)
+
+    def wait_for(self, pids, timeout):
         deadline = time.monotonic() + timeout
-        while self.pending:
+        while self.pending.intersection(pids):
             remaining = deadline - time.monotonic()
             assert remaining > 0, "fixture exit was not confirmed"
             events = self.queue.control([], len(self.pending), remaining)
@@ -446,6 +464,9 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
             escaped = accept("escaped")
             assert escaped["pid"] == spawned and escaped["group"] != root["group"]
             assert escaped["coalitions"][0] == root["coalitions"][0]
+            if use_guardian:
+                active = kernel.active_tasks(root["coalitions"][0])
+                assert active == 3, f"coalition omitted a live fixture: {active}"
             assert kernel.send(root, signal.SIGSTOP, wrong=True) == errno.ESRCH
             ping("root")
             assert kernel.send(root, signal.SIGKILL) == 0
@@ -464,8 +485,13 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
             assert fixtures["escaped"][1].read(1) == b"", "escaped child did not exit"
             ping("sentinel")
             if use_guardian:
+                exits.wait_for({root["pid"], escaped["pid"]}, 20)
                 ping("guardian")
-                print(json.dumps({"protected_guardian": guardian, "escaped_child_stopped": True}), flush=True)
+                active = kernel.active_tasks(root["coalitions"][0])
+                assert active == 1, f"coalition still has untracked tasks: {active}"
+                print(json.dumps({"protected_guardian": guardian,
+                                  "escaped_child_stopped": True,
+                                  "active_tasks_after_cleanup": active}), flush=True)
         finally:
             try:
                 signal_errors = []
