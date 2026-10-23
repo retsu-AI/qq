@@ -6,6 +6,7 @@ snapshots and the kernel's audit-token API. No bare-PID cleanup is permitted.
 """
 
 import ctypes as C
+from contextlib import closing
 import errno
 import json
 import os
@@ -418,7 +419,7 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
                 control_label = label + ".control"
                 broker_labels.extend([control_label, label])
                 marker = Path(temporary) / "broker-control"
-                with select.kqueue() as changes:
+                with closing(select.kqueue()) as changes:
                     directory = os.open(temporary, os.O_RDONLY)
                     try:
                         changes.control([select.kevent(directory,
