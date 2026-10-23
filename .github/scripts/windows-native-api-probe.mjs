@@ -285,7 +285,8 @@ fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
 fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
 fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
-fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, futureSecret, publicWritable, privateCredential: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL, endpoint, softwareFile, restrictedHelper }));
+const publicWritableAliases = [(await volumeMetadata()).guid + publicWritable.slice(3), '\\\\?\\GLOBALROOT' + (await volumeMetadata()).device + publicWritable.slice(2)];
+fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, futureSecret, publicWritable, publicWritableAliases, privateCredential: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL, endpoint, softwareFile, restrictedHelper }));
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -313,6 +314,11 @@ const path = require('node:path');
   try { fs.readFileSync(input.futureSecret); report.futureRead = true; } catch { report.futureRead = false; }
   try { fs.writeFileSync(input.futureSecret, 'changed'); report.futureWrite = true; } catch { report.futureWrite = false; }
   try { fs.writeFileSync(input.publicWritable, 'payload-write'); report.publicWrite = true; } catch (error) { report.publicWrite = false; report.publicWriteError = error.code; }
+
+  report.publicAliasWrites = input.publicWritableAliases.map(alias => {
+    try { fs.writeFileSync(alias, 'payload-write'); return true; }
+    catch { return false; }
+  });
 
   report.pathResolution = {};
   for (const [name, resolve] of [['legacy', fs.realpathSync], ['native', fs.realpathSync.native]]) {
@@ -491,6 +497,7 @@ cases.push({ name: 'restricted-recreated-token-inherited-native-policy', payload
 cases.push({ name: 'restricted-native-policy-host-write-token', payload: false, nativePolicy: true, nativePolicyWrite: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-host-write-token-lpac', payload: false, nativePolicy: true, nativePolicyWrite: true, nativePolicyLpac: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-projected-payload', payload: true, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, projectedPayload: true, command: relayCommand });
+cases.push({ name: 'restricted-native-policy-projected-payload-public-input', payload: true, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, projectedPayload: true, extraReadonly: [publicWritable], command: relayCommand });
 cases.push({ name: 'native-policy-projected-file-control', payload: false, nativePolicy: true, nativePolicyProjected: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-projected-drive', payload: false, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, command: relayCommand });
 // The SDK removes same-path enumerate+deny pairs. Probe the native contract
@@ -579,12 +586,12 @@ try {
       const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
       assert.equal(futureCreated, true, 'outside file must be created after payload launch');
       outcome.report = report;
-      assert.equal(fs.readFileSync(publicWritable, 'utf8'), report.publicWrite ? 'payload-write' : 'public-input');
+      assert.equal(fs.readFileSync(publicWritable, 'utf8'), report.publicWrite || report.publicAliasWrites.some(Boolean) ? 'payload-write' : 'public-input');
       // This probe isolates public-file containment. Rust compilation has its
       // own reported result and remains required by QQ's production fixture.
       outcome.fileBoundary = output.exitCode === 0 && !output.timedOut
         && report.tools.node.exit === 0 && report.privateRead === false && report.privateWrite === false
-        && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
+        && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.publicAliasWrites.every(value => value === false) && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'));
       outcome.frozenProfiles = ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'].every(name => {
         const profile = report.profiles[name];
@@ -595,7 +602,7 @@ try {
         && report.pathResolution.native.path !== undefined && report.nullSink.exit === 0 && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
-        && report.privateRead === false && report.privateWrite === false && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
+        && report.privateRead === false && report.privateWrite === false && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.publicAliasWrites.every(value => value === false) && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
     }
