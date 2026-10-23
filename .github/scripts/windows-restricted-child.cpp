@@ -120,6 +120,53 @@ static int inspect() {
     return 0;
 }
 
+// Read the caller's effective namespace; a successful setter alone does not
+// prove that subsequent file opens use the private directory.
+static void inspect_device_map() {
+    wchar_t mapping[32768]{};
+    const DWORD count = QueryDosDeviceW(L"C:", mapping, 32768);
+    std::wcout << L"effective-drive-C=" << (count ? mapping : L"<unavailable>")
+        << L"; error=" << (count ? 0 : GetLastError()) << std::endl;
+    const auto module = GetModuleHandleW(L"ntdll.dll");
+    using OpenDirectory = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+    using QueryObject = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    const FARPROC open_address = GetProcAddress(module, "NtOpenDirectoryObject");
+    const FARPROC query_address = GetProcAddress(module, "NtQueryObject");
+    if (!open_address || !query_address) throw std::runtime_error("namespace query APIs unavailable");
+    OpenDirectory open = nullptr;
+    QueryObject query = nullptr;
+    static_assert(sizeof(open) == sizeof(open_address));
+    static_assert(sizeof(query) == sizeof(query_address));
+    std::memcpy(&open, &open_address, sizeof(open));
+    std::memcpy(&query, &query_address, sizeof(query));
+    wchar_t path[] = L"\\??";
+    UNICODE_STRING name{};
+    name.Buffer = path;
+    name.Length = static_cast<USHORT>((std::size(path) - 1) * sizeof(wchar_t));
+    name.MaximumLength = static_cast<USHORT>(sizeof(path));
+    OBJECT_ATTRIBUTES attributes{};
+    attributes.Length = sizeof(attributes);
+    attributes.ObjectName = &name;
+    attributes.Attributes = OBJ_CASE_INSENSITIVE;
+    Handle directory;
+    const NTSTATUS opened = open(&directory.value, 1, &attributes);
+    std::cout << "effective-dos-directory-open-status=" << static_cast<ULONG>(opened) << std::endl;
+    if (opened < 0) return;
+    std::vector<BYTE> storage(65536);
+    ULONG length = 0;
+    const NTSTATUS queried = query(directory.value, 1, storage.data(), static_cast<ULONG>(storage.size()), &length);
+    std::cout << "effective-dos-directory-query-status=" << static_cast<ULONG>(queried) << std::endl;
+    if (queried < 0) return;
+    if (length < sizeof(UNICODE_STRING) || length > storage.size()) throw std::runtime_error("invalid namespace name length");
+    const auto* result = reinterpret_cast<const UNICODE_STRING*>(storage.data());
+    const auto begin = reinterpret_cast<ULONG_PTR>(storage.data());
+    const auto buffer = reinterpret_cast<ULONG_PTR>(result->Buffer);
+    if (result->Length && (buffer < begin || buffer > begin + storage.size()
+        || result->Length > begin + storage.size() - buffer)) throw std::runtime_error("invalid namespace name buffer");
+    const std::wstring actual = result->Length ? std::wstring(result->Buffer, result->Length / sizeof(wchar_t)) : L"<unnamed>";
+    std::wcout << L"effective-dos-directory=" << actual << std::endl;
+}
+
 // Do not infer permission failure from Node's path loader. Probe each Win32
 // access mask directly, without changing any file or existing security object.
 static int inspect_files() {
@@ -134,6 +181,7 @@ static int inspect_files() {
         if (read != 1 || release != 1) throw std::runtime_error("invalid view release frame");
     }
     inspect();
+    inspect_device_map();
     wchar_t acl_mode[8]{};
     const bool task_acl = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_ACL", acl_mode, 8) != 0;
     if (task_acl) {
@@ -505,7 +553,7 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
         status = set_process(process, 23, &map, used_size);
     }
     check(status, "set suspended child's private device map");
-    std::cerr << "private device map installed; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
+    std::cerr << "private device map setter status=" << static_cast<ULONG>(status) << "; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
 }
 
 // Modify only this diagnostic task directory. Never grant a public capability
@@ -546,7 +594,7 @@ static void grant_task_directory(PSID package, const wchar_t* directory, bool lo
     }
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false, bool normal_control = false) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false, bool normal_control = false, bool self_control = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -697,6 +745,15 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     grant_private_desktop(sid);
     if (task_acl) grant_task_directory(sid, workspace, low_label);
     PrivateDeviceMap device_map;
+    if (self_control) {
+        // The disposable trusted controller changes only its own per-process
+        // map, never a shared logon map. No untrusted command runs here.
+        require(TerminateProcess(process.value, 0), "unused normal source stop");
+        if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("unused normal source wait failed");
+        require(SetEnvironmentVariableW(L"QQ_NATIVE_EXPECT_NORMAL", L"1"), "normal inspector identity");
+        install_device_map(GetCurrentProcess(), sid, device_map);
+        return inspect_files();
+    }
     if (projected && !after_ready) install_device_map(process.value, sid, device_map);
     LPWSTR package_text = nullptr;
     require(ConvertSidToStringSidW(sid, &package_text), "native policy package SID");
@@ -750,6 +807,7 @@ int wmain(int argc, wchar_t** argv) {
     try {
         // Fixed inspector only. This normal-token control never launches the
         // untrusted payload or counts as a contained execution result.
+        if (argc == 3 && std::wstring(argv[1]) == L"host-normal-projected-self") return host_create_policy(argv[2], false, true, false, false, true, false, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-normal-projected") return host_create_policy(argv[2], false, true, false, false, true, false, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-normal-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl") return host_create_policy(argv[2], false, true, true, false, false, false, true);
