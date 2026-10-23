@@ -1,7 +1,7 @@
-name: Windows Auto installed tool diagnostics
+name: Windows absolute tool read diagnostics
 on:
   push:
-    branches: [fix/windows-tool-input-discovery]
+    branches: [test/windows-tool-read-diagnostic]
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-11-arm]
+        os: [windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
@@ -24,7 +24,9 @@ jobs:
           cache-on-failure: true
       - name: Build the native command helper
         shell: bash
-        run: cargo build --locked -p qq-core --example command_owner
+        run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo build --locked -p qq --no-default-features --example windows_tool_inputs
       - name: Diagnose the production Auto installed tool boundary
         shell: bash
         run: |

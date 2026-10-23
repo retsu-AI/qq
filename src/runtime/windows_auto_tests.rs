@@ -40,8 +40,51 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
+    let probe_image = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/windows_tool_inputs.exe");
+    fs::copy(probe_image, source.join("tool-input-probe.exe")).unwrap();
+    let mut targets = Vec::new();
+    for (program, _, resolved) in &tool_versions {
+        if *program == "git" {
+            continue;
+        }
+        for original in resolved
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            let canonical = fs::canonicalize(original).unwrap();
+            let metadata = fs::metadata(original).unwrap();
+            eprintln!(
+                "Windows Auto host tool: {}",
+                json!({
+                    "program": program, "original": original, "canonical": canonical,
+                    "file": metadata.is_file(), "length": metadata.len(), "attributes": metadata.file_attributes(),
+                })
+            );
+            for path in [PathBuf::from(original), canonical] {
+                if !targets
+                    .iter()
+                    .any(|entry: &Value| entry["path"] == json!(path))
+                {
+                    targets.push(json!({"program": program, "path": path}));
+                }
+            }
+        }
+    }
+    fs::write(
+        source.join("tool-input-manifest.json"),
+        serde_json::to_vec(&json!({"targets": targets, "secret": secret})).unwrap(),
+    )
+    .unwrap();
     let mut script = format!(
-        "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
+        ".\\tool-input-probe.exe & echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
         secret.display()
     );
     for name in [
@@ -254,6 +297,16 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             "task import must preserve owned probe script {name}",
         );
     }
+    let absolute_result = fs::read_to_string(task.join("tool-input-result.json"));
+    eprintln!("Windows Auto absolute tool inputs: {absolute_result:?}");
+    let absolute_result: Value = serde_json::from_str(
+        &absolute_result.expect("absolute task-owned probe must publish its result"),
+    )
+    .unwrap();
+    assert_eq!(
+        absolute_result["private_read"]["kind"], "PermissionDenied",
+        "same-token absolute probe must not read private canary"
+    );
     let diagnostics = tool_versions
         .iter()
         .map(|(program, _, host_resolved)| {
