@@ -355,9 +355,9 @@ static void grant_private_desktop(PSID package) {
     require(SetUserObjectSecurity(desktop.value, &requested, &replacement), "owned desktop package access");
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false) {
     Handle host;
-    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &host.value), "policy host token");
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
     if (*reinterpret_cast<const DWORD*>(host_kind.data())) throw std::runtime_error("policy controller requires a normal host token");
     Handle policy_file;
@@ -396,15 +396,38 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     const HRESULT created = create(policy.data(), static_cast<DWORD>(policy.size()), 0, &environment.value);
     if (FAILED(created)) throw std::runtime_error("create native policy HRESULT: " + std::to_string(static_cast<unsigned long>(created)));
     if (!environment.value) throw std::runtime_error("native policy returned no handle");
+    Handle restricted_host;
+    std::vector<BYTE> host_restrictions;
+    if (restrict_host) {
+        wchar_t write_sid_text[256]{};
+        const DWORD sid_size = GetEnvironmentVariableW(L"QQ_NATIVE_WRITE_SID", write_sid_text, 256);
+        if (!sid_size || sid_size >= 256) throw std::runtime_error("missing host write SID");
+        PSID write_sid = nullptr;
+        require(ConvertStringSidToSidW(write_sid_text, &write_sid), "host write SID");
+        auto local_free = [](void* value) { LocalFree(value); };
+        std::unique_ptr<void, decltype(local_free)> owned_sid(write_sid, local_free);
+        SID_AND_ATTRIBUTES restriction{ write_sid, 0 };
+        require(CreateRestrictedToken(host.value, DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED,
+            0, nullptr, 0, nullptr, 1, &restriction, &restricted_host.value), "host write restriction");
+        if (restricting_count(restricted_host.value) != 1) throw std::runtime_error("invalid host write restriction count");
+        host_restrictions = information(restricted_host.value, TokenRestrictedSids);
+    }
     SIZE_T size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    const DWORD attribute_count = lpac ? 2 : 1;
+    InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &size);
     if (!size || size > 65536) throw std::runtime_error("invalid policy attribute size");
     std::vector<BYTE> storage(size);
     auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-    require(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "policy attributes");
+    require(InitializeProcThreadAttributeList(attributes, attribute_count, 0, &size), "policy attributes");
     if (!UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000, &environment.value, sizeof(environment.value), nullptr, nullptr)) {
         const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
         require(FALSE, "source native policy attribute");
+    }
+    DWORD lpac_policy = 1;
+    if (lpac && !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+        &lpac_policy, sizeof(lpac_policy), nullptr, nullptr)) {
+        const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
+        require(FALSE, "source native LPAC attribute");
     }
     wchar_t image[32768]{}, workspace[32768]{};
     require(GetModuleFileNameW(nullptr, image, 32768) != 0, "policy source image");
@@ -425,9 +448,12 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     // primary token gives the exact identity of this newly created policy.
     LPWCH inherited_environment = GetEnvironmentStringsW();
     require(inherited_environment != nullptr, "native policy environment");
-    const BOOL launched = CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
-        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-        inherited_environment, workspace, &startup.StartupInfo, &source);
+    const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
+    const BOOL launched = restrict_host
+        ? CreateProcessAsUserW(restricted_host.value, image, mutable_command.data(), nullptr, nullptr, TRUE,
+            flags, inherited_environment, workspace, &startup.StartupInfo, &source)
+        : CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
+            flags, inherited_environment, workspace, &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
     FreeEnvironmentStringsW(inherited_environment);
     DeleteProcThreadAttributeList(attributes);
@@ -438,6 +464,14 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     thread.value = source.hThread;
     require(OpenProcessToken(process.value, TOKEN_QUERY, &token.value), "native policy source token");
     contained(token.value);
+    if (restrict_host) {
+        const auto retained = information(token.value, TokenRestrictedSids);
+        const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(retained.data());
+        const auto* original = reinterpret_cast<const TOKEN_GROUPS*>(host_restrictions.data());
+        if (groups->GroupCount != 1 || !EqualSid(groups->Groups[0].Sid, original->Groups[0].Sid)) {
+            throw std::runtime_error("native creation changed the exact write restriction");
+        }
+    }
     const auto package = information(token.value, TokenAppContainerSid);
     const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     grant_private_desktop(sid);
@@ -461,6 +495,8 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-write-restricted") return host_create_policy(argv[2], false, true, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-write-restricted-lpac") return host_create_policy(argv[2], false, true, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-control") return host_create_policy(argv[2], false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-create-policy-parent") return host_create_policy(argv[2], true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-create-policy") return host_create_policy(argv[2]);

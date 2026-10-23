@@ -165,7 +165,7 @@ async function runWithRecreatedToken(request) {
       restrictedHelper, 'host-recreate', String(source.pid), writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PACKAGE_SID: source.package,
-        QQ_NATIVE_PUBLIC_WRITABLE: publicWritable, QQ_NATIVE_TASK_WORKSPACE: workspace } });
+        QQ_NATIVE_PUBLIC_WRITABLE: publicWritable, QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid } });
     return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
   } catch (error) {
     return { stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message),
@@ -179,15 +179,15 @@ async function runWithRecreatedToken(request) {
   }
 }
 
-async function runWithNativePolicy(request, inheritParent = false, control = false) {
+async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
-        QQ_NATIVE_TASK_WORKSPACE: workspace } });
+        QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid } });
     return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
   } catch (error) {
     return { stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message),
@@ -395,6 +395,8 @@ cases.push({ name: 'restricted-host-recreated-native-file-access', payload: fals
 cases.push({ name: 'native-policy-file-control', payload: false, nativePolicy: true, nativePolicyControl: true, command: relayCommand });
 cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, nativePolicy: true, command: relayCommand });
 cases.push({ name: 'restricted-recreated-token-inherited-native-policy', payload: false, nativePolicy: true, nativePolicyParent: true, command: relayCommand });
+cases.push({ name: 'restricted-native-policy-host-write-token', payload: false, nativePolicy: true, nativePolicyWrite: true, command: relayCommand });
+cases.push({ name: 'restricted-native-policy-host-write-token-lpac', payload: false, nativePolicy: true, nativePolicyWrite: true, nativePolicyLpac: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -420,7 +422,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },
