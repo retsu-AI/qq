@@ -102,7 +102,7 @@ impl TaskExecution {
     }
 
     pub(super) fn home(&self) -> PathBuf {
-        self.scope.workspace.path.join(PRIVATE_HOME)
+        self.scope.workspace.path.join(".qq").join("task-home")
     }
 
     /// Called only with the session's teardown proof, after descendants drain.

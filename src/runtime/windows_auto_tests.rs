@@ -278,8 +278,9 @@ fn writes_verified_artifact() {
     assert_eq!(record["scope"]["resources"]["cpu_percent"], 90);
     let task = PathBuf::from(record["scope"]["workspace"]["path"].as_str().unwrap());
     assert!(task.starts_with(fixture.path("data/task-workspaces")));
+    let home = task.join(".qq").join("task-home");
     assert_eq!(
-        fs::read_to_string(task.join(".qq/task-home/cache-proof"))
+        fs::read_to_string(home.join("cache-proof"))
             .unwrap()
             .trim_end(),
         "cache-retained"
@@ -293,14 +294,14 @@ fn writes_verified_artifact() {
         ("APPDATA", "AppData/Roaming"),
         ("LOCALAPPDATA", "AppData/Local"),
     ] {
+        let profile = directory
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .fold(home.clone(), |path, part| path.join(part));
         assert_eq!(
-            fs::read_to_string(
-                task.join(".qq/task-home")
-                    .join(directory)
-                    .join(format!("proof-{name}"))
-            )
-            .unwrap()
-            .trim_end(),
+            fs::read_to_string(profile.join(format!("proof-{name}")))
+                .unwrap()
+                .trim_end(),
             format!("private-{name}"),
             "{name} must resolve to private task storage",
         );

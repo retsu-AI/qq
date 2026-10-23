@@ -105,6 +105,8 @@ impl NativeEnvironment {
         mut self,
         home: &std::path::Path,
     ) -> Result<Self, CommandOwnerError> {
+        #[cfg(windows)]
+        let home = dunce::simplified(home);
         let overrides = vec![
             ("HOME".to_owned(), home.as_os_str().to_owned()),
             ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
@@ -122,11 +124,11 @@ impl NativeEnvironment {
                 ("TMP".to_owned(), home.join("tmp").into_os_string()),
                 (
                     "APPDATA".to_owned(),
-                    home.join("AppData/Roaming").into_os_string(),
+                    home.join("AppData").join("Roaming").into_os_string(),
                 ),
                 (
                     "LOCALAPPDATA".to_owned(),
-                    home.join("AppData/Local").into_os_string(),
+                    home.join("AppData").join("Local").into_os_string(),
                 ),
             ]);
             values
@@ -347,10 +349,38 @@ mod tests {
             ("USERPROFILE", home.to_path_buf()),
             ("TEMP", home.join("tmp")),
             ("TMP", home.join("tmp")),
-            ("APPDATA", home.join("AppData/Roaming")),
-            ("LOCALAPPDATA", home.join("AppData/Local")),
+            ("APPDATA", home.join("AppData").join("Roaming")),
+            ("LOCALAPPDATA", home.join("AppData").join("Local")),
         ] {
             assert_eq!(environment.get(name), Some(path.into_os_string()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_home_environment_uses_cmd_compatible_paths() {
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_task_home(std::path::Path::new(
+                r"\\?\C:\task with spaces\.qq\task-home",
+            ))
+            .unwrap();
+        for (name, expected) in [
+            ("HOME", r"C:\task with spaces\.qq\task-home"),
+            ("USERPROFILE", r"C:\task with spaces\.qq\task-home"),
+            ("CARGO_HOME", r"C:\task with spaces\.qq\task-home\.cargo"),
+            ("TEMP", r"C:\task with spaces\.qq\task-home\tmp"),
+            ("TMP", r"C:\task with spaces\.qq\task-home\tmp"),
+            (
+                "APPDATA",
+                r"C:\task with spaces\.qq\task-home\AppData\Roaming",
+            ),
+            (
+                "LOCALAPPDATA",
+                r"C:\task with spaces\.qq\task-home\AppData\Local",
+            ),
+        ] {
+            assert_eq!(environment.get(name), Some(expected.into()), "{name}");
         }
     }
 
