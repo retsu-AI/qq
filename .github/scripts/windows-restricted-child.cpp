@@ -861,6 +861,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 3 && std::wstring(argv[1]) == L"host-recreate") return host_recreate(argv[2]);
         if (argc == 2 && std::wstring(argv[1]) == L"hold") return hold_environment();
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
+        if (argc == 2 && std::wstring(argv[1]) == L"inspect-device-map") { inspect_device_map(); return 0; }
         if (argc == 2 && std::wstring(argv[1]) == L"inspect-files") return inspect_files();
         if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
         const std::wstring mode(argv[3]);

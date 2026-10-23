@@ -254,6 +254,7 @@ async function runWithNativePolicy(request, inheritParent = false, control = fal
         QQ_NATIVE_PUBLIC_WRITABLE_GUID: volume.guid + publicWritable.slice(3),
         QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT: '\\\\?\\GLOBALROOT' + volume.device + publicWritable.slice(2),
         ...(projection ? { QQ_NATIVE_PROJECTION_ROOT: projection } : {}),
+        ...(projectedPayload ? { QQ_NATIVE_PROJECTED_IN_PROCESS: '1' } : {}),
       } });
     return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
   } catch (error) {
@@ -329,6 +330,8 @@ const path = require('node:path');
   report.nullSink = { exit: nullSink.status, error: nullSink.error?.message, stderr: nullSink.stderr };
   const token = spawnSync(input.restrictedHelper, ['inspect'], { encoding: 'utf8', timeout: 5000 });
   report.token = { exit: token.status, stdout: token.stdout, stderr: token.stderr, error: token.error?.message };
+  const childMap = spawnSync(input.restrictedHelper, ['inspect-device-map'], { encoding: 'utf8', timeout: 5000 });
+  report.childDeviceMap = { exit: childMap.status, stdout: childMap.stdout, stderr: childMap.stderr };
   report.softwareRead = fs.readFileSync(input.softwareFile, 'utf8');
   const alias = 'software-hardlink';
   try {
@@ -405,9 +408,14 @@ const {spawnSync} = require('node:child_process');
 const environment = JSON.parse(fs.readFileSync('captured-environment.json', 'utf8'));
 if (process.env.OPENSSL_CONF) environment.OPENSSL_CONF = process.env.OPENSSL_CONF;
 if (process.env.NODE_OPTIONS) environment.NODE_OPTIONS = process.env.NODE_OPTIONS;
-const child = spawnSync(process.execPath, ['payload.cjs'], { env: environment, stdio: 'inherit', timeout: 45000 });
-if (child.error) console.error(child.error.message);
-process.exitCode = child.status ?? 1;
+if (process.env.QQ_NATIVE_PROJECTED_IN_PROCESS === '1') {
+  Object.assign(process.env, environment);
+  require('./payload.cjs');
+} else {
+  const child = spawnSync(process.execPath, ['payload.cjs'], { env: environment, stdio: 'inherit', timeout: 45000 });
+  if (child.error) console.error(child.error.message);
+  process.exitCode = child.status ?? 1;
+}
 `;
 const relayCommand = `${quote(tools.node)} -e ${quote(`eval(Buffer.from('${Buffer.from(relay).toString('base64')}','base64').toString())`)}`;
 const relayPath = path.join(workspace, 'contained-relay.cjs');
