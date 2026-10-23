@@ -221,6 +221,8 @@ jobs:
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::resource_admission_requires_restricted_filesystem_authority
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied
           fi
@@ -412,7 +414,7 @@ jobs:
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
               grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/qq-macos-tests.txt"
-            for name in payload_cannot_leave_the_owned_process_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes; do
+            for name in payload_cannot_leave_the_owned_process_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes guarded_commands_complete_and_resource_pressure_stops_the_owned_group; do
               grep -Fx "macos::$name: test" "$RUNNER_TEMP/qq-macos-tests.txt"
             done
           fi

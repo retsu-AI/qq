@@ -24,6 +24,10 @@ use std::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+#[cfg(target_os = "macos")]
+mod resources;
+
+const RESOURCE_STOPPED: i32 = i32::MIN;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -55,6 +59,7 @@ struct Packet {
     cwd_identity: NativeWorkspaceIdentity,
     filesystem: NativeFilesystem,
     network: NativeNetwork,
+    resources: NativeResources,
     not_after_ms: u64,
 }
 
@@ -107,10 +112,8 @@ impl MacosOwner {
         native: Option<&NativeExecution>,
         deadline: Instant,
     ) -> io::Result<(tokio::process::Command, Startup)> {
-        if native.is_some_and(|native| native.resources != NativeResources::Host) {
-            return Err(io::Error::other(
-                "macOS aggregate resource enforcement is unavailable",
-            ));
+        if let Some(native) = native {
+            validate_resources(&native.filesystem, native.resources)?;
         }
         if let Some(NativeExecution {
             filesystem: NativeFilesystem::Restricted { read_write, .. },
@@ -149,6 +152,7 @@ impl MacosOwner {
             cwd_identity: NativeWorkspaceIdentity::held(cwd)?,
             filesystem: native.map_or(NativeFilesystem::Host, |native| native.filesystem.clone()),
             network: native.map_or(NativeNetwork::Host, |native| native.network),
+            resources: native.map_or(NativeResources::Host, |native| native.resources),
             not_after_ms: unix_ms().saturating_add(
                 u64::try_from(
                     deadline
@@ -169,7 +173,7 @@ impl MacosOwner {
         wrapped
             .env_clear()
             .args(&self.launcher.arguments)
-            .arg("qq-macos-launch:4");
+            .arg("qq-macos-launch:5");
         wrapped
             .as_std_mut()
             .fd_mappings(vec![command_fds::FdMapping {
@@ -202,6 +206,7 @@ pub(crate) struct Child {
     result_bytes: [u8; 4],
     result_read: usize,
     stopping: bool,
+    resource_stopped: bool,
 }
 impl From<tokio::process::Child> for Child {
     fn from(inner: tokio::process::Child) -> Self {
@@ -213,6 +218,7 @@ impl From<tokio::process::Child> for Child {
             result_bytes: [0; 4],
             result_read: 0,
             stopping: false,
+            resource_stopped: false,
         }
     }
 }
@@ -228,6 +234,10 @@ impl DerefMut for Child {
     }
 }
 impl Child {
+    pub(super) fn resource_stopped(&self) -> bool {
+        self.resource_stopped
+    }
+
     pub(super) fn owns_payload_group(&self) -> bool {
         self.lease.is_some()
     }
@@ -303,7 +313,13 @@ impl Child {
                 // discard consumed bytes or turn a failed payload into success.
                 self.result_read += count;
             }
-            self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(self.result_bytes)));
+            let raw = i32::from_le_bytes(self.result_bytes);
+            self.resource_stopped = raw == RESOURCE_STOPPED;
+            self.reported = Some(ExitStatus::from_raw(if self.resource_stopped {
+                9 // SIGKILL after the guardian confirms group cleanup.
+            } else {
+                raw
+            }));
         }
         if let Some(lease) = &mut self.lease {
             lease.process_reaped();
@@ -343,6 +359,7 @@ pub(super) async fn spawn(
         result_bytes: [0; 4],
         result_read: 0,
         stopping: false,
+        resource_stopped: false,
     };
     let mut released = false;
     let authorized = tokio::select! {
@@ -432,6 +449,20 @@ fn unix_ms() -> u64 {
     )
     .unwrap_or(u64::MAX)
 }
+fn validate_resources(filesystem: &NativeFilesystem, resources: NativeResources) -> io::Result<()> {
+    resources.validate()?;
+    match resources {
+        NativeResources::Host => Ok(()),
+        NativeResources::Guarded { .. } if filesystem.is_restricted() => Ok(()),
+        NativeResources::Guarded { .. } => Err(io::Error::other(
+            "resource safeguards require restricted filesystem authority",
+        )),
+        NativeResources::Limited { .. } => Err(io::Error::other(
+            "macOS aggregate resource enforcement is unavailable",
+        )),
+    }
+}
+
 fn validate_environment(packet: &Packet) -> io::Result<()> {
     if packet
         .environment
@@ -448,7 +479,7 @@ fn validate_environment(packet: &Packet) -> io::Result<()> {
 /// Single-purpose entry, before Tokio or any application initialization.
 #[cfg(target_os = "macos")]
 pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
-    if encoded != "qq-macos-launch:4" {
+    if encoded != "qq-macos-launch:5" {
         return Err(io::Error::other("invalid native launch descriptor"));
     }
     if rustix::process::getpgrp() != rustix::process::getpid() {
@@ -503,6 +534,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     if NativeWorkspaceIdentity::held(cwd.root())? != packet.cwd_identity {
         return Err(io::Error::other("native working directory changed"));
     }
+    validate_resources(&packet.filesystem, packet.resources)?;
     let profile = profile(&packet.filesystem, packet.network)?;
     rustix::process::fchdir(cwd.root())?;
     control.write_all(b"RDY!")?;
@@ -511,8 +543,14 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     if authorization != [1] || unix_ms() >= packet.not_after_ms {
         return Err(io::Error::other("native launch authorization expired"));
     }
-    let mut liveness = control.try_clone()?;
+    let liveness: std::os::fd::OwnedFd = control.try_clone()?.into();
     rustix::io::fcntl_setfd(&liveness, rustix::io::FdFlags::CLOEXEC)?;
+    let mut liveness = std::os::unix::net::UnixStream::from(liveness);
+    let guarded = matches!(packet.resources, NativeResources::Guarded { .. });
+    if guarded {
+        liveness.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
+    }
+    let policy = packet.resources;
     let custody = std::sync::Arc::new(PayloadGroup::default());
     let stop = custody.clone();
     std::thread::Builder::new()
@@ -522,6 +560,15 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
             loop {
                 match liveness.read(&mut byte) {
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error)
+                        if guarded
+                            && matches!(
+                                error.kind(),
+                                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                            ) =>
+                    {
+                        stop.check_resources(policy);
+                    }
                     _ => {
                         stop.request_stop();
                         return;
@@ -529,7 +576,13 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
                 }
             }
         })?;
-    let mut command = std::process::Command::new(SANDBOX_EXEC);
+    let mut command = if guarded {
+        let mut command = std::process::Command::new("/usr/sbin/taskpolicy");
+        command.args(["-b", SANDBOX_EXEC]);
+        command
+    } else {
+        std::process::Command::new(SANDBOX_EXEC)
+    };
     command
         .env_clear()
         .arg("-p")
@@ -581,9 +634,14 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     // Serialize disarming against the liveness thread before the only reap.
     // No code may signal this numeric group after its leader can be reused.
-    custody.disarm();
+    let resource_stopped = custody.disarm();
     let status = child.wait()?;
-    let _ = control.write_all(&status.into_raw().to_le_bytes());
+    let raw = if resource_stopped {
+        RESOURCE_STOPPED
+    } else {
+        status.into_raw()
+    };
+    let _ = control.write_all(&raw.to_le_bytes());
     Ok(0)
 }
 
@@ -596,6 +654,7 @@ struct PayloadGroup(std::sync::Mutex<PayloadGroupState>);
 struct PayloadGroupState {
     leader: Option<rustix::process::Pid>,
     stopping: bool,
+    resource_stopped: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -622,11 +681,27 @@ impl PayloadGroup {
         }
     }
 
-    fn disarm(&self) {
-        self.0
+    fn check_resources(&self, policy: NativeResources) {
+        let mut state = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .leader = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pid) = state.leader
+            && resources::check(policy, pid).is_err()
+        {
+            state.resource_stopped = true;
+            state.stopping = true;
+            let _ = kill_group(Some(pid.as_raw_nonzero().get() as u32));
+        }
+    }
+
+    fn disarm(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.leader = None;
+        state.resource_stopped
     }
 }
 
@@ -749,6 +824,55 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn resource_admission_requires_restricted_filesystem_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let cwd = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        let owner = MacosOwner::discover(CommandLauncher::new("/bin/sh".into())).unwrap();
+        let restricted = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        let guarded = NativeResources::Guarded {
+            memory_bytes: 1024,
+            max_tasks: 2,
+        };
+        for (filesystem, resources, admitted) in [
+            (NativeFilesystem::Host, NativeResources::Host, true),
+            (NativeFilesystem::Host, guarded, false),
+            (restricted.clone(), guarded, true),
+            (
+                restricted,
+                NativeResources::Guarded {
+                    memory_bytes: 0,
+                    max_tasks: 2,
+                },
+                false,
+            ),
+        ] {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.current_dir(&root);
+            let result = owner.wrap(
+                command,
+                &cwd,
+                Some(&NativeExecution {
+                    environment: crate::command_owner::NativeEnvironment::from_values([]).unwrap(),
+                    filesystem,
+                    network: NativeNetwork::Isolated,
+                    resources,
+                }),
+                Instant::now() + std::time::Duration::from_secs(60),
+            );
+            assert_eq!(
+                result.is_ok(),
+                admitted,
+                "{resources:?}: {:?}",
+                result.err()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn writable_launcher_cannot_replace_the_trusted_helper() {
         use std::os::unix::fs::PermissionsExt as _;
 
@@ -849,7 +973,11 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame() {
-        for complete in [true, false] {
+        for (complete, raw_status) in [
+            (true, 7_i32 << 8),
+            (false, 7_i32 << 8),
+            (true, RESOURCE_STOPPED),
+        ] {
             let mut inner = tokio::process::Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .spawn()
@@ -867,8 +995,9 @@ mod tests {
                 result_bytes: [0; 4],
                 result_read: 0,
                 stopping: false,
+                resource_stopped: false,
             };
-            let raw = (7_i32 << 8).to_le_bytes();
+            let raw = raw_status.to_le_bytes();
             peer.write_all(&raw[..2]).await.unwrap();
             child.control.as_ref().unwrap().readable().await.unwrap();
             let mut waiting = Box::pin(child.wait());
@@ -877,7 +1006,14 @@ mod tests {
             assert_eq!(child.result_read, 2);
             if complete {
                 peer.write_all(&raw[2..]).await.unwrap();
-                assert_eq!(child.wait().await.unwrap().code(), Some(7));
+                let status = child.wait().await.unwrap();
+                if raw_status == RESOURCE_STOPPED {
+                    assert_eq!(status.signal(), Some(9));
+                    assert!(child.resource_stopped());
+                } else {
+                    assert_eq!(status.code(), Some(7));
+                    assert!(!child.resource_stopped());
+                }
             } else {
                 drop(peer);
                 assert!(
