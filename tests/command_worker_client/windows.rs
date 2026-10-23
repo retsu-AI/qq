@@ -27,7 +27,19 @@ fn payload_probe() {
     assert!(std::env::var_os("SYSTEMROOT").is_some());
     assert!(std::env::var_os("LOCALAPPDATA").is_some());
     if mode == "ordinary" {
-        assert!(token.capability_sids.is_empty());
+        let expected =
+            rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
+                .with_named(&["registryRead"])
+                .build()
+                .unwrap();
+        assert_eq!(
+            token.capability_sids,
+            expected
+                .caps
+                .iter()
+                .map(|cap| cap.sid_sddl.clone())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             std::fs::read_to_string(&arguments[index + 1]).unwrap(),
             "aap-visible"
@@ -748,7 +760,10 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
         Some("QQ ordinary AppContainer access control"),
     )
     .unwrap();
+    // Match the restricted payload's capability. AAP membership is the
+    // difference being tested, rather than an unrelated registry capability.
     let capabilities = rappct::SecurityCapabilitiesBuilder::new(&profile.sid)
+        .with_named(&["registryRead"])
         .build()
         .unwrap();
     let args = [

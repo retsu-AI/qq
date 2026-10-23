@@ -19,6 +19,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-native-integration
+          cache-on-failure: true
       - name: Build the real command helpers
         run: |
           cargo build --locked -p qq-core --example command_owner

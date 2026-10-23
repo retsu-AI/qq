@@ -207,6 +207,17 @@ fn writes_verified_artifact() {
     handler.shutdown().await.unwrap();
     owner.shutdown().await.unwrap();
     let events = finished.expect("default Auto must finish the native editing task");
+    for event in &events {
+        if let SessionEvent::ToolCallFinished { tool_call, .. } = &event.event {
+            eprintln!(
+                "native Auto tool observation: {}",
+                tool_call.result.as_deref().unwrap_or("missing tool result")
+            );
+        }
+    }
+    if let Ok(output) = fs::read_to_string(source.join("cargo-test-output.txt")) {
+        eprintln!("native Auto offline Cargo output: {output}");
+    }
     assert!(
         matches!(
             events.last().map(|event| &event.event),
