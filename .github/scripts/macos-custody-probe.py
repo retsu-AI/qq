@@ -360,6 +360,7 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
                         "(version 1)", "(deny default)",
                         "(allow file-read* process-exec process-fork sysctl-read)",
                         "(allow signal (target same-sandbox))",
+                        '(allow file-read-data file-write-data (require-all (literal "/dev/null") (vnode-type CHARACTER-DEVICE)))',
                         "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))",
                         "(allow network-outbound (literal " + json.dumps(address) + "))",
                     ])
@@ -456,7 +457,9 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
                         os.close(directory)
                 connection.sendall(b"broker\n")
                 result = read_json(reader)
-                assert result.get("broker_exit", 0) != 0, f"sandbox submitted an external job: {result}"
+                assert "error" not in result and isinstance(result.get("broker_exit"), int), \
+                    f"broker attempt did not execute: {result}"
+                assert result["broker_exit"] != 0, f"sandbox submitted an external job: {result}"
                 assert not (Path(temporary) / "broker-output").exists(), "sandbox escaped through launchd"
                 print(json.dumps({"launchd_broker_boundary": "enforced", "attempt": result}), flush=True)
             connection.sendall(b"spawn\n")
