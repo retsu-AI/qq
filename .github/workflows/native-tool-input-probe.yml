@@ -1,4 +1,4 @@
-name: Windows installed tool input probe
+name: Windows native security API probe
 on:
   push:
     branches: [test/windows-tool-input-probe]
@@ -28,7 +28,32 @@ jobs:
             static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(IntPtr descriptor, uint revision, uint requested, out IntPtr text, out uint length);
             [DllImport("kernel32.dll")]
             static extern IntPtr LocalFree(IntPtr memory);
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            static extern IntPtr LoadLibraryEx(string name, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet=CharSet.Ansi, ExactSpelling=true)]
+            static extern IntPtr GetProcAddress(IntPtr module, string name);
+            [DllImport("kernel32.dll")]
+            static extern bool FreeLibrary(IntPtr module);
+            [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+            delegate int VersionSupported(uint major, out byte available, out uint minor);
             public static void Read() {
+              var module = LoadLibraryEx("processmodel.dll", IntPtr.Zero, 0x800);
+              if (module == IntPtr.Zero) {
+                Console.WriteLine("processmodel.dll unavailable: " + Marshal.GetLastWin32Error());
+              } else {
+                try {
+                  foreach (string name in new[] { "CreateProcessSecurityEnvironment", "IsProcessSecurityEnvironmentVersionSupported", "QueryProcessSecurityEnvironmentSupport", "Experimental_CreateProcessInSandbox", "Experimental_QuerySandboxSupport" }) {
+                    Console.WriteLine(name + " export present: " + (GetProcAddress(module, name) != IntPtr.Zero));
+                  }
+                  var address = GetProcAddress(module, "IsProcessSecurityEnvironmentVersionSupported");
+                  if (address != IntPtr.Zero) {
+                    byte available; uint minor;
+                    var query = Marshal.GetDelegateForFunctionPointer<VersionSupported>(address);
+                    int result = query(1, out available, out minor);
+                    Console.WriteLine("PSEC version 1 support: HRESULT=" + result + "; available=" + available + "; minor=" + minor);
+                  }
+                } finally { FreeLibrary(module); }
+              }
               using (var handle = CreateFile(@"\\.\NUL", 0x20000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
                 if (handle.IsInvalid) { Console.WriteLine("NUL READ_CONTROL failed: " + Marshal.GetLastWin32Error()); return; }
                 IntPtr owner, group, dacl, sacl, descriptor;
@@ -47,12 +72,3 @@ jobs:
           }
           '@
           [NullSecurityProbe]::Read()
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - name: Exercise production Auto with every installed-tool diagnostic
-        run: |
-          cargo build --locked -p qq-core --example command_owner
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p qq --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
-          exit $LASTEXITCODE
