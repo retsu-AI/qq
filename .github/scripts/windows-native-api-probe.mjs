@@ -313,6 +313,13 @@ const path = require('node:path');
   try { fs.writeFileSync(input.futureSecret, 'changed'); report.futureWrite = true; } catch { report.futureWrite = false; }
   try { fs.writeFileSync(input.publicWritable, 'payload-write'); report.publicWrite = true; } catch (error) { report.publicWrite = false; report.publicWriteError = error.code; }
 
+  report.pathResolution = {};
+  for (const [name, resolve] of [['legacy', fs.realpathSync], ['native', fs.realpathSync.native]]) {
+    try { report.pathResolution[name] = { path: resolve('input.json') }; }
+    catch (error) { report.pathResolution[name] = { error: error.code }; }
+  }
+  const nullSink = spawnSync('cmd.exe', ['/d', '/c', 'echo contained>NUL'], { encoding: 'utf8', timeout: 5000 });
+  report.nullSink = { exit: nullSink.status, error: nullSink.error?.message, stderr: nullSink.stderr };
   const token = spawnSync(input.restrictedHelper, ['inspect'], { encoding: 'utf8', timeout: 5000 });
   report.token = { exit: token.status, stdout: token.stdout, stderr: token.stderr, error: token.error?.message };
   report.softwareRead = fs.readFileSync(input.softwareFile, 'utf8');
@@ -469,6 +476,13 @@ cases.push({ name: 'deny-volume-root-preserved-node-paths', payload: true,
   command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
   environment: { ...environment, OPENSSL_CONF: opensslConfig,
     NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main' } });
+for (const [name, readonly] of [['file', publicWritable], ['directory', path.dirname(publicWritable)]]) {
+  cases.push({ name: 'deny-volume-readonly-public-' + name, payload: true,
+    command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
+    extraReadonly: [readonly],
+    environment: { ...environment, OPENSSL_CONF: opensslConfig,
+      NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main' } });
+}
 cases.push({ name: 'restricted-host-recreated-native-file-access', payload: false, recreateToken: true, command: relayCommand });
 cases.push({ name: 'native-policy-file-control', payload: false, nativePolicy: true, nativePolicyControl: true, command: relayCommand });
 cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, nativePolicy: true, command: relayCommand });
@@ -568,7 +582,8 @@ try {
         return profile.directory === environment[name] && profile.nodeWrite === true
           && profile.exit === 0 && profile.written === true;
       });
-      outcome.qualified = outcome.frozenProfiles && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
+      outcome.qualified = outcome.frozenProfiles && report.pathResolution.legacy.path !== undefined
+        && report.pathResolution.native.path !== undefined && report.nullSink.exit === 0 && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
         && report.privateRead === false && report.privateWrite === false && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
