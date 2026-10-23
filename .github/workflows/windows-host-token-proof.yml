@@ -49,7 +49,7 @@ jobs:
         run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG build --locked -p qq-core --example windows_host_token
       - name: Lint the native diagnostic example
         shell: pwsh
-        run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG clippy --locked -p qq-core --example windows_host_token -- -D warnings
+        run: cargo clippy --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG --locked -p qq-core --example windows_host_token -- -D warnings
       - name: Run ordinary LPAC control then host restricted token composition
         shell: pwsh
         run: .\target\debug\examples\windows_host_token.exe
