@@ -141,6 +141,96 @@ fn payload_probe() {
             std::io::stdin().read_to_string(&mut input).unwrap();
             std::fs::write("stdin-result", input).unwrap();
         }
+        "memory" => {
+            let mut bytes = Vec::<u8>::new();
+            assert!(
+                bytes.try_reserve_exact(512 * 1024 * 1024).is_err(),
+                "job committed-memory limit must reject an allocation larger than the whole job budget"
+            );
+        }
+        "aggregate-memory" => {
+            // This allocation fits in the job when no descendant holds memory.
+            let mut bytes = Vec::<u8>::new();
+            bytes.try_reserve_exact(160 * 1024 * 1024).unwrap();
+            drop(bytes);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "windows::payload_probe",
+                    "--nocapture",
+                    "--skip",
+                    "qq-windows-probe:memory-child",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            loop {
+                let mut line = String::new();
+                assert_ne!(
+                    std::io::BufRead::read_line(&mut output, &mut line).unwrap(),
+                    0,
+                    "descendant exited before holding its allocation"
+                );
+                if line.trim_end().ends_with("descendant-memory-held") {
+                    break;
+                }
+            }
+            let mut bytes = Vec::<u8>::new();
+            let allocation = bytes.try_reserve_exact(160 * 1024 * 1024);
+            child.stdin.take().unwrap().write_all(&[1]).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert!(
+                allocation.is_err(),
+                "individually permitted allocations must share the aggregate job budget"
+            );
+        }
+        "memory-child" => {
+            let mut bytes = Vec::<u8>::new();
+            bytes.try_reserve_exact(112 * 1024 * 1024).unwrap();
+            bytes.resize(112 * 1024 * 1024, 1);
+            println!("descendant-memory-held");
+            std::io::stdout().flush().unwrap();
+            let mut release = [0];
+            std::io::stdin().read_exact(&mut release).unwrap();
+            assert_eq!(release, [1]);
+            std::hint::black_box(bytes);
+        }
+        "processes" => {
+            let mut children = Vec::new();
+            let mut refusal = None;
+            for _ in 0..6 {
+                match std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "windows::payload_probe",
+                        "--nocapture",
+                        "--skip",
+                        "qq-windows-probe:child",
+                    ])
+                    .spawn()
+                {
+                    Ok(child) => children.push(child),
+                    Err(error) => {
+                        refusal = Some(error);
+                        break;
+                    }
+                }
+            }
+            let count = children.len();
+            for child in &mut children {
+                let _ = child.kill();
+                child.wait().unwrap();
+            }
+            assert_eq!(
+                count, 2,
+                "four-process job includes the helper and payload; spawn refusal: {refusal:?}"
+            );
+        }
+        "child" => loop {
+            std::thread::park();
+        },
         "blocked" => {
             println!("probe-ready");
             std::io::stdout().flush().unwrap();
@@ -265,10 +355,25 @@ async fn finish(
     worker: &client::CommandWorker,
     request: NativeCommand,
 ) -> qq_core::command_owner::CommandSnapshot {
+    let started = std::time::Instant::now();
     worker.submit(request.clone()).await.unwrap();
+    eprintln!(
+        "Windows native command {} admitted after {:?}",
+        request.id,
+        started.elapsed()
+    );
     let mut after = 0;
     loop {
         let state = worker.wait(request.id, after).await.unwrap();
+        eprintln!(
+            "Windows native command {} after {:?}: status={:?}, version={}, process={}, output_bytes={}",
+            request.id,
+            started.elapsed(),
+            state.status,
+            state.version,
+            state.process.is_some(),
+            state.output.len(),
+        );
         if matches!(state.status, CommandStatus::Finished | CommandStatus::Lost) {
             return state;
         }
@@ -321,6 +426,21 @@ async fn restricted_payload_can_start_an_equally_restricted_descendant() {
     restricted_worker_probe("descendants").await;
 }
 
+#[tokio::test]
+async fn committed_memory_limit_is_enforced_by_the_real_worker() {
+    restricted_worker_probe("memory").await;
+}
+
+#[tokio::test]
+async fn committed_memory_budget_is_shared_with_descendants() {
+    restricted_worker_probe("aggregate-memory").await;
+}
+
+#[tokio::test]
+async fn process_limit_is_enforced_by_the_real_worker() {
+    restricted_worker_probe("processes").await;
+}
+
 async fn restricted_worker_probe(mode: &str) {
     let aap = tokio::task::spawn_blocking(appcontainer_only_fixture)
         .await
@@ -365,6 +485,13 @@ async fn restricted_worker_probe(mode: &str) {
         read_only
             .push(qq_core::command_owner::NativeDirectoryGrant::capture(workspace.path()).unwrap());
     }
+    if matches!(mode, "memory" | "aggregate-memory" | "processes") {
+        command.resources = qq_core::command_owner::NativeResources::Committed {
+            memory_bytes: if mode == "aggregate-memory" { 256 } else { 128 } * 1024 * 1024,
+            max_processes: 4,
+            cpu_percent: 50,
+        };
+    }
     if mode == "shell" {
         command.tool = "shell".to_owned();
         command.arguments = serde_json::json!({"command":
@@ -385,7 +512,10 @@ async fn restricted_worker_probe(mode: &str) {
         args["stdin"] = serde_json::json!(stdin);
         command.arguments = args.to_string();
     }
-    let completed = tokio::time::timeout(Duration::from_secs(30), finish(&worker, command)).await;
+    // A cold worker may use the 120-second preparation budget. This is an
+    // observation watchdog, matching the recovery/cancellation startup fixtures;
+    // payload outcomes and the separate cancellation deadline remain asserted.
+    let completed = tokio::time::timeout(Duration::from_secs(150), finish(&worker, command)).await;
     worker.stop_spawned().await;
     let completed = completed.expect("native Windows boundary must finish");
     assert_eq!(completed.status, CommandStatus::Finished, "{completed:?}");
@@ -523,7 +653,7 @@ async fn linked_files_are_refused_before_the_payload_runs() {
         let grants = if writable { read_write } else { read_only };
         grants.push(qq_core::command_owner::NativeDirectoryGrant::capture(linked.path()).unwrap());
         let completed =
-            tokio::time::timeout(Duration::from_secs(30), finish(&worker, command)).await;
+            tokio::time::timeout(Duration::from_secs(150), finish(&worker, command)).await;
         worker.stop_spawned().await;
         let completed = completed.expect("invalid file authority must be refused");
         assert_eq!(completed.status, CommandStatus::Finished, "{completed:?}");

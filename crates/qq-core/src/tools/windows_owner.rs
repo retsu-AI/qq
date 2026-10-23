@@ -23,6 +23,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 mod access;
 mod arguments;
 mod directory;
+mod resources;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
 
@@ -68,6 +69,7 @@ struct Packet {
     cwd: PathBuf,
     cwd_identity: NativeWorkspaceIdentity,
     filesystem: NativeFilesystem,
+    resources: NativeResources,
     not_after_ms: u64,
 }
 impl WindowsOwner {
@@ -142,13 +144,16 @@ impl WindowsOwner {
         let Some(native) = native else {
             return Ok((command, None));
         };
-        if native.resources != NativeResources::Host {
+        if !matches!(
+            native.resources,
+            NativeResources::Host | NativeResources::Committed { .. }
+        ) {
             return Err(io::Error::other(
                 "resource enforcement is unavailable for this accounting policy on Windows",
             ));
         }
         if !native.filesystem.is_restricted() {
-            if native.network != NativeNetwork::Host {
+            if native.network != NativeNetwork::Host || native.resources != NativeResources::Host {
                 return Err(io::Error::other(
                     "network enforcement is unavailable without restricted file authority on Windows",
                 ));
@@ -190,6 +195,7 @@ impl WindowsOwner {
                 .into(),
             cwd_identity: NativeWorkspaceIdentity::held(cwd)?,
             filesystem: native.filesystem.clone(),
+            resources: native.resources,
             not_after_ms: unix_ms().saturating_add(
                 u64::try_from(
                     deadline
@@ -385,6 +391,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         rappct::AppContainerProfile::ensure(&name, "QQ task", Some("QQ native task scope"))
             .map_err(io::Error::other)?;
     let _grants = access::prepare(&packet.filesystem, &profile.sid, packet.not_after_ms)?;
+    let cpu_rate_percent = resources::apply(packet.resources)?;
     let capabilities = access::capabilities(&packet.filesystem, &profile.sid)?;
     let options = rappct::LaunchOptions {
         exe: packet.program.clone(),
@@ -394,6 +401,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         suspended: true,
         join_job: Some(rappct::JobLimits {
             kill_on_job_close: true,
+            cpu_rate_percent,
             ..Default::default()
         }),
         ..Default::default()
