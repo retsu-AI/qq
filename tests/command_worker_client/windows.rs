@@ -26,6 +26,13 @@ fn payload_probe() {
     assert!(token.package_sid.is_some(), "{token:?}");
     assert!(std::env::var_os("SYSTEMROOT").is_some());
     assert!(std::env::var_os("LOCALAPPDATA").is_some());
+    if mode == "ambient-control" {
+        let outside = &arguments[index + 1];
+        assert_eq!(std::fs::read(outside).unwrap(), b"ambient original");
+        std::fs::write(outside, b"ordinary LPAC wrote outside").unwrap();
+        println!("ordinary-lpac-can-write-arap-file");
+        return;
+    }
     if mode == "ordinary" {
         assert!(token.capability_sids.is_empty());
         assert_eq!(
@@ -68,7 +75,36 @@ fn payload_probe() {
     }
     std::fs::write("probe-pid", std::process::id().to_string()).unwrap();
     match mode {
-        "files" | "overlap" | "profile" => {
+        "files" | "overlap" | "profile" | "ambient" => {
+            if mode == "ambient" {
+                let ambient = std::fs::read_to_string("ambient-path").unwrap();
+                assert_eq!(std::fs::read(&ambient).unwrap(), b"ambient original");
+                let write = std::fs::write(&ambient, b"escaped ambient write");
+                assert!(
+                    matches!(&write, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied),
+                    "task write boundary must deny an ambient ARAP write: {write:?}"
+                );
+                let primary = winsafe::HPROCESS::GetCurrentProcess()
+                    .OpenProcessToken(winsafe::co::TOKEN::QUERY)
+                    .unwrap();
+                let winsafe::TokenInfo::RestrictedSids(sids) = primary
+                    .GetTokenInformation(winsafe::co::TOKEN_INFORMATION_CLASS::RestrictedSids)
+                    .unwrap()
+                else {
+                    panic!("expected payload restricting SIDs")
+                };
+                let actual = sids
+                    .Groups()
+                    .iter()
+                    .map(|group| group.Sid().unwrap().to_string())
+                    .collect::<Vec<_>>();
+                let expected = std::fs::read_to_string("expected-write-sid").unwrap();
+                assert_eq!(
+                    actual,
+                    vec![expected],
+                    "payload must retain only task write authority"
+                );
+            }
             if let Some(expected_package) = arguments.get(index + 1) {
                 assert_eq!(
                     token.package_sid.as_ref().unwrap().as_string(),
@@ -319,7 +355,7 @@ fn request(workspace: &Path, mode: &str, aap: &Path) -> NativeCommand {
     let executable = workspace.join("probe.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let system = std::fs::canonicalize(std::env::var_os("SYSTEMROOT").unwrap()).unwrap();
-    NativeCommand {
+    let command = NativeCommand {
         id: ToolCallId::generate().unwrap(),
         workspace_identity:qq_core::command_owner::NativeWorkspaceIdentity::capture(&workspace).unwrap(),
         workspace:workspace.clone(),
@@ -335,7 +371,22 @@ fn request(workspace: &Path, mode: &str, aap: &Path) -> NativeCommand {
         network:qq_core::command_owner::NativeNetwork::Isolated,
         resources:qq_core::command_owner::NativeResources::Host,
         not_after_ms:None,
+    };
+    if mode == "ambient" {
+        use sha2::{Digest as _, Sha256};
+        let scope = serde_json::to_vec(&command.filesystem).unwrap();
+        let identity = format!("qq.{}", &format!("{:x}", Sha256::digest(scope))[..48]);
+        let name = format!("{identity}.write.v1");
+        let (groups, _) = firehazard_sid::derive_capability_sids_from_name(name.as_str()).unwrap();
+        let [group] = groups.as_slice() else {
+            panic!("expected exactly one task write group")
+        };
+        let expected = firehazard_sid::convert_sid_to_string_sid_a(group)
+            .unwrap()
+            .to_string();
+        std::fs::write(workspace.join("expected-write-sid"), expected).unwrap();
     }
+    command
 }
 fn worker(root: &Path) -> client::CommandWorker {
     client::CommandWorker::new(
@@ -384,6 +435,11 @@ async fn finish(
 #[tokio::test]
 async fn restricted_files_are_enforced_by_the_real_worker() {
     restricted_worker_probe("files").await;
+}
+
+#[tokio::test]
+async fn arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker() {
+    restricted_worker_probe("ambient").await;
 }
 
 #[tokio::test]
@@ -445,8 +501,25 @@ async fn restricted_worker_probe(mode: &str) {
     let aap = tokio::task::spawn_blocking(appcontainer_only_fixture)
         .await
         .unwrap();
+    let ambient = if mode == "ambient" {
+        let path = aap.path().to_owned();
+        Some(
+            tokio::task::spawn_blocking(move || ambient_write_fixture(&path))
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
+    if let Some(path) = &ambient {
+        std::fs::write(
+            workspace.path().join("ambient-path"),
+            path.to_str().unwrap(),
+        )
+        .unwrap();
+    }
     let profile = (mode == "profile").then(|| {
         tempfile::Builder::new()
             .prefix("qq-profile-boundary-test-")
@@ -542,7 +615,10 @@ async fn restricted_worker_probe(mode: &str) {
             "shell-output"
         );
     }
-    if matches!(mode, "files" | "descendants" | "shell") {
+    if let Some(path) = &ambient {
+        assert_eq!(std::fs::read(path).unwrap(), b"ambient original");
+    }
+    if matches!(mode, "files" | "descendants" | "shell" | "ambient") {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("artifact")).unwrap(),
             "task output"
@@ -747,6 +823,84 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
         "{output:?}"
     );
     root
+}
+
+fn ambient_write_fixture(root: &Path) -> std::path::PathBuf {
+    let root = root.canonicalize().unwrap();
+    let outside = root.join("ambient-writable");
+    std::fs::write(&outside, b"ambient original").unwrap();
+    let image = root.join("probe.exe");
+    for resource in [
+        rappct::acl::ResourcePath::DirectoryCustom(root.clone(), rappct::acl::AceInheritance::NONE),
+        rappct::acl::ResourcePath::File(image.clone()),
+    ] {
+        rappct::acl::grant_to_capability(
+            resource,
+            "S-1-15-2-2",
+            rappct::acl::AccessMask(0x0012_00a9),
+        )
+        .unwrap();
+    }
+    rappct::acl::grant_to_capability(
+        rappct::acl::ResourcePath::File(outside.clone()),
+        "S-1-15-2-2",
+        rappct::acl::AccessMask(0x0012_019f),
+    )
+    .unwrap();
+    let name = format!("qq-ambient-control-{}", ToolCallId::generate().unwrap());
+    let profile = rappct::AppContainerProfile::ensure(
+        &name,
+        "QQ test control",
+        Some("QQ ordinary LPAC write control"),
+    )
+    .unwrap();
+    let capabilities = rappct::SecurityCapabilitiesBuilder::new(&profile.sid)
+        .with_named(&["registryRead"])
+        .lpac(true)
+        .build()
+        .unwrap();
+    let args = [
+        "--exact",
+        "windows::payload_probe",
+        "--nocapture",
+        "--skip",
+        "qq-windows-probe:ambient-control",
+    ]
+    .map(std::ffi::OsString::from)
+    .into_iter()
+    .chain([outside.as_os_str().to_owned()])
+    .collect::<Vec<_>>();
+    let options = rappct::LaunchOptions {
+        exe: image.clone(),
+        cmdline: Some(super::windows_arguments::command_line(&image, &args).unwrap()),
+        cwd: Some(root),
+        env: Some(
+            qq_core::BASE_ENV
+                .iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| ((*name).into(), value)))
+                .collect(),
+        ),
+        stdio: rappct::StdioConfig::Pipe,
+        join_job: Some(rappct::JobLimits {
+            kill_on_job_close: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut child = rappct::launch_in_container_with_io(&capabilities, &options).unwrap();
+    let captured = child.capture_output();
+    let result = child.wait(Some(Duration::from_secs(15)));
+    drop(child.job_guard.take());
+    let output = captured.finish().unwrap();
+    drop(child);
+    profile.delete().unwrap();
+    assert_eq!(result.unwrap(), 0, "{output:?}");
+    assert_eq!(
+        std::fs::read(&outside).unwrap(),
+        b"ordinary LPAC wrote outside"
+    );
+    std::fs::write(&outside, b"ambient original").unwrap();
+    outside
 }
 
 async fn file_access_list(path: &Path) -> String {
