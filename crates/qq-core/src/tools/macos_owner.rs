@@ -1223,6 +1223,80 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writable_grant_anchors_survive_content_edits_and_replacement_attempts() {
+        use crate::command_owner::NativeDirectoryGrant;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let anchor = workspace.join("anchor");
+        std::fs::create_dir_all(&anchor).unwrap();
+        let outside = root.join("outside");
+        std::fs::write(&outside, "outside-original").unwrap();
+        let read_only = ["/bin", "/usr", "/System/Library", "/System/Cryptexes/OS"]
+            .into_iter()
+            .map(|path| {
+                NativeDirectoryGrant::capture(&std::fs::canonicalize(path).unwrap()).unwrap()
+            })
+            .collect();
+        let policy = profile(
+            &NativeFilesystem::Restricted {
+                read_only,
+                // The enclosing grant would otherwise permit replacing the
+                // nested anchor even though its identity was checked at launch.
+                read_write: vec![
+                    NativeDirectoryGrant::capture(&workspace).unwrap(),
+                    NativeDirectoryGrant::capture(&anchor).unwrap(),
+                ],
+            },
+            NativeNetwork::Isolated,
+        )
+        .unwrap();
+        let output = std::process::Command::new(SANDBOX_EXEC)
+            .args(["-p", &policy, "/bin/sh", "-c"])
+            .arg(
+                r#"set -eu
+printf original > "$1/keep"
+printf editable > "$1/edit"
+/bin/mv "$1/edit" "$1/renamed"
+/bin/rm "$1/renamed"
+/bin/mkdir "$1/ordinary"
+/bin/rmdir "$1/ordinary"
+if /bin/mv "$1" "$1-moved"; then exit 91; fi
+/bin/rm "$1/keep"
+if /bin/rmdir "$1"; then exit 92; fi
+printf retained > "$1/kept"
+if printf changed > "$2"; then exit 93; fi
+printf anchored"#,
+            )
+            .arg("anchor-probe")
+            .arg(&anchor)
+            .arg(&outside)
+            .current_dir(&workspace)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "status={:?}, stdout={}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"anchored");
+        assert_eq!(
+            std::fs::read_to_string(anchor.join("kept")).unwrap(),
+            "retained"
+        );
+        assert!(!workspace.join("anchor-moved").exists());
+        assert_eq!(
+            std::fs::read_to_string(outside).unwrap(),
+            "outside-original"
+        );
+    }
+
     #[test]
     fn replaced_directory_is_refused_before_profile_construction() {
         let root = tempfile::tempdir().unwrap();
