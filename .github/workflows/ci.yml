@@ -183,9 +183,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
-      - name: Investigate native macOS coalition custody prerequisites
-        if: runner.os == 'macOS'
-        run: python3 -I .github/scripts/macos-custody-probe.py host
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
@@ -411,9 +408,11 @@ jobs:
       - name: Report size
         run: |
           size=$(stat -c%s target/release/qq)
-          echo "### qq release binary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "$(numfmt --to=iec "$size") ($size bytes)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### qq release binary"
+            echo ""
+            echo "$(numfmt --to=iec "$size") ($size bytes)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   turn-overhead:
     name: controlled turn overhead
