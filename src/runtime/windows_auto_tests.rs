@@ -204,6 +204,21 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
         "Auto must not request per-command approval"
     );
+    for event in &events {
+        if let SessionEvent::ToolCallFinished { tool_call } = &event.event {
+            let result = tool_call.result.as_deref().unwrap_or("<no result>");
+            let bounded = result.chars().take(16 * 1024).collect::<String>();
+            eprintln!(
+                "Windows Auto native result: {}",
+                json!({
+                    "tool": tool_call.name,
+                    "is_error": tool_call.is_error,
+                    "result": bounded,
+                    "truncated": result.chars().count() > 16 * 1024,
+                })
+            );
+        }
+    }
     assert_eq!(fs::read_to_string(&secret).unwrap(), "host bytes");
     assert_eq!(
         fs::read_to_string(source.join("result with spaces.txt"))
@@ -221,6 +236,24 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         )
         .unwrap();
     let record: Value = serde_json::from_str(&record).unwrap();
+    let task = PathBuf::from(record["scope"]["workspace"]["path"].as_str().unwrap());
+    assert!(task.starts_with(fixture.path("data/task-workspaces")));
+    for (program, _, _) in &tool_versions {
+        let name = format!("version-probe-{program}.cmd");
+        let path = task.join(&name);
+        let imported = fs::read(&path).unwrap_or_else(|error| {
+            panic!("persisted task must contain owned probe script {path:?}: {error}")
+        });
+        eprintln!(
+            "Windows Auto imported probe: {name} ({} bytes)",
+            imported.len()
+        );
+        assert_eq!(
+            imported,
+            fs::read(source.join(&name)).unwrap(),
+            "task import must preserve owned probe script {name}",
+        );
+    }
     let diagnostics = tool_versions
         .iter()
         .map(|(program, _, host_resolved)| {
@@ -253,7 +286,11 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     for (program, expected, _) in &tool_versions {
         assert_eq!(
             fs::read_to_string(source.join(format!("{program}-exit.txt")))
-                .unwrap()
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "installed {program} probe did not publish its exit status: {error}; diagnostics: {diagnostics:#?}",
+                    )
+                })
                 .trim(),
             "0",
             "Auto must execute installed {program} successfully: {diagnostics:#?}; read roots: {read_roots:?}",
@@ -273,8 +310,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     assert_eq!(record["scope"]["network"], "isolated");
     assert_eq!(record["scope"]["resources"]["access"], "committed");
     assert_eq!(record["scope"]["resources"]["cpu_percent"], 90);
-    let task = PathBuf::from(record["scope"]["workspace"]["path"].as_str().unwrap());
-    assert!(task.starts_with(fixture.path("data/task-workspaces")));
     assert_eq!(
         fs::read_to_string(task.join(".qq/task-home/cache-proof"))
             .unwrap()
