@@ -1,6 +1,6 @@
 //! Grant only held, non-reparse objects. Never grant access through a pathname
 //! after checking some other object's metadata.
-use crate::command_owner::{NativeFilesystem, NativeWorkspaceIdentity};
+use crate::command_owner::{NativeDirectoryGrant, NativeFilesystem, NativeWorkspaceIdentity};
 use rappct::AppContainerSid;
 use sha2::{Digest as _, Sha256};
 use std::{fs::File, io, os::windows::fs::OpenOptionsExt as _, path::Path};
@@ -80,11 +80,7 @@ pub(super) fn prepare(
                 .as_ref()
                 .is_some_and(|root| grant.path.starts_with(root));
         let root = open(&grant.path, !system_read)?;
-        if !root.metadata()?.is_dir()
-            || NativeWorkspaceIdentity::capture(&grant.path)? != grant.identity
-        {
-            return Err(io::Error::other("native directory authority changed"));
-        }
+        validate_root(grant, &root)?;
         // LPAC's OS baseline already grants access to Windows system images.
         // Do not recursively change system ACLs or request administrator setup.
 
@@ -102,6 +98,28 @@ pub(super) fn prepare(
         held.push(root);
     }
     Ok(held)
+}
+
+fn validate_root(grant: &NativeDirectoryGrant, root: &File) -> io::Result<()> {
+    if !root.metadata()?.is_dir()
+        || NativeWorkspaceIdentity::held(&cap_std::fs::Dir::from_std_file(root.try_clone()?))?
+            != grant.identity
+    {
+        return Err(io::Error::other("native directory authority changed"));
+    }
+    Ok(())
+}
+
+fn open_child(parent: &cap_std::fs::Dir, name: &std::ffi::OsStr) -> io::Result<File> {
+    use cap_std::fs::OpenOptionsExt as _;
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .access_mode(0x0006_0080)
+        .share_mode(3)
+        .custom_flags(0x0200_0000 | 0x0020_0000);
+    parent
+        .open_with(name, &options)
+        .map(cap_std::fs::File::into_std)
 }
 
 fn open(path: &Path, write_dacl: bool) -> io::Result<File> {
@@ -245,11 +263,16 @@ fn walk(
     }
     drop(updating);
     if metadata.is_dir() {
-        for entry in std::fs::read_dir(path)? {
-            let path = entry?.path();
+        let parent = cap_std::fs::Dir::from_std_file(file);
+        // On Windows entries() may recover a pathname for enumeration. Treat
+        // those names as untrusted and open each relative to the held parent;
+        // never use DirEntry::open_with or an ambient child pathname here.
+        for entry in parent.entries()? {
+            let name = entry?.file_name();
+            let path = path.join(&name);
             walk(
                 &path,
-                open(&path, true)?,
+                open_child(&parent, &name)?,
                 writable,
                 sid,
                 count,
@@ -395,5 +418,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn native_grant_validates_the_opened_object_before_acl_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let authorized = root.path().join("authorized");
+        let substituted = root.path().join("substituted");
+        std::fs::create_dir(&authorized).unwrap();
+        std::fs::create_dir(&substituted).unwrap();
+        let grant = NativeDirectoryGrant::capture(&authorized).unwrap();
+        let wrong = open(&substituted, true).unwrap();
+        // The pathname has already been restored; reopening it proves nothing
+        // about the object retained during the earlier substituted traversal.
+        assert_eq!(
+            NativeWorkspaceIdentity::capture(&grant.path).unwrap(),
+            grant.identity
+        );
+        assert!(validate_root(&grant, &wrong).is_err());
+        validate_root(&grant, &open(&authorized, true).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn acl_walk_cannot_follow_a_retargeted_ancestor_junction() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let original = root.join("original");
+        let outside = root.join("outside");
+        let alias = root.join("alias");
+        for path in [&original, &outside] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::create_dir(path.join("tree")).unwrap();
+        }
+        let secret = outside.join("tree/secret");
+        std::fs::write(&secret, "unrelated host file").unwrap();
+        let before = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &acl(&open(&secret, true).unwrap()),
+            SecurityInformation::Dacl,
+        )
+        .unwrap()
+        .into_string()
+        .unwrap();
+        let junction = |target: &Path| {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/j"])
+                .arg(dunce::simplified(&alias))
+                .arg(dunce::simplified(target))
+                .output()
+                .unwrap();
+            assert_success(result);
+        };
+        junction(&original);
+        let held = open(&alias.join("tree"), true).unwrap();
+        let expected = NativeWorkspaceIdentity::held(&cap_std::fs::Dir::from_std_file(
+            held.try_clone().unwrap(),
+        ))
+        .unwrap();
+        std::fs::remove_dir(&alias).unwrap();
+        junction(&outside);
+        assert_ne!(
+            NativeWorkspaceIdentity::capture(&outside.join("tree")).unwrap(),
+            expected
+        );
+        assert!(NativeWorkspaceIdentity::capture(&alias.join("tree")).is_err());
+        let package = rappct::derive_sid_from_name("qq-junction-walk-regression").unwrap();
+        let sid: LocalBox<Sid> = package.as_string().parse().unwrap();
+        walk(
+            &alias.join("tree"),
+            held,
+            false,
+            &sid,
+            &mut 0,
+            super::super::unix_ms() + 15_000,
+            &lock_security().unwrap(),
+        )
+        .unwrap();
+        let after = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &acl(&open(&secret, true).unwrap()),
+            SecurityInformation::Dacl,
+        )
+        .unwrap()
+        .into_string()
+        .unwrap();
+        std::fs::remove_dir(&alias).unwrap();
+        assert_eq!(
+            after, before,
+            "a retargeted pathname must not grant outside file access"
+        );
+        assert_eq!(
+            std::fs::read_to_string(secret).unwrap(),
+            "unrelated host file"
+        );
     }
 }
