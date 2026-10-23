@@ -297,13 +297,20 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         let workspace = std::fs::canonicalize(directory.path()).unwrap();
         let release = workspace.join("release");
         crate::tools::create_test_fifo(&release).await;
-        let mut gate = std::fs::OpenOptions::new()
+        let gate = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(release)
             .unwrap();
+        let begin_read = workspace.join("begin-read");
+        crate::tools::create_test_fifo(&begin_read).await;
+        let mut begin_read = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(begin_read)
+            .unwrap();
         let store = Store::open(database.clone()).await.unwrap();
-        let arguments = r#"{"command":"printf once >> counter; printf ready; read token < release; printf original-result"}"#;
+        let arguments = r#"{"command":"printf once >> counter; printf ready; read token < begin-read; read token < release; printf original-result"}"#;
         let (claimed, id) = pending_process_call(&store, &workspace, "shell", arguments).await;
         let run = claimed.identity.run_id;
         let owner = CommandOwner::open(
@@ -431,9 +438,13 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
                 requests.lock().unwrap().is_empty(),
                 "a continuation must not race the recovered invocation"
             );
-            tokio::task::spawn_blocking(move || gate.write_all(b"continue\n").unwrap())
+            let mut writer = gate.try_clone().unwrap();
+            tokio::task::spawn_blocking(move || writer.write_all(b"continue\n").unwrap())
                 .await
                 .unwrap();
+            // Delay opening the payload reader until after the write. The
+            // original gate must retain the FIFO's buffered token across this gap.
+            begin_read.write_all(b"begin\n").unwrap();
             Some(run_id)
         };
         let mut version = 0;
@@ -448,6 +459,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             }
             version = observed.version;
         }
+        drop(gate);
         assert_eq!(
             live,
             ("running".to_owned(), "running".to_owned()),
