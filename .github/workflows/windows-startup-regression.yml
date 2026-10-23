@@ -43,6 +43,19 @@ jobs:
           git checkout "$GITHUB_SHA"
           bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
           bash .github/scripts/test-exact.sh tools::windows_job::tests::budgeted_startup_rechecks_cancellation_and_deadline_before_resume
+      - name: Verify accepted commands and fleet lifecycle
+        shell: bash
+        run: |
+          status=0
+          for selector in \
+            tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs \
+            tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers \
+            tools::windows_owner::fleet::tests::budgeted_exit_notification_survives_a_dropped_wait \
+            tools::windows_owner::fleet::tests::memory_budget_is_rounded_down_and_retained_by_the_kernel \
+            command_owner::tests::windows_processes::descendants_stop_on_completion_cancellation_and_deadline; do
+            bash .github/scripts/test-exact.sh "$selector" || status=1
+          done
+          exit "$status"
       - name: Check native Windows Rust warnings
         shell: bash
         run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
