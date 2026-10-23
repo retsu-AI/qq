@@ -111,6 +111,13 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
+            // Ordinary Windows tools append slash-separated names to these
+            // values. Keep verbatim syntax only when DOS paths change identity.
+            for (_, value) in &mut values {
+                *value = dunce::simplified(std::path::Path::new(value))
+                    .as_os_str()
+                    .to_owned();
+            }
             values
         };
         self.0.retain(|(name, _)| {
