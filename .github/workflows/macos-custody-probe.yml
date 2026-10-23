@@ -10,9 +10,13 @@ permissions:
 
 jobs:
   seatbelt-prerequisites:
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [seatbelt-nesting, launchservices]
     runs-on: macos-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Check standalone and nested Seatbelt application
-        run: python3 -I .github/scripts/macos-custody-probe.py seatbelt-nesting
+      - name: Check native custody prerequisite
+        run: python3 -I .github/scripts/macos-custody-probe.py "${{ matrix.mode }}"

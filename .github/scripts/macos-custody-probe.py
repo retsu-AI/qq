@@ -14,6 +14,7 @@ import plistlib
 import secrets
 import select
 import selectors
+import shlex
 import signal
 import socket
 import struct
@@ -264,7 +265,7 @@ def launch(command, nonce=""):
             process.stdout.close()
 
 
-def host():
+def host(use_launchservices=False):
     kernel = Kernel()
     assert os.geteuid() != 0
     controller = kernel.identity(os.getpid())
@@ -312,17 +313,36 @@ def host():
                 configuration = Path(temporary) / f"{role}.plist"
                 arguments = [sys.executable, "-I", str(Path(__file__).resolve()),
                              "child", address, nonce, role]
-                configuration.write_bytes(plistlib.dumps({
-                    "Label": label, "ProgramArguments": arguments,
-                    "RunAtLoad": True, "KeepAlive": False,
-                    "ProcessType": "Background",
-                    "StandardOutPath": str(Path(temporary) / f"{role}.stdout"),
-                    "StandardErrorPath": str(Path(temporary) / f"{role}.stderr"),
-                }))
-                configuration.chmod(0o600)
-                services.append(service)
-                code, output = launch(["/bin/launchctl", "bootstrap",
-                                       f"user/{os.getuid()}", str(configuration)], nonce)
+                if use_launchservices:
+                    bundle = Path(temporary) / f"{role}.app"
+                    executable = bundle / "Contents" / "MacOS" / "worker"
+                    executable.parent.mkdir(parents=True)
+                    executable.write_text(
+                        "#!/bin/sh\nexec " + shlex.join(arguments)
+                        + " >" + shlex.quote(str(Path(temporary) / f"{role}.stdout"))
+                        + " 2>" + shlex.quote(str(Path(temporary) / f"{role}.stderr")) + "\n"
+                    )
+                    executable.chmod(0o700)
+                    (bundle / "Contents" / "Info.plist").write_bytes(plistlib.dumps({
+                        "CFBundleIdentifier": label,
+                        "CFBundleExecutable": "worker",
+                        "CFBundlePackageType": "APPL",
+                        "CFBundleVersion": "1",
+                        "LSBackgroundOnly": True,
+                    }))
+                    command = ["/usr/bin/open", "-n", "-g", str(bundle)]
+                else:
+                    configuration.write_bytes(plistlib.dumps({
+                        "Label": label, "ProgramArguments": arguments,
+                        "RunAtLoad": True, "KeepAlive": False,
+                        "ProcessType": "Background",
+                        "StandardOutPath": str(Path(temporary) / f"{role}.stdout"),
+                        "StandardErrorPath": str(Path(temporary) / f"{role}.stderr"),
+                    }))
+                    configuration.chmod(0o600)
+                    services.append(service)
+                    command = ["/bin/launchctl", "bootstrap", f"user/{os.getuid()}", str(configuration)]
+                code, output = launch(command, nonce)
                 launched.append({"role": role, "code": code,
                                  "output": output[:4096].replace(nonce, "<fixture nonce>")})
                 print(json.dumps({"launch": launched[-1]}), flush=True)
@@ -339,6 +359,7 @@ def host():
                     raise
             root = fixtures["root"][2]
             sentinel = fixtures["sentinel"][2]
+            print(json.dumps({"coalition_control": {"controller": controller, "root": root, "sentinel": sentinel}}), flush=True)
             coalitions = [controller["coalitions"][0], root["coalitions"][0], sentinel["coalitions"][0]]
             assert 0 not in coalitions and len(set(coalitions)) == 3, "coalitions are not private"
             connection, reader, _ = fixtures["root"]
@@ -401,13 +422,13 @@ if __name__ == "__main__":
     elif sys.argv[1:] == ["layout-check"]:
         layouts()
         print("LP64 probe layouts checked")
-    elif sys.argv[1:] == ["host"]:
+    elif sys.argv[1:] in (["host"], ["launchservices"]):
         try:
-            host()
+            host(use_launchservices=sys.argv[1] == "launchservices")
         except Exception as error:
             print(json.dumps({"prerequisites_passed": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
             raise
     elif len(sys.argv) == 5 and sys.argv[1] == "child":
         child(*sys.argv[2:])
     else:
-        raise SystemExit("usage: macos-custody-probe.py host|layout-check|child ADDRESS NONCE ROLE")
+        raise SystemExit("usage: macos-custody-probe.py host|launchservices|seatbelt-nesting|layout-check|child ADDRESS NONCE ROLE")
