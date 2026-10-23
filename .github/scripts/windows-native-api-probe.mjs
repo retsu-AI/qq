@@ -326,6 +326,8 @@ const path = require('node:path');
     try { report.pathResolution[name] = { path: resolve('input.json') }; }
     catch (error) { report.pathResolution[name] = { error: error.code }; }
   }
+  const nestedNode = spawnSync(process.execPath, ['-e', "console.log(require('node:fs').realpathSync('input.json'))"], { encoding: 'utf8', timeout: 5000 });
+  report.nestedNode = { exit: nestedNode.status, stdout: nestedNode.stdout, stderr: nestedNode.stderr, error: nestedNode.error?.message };
   const nullSink = spawnSync('cmd.exe', ['/d', '/c', 'echo contained>NUL'], { encoding: 'utf8', timeout: 5000 });
   report.nullSink = { exit: nullSink.status, error: nullSink.error?.message, stderr: nullSink.stderr };
   const token = spawnSync(input.restrictedHelper, ['inspect'], { encoding: 'utf8', timeout: 5000 });
@@ -606,7 +608,7 @@ try {
         return profile.directory === environment[name] && profile.nodeWrite === true
           && profile.exit === 0 && profile.written === true;
       });
-      outcome.qualified = outcome.frozenProfiles && report.pathResolution.legacy.path !== undefined
+      outcome.qualified = outcome.frozenProfiles && report.nestedNode.exit === 0 && report.nestedNode.stdout.trim() !== '' && report.pathResolution.legacy.path !== undefined
         && report.pathResolution.native.path !== undefined && report.nullSink.exit === 0 && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
