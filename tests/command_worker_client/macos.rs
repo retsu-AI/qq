@@ -9,6 +9,7 @@ fn payload_probe() {
     else {
         return;
     };
+    std::fs::write("probe-group", rustix::process::getpgrp().to_string()).unwrap();
     match mode.as_str() {
         "groups" => {
             assert_eq!(
@@ -31,14 +32,78 @@ fn payload_probe() {
                 ),
                 "a payload must not kill its trusted cleanup guardian"
             );
-            assert!(matches!(
-                rustix::process::setsid(),
-                Err(rustix::io::Errno::PERM)
-            ));
+            let child = |mode: &str| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args([
+                    "--exact",
+                    "macos::payload_probe",
+                    "--nocapture",
+                    "--skip",
+                    &format!("qq-macos-probe:{mode}"),
+                ]);
+                command
+            };
+            let inherited = child("group-child").output().unwrap();
+            assert!(
+                inherited.status.success(),
+                "{}",
+                String::from_utf8_lossy(&inherited.stderr)
+            );
+            let facts: (u32, i32) =
+                serde_json::from_slice(&std::fs::read("child-group").unwrap()).unwrap();
+            assert_ne!(facts.0 as i32, facts.1);
+            assert_eq!(facts.1, rustix::process::getpgrp().as_raw_nonzero().get());
+            std::fs::remove_file("child-group").unwrap();
+            use std::os::unix::process::CommandExt as _;
+            let escaped = child("group-child").process_group(0).output();
+            match escaped {
+                Ok(output) => {
+                    assert!(
+                        !output.status.success(),
+                        "spawn attributes escaped the owned group"
+                    );
+                    assert!(
+                        !std::path::Path::new("child-group").exists(),
+                        "spawn attributes executed a child outside the owned group"
+                    );
+                }
+                Err(error) => assert!(
+                    matches!(error.raw_os_error(), Some(1 | 13)),
+                    "unexpected spawn-attribute failure: {error}"
+                ),
+            }
+            let session = child("setsid-child").output().unwrap();
+            assert!(
+                session.status.success(),
+                "{}",
+                String::from_utf8_lossy(&session.stderr)
+            );
             assert!(matches!(
                 rustix::process::setpgid(None, None),
                 Err(rustix::io::Errno::PERM)
             ));
+        }
+        "group-child" => {
+            std::fs::write(
+                "child-group",
+                serde_json::to_vec(&(
+                    std::process::id(),
+                    rustix::process::getpgrp().as_raw_nonzero().get(),
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        "setsid-child" => {
+            let group = rustix::process::getpgrp();
+            assert_ne!(group, rustix::process::getpid());
+            assert!(matches!(
+                rustix::process::setsid(),
+                Err(rustix::io::Errno::PERM)
+            ));
+            assert_eq!(rustix::process::getpgrp(), group);
+            return;
         }
         "guardian-loss" => {
             use std::io::{Read as _, Write as _};
@@ -84,6 +149,34 @@ fn payload_probe() {
             );
             assert!(std::os::unix::net::UnixStream::connect("socket").is_err());
         }
+        "memory" => {
+            println!("native pressure probe started");
+            let mut memory = vec![0_u8; 256 * 1024 * 1024];
+            for byte in memory.iter_mut().step_by(4096) {
+                *byte = 1;
+            }
+            std::fs::write("pressure-ready", "memory").unwrap();
+            std::hint::black_box(&memory);
+            loop {
+                std::thread::park();
+            }
+        }
+        "threads" => {
+            println!("native pressure probe started");
+            let mut threads = Vec::new();
+            for _ in 0..32 {
+                threads.push(std::thread::spawn(|| {
+                    loop {
+                        std::thread::park();
+                    }
+                }));
+            }
+            std::fs::write("pressure-ready", "threads").unwrap();
+            std::hint::black_box(&threads);
+            loop {
+                std::thread::park();
+            }
+        }
         "descriptors" => {
             let fd = std::fs::read_to_string("inherited-fd").unwrap();
             let opened = std::fs::File::open(format!("/dev/fd/{fd}"));
@@ -104,6 +197,28 @@ async fn fixture_command(
     isolated: bool,
     restricted: bool,
     additional_read_only: &[std::path::PathBuf],
+) -> qq_core::command_owner::CommandResult {
+    fixture_command_with_resources(
+        workspace,
+        arguments,
+        tool,
+        isolated,
+        restricted,
+        additional_read_only,
+        qq_core::command_owner::NativeResources::Host,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fixture_command_with_resources(
+    workspace: &std::path::Path,
+    arguments: serde_json::Value,
+    tool: &str,
+    isolated: bool,
+    restricted: bool,
+    additional_read_only: &[std::path::PathBuf],
+    resources: qq_core::command_owner::NativeResources,
 ) -> qq_core::command_owner::CommandResult {
     let root = tempfile::tempdir().unwrap();
     let worker = client::CommandWorker::new(
@@ -157,7 +272,7 @@ async fn fixture_command(
         } else {
             qq_core::command_owner::NativeFilesystem::Host
         },
-        resources: qq_core::command_owner::NativeResources::Host,
+        resources,
         not_after_ms: None,
     };
     worker.submit(request.clone()).await.unwrap();
@@ -409,4 +524,97 @@ async fn worker_death_leaves_the_guardian_alive_until_every_payload_process_exit
     result
         .expect("native worker-loss fixture exceeded its deadline")
         .unwrap();
+}
+
+#[tokio::test]
+async fn guarded_commands_complete_and_resource_pressure_stops_the_owned_group() {
+    use qq_core::command_owner::NativeResources;
+    let refused = tempfile::tempdir().unwrap();
+    let result = fixture_command_with_resources(
+        refused.path(),
+        serde_json::json!({"command":"printf escaped > forbidden"}),
+        "shell",
+        false,
+        false,
+        &[],
+        NativeResources::Guarded {
+            memory_bytes: 256 * 1024 * 1024,
+            max_tasks: 16,
+        },
+    )
+    .await;
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result.text().contains("restricted filesystem authority"),
+        "{}",
+        result.text()
+    );
+    assert!(!refused.path().join("forbidden").exists());
+    let executable = std::env::current_exe().unwrap();
+    let executable_directory = executable.parent().unwrap().to_owned();
+    for mode in ["groups", "memory", "threads"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let result = fixture_command_with_resources(
+            workspace.path(),
+            probe(mode),
+            "exec",
+            true,
+            true,
+            std::slice::from_ref(&executable_directory),
+            NativeResources::Guarded {
+                memory_bytes: 256 * 1024 * 1024,
+                max_tasks: 16,
+            },
+        )
+        .await;
+        if mode == "groups" {
+            assert!(!result.is_error(), "{}", result.text());
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("probe-result")).unwrap(),
+                "enforced"
+            );
+        } else {
+            assert!(result.is_error(), "{}", result.text());
+            assert!(
+                result.text().contains("native pressure probe started"),
+                "{}",
+                result.text()
+            );
+            assert!(
+                result.text().contains("native resource safeguard"),
+                "{}",
+                result.text()
+            );
+            let group = std::fs::read_to_string(workspace.path().join("probe-group"))
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
+            nix::errno::Errno::clear();
+            let members =
+                libproc::processes::pids_by_type(libproc::processes::ProcFilter::ByProgramGroup {
+                    pgrpid: group as u32,
+                })
+                .unwrap();
+            assert!(
+                (members.is_empty() || members.len() < members.capacity()) && members.len() <= 4096
+            );
+            for pid in members {
+                match libproc::proc_pid::pidinfo::<libproc::bsd_info::BSDInfo>(pid as i32, 1) {
+                    Ok(info) => assert!(
+                        info.pbi_pgid != group as u32 || info.pbi_status == nix::libc::SZOMB,
+                        "resource termination left a live group member: {pid}"
+                    ),
+                    Err(error) => assert!(
+                        matches!(
+                            rustix::process::getpgid(Some(
+                                rustix::process::Pid::from_raw(pid as i32).unwrap()
+                            )),
+                            Err(rustix::io::Errno::SRCH)
+                        ),
+                        "could not prove process exit for {pid}: {error}"
+                    ),
+                }
+            }
+        }
+    }
 }

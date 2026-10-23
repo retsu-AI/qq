@@ -155,7 +155,7 @@ Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution and
+non-goal task continuation is unfinished. macOS kernel-quota execution and
 default Windows Auto containment remain unavailable and fail closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
@@ -1382,8 +1382,17 @@ is returned through the private channel only after cleanup; a missing or partial
 status never confirms quiescence. Exited zombies may await collection by the OS,
 but live members keep cleanup unconfirmed. Loader-injection environment
 variables are refused before helper startup. macOS does not create Linux-style
-mount or PID namespaces, and aggregate resource limits remain unavailable;
-requesting those limits fails closed.
+mount or PID namespaces, and kernel aggregate resource quotas remain unavailable.
+An explicit `NativeResources::Guarded` request instead starts the payload with
+`taskpolicy -b` and samples the pinned process group's physical footprint and
+thread count every 250 ms using Darwin process accounting. The existing owner
+liveness thread performs these checks; no extra per-command thread is created.
+Excess use or unavailable accounting stops the whole owned group and retains its
+captured output. These sampled safeguards can overshoot and exclude charged file
+cache; they are not `NativeResources::Limited` quotas. Guarded commands require
+restricted filesystem authority. Default macOS Auto uses these safeguards with
+its detached task files; it does not claim kernel aggregate quotas.
+Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`
 for ordinary child-process creation and a directory-identity capability for each

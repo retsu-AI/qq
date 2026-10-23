@@ -142,7 +142,10 @@ impl LinuxOwner {
         }
         let resources = match native.map(|native| native.resources) {
             None | Some(crate::command_owner::NativeResources::Host) => None,
-            Some(crate::command_owner::NativeResources::Committed { .. }) => {
+            Some(
+                crate::command_owner::NativeResources::Committed { .. }
+                | crate::command_owner::NativeResources::Guarded { .. },
+            ) => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "requested resource accounting is not implemented by this launcher",
