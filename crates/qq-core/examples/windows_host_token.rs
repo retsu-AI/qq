@@ -384,25 +384,46 @@ mod proof {
         Ok(())
     }
 
+    #[derive(Debug, thiserror::Error)]
+    #[error("{operation}: {source}")]
+    struct AdmissionError {
+        operation: &'static str,
+        #[source]
+        source: io::Error,
+    }
+
+    fn admission_error(operation: &'static str, source: impl Into<io::Error>) -> io::Error {
+        let source = source.into();
+        io::Error::new(source.kind(), AdmissionError { operation, source })
+    }
+
     fn launch_restricted_helper(root: &Path, name: &str, package: &str) -> io::Result<()> {
         use firehazard::{job, process, token};
         let host =
             firehazard::open_process_token(firehazard::get_current_process(), token::ALL_ACCESS)
-                .map_err(err)?;
-        let sid = firehazard::convert_string_sid_to_sid_a(package).map_err(err)?;
-        let filtered = firehazard::create_restricted_token(
-            &host,
-            token::DISABLE_MAX_PRIVILEGE | token::WRITE_RESTRICTED,
-            None,
-            None,
-            Some(&[firehazard::sid::AndAttributes::new(&sid, None)]),
-        )
-        .map_err(err)?;
+                .map_err(|error| admission_error("OpenProcessToken(host)", error))?;
+        let sid = firehazard::convert_string_sid_to_sid_a(package)
+            .map_err(|error| admission_error("ConvertStringSidToSid(task)", error))?;
+        let flags = token::DISABLE_MAX_PRIVILEGE | token::WRITE_RESTRICTED;
+        let restricting = [firehazard::sid::AndAttributes::new(&sid, None)];
+        println!(
+            "CreateRestrictedToken inputs: flags={:#x}, disabled_sids=0, deleted_privileges=0, restricting_sids={}, restricting_attributes={:#x}",
+            u32::from(flags),
+            restricting.len(),
+            u32::from(restricting[0].attributes),
+        );
+        let filtered =
+            firehazard::create_restricted_token(&host, flags, None, None, Some(&restricting))
+                .map_err(|error| admission_error("CreateRestrictedToken", error))?;
+        let restricting = filtered.restricted_sids().map_err(|error| {
+            admission_error("GetTokenInformation(filtered, TokenRestrictedSids)", error)
+        })?;
         println!(
             "filtered host: restricting SID count={}",
-            filtered.restricted_sids().map_err(err)?.group_count()
+            restricting.group_count()
         );
-        let job = firehazard::create_job_object_w(None, ()).map_err(err)?;
+        let job = firehazard::create_job_object_w(None, ())
+            .map_err(|error| admission_error("CreateJobObjectW", error))?;
         let limits = job::object::ExtendedLimitInformation {
             basic_limit_information: job::object::BasicLimitInformation {
                 limit_flags: job::object::limit::KILL_ON_JOB_CLOSE,
@@ -410,8 +431,10 @@ mod proof {
             },
             ..Default::default()
         };
-        firehazard::set_information_job_object(&job, limits).map_err(err)?;
-        let image = std::env::current_exe()?;
+        firehazard::set_information_job_object(&job, limits)
+            .map_err(|error| admission_error("SetInformationJobObject", error))?;
+        let image = std::env::current_exe()
+            .map_err(|error| admission_error("current_exe(helper)", error))?;
         let mut command: Vec<u16> = format!(
             "\"{}\" --launcher \"{}\" {name}\0",
             image.display(),
@@ -420,11 +443,11 @@ mod proof {
         .encode_utf16()
         .collect();
         let jobs = [job::Handle::from(&job)];
-        let mut attributes =
-            process::ThreadAttributeList::with_attribute_capacity(1).map_err(err)?;
+        let mut attributes = process::ThreadAttributeList::with_attribute_capacity(1)
+            .map_err(|error| admission_error("InitializeProcThreadAttributeList", error))?;
         attributes
             .update(process::ThreadAttributeRef::job_list(&jobs))
-            .map_err(err)?;
+            .map_err(|error| admission_error("UpdateProcThreadAttribute(job list)", error))?;
         let startup = process::StartupInfoExW {
             attribute_list: Some(attributes),
             ..Default::default()
@@ -443,7 +466,7 @@ mod proof {
             (),
             &startup,
         )
-        .map_err(err)?;
+        .map_err(|error| admission_error("CreateProcessAsUserW(filtered helper)", error))?;
         // The original process handle pins this PID across the safe OpenProcess.
         let observer = match winsafe::HPROCESS::OpenProcess(
             winsafe::co::PROCESS::SYNCHRONIZE,
@@ -452,25 +475,43 @@ mod proof {
         ) {
             Ok(observer) => observer,
             Err(error) => {
-                firehazard::terminate_job_object(&job, 125).map_err(err)?;
-                firehazard::wait_for_process(&child.process).map_err(err)?;
-                return Err(err(error));
+                firehazard::terminate_job_object(&job, 125)
+                    .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
+                firehazard::wait_for_process(&child.process)
+                    .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
+                return Err(admission_error(
+                    "OpenProcess(observer)",
+                    io::Error::other(error),
+                ));
             }
         };
         if let Err(error) = firehazard::resume_thread(&child.thread) {
-            firehazard::terminate_job_object(&job, 125).map_err(err)?;
-            firehazard::wait_for_process(&child.process).map_err(err)?;
-            return Err(err(error));
+            firehazard::terminate_job_object(&job, 125)
+                .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
+            firehazard::wait_for_process(&child.process)
+                .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
+            return Err(admission_error("ResumeThread(filtered helper)", error));
         }
         match observer.WaitForSingleObject(Some(30_000)) {
             Ok(winsafe::co::WAIT::OBJECT_0) => {}
             result => {
-                firehazard::terminate_job_object(&job, 125).map_err(err)?;
-                firehazard::wait_for_process(&child.process).map_err(err)?;
-                return Err(err(format!("filtered launcher wait failed: {result:?}")));
+                firehazard::terminate_job_object(&job, 125)
+                    .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
+                firehazard::wait_for_process(&child.process)
+                    .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
+                return Err(match result {
+                    Err(error) => admission_error(
+                        "WaitForSingleObject(filtered helper)",
+                        io::Error::other(error),
+                    ),
+                    Ok(status) => err(format!(
+                        "WaitForSingleObject(filtered helper): unexpected status {status:?}"
+                    )),
+                });
             }
         }
-        let code = firehazard::get_exit_code_process(&child.process).map_err(err)?;
+        let code = firehazard::get_exit_code_process(&child.process)
+            .map_err(|error| admission_error("GetExitCodeProcess(filtered helper)", error))?;
         if code != 0 {
             let detail = fs::read_to_string(root.join("task/launcher-error.txt"))
                 .unwrap_or_else(|_| "no helper error report".to_owned());
