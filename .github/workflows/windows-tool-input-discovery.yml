@@ -1,7 +1,7 @@
-name: Windows Auto installed tool diagnostics
+name: Windows task home Auto qualification
 on:
   push:
-    branches: [fix/windows-tool-input-discovery]
+    branches: [test/windows-task-home-auto]
   workflow_dispatch:
 permissions:
   contents: read
@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-11-arm]
+        os: [windows-2025, windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
@@ -22,6 +22,16 @@ jobs:
         with:
           key: windows-tool-input-discovery-${{ matrix.os }}
           cache-on-failure: true
+      - name: Verify the exact production profile regression and identity cases
+        shell: bash
+        run: |
+          selector=command_owner::environment::tests::windows_task_home_supports_shell_profile_paths_and_called_batches
+          cargo test --locked -p qq-core "$selector" -- --list | tr -d '\r' | grep -Fx "$selector: test"
+          cargo test --locked -p qq-core "$selector" -- --exact --nocapture
+          cargo test --locked -p qq-core command_owner::environment::tests::windows_task_home_preserves_extended_only_names -- --exact --nocapture
+      - name: Lint the exact native production source
+        shell: bash
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
       - name: Build the native command helper
         shell: bash
         run: cargo build --locked -p qq-core --example command_owner
