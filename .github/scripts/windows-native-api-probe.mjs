@@ -40,6 +40,7 @@ const environment = {
   SystemRoot: process.env.SystemRoot,
   PATHEXT: '.COM;.EXE;.BAT;.CMD',
   HOME: home, USERPROFILE: home,
+  TMPDIR: path.join(home, 'tmp'),
   TEMP: path.join(home, 'tmp'), TMP: path.join(home, 'tmp'),
   APPDATA: path.join(home, 'AppData', 'Roaming'),
   LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
@@ -195,15 +196,19 @@ if (child.error) console.error(child.error.message);
 process.exitCode = child.status ?? 1;
 `;
 const relayCommand = `${quote(tools.node)} -e ${quote(`eval(Buffer.from('${Buffer.from(relay).toString('base64')}','base64').toString())`)}`;
+const relayPath = path.join(workspace, 'contained-relay.cjs');
+fs.writeFileSync(relayPath, relay);
 
 const cases = [
   { name: 'public-read-baseline', command: relayCommand, payload: true },
   { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret] },
   { name: 'token-creation-control',
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
-  ...['package', 'package-arap', 'package-arap-registry'].map(mode => ({
+  { name: 'token-user-sid-control',
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} user`, payload: true },
+  ...['package', 'arap', 'package-arap', 'package-arap-registry', 'package-write', 'lpac-inherit', 'lpac-recreate'].map(mode => ({
     name: 'restricted-' + mode,
-    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} ${mode}`,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(mode.startsWith('lpac-') ? relayPath : payload)} ${mode}`,
     payload: true,
   })),
 ];

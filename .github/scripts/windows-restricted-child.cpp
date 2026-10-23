@@ -83,50 +83,90 @@ int wmain(int argc, wchar_t** argv) {
         auto package = information(current.value, TokenAppContainerSid);
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
-        std::vector<SID_AND_ATTRIBUTES> sids{ { sid, 0 } };
         const std::wstring mode(argv[3]);
-        if (mode == L"control") sids.clear();
+        const bool lpac = mode == L"lpac-inherit" || mode == L"lpac-recreate";
+        const bool with_package = mode == L"package" || mode == L"package-arap" ||
+            mode == L"package-arap-registry" || mode == L"package-write";
+        const bool with_arap = mode == L"arap" || mode == L"package-arap" || mode == L"package-arap-registry";
+        const bool with_registry = mode == L"package-arap-registry" || mode == L"lpac-recreate";
+        if (!lpac && !with_package && !with_arap && mode != L"control" && mode != L"user") {
+            throw std::runtime_error("unknown token restriction mode");
+        }
+        std::vector<SID_AND_ATTRIBUTES> sids;
+        if (with_package) sids.push_back({ sid, 0 });
+        auto user = information(current.value, TokenUser);
+        if (mode == L"user") sids.push_back({ reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid, 0 });
         auto free_sid = [](void* value) { LocalFree(value); };
         std::unique_ptr<void, decltype(free_sid)> arap(nullptr, free_sid), registry(nullptr, free_sid);
-        if (mode == L"package-arap" || mode == L"package-arap-registry") {
+        if (with_arap) {
             PSID allocated = nullptr;
             require(ConvertStringSidToSidW(L"S-1-15-2-2", &allocated), "ARAP SID");
             arap.reset(allocated);
             sids.push_back({ arap.get(), 0 });
         }
-        if (mode == L"package-arap-registry") {
+        if (with_registry) {
             PSID allocated = nullptr;
             require(ConvertStringSidToSidW(L"S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681", &allocated), "registryRead SID");
             registry.reset(allocated);
-            sids.push_back({ registry.get(), 0 });
-        } else if (mode != L"package" && mode != L"package-arap" && mode != L"control") {
-            throw std::runtime_error("unknown token restriction mode");
+            if (!lpac) sids.push_back({ registry.get(), 0 });
         }
         Handle restricted;
-        require(CreateRestrictedToken(current.value, DISABLE_MAX_PRIVILEGE, 0, nullptr, 0, nullptr,
-            static_cast<DWORD>(sids.size()), sids.empty() ? nullptr : sids.data(), &restricted.value), "CreateRestrictedToken");
-        contained(restricted.value);
-        const DWORD after = restricting_count(restricted.value);
-        std::cout << "token restriction: before=" << restricting_count(current.value) << "; after=" << after << std::endl;
-        if (mode != L"control" && after == 0) throw std::runtime_error("restriction produced no restricting SIDs");
+        if (!lpac) {
+            const DWORD flags = DISABLE_MAX_PRIVILEGE | (mode == L"package-write" ? WRITE_RESTRICTED : 0);
+            require(CreateRestrictedToken(current.value, flags, 0, nullptr, 0, nullptr,
+                static_cast<DWORD>(sids.size()), sids.empty() ? nullptr : sids.data(), &restricted.value), "CreateRestrictedToken");
+            contained(restricted.value);
+            const DWORD after = restricting_count(restricted.value);
+            std::cout << "token restriction: before=" << restricting_count(current.value) << "; after=" << after << std::endl;
+            if (mode != L"control" && after == 0) throw std::runtime_error("restriction produced no restricting SIDs");
+        }
         auto block = environment();
         const std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" \"" + std::wstring(argv[2]) + L"\"";
         std::vector<wchar_t> mutable_command(command.begin(), command.end());
         mutable_command.push_back(0);
-        STARTUPINFOW startup{};
-        startup.cb = static_cast<DWORD>(sizeof(startup));
-        startup.dwFlags = STARTF_USESTDHANDLES;
+        STARTUPINFOEXW startup{};
+        startup.StartupInfo.cb = static_cast<DWORD>(lpac ? sizeof(startup) : sizeof(STARTUPINFOW));
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
         Handle input, output, error;
         for (const auto& pair : std::vector<std::pair<DWORD, HANDLE*>>{
             { STD_INPUT_HANDLE, &input.value }, { STD_OUTPUT_HANDLE, &output.value }, { STD_ERROR_HANDLE, &error.value } }) {
             require(DuplicateHandle(GetCurrentProcess(), GetStdHandle(pair.first), GetCurrentProcess(), pair.second, 0, TRUE, DUPLICATE_SAME_ACCESS), "DuplicateHandle(stdio)");
         }
-        startup.hStdInput = input.value;
-        startup.hStdOutput = output.value;
-        startup.hStdError = error.value;
+        startup.StartupInfo.hStdInput = input.value;
+        startup.StartupInfo.hStdOutput = output.value;
+        startup.StartupInfo.hStdError = error.value;
         PROCESS_INFORMATION process{};
-        require(CreateProcessAsUserW(restricted.value, argv[1], mutable_command.data(), nullptr, nullptr,
-            TRUE, CREATE_UNICODE_ENVIRONMENT, block.data(), nullptr, &startup, &process), "CreateProcessAsUserW");
+        if (lpac) {
+            SIZE_T size = 0;
+            const DWORD count = mode == L"lpac-recreate" ? 2 : 1;
+            InitializeProcThreadAttributeList(nullptr, count, 0, &size);
+            if (size == 0 || size > 65536) throw std::runtime_error("invalid attribute-list size");
+            std::vector<BYTE> attributes(size);
+            startup.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
+            require(InitializeProcThreadAttributeList(startup.lpAttributeList, count, 0, &size), "InitializeProcThreadAttributeList");
+            DWORD policy = 1; // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT.
+            require(UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+                &policy, sizeof(policy), nullptr, nullptr), "UpdateProcThreadAttribute(LPAC)");
+            SID_AND_ATTRIBUTES read_cap{ registry.get(), SE_GROUP_ENABLED };
+            SECURITY_CAPABILITIES capabilities{};
+            capabilities.AppContainerSid = sid;
+            capabilities.Capabilities = &read_cap;
+            capabilities.CapabilityCount = 1;
+            if (mode == L"lpac-recreate") {
+                require(UpdateProcThreadAttribute(startup.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+                    &capabilities, sizeof(capabilities), nullptr, nullptr), "UpdateProcThreadAttribute(capabilities)");
+            }
+            const BOOL created = CreateProcessW(argv[1], mutable_command.data(), nullptr, nullptr, TRUE,
+                CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, block.data(), nullptr,
+                &startup.StartupInfo, &process);
+            const DWORD code = created ? 0 : GetLastError();
+            DeleteProcThreadAttributeList(startup.lpAttributeList);
+            SetLastError(code);
+            require(created, "CreateProcessW(LPAC child)");
+        } else {
+            require(CreateProcessAsUserW(restricted.value, argv[1], mutable_command.data(), nullptr, nullptr,
+                TRUE, CREATE_UNICODE_ENVIRONMENT, block.data(), nullptr, &startup.StartupInfo, &process), "CreateProcessAsUserW");
+        }
         Handle child, thread;
         child.value = process.hProcess;
         thread.value = process.hThread;
