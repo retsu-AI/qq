@@ -243,6 +243,8 @@ fs.writeFileSync(relayPath, relay);
 const cases = [
   { name: 'public-read-baseline', command: relayCommand, payload: true },
   { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret, markerSecret, process.env.QQ_NATIVE_FUTURE_DIRECTORY] },
+  { name: 'deny-volume-root', command: relayCommand, payload: true, deniedPaths: [path.parse(workspace).root] },
+  { name: 'deny-volume-root-without-enumeration', command: relayCommand, payload: true, deniedPaths: [path.parse(workspace).root], enumeratePaths: [] },
   { name: 'deny-canary-directory', command: relayCommand, payload: true, deniedPaths: [path.dirname(secret)] },
   { name: 'deny-parent-with-allowed-children', command: relayCommand, payload: true, deniedPaths: [root, path.dirname(secret)] },
   { name: 'token-creation-control',
