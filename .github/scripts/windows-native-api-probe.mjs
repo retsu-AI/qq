@@ -75,33 +75,62 @@ const readonlyPaths = [...new Set([
   rustup,
 ])];
 const quote = value => { assert.ok(!/["\r\n]/.test(value)); return `"${value}"`; };
+const copiedNode = path.join(workspace, 'node-control.exe');
+fs.copyFileSync(tools.node, copiedNode);
+const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
+const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
+const cases = [
+  { name: 'cmd-default-ui', command: `${quote(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'))} /d /c echo native-api-cmd`, payload: false },
+  { name: 'node-default-ui', command: payloadCommand(tools.node), payload: true },
+  { name: 'node-base-ui', command: payloadCommand(tools.node), payload: true, ui: baseUi },
+  { name: 'copied-node-default-ui', command: payloadCommand(copiedNode), payload: true },
+  { name: 'copied-node-base-ui', command: payloadCommand(copiedNode), payload: true, ui: baseUi },
+];
+const outcomes = [];
 try {
-  const started = performance.now();
-  const output = await run({
-    containment: { type: 'processcontainer', config: { capabilities: ['registryRead'] } },
-    command: `${quote(tools.node)} ${quote(payload)}`,
-    workingDirectory: workspace,
-    inheritDefaultEnvironment: false,
-    environment,
-    filesystem: { readonlyPaths, readwritePaths: [workspace] },
-    network: { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } },
-    timeoutMs: 15_000,
-  });
-  console.log(JSON.stringify({ phase: 'native-api-run', elapsedMs: performance.now() - started, ...output }));
-  assert.equal(output.exitCode, 0);
-  assert.equal(output.timedOut, false);
-  const report = JSON.parse(fs.readFileSync(path.join(workspace, 'report.json'), 'utf8'));
-  console.log(JSON.stringify({ phase: 'payload-report', report }));
-  for (const name of ['git', 'node', 'cargo']) {
-    assert.equal(report.tools[name].exit, 0, name);
-    assert.equal(report.tools[name].stdout.trim(), expected[name], name);
+  for (const test of cases) {
+    for (const name of ['report.json', 'artifact.txt']) fs.rmSync(path.join(workspace, name), { force: true });
+    const started = performance.now();
+    let output;
+    try {
+      output = await run({
+        containment: { type: 'processcontainer', config: { capabilities: ['registryRead'] } },
+        command: test.command,
+        workingDirectory: workspace,
+        inheritDefaultEnvironment: false,
+        environment,
+        filesystem: { readonlyPaths, readwritePaths: [workspace] },
+        network: { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } },
+        ...(test.ui ? { ui: test.ui } : {}),
+        timeoutMs: 15_000,
+      });
+    } catch (error) {
+      outcomes.push({ name: test.name, error: error.message });
+      console.log(JSON.stringify(outcomes.at(-1)));
+      assert.equal(requests, 0);
+      assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+      continue;
+    }
+    const outcome = { name: test.name, elapsedMs: performance.now() - started, ...output };
+    const reportPath = path.join(workspace, 'report.json');
+    if (test.payload && fs.existsSync(reportPath)) {
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+      outcome.report = report;
+      outcome.qualified = output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
+        report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
+        && report.secretRead === false && report.secretWrite === false && report.loopback === false
+        && fs.existsSync(path.join(workspace, 'artifact.txt'))
+        && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
+    }
+    outcomes.push(outcome);
+    console.log(JSON.stringify(outcome));
+    // These remain unconditional safety assertions, including failed startups.
+    assert.equal(requests, 0);
+    assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
   }
-  assert.equal(report.secretRead, false);
-  assert.equal(report.secretWrite, false);
-  assert.equal(report.loopback, false);
   assert.equal(requests, 0);
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
-  assert.equal(fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8'), 'native-api-output');
+  assert.ok(outcomes.some(outcome => outcome.qualified), 'No native API candidate completed the tool/denial fixture');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
