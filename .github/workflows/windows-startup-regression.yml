@@ -1,8 +1,8 @@
-name: Windows startup admission regression
+name: Windows fleet startup admission regression
 
 on:
   push:
-    branches: [test/windows-startup-regression]
+    branches: [test/windows-fleet-startup-regression]
   workflow_dispatch:
 
 permissions:
@@ -25,8 +25,8 @@ jobs:
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
         with:
-          key: startup-admission-${{ matrix.os }}
-      - name: Prove cancelled startup resumes without the final check
+          key: fleet-startup-admission-${{ matrix.os }}
+      - name: Prove plain cancelled startup resumes without the final check
         shell: bash
         run: |
           git checkout e64e7a4c87ef12c02d55db712808b0625bed5c01
@@ -37,8 +37,12 @@ jobs:
           cat "$RUNNER_TEMP/startup-before.log"
           test "$result" -ne 0
           grep -F 'cancellation: suspended payload was incorrectly resumed' "$RUNNER_TEMP/startup-before.log"
-      - name: Verify cancellation and deadline rejection before resume
+      - name: Verify plain and budgeted cancellation and deadline rejection before resume
         shell: bash
         run: |
           git checkout "$GITHUB_SHA"
           bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
+          bash .github/scripts/test-exact.sh tools::windows_job::tests::budgeted_startup_rechecks_cancellation_and_deadline_before_resume
+      - name: Check native Windows Rust warnings
+        shell: bash
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
