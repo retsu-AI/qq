@@ -17,6 +17,7 @@ use qq_server as server;
 
 mod cli;
 mod command_owner;
+mod daemon;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
@@ -124,11 +125,16 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
         && !matches!(
             cli.command,
             None | Some(
-                cli::Command::Ask { .. } | cli::Command::Run(_) | cli::Command::Serve { .. }
+                cli::Command::Ask { .. }
+                    | cli::Command::Run(_)
+                    | cli::Command::Serve { .. }
+                    | cli::Command::Daemon {
+                        command: cli::DaemonCommand::Run(_) | cli::DaemonCommand::Restart(_)
+                    }
             )
         )
     {
-        return Err(io::Error::other("read image approvals are only valid when starting ask, run, serve or interactive execution").into());
+        return Err(io::Error::other("read image approvals are only valid when starting ask, run, serve, the daemon or interactive execution").into());
     }
     let overrides = CliOverrides {
         approved_read_images: qq_core::ApprovedReadImages::new(cli.approved_read_images)?,
@@ -150,6 +156,9 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             bind,
             allow_origins,
         }) => serve(bind, &allow_origins, &overrides).await?,
+        Some(cli::Command::Daemon { command }) => {
+            return daemon::command(command, &overrides).await;
+        }
         Some(cli::Command::NativeWorker { state_dir }) => command_owner::run(state_dir).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
@@ -644,60 +653,17 @@ async fn serve(
     allow_origins: &[String],
     overrides: &CliOverrides,
 ) -> Result<(), Box<dyn Error>> {
-    let options = server::ServerOptions::for_user()?
-        .with_bind_address(bind)
-        .with_version(cli::BUILD_VERSION)
-        .with_allowed_origins(server::AllowedOrigins::new(allow_origins)?);
-    match server::reserve(options).await? {
-        server::ReserveOutcome::Existing(connection) => {
-            reject_read_approvals_for_existing_server(&overrides.approved_read_images)?;
-            println!("qq server already running at {}", connection.address());
-        }
-        server::ReserveOutcome::Reserved(reservation) => {
-            let factory = runtime::RuntimeFactory::system_with_read_images(
-                cli::HOST_BUILD,
-                overrides.approved_read_images.clone(),
-            )?;
-            // The server's own configuration decides the approval wait for
-            // every session it serves: a server-side control, not one a
-            // client forwards. Absent is no deadline. A
-            // configuration that does not load yet (no model, untrusted
-            // project) still serves; it simply has no bound.
-            let request = config::LoadRequest::from_current_process(None)?;
-            let approval_timeout = {
-                let factory = factory.clone();
-                tokio::task::spawn_blocking(move || {
-                    factory
-                        .load_for_client(&request)
-                        .ok()
-                        .and_then(|snapshot| snapshot.approval_timeout())
-                })
-                .await?
-            };
-            let handler =
-                Arc::new(runtime::RuntimeHandler::open_owned(factory, approval_timeout).await?);
-            let identity = handler.server_identity(None);
-            let server = match reservation.start(handler.clone(), identity) {
-                Ok(server) => server,
-                Err(error) => {
-                    // The runtime opened but never served; settle it so the
-                    // store closes cleanly before reporting the failure.
-                    let _ = handler.shutdown().await;
-                    return Err(error.into());
-                }
-            };
-            let embedded = EmbeddedRuntime { server, handler };
-            println!(
-                "qq server listening at {}",
-                embedded.server.connection().address()
-            );
-            let signal_result = tokio::signal::ctrl_c().await;
-            let shutdown_result = embedded.shutdown().await;
-            signal_result?;
-            shutdown_result?;
-        }
-    }
-    Ok(())
+    let listen = daemon::Listen {
+        bind,
+        allow_origins: allow_origins.to_vec(),
+    };
+    daemon::host(
+        &server::ServerPaths::for_user()?,
+        &listen,
+        overrides,
+        daemon::Host::Serve,
+    )
+    .await
 }
 
 struct EmbeddedRuntime {

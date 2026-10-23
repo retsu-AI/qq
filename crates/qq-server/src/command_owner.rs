@@ -32,7 +32,7 @@ impl ServerReservation {
     /// of the journal and must shut it down after stopping this listener.
     pub fn start_command_owner(self, owner: CommandOwner) -> Result<ServerHandle, ServerError> {
         let identity = ServerIdentity::new(owner.store_id(), Some("qq-command-owner"));
-        self.start_with(identity, |connection, _| router(owner, connection))
+        self.start_with(identity, |connection, _, _| router(owner, connection))
     }
 }
 

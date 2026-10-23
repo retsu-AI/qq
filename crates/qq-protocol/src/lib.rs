@@ -240,6 +240,11 @@ pub struct ServerInfo {
     pub display_name: String,
 }
 
+/// `POST` asks a daemon or `qq serve` to stop; it answers `202` with its
+/// `ServerInfo` before stopping. A server embedded in another client answers
+/// `404`. The body is ignored.
+pub const DAEMON_SHUTDOWN_PATH: &str = "/v1/daemon/shutdown";
+
 /// Longest `ServerInfo.display_name` a server may advertise, in bytes.
 pub const MAX_DISPLAY_NAME_BYTES: usize = 64;
 

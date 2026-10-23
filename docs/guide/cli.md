@@ -80,8 +80,23 @@ changes on bare resume require supplying an objective explicitly.
 
 ## `qq serve [--bind ADDR] [--allow-origin ORIGIN]…`
 
-The user-scoped server in the foreground. Default bind `127.0.0.1:0`.
+The user-scoped server in the foreground. Default bind `127.0.0.1:0`. The same
+server as `qq daemon run`.
 [Headless](headless.md#qq-serve--a-persistent-server).
+
+## `qq daemon …`
+
+The per-user daemon: one background `qq` that owns the session store and
+serves clients until it is stopped.
+[Headless](headless.md#qq-daemon--a-background-server).
+
+| Subcommand | Behavior |
+| --- | --- |
+| `run [--bind ADDR] [--allow-origin ORIGIN]…` | serve in the foreground until stopped, SIGTERM or `Ctrl-C` |
+| `run --detach` | start in the background and return once it serves; report an already running daemon instead |
+| `status` | print the running daemon's address, pid, version and log path; exit 1 when none runs |
+| `stop` | ask the daemon to stop and wait until it has closed the store |
+| `restart [--bind ADDR] [--allow-origin ORIGIN]…` | `stop`, then start this binary with `--detach` |
 
 ## `qq goal …`
 

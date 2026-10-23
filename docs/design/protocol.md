@@ -622,6 +622,7 @@ POST /v1/runs/steer
 POST /v1/runs/cancel
 POST /v1/tools/approvals
 GET  /v1/workspaces/{workspace_id}/events
+POST /v1/daemon/shutdown
 ```
 
 Each command route accepts only its matching `SessionCommand` variant. Sending
@@ -650,6 +651,16 @@ configured label, else the host name, else `qq`.
 
 `ServerInfo` tolerates unknown fields so a client built against an older
 revision still reads a newer server's answer and reports the mismatch.
+
+### `POST /v1/daemon/shutdown`
+
+Asks a server started by `qq daemon run` or `qq serve` to stop. The body is
+ignored. The server answers `202` with its `ServerInfo` before it stops, so a
+caller can wait for that process: it stops accepting work, settles every
+queued and running run as cancelled, closes the store, and exits. A server
+embedded in an interactive `qq` answers `404`; quitting that `qq` stops it.
+Older servers answer `404` too. The route is additive and does not change
+`PROTOCOL_VERSION`.
 
 ### `POST /v1/capabilities`
 
