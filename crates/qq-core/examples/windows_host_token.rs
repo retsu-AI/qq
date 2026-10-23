@@ -61,6 +61,31 @@ mod proof {
                 .map_err(err)?;
         let outcome = (|| {
             let user = win_custody::current_user_sid_string()?;
+            // Keep the LPAC package identity separate from the ordinary
+            // NT-authority group SID used by the host's write-only restriction.
+            let (groups, _capabilities) =
+                firehazard_sid::derive_capability_sids_from_name(format!("{name}.write").as_str())
+                    .map_err(|error| {
+                        admission_error("DeriveCapabilitySidsFromName(task group)", error)
+                    })?;
+            if groups.len() != 1 {
+                return Err(err(format!(
+                    "expected one task group SID, got {}",
+                    groups.len()
+                )));
+            }
+            let write_sid = firehazard_sid::convert_sid_to_string_sid_a(&groups[0])
+                .ok_or_else(|| err("ConvertSidToStringSidA(task group): missing SID"))?
+                .to_string();
+            if !write_sid.starts_with("S-1-5-") || write_sid == profile.sid.as_string() {
+                return Err(err(
+                    "task write SID must have NT authority and differ from the package",
+                ));
+            }
+            println!(
+                "task write group SID={write_sid}; LPAC package SID={}",
+                profile.sid
+            );
             // All ACL changes are confined to these freshly created objects.
             set_acl(
                 root,
@@ -68,7 +93,10 @@ mod proof {
             )?;
             set_acl(
                 &workspace,
-                &format!("D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;{})", profile.sid),
+                &format!(
+                    "D:P(A;OICI;FA;;;{user})(A;OICI;FA;;;{})(A;OICI;FA;;;{write_sid})",
+                    profile.sid
+                ),
             )?;
             set_acl(
                 &outside,
@@ -88,6 +116,7 @@ mod proof {
                 &payload,
                 &format!("D:P(A;;FA;;;{user})(A;;FRFX;;;{})", profile.sid),
             )?;
+            fs::write(workspace.join("expected-write-sid.txt"), &write_sid)?;
             // Match the established native fixture: ordinary AppContainer must
             // read this exact AAP-only input before LPAC denial is meaningful.
             launch_lpac(root, &name, "ordinary")?;
@@ -98,7 +127,10 @@ mod proof {
             }
             let ordinary: serde_json::Value =
                 serde_json::from_slice(&fs::read(workspace.join("token-ordinary.json"))?)?;
-            if ordinary["is_appcontainer"] != true || ordinary["package_matches"] != true {
+            if ordinary["is_appcontainer"] != true
+                || ordinary["package_matches"] != true
+                || ordinary["task_sid_present"] != false
+            {
                 return Err(err("ordinary AppContainer token identity mismatch"));
             }
             println!("ordinary AppContainer: exact AAP-only bytes readable");
@@ -114,7 +146,7 @@ mod proof {
                 "control: task write, OS/public reads, private-read denial and ARAP outside write passed"
             );
             fs::write(&outside, b"original")?;
-            launch_restricted_helper(root, &name, profile.sid.as_string())?;
+            launch_restricted_helper(root, &name, &write_sid)?;
             assert_results(root, "filtered", "denied")?;
             if fs::read(&outside)? != b"original" {
                 return Err(err("filtered LPAC changed the outside canary"));
@@ -280,7 +312,9 @@ mod proof {
         )
         .map_err(err)?;
         let restricted = token.restricted_sids().map_err(err)?;
-        let expected = firehazard::convert_string_sid_to_sid_a(package).map_err(err)?;
+        let write_sid = fs::read_to_string(task.join("expected-write-sid.txt"))?;
+        let expected = firehazard::convert_string_sid_to_sid_a(write_sid.as_str())
+            .map_err(|error| admission_error("ConvertStringSidToSid(payload task group)", error))?;
         let task_sid_present = restricted
             .groups()
             .iter()
@@ -291,6 +325,7 @@ mod proof {
             "access_information_flags": access_flags,
             "restricted_sid_count": restricted.group_count(),
             "task_sid_present": task_sid_present,
+            "task_group_sid": write_sid,
             "is_appcontainer": app.is_appcontainer,
             "is_lpac": app.is_lpac,
             "package_matches": app.package_sid.as_ref().is_some_and(|sid| sid.as_string() == package),
@@ -363,7 +398,7 @@ mod proof {
         }
         if witness["is_appcontainer"] != true
             || witness["package_matches"] != true
-            || (mode == "filtered" && witness["task_sid_present"] != true)
+            || witness["task_sid_present"] != (mode == "filtered")
             || fs::read(task.join(format!("task-{mode}.txt")))? != b"task-written"
             || fs::read(task.join(format!("public-{mode}.txt")))? != b"public-input"
             || image? != source
@@ -397,12 +432,12 @@ mod proof {
         io::Error::new(source.kind(), AdmissionError { operation, source })
     }
 
-    fn launch_restricted_helper(root: &Path, name: &str, package: &str) -> io::Result<()> {
+    fn launch_restricted_helper(root: &Path, name: &str, write_sid: &str) -> io::Result<()> {
         use firehazard::{job, process, token};
         let host =
             firehazard::open_process_token(firehazard::get_current_process(), token::ALL_ACCESS)
                 .map_err(|error| admission_error("OpenProcessToken(host)", error))?;
-        let sid = firehazard::convert_string_sid_to_sid_a(package)
+        let sid = firehazard::convert_string_sid_to_sid_a(write_sid)
             .map_err(|error| admission_error("ConvertStringSidToSid(task)", error))?;
         let flags = token::DISABLE_MAX_PRIVILEGE | token::WRITE_RESTRICTED;
         let restricting = [firehazard::sid::AndAttributes::new(&sid, None)];
