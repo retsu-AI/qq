@@ -1,12 +1,16 @@
 // Dev-server-only fixture: no engine, credentials or model calls.
 import { createRoot } from "react-dom/client";
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
-import { mockIPC } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import { Sidebar } from "../src/components/Sidebar";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import type { Item, ProjectState } from "../src/lib/types";
 import { getPreferences, setPreferences } from "../src/lib/preferences";
+import { openGoalDialog } from "../src/lib/goal-ui";
+import { showWorktreeDialog } from "../src/lib/worktree-dialog";
+import { showProviders, start } from "../src/lib/store";
 import "../src/styles.css";
 
 const count = Math.min(
@@ -438,4 +442,167 @@ function Fixture() {
     </>
   );
 }
-createRoot(document.getElementById("root")!).render(<Fixture />);
+// `?app`: the real App (title bar, store, dialogs) over mocked IPC and events.
+// `welcome` opens no project, `empty` shows a new session's starters,
+// `signed-out` has no models, `trust` holds the project's configuration, and
+// `open=palette|providers|worktree|goal|menu-file` opens that overlay.
+async function renderApp() {
+  const query = new URLSearchParams(location.search);
+  if (query.has("empty")) {
+    project.focused = null;
+    project.transcript = null;
+  }
+  if (query.has("signed-out")) project.models = [];
+  const info = {
+    id: project.project_id,
+    path: project.path,
+    name: project.name,
+    worktree: null,
+  };
+  mockWindows("main");
+  mockIPC(
+    async (command) => {
+      switch (command) {
+        case "plugin:window|is_maximized":
+          return false;
+        case "plugin:app|version":
+          return "0.0.0-fixture";
+        case "recent_projects":
+          return [
+            info,
+            { ...info, id: "other", path: "C:/temporary/api", name: "api" },
+            {
+              id: "wt",
+              path: "C:/temporary/qq-render-fixture-retry",
+              name: "qq-render-fixture-retry",
+              worktree: {
+                branch: "retry-backoff",
+                main_path: project.path,
+                main_name: project.name,
+              },
+            },
+          ];
+        case "launch_paths":
+          return [];
+        case "open_project":
+          return info;
+        case "refresh":
+          await emit("project-state", project);
+          return undefined;
+        case "project_trust":
+          return query.has("trust")
+            ? [
+                {
+                  path: ".qq/config.ron",
+                  sections: ["mcp_servers", "policy"],
+                  declarations: ["mcp_servers.github", "policy.shell.allow"],
+                },
+              ]
+            : [];
+        case "git_status":
+          return {
+            repo: true,
+            branch: "retry-backoff",
+            upstream: "origin/retry-backoff",
+            ahead: 2,
+            behind: 0,
+            changed: 3,
+            conflicted: 0,
+            pr: {
+              number: 42,
+              state: "OPEN",
+              draft: true,
+              title: "Exponential retry backoff",
+              url: "https://example.invalid/pull/42",
+            },
+            gh: true,
+          };
+        case "goal_defaults":
+          return {
+            duration_ms: 3_600_000,
+            max_duration_ms: 86_400_000,
+            default_runs: 20,
+            max_runs: 200,
+            check_timeout_ms: 600_000,
+          };
+        case "auth_providers":
+          return [
+            {
+              id: "anthropic",
+              stored: "keyring",
+              environment: null,
+              accepts_key: true,
+              browser_sign_in: true,
+              recommended_model: "anthropic/fixture",
+            },
+            {
+              id: "openai-codex",
+              stored: null,
+              environment: null,
+              accepts_key: false,
+              browser_sign_in: true,
+              recommended_model: "openai-codex/fixture",
+            },
+            {
+              id: "openai",
+              stored: null,
+              environment: "OPENAI_API_KEY",
+              accepts_key: true,
+              browser_sign_in: false,
+              recommended_model: "openai/fixture",
+            },
+            {
+              id: "google",
+              stored: null,
+              environment: null,
+              accepts_key: true,
+              browser_sign_in: false,
+              recommended_model: "google/fixture",
+            },
+          ];
+        case "complete_mention":
+          return ["src/lib/retry.rs", "src/lib/mod.rs", "README.md"];
+        default:
+          return undefined;
+      }
+    },
+    { shouldMockEvents: true },
+  );
+  try {
+    localStorage.setItem(
+      "qq.openProjects",
+      JSON.stringify(query.has("welcome") ? [] : [project.path]),
+    );
+  } catch {
+    // Without storage the fixture opens the welcome screen.
+  }
+  // Imported after the mocks: the title bar resolves its window on import.
+  const { App } = await import("../src/App");
+  createRoot(document.getElementById("root")!).render(<App />);
+  await start();
+  // After the first commit, so the title bar's key handler is listening.
+  await new Promise((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(resolve)),
+  );
+  const opened = query.get("open");
+  if (opened === "palette" || opened?.startsWith("menu-"))
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: opened === "palette" ? "k" : opened.slice(5, 6),
+        ctrlKey: opened === "palette",
+        altKey: opened !== "palette",
+      }),
+    );
+  else if (opened === "providers") showProviders(true);
+  else if (opened === "worktree") showWorktreeDialog(project.project_id);
+  else if (opened === "goal")
+    openGoalDialog({
+      projectId: project.project_id,
+      sessionId: project.focused ?? "s0",
+      objective: "Make retry backoff exponential, capped at 5 s, with tests.",
+      edit: false,
+    });
+}
+
+if (new URLSearchParams(location.search).has("app")) void renderApp();
+else createRoot(document.getElementById("root")!).render(<Fixture />);
