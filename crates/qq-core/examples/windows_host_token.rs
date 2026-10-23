@@ -153,7 +153,7 @@ mod proof {
             exe: Path::new(&windows).join("System32/cmd.exe"),
             cmdline: Some(format!("cmd.exe /d /c {mode}.cmd")),
             cwd: Some(root.join("task")),
-            env: Some(rappct::merge_parent_env(vec![
+            env: Some(rappct::launch::merge_parent_env(vec![
                 ("SystemRoot".into(), windows.clone()),
                 (
                     "PATH".into(),
