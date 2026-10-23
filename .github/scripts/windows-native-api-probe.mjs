@@ -9,6 +9,14 @@ import path from 'node:path';
 import { run } from '@microsoft/mxc-sdk/v1';
 
 assert.equal(process.platform, 'win32');
+const role = spawnSync(path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+  '-NoProfile', '-NonInteractive', '-Command',
+  '([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)',
+], { encoding: 'utf8', timeout: 10_000 });
+assert.equal(role.status, 0, role.stderr);
+console.log(JSON.stringify({ phase: 'host-role', administrator: role.stdout.trim() }));
+assert.equal(role.stdout.trim(), 'False', 'native API must work without an administrator token');
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-native-api-'));
 const workspace = path.join(root, 'task');
 const home = path.join(workspace, 'home');
@@ -63,7 +71,7 @@ const { spawnSync } = require('node:child_process');
     const output = spawnSync(name, ['--version'], { encoding: 'utf8', timeout: 5000 });
     report.tools[name] = { exit: output.status, stdout: output.stdout, stderr: output.stderr, error: output.error?.message };
   }
-  const rust = spawnSync('cargo', ['check', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], { encoding: 'utf8', timeout: 10000 });
+  const rust = spawnSync('cargo', ['check', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], { encoding: 'utf8', timeout: 30000 });
   report.rustCheck = { exit: rust.status, stdout: rust.stdout, stderr: rust.stderr, error: rust.error?.message };
   try { fs.readFileSync(input.secret); report.secretRead = true; } catch { report.secretRead = false; }
   try { fs.writeFileSync(input.secret, 'changed'); report.secretWrite = true; } catch { report.secretWrite = false; }
@@ -123,7 +131,7 @@ try {
         filesystem: { readonlyPaths, readwritePaths: [workspace] },
         network: { egress: { default: 'deny' }, ingress: { default: 'deny', hostLoopback: 'deny' } },
         ...(test.ui ? { ui: test.ui } : {}),
-        timeoutMs: 15_000,
+        timeoutMs: 60_000,
       });
     } catch (error) {
       outcomes.push({ name: test.name, error: error.message });

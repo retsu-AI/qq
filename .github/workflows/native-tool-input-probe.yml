@@ -81,13 +81,22 @@ jobs:
       - name: Exercise native API tool access and denial behavior
         shell: pwsh
         run: |
-          $probeDirectory = Join-Path $env:RUNNER_TEMP 'qq-mxc-api-probe'
+          $probeDirectory = Join-Path $env:TEMP 'qq-mxc-api-probe'
           New-Item -ItemType Directory -Force $probeDirectory | Out-Null
           npm install --prefix $probeDirectory --ignore-scripts --no-audit --no-fund @microsoft/mxc-sdk@1.0.1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Copy-Item .github/scripts/windows-native-api-probe.mjs $probeDirectory
-          node (Join-Path $probeDirectory 'windows-native-api-probe.mjs')
-          exit $LASTEXITCODE
+          $tools = @((Get-Command node.exe).Source, (Get-Command cargo.exe).Source)
+          $rustup = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          $roots = @($env:SystemRoot, $rustup) + $tools + @($tools | ForEach-Object { Split-Path $_ })
+          $before = @($roots | ForEach-Object { (Get-Acl -LiteralPath $_).Sddl })
+          Add-Type -Path .github/scripts/windows-basic-user-probe.cs
+          $log = Join-Path $probeDirectory 'basic-user.log'
+          $code = [BasicUserProbe]::Run($tools[0], (Join-Path $probeDirectory 'windows-native-api-probe.mjs'), $log)
+          Get-Content $log
+          $after = @($roots | ForEach-Object { (Get-Acl -LiteralPath $_).Sddl })
+          if (Compare-Object $before $after) { throw 'Native API probe changed host tool security descriptors' }
+          if ($code -ne 0) { throw "Basic-user native API fixture failed: $code" }
       - name: Verify the API probe did not change null-device security
         if: always()
         shell: pwsh
