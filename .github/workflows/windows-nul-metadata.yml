@@ -1,0 +1,31 @@
+name: Windows NUL metadata
+on:
+  push:
+    branches: [test/windows-nul-metadata]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  metadata:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-nul-metadata-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Compile metadata-only safe API probe
+        run: cargo build --locked -p qq-core --example windows_nul_metadata
+      - name: Read NUL metadata and compare handle access without changing ACLs
+        run: .\target\debug\examples\windows_nul_metadata.exe
