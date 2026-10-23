@@ -1961,6 +1961,11 @@ impl RunState {
                                         && run.summary_fold.split(Arc::make_mut(messages))
                                     {
                                         run.summary_fold_text.clear();
+                                        // A split abandons this reply. Its truncation
+                                        // streak must not limit the fresh smaller request.
+                                        recovery.output_continuations = 0;
+                                        recovery.reasoning_only_truncations = 0;
+                                        recovery.empty_output_retries = 0;
                                         yield TurnStep::Emit(RuntimeEvent::AssistantTurnCompleted {
                                             model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
                                             turn_ordinal,

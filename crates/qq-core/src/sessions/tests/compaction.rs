@@ -1637,7 +1637,10 @@ async fn manual_fold_restart_discards_abandoned_truncated_summary() {
         AutoCompactScript::Text("evidence ".repeat(12_000)),
         AutoCompactScript::Sequence(vec![
             AutoCompactScript::Truncated("ABANDONED partial summary".to_owned()),
+            AutoCompactScript::Truncated("ABANDONED second fragment".to_owned()),
+            AutoCompactScript::Truncated("ABANDONED third fragment".to_owned()),
             AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Truncated("RESTARTED prefix\n".to_owned()),
             AutoCompactScript::Text(valid_summary("intermediate")),
             AutoCompactScript::Text(valid_summary("FINAL_RESTART")),
         ]),
@@ -1646,7 +1649,10 @@ async fn manual_fold_restart_discards_abandoned_truncated_summary() {
     let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
     collect_until(&mut harness.events, finished_for(seed)).await;
     let run = compact_session(&harness.runtime, harness.session_id).await;
-    collect_through_compacted(&mut harness.events).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run
+    )), "{observed:?}");
     let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
     let summary: String = connection
         .query_row(
@@ -1658,8 +1664,8 @@ async fn manual_fold_restart_discards_abandoned_truncated_summary() {
     assert!(summary.contains("FINAL_RESTART"));
     assert!(!summary.contains("ABANDONED"));
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
-    assert!(!request_texts(&requests[4]).join("\n").contains("ABANDONED"));
+    assert_eq!(requests.len(), 8);
+    assert!(!request_texts(&requests[7]).join("\n").contains("ABANDONED"));
 }
 
 #[tokio::test]
@@ -6964,4 +6970,55 @@ async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_message
         .await
         .unwrap();
     store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_empty_final_fold_preserves_the_uncompacted_transcript() {
+    let evidence = "UNSUMMARIZED FINAL PORTION ".repeat(6_000);
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text(evidence.clone()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("PRECEDING PORTION ONLY")),
+            AutoCompactScript::Text(String::new()),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+        "an empty final response must not advance the cutoff: {observed:?}"
+    );
+    assert!(
+        observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { failure }, .. }
+                if *run_id == run && failure.message.contains("empty summary")
+        )),
+        "{observed:?}"
+    );
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let markers: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+            [harness.session_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        markers, 0,
+        "failed final folds must leave the cutoff unchanged"
+    );
+    let context = load_model_context(&connection, harness.session_id, u64::MAX).unwrap();
+    assert!(
+        context
+            .iter()
+            .flat_map(Message::content)
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == &evidence))
+    );
+    assert_eq!(harness.requests.lock().unwrap().len(), 4);
 }

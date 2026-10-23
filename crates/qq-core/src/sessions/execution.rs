@@ -2571,15 +2571,15 @@ async fn execute_started_run(
                         accounting.record_review(None, None);
                     }
                     if calls.is_empty() {
+                        // A fresh response supersedes the previous portion,
+                        // even when the provider emits no text. Continuations
+                        // append every block verbatim to the visible prefix.
+                        if !summary_continues_truncated_turn {
+                            summary_text.clear();
+                        }
                         for block in message.content() {
                             if let ContentBlock::Text { text } = block {
-                                if !summary_text.is_empty() && !summary_continues_truncated_turn {
-                                    // A later non-continuation reply supersedes a
-                                    // completed partial fold, rather than joining it.
-                                    summary_text.clear();
-                                }
                                 summary_text.push_str(text);
-                                summary_continues_truncated_turn = false;
                             }
                         }
                         summary_continues_truncated_turn = truncated;
