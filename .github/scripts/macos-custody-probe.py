@@ -189,7 +189,7 @@ class ExitWatch:
                 self.pending.discard(event.ident)
 
 
-def child(address, nonce, role):
+def child(address, nonce, role, root_policy=None):
     # Includes failures before the host authenticates this process. No fixture
     # can wait indefinitely in a protocol read or its own child's waitpid.
     signal.alarm(60)
@@ -201,6 +201,12 @@ def child(address, nonce, role):
         kernel = Kernel()
         unprivileged_coalition()
         send_json(connection, {"nonce": nonce, "role": role, "identity": kernel.identity(os.getpid())})
+        if root_policy is not None:
+            assert role == "guardian"
+            arguments = ["/usr/bin/sandbox-exec", "-p", root_policy,
+                         sys.executable, "-I", str(Path(__file__).resolve()),
+                         "child", address, nonce, "root"]
+            children.append(os.posix_spawn(arguments[0], arguments, dict(os.environ)))
         reader = connection.makefile("rb")
         while True:
             command = reader.readline(32)
@@ -273,7 +279,7 @@ def launch(command, nonce=""):
             process.stdout.close()
 
 
-def host(use_launchservices=False, use_seatbelt=False):
+def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
     kernel = Kernel()
     assert os.geteuid() != 0
     controller = kernel.identity(os.getpid())
@@ -331,7 +337,11 @@ def host(use_launchservices=False, use_seatbelt=False):
                         "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))",
                         "(allow network-outbound (literal " + json.dumps(address) + "))",
                     ])
-                    arguments = ["/usr/bin/sandbox-exec", "-p", policy, *arguments]
+                    if use_guardian:
+                        arguments = [sys.executable, "-I", str(Path(__file__).resolve()),
+                                     "guardian", address, nonce, policy]
+                    else:
+                        arguments = ["/usr/bin/sandbox-exec", "-p", policy, *arguments]
                 if use_launchservices:
                     bundle = Path(temporary) / f"{role}.app"
                     executable = bundle / "Contents" / "MacOS" / "worker"
@@ -367,6 +377,8 @@ def host(use_launchservices=False, use_seatbelt=False):
                 print(json.dumps({"launch": launched[-1]}), flush=True)
                 assert code == 0, "launchd did not accept the fixture"
                 try:
+                    if use_guardian and role == "root":
+                        accept("guardian")
                     accept(role)
                 except Exception:
                     for stream in ("stdout", "stderr"):
@@ -382,11 +394,16 @@ def host(use_launchservices=False, use_seatbelt=False):
             coalitions = [controller["coalitions"][0], root["coalitions"][0], sentinel["coalitions"][0]]
             assert 0 not in coalitions and len(set(coalitions)) == 3, "coalitions are not private"
             connection, reader, _ = fixtures["root"]
+            if use_guardian:
+                guardian = fixtures["guardian"][2]
+                assert guardian["coalitions"][0] == root["coalitions"][0]
+                assert guardian["unique"] != root["unique"]
             if use_seatbelt:
-                connection.sendall(f"signal {sentinel['pid']}\n".encode())
+                protected = guardian if use_guardian else sentinel
+                connection.sendall(f"signal {protected['pid']}\n".encode())
                 result = read_json(reader)
                 assert result == {"signal_errno": errno.EPERM}, result
-                ping("sentinel")
+                ping("guardian" if use_guardian else "sentinel")
                 print(json.dumps({"seatbelt_signal_boundary": "enforced"}), flush=True)
             connection.sendall(b"spawn\n")
             spawned = read_json(reader)["spawned"]
@@ -401,10 +418,18 @@ def host(use_launchservices=False, use_seatbelt=False):
             ping("sentinel")
             members = kernel.members(root["coalitions"][0])
             assert escaped["unique"] in {item["unique"] for item in members}
-            assert all(item["unique"] in {root["unique"], escaped["unique"]} for item in members), "unexpected coalition members"
+            allowed = {root["unique"], escaped["unique"]}
+            if use_guardian:
+                allowed.add(guardian["unique"])
+                assert guardian["unique"] in {item["unique"] for item in members}
+                ping("guardian")
+            assert all(item["unique"] in allowed for item in members), "unexpected coalition members"
             assert kernel.send(escaped, signal.SIGKILL) == 0
             assert fixtures["escaped"][1].read(1) == b"", "escaped child did not exit"
             ping("sentinel")
+            if use_guardian:
+                ping("guardian")
+                print(json.dumps({"protected_guardian": guardian, "escaped_child_stopped": True}), flush=True)
         finally:
             try:
                 signal_errors = []
@@ -447,14 +472,17 @@ if __name__ == "__main__":
     elif sys.argv[1:] == ["layout-check"]:
         layouts()
         print("LP64 probe layouts checked")
-    elif sys.argv[1:] in (["host"], ["launchservices"], ["launchservices-seatbelt"]):
+    elif sys.argv[1:] in (["host"], ["launchservices"], ["launchservices-seatbelt"], ["launchservices-guardian"]):
         try:
             host(use_launchservices=sys.argv[1] != "host",
-                 use_seatbelt=sys.argv[1] == "launchservices-seatbelt")
+                 use_seatbelt=sys.argv[1] in ("launchservices-seatbelt", "launchservices-guardian"),
+                 use_guardian=sys.argv[1] == "launchservices-guardian")
         except Exception as error:
             print(json.dumps({"prerequisites_passed": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
             raise
+    elif len(sys.argv) == 5 and sys.argv[1] == "guardian":
+        child(sys.argv[2], sys.argv[3], "guardian", root_policy=sys.argv[4])
     elif len(sys.argv) == 5 and sys.argv[1] == "child":
         child(*sys.argv[2:])
     else:
-        raise SystemExit("usage: macos-custody-probe.py host|launchservices|launchservices-seatbelt|seatbelt-nesting|layout-check|child ADDRESS NONCE ROLE")
+        raise SystemExit("usage: macos-custody-probe.py host|launchservices|launchservices-seatbelt|launchservices-guardian|seatbelt-nesting|layout-check|child ADDRESS NONCE ROLE")
