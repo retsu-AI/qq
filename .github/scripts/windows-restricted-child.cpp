@@ -51,7 +51,7 @@ static void contained(HANDLE token) {
     if (*reinterpret_cast<const DWORD*>(bytes.data()) != 1) throw std::runtime_error("token lost AppContainer isolation");
 }
 
-static std::vector<wchar_t> environment() {
+static std::vector<wchar_t> environment(const std::map<std::wstring, std::wstring>& additions = {}) {
     LPWCH block = GetEnvironmentStringsW();
     if (!block) throw std::runtime_error("GetEnvironmentStringsW failed");
     std::map<std::wstring, std::wstring> values;
@@ -69,6 +69,7 @@ static std::vector<wchar_t> environment() {
     values[L"TEMP"] = home->second + L"\\tmp";
     values[L"TMP"] = home->second + L"\\tmp";
     values[L"LOCALAPPDATA"] = home->second + L"\\AppData\\Local";
+    for (const auto& [name, value] : additions) values[name] = value;
     std::vector<wchar_t> result;
     for (const auto& [name, value] : values) {
         const auto entry = name + L"=" + value;
@@ -115,6 +116,23 @@ static int inspect() {
 // Do not infer permission failure from Node's path loader. Probe each Win32
 // access mask directly, without changing any file or existing security object.
 static int inspect_files() {
+    wchar_t ready_text[64]{}, release_text[64]{};
+    if (GetEnvironmentVariableW(L"QQ_NATIVE_READY_HANDLE", ready_text, 64)) {
+        require(GetEnvironmentVariableW(L"QQ_NATIVE_RELEASE_HANDLE", release_text, 64) != 0, "view release handle");
+        const auto handle = [](const wchar_t* text) {
+            wchar_t* end = nullptr;
+            const auto value = wcstoull(text, &end, 10);
+            if (!value || !end || *end || static_cast<unsigned long long>(static_cast<UINT_PTR>(value)) != value) {
+                throw std::runtime_error("invalid view synchronization handle");
+            }
+            return reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(value));
+        };
+        Handle ready, release;
+        ready.value = handle(ready_text);
+        release.value = handle(release_text);
+        require(SetEvent(ready.value), "view source ready");
+        if (WaitForSingleObject(release.value, 15000) != WAIT_OBJECT_0) throw std::runtime_error("view source release failed");
+    }
     inspect();
     wchar_t current[32768]{};
     require(GetCurrentDirectoryW(32768, current) != 0, "GetCurrentDirectoryW");
@@ -470,7 +488,7 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
     std::cerr << "private device map installed; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -561,16 +579,24 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     PROCESS_INFORMATION source{};
     // Outside the explicit control case, the source is never resumed. Its
     // primary token gives the exact identity of this newly created policy.
-    LPWCH inherited_environment = GetEnvironmentStringsW();
-    require(inherited_environment != nullptr, "native policy environment");
+    Handle ready, release;
+    std::map<std::wstring, std::wstring> additions;
+    if (after_ready) {
+        SECURITY_ATTRIBUTES synchronization{ static_cast<DWORD>(sizeof(SECURITY_ATTRIBUTES)), nullptr, TRUE };
+        ready.value = CreateEventW(&synchronization, TRUE, FALSE, nullptr);
+        release.value = CreateEventW(&synchronization, TRUE, FALSE, nullptr);
+        require(ready.value != nullptr && release.value != nullptr, "view synchronization events");
+        additions[L"QQ_NATIVE_READY_HANDLE"] = std::to_wstring(reinterpret_cast<UINT_PTR>(ready.value));
+        additions[L"QQ_NATIVE_RELEASE_HANDLE"] = std::to_wstring(reinterpret_cast<UINT_PTR>(release.value));
+    }
+    auto source_environment = ::environment(additions);
     const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
     const BOOL launched = restrict_host
         ? CreateProcessAsUserW(restricted_host.value, image, mutable_command.data(), nullptr, nullptr, TRUE,
-            flags, inherited_environment, workspace, &startup.StartupInfo, &source)
+            flags, source_environment.data(), workspace, &startup.StartupInfo, &source)
         : CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
-            flags, inherited_environment, workspace, &startup.StartupInfo, &source);
+            flags, source_environment.data(), workspace, &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
-    FreeEnvironmentStringsW(inherited_environment);
     DeleteProcThreadAttributeList(attributes);
     SetLastError(launch_error);
     require(launched, "suspended native policy source");
@@ -591,13 +617,19 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     grant_private_desktop(sid);
     PrivateDeviceMap device_map;
-    if (projected) install_device_map(process.value, sid, device_map);
+    if (projected && !after_ready) install_device_map(process.value, sid, device_map);
     LPWSTR package_text = nullptr;
     require(ConvertSidToStringSidW(sid, &package_text), "native policy package SID");
     auto local_free = [](void* value) { LocalFree(value); };
     std::unique_ptr<void, decltype(local_free)> owned_package(package_text, local_free);
     if (control) {
         if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) throw std::runtime_error("native policy control resume failed");
+        if (after_ready) {
+            const HANDLE waiters[] = { ready.value, process.value };
+            if (WaitForMultipleObjects(2, waiters, FALSE, 15000) != WAIT_OBJECT_0) throw std::runtime_error("source did not reach the post-initialization view handshake");
+            install_device_map(process.value, sid, device_map);
+            require(SetEvent(release.value), "release initialized view source");
+        }
         if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("native policy control wait failed");
         DWORD result = 0;
         require(GetExitCodeProcess(process.value, &result), "native policy control exit");
@@ -612,6 +644,7 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected") return host_create_policy(argv[2], false, true, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"volume-name") {
             wchar_t volume[128]{}, target[32768]{};
