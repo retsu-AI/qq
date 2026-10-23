@@ -2904,7 +2904,6 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "directories",
- "dunce",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",

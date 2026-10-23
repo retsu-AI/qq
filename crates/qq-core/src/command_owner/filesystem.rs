@@ -33,8 +33,9 @@ impl NativeDirectoryGrant {
 /// no implicit home, toolchain, temporary or workspace roots are added.
 /// macOS applies a default-deny Seatbelt profile with these explicit roots;
 /// its loader baseline also permits listing the root directory itself.
-/// It does not create a private mount tree. Windows uses zero-capability LPAC
-/// with object ACL grants, requires isolated networking and currently accepts
+/// It does not create a private mount tree. Windows uses LPAC with the
+/// registryRead capability and object ACL grants, requires isolated networking,
+/// and currently accepts
 /// Host resource policy only. Non-system roots must contain regular, unaliased
 /// files without reparse points. These roots must be private task inputs:
 /// Windows ACL authority follows objects moved outside the original directory.
