@@ -170,6 +170,7 @@ fn capability_matrix_preserves_boundaries_and_records_child_creation() {
                     .collect(),
             ),
             stdio: rappct::StdioConfig::Pipe,
+            suspended: true,
             join_job: Some(rappct::JobLimits {
                 kill_on_job_close: true,
                 ..Default::default()
@@ -184,6 +185,7 @@ fn capability_matrix_preserves_boundaries_and_records_child_creation() {
             Ok(mut child) => {
                 let stdout = capture(child.stdout.take().unwrap());
                 let stderr = capture(child.stderr.take().unwrap());
+                child.resume().unwrap();
                 let status = child.wait(Some(Duration::from_secs(30)));
                 if status.is_err() {
                     child.terminate(1).unwrap();
