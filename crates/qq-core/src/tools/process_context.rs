@@ -133,7 +133,7 @@ impl ExecutionContextReceipt {
     pub(crate) fn valid(&self) -> bool {
         let facts = self.facts();
         facts.pid != 0
-            && facts.base_env_present < 32
+            && usize::from(facts.base_env_present) < (1_usize << BASE_ENV.len())
             && (!matches!(facts.verdict, ExecutionVerdict::VerifiedRead { .. })
                 || (!facts.requested_env
                     && facts.locale != Locale::Other
@@ -225,6 +225,8 @@ pub(crate) struct PreparedLaunch {
     startup: Option<super::linux_owner::Startup>,
     #[cfg(target_os = "macos")]
     macos_startup: Option<super::macos_owner::Startup>,
+    #[cfg(windows)]
+    windows_startup: Option<super::windows_owner::Startup>,
 }
 
 impl PreparedLaunch {
@@ -271,6 +273,29 @@ impl PreparedLaunch {
             .map_err(PreparationError::Macos)?;
         self.command = Some(command);
         self.macos_startup = Some(startup);
+        Ok(self)
+    }
+    #[cfg(windows)]
+    pub(super) fn owned_windows(
+        mut self,
+        owner: &super::windows_owner::WindowsOwner,
+        native: Option<&NativeExecution>,
+        deadline: Instant,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                native,
+                deadline,
+            )
+            .map_err(PreparationError::Windows)?;
+        self.command = Some(command);
+        self.windows_startup = startup;
         Ok(self)
     }
     /// Only stream/process supervision settings may change after verification.
@@ -329,8 +354,10 @@ impl PreparedLaunch {
             command.spawn()?.into()
         };
         #[cfg(windows)]
-        let child = super::windows_job::spawn(
+        let child = super::windows_owner::spawn(
             command,
+            self.windows_startup.take(),
+            piped_stdin,
             self._cwd
                 .take()
                 .ok_or_else(|| std::io::Error::other("launch directory was already consumed"))?,
@@ -362,6 +389,9 @@ pub(crate) enum PreparationError {
     #[cfg(target_os = "macos")]
     #[error("could not establish macOS command isolation: {0}")]
     Macos(#[source] std::io::Error),
+    #[cfg(windows)]
+    #[error("could not establish Windows command isolation: {0}")]
+    Windows(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -557,6 +587,8 @@ pub(super) fn prepare(
         startup: None,
         #[cfg(target_os = "macos")]
         macos_startup: None,
+        #[cfg(windows)]
+        windows_startup: None,
     })
 }
 

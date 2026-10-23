@@ -7,7 +7,22 @@ use std::sync::Arc;
 
 /// Variables every child starts with regardless of the allowlist: enough
 /// for a program to find its tools, home, locale, terminal, and scratch.
+#[cfg(not(windows))]
 pub const BASE_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
+/// Windows loaders require SYSTEMROOT and AppContainer startup requires
+/// LOCALAPPDATA in the child environment.
+/// Capture it with the other base values rather than adding worker ambient
+/// environment after the invocation has been frozen.
+#[cfg(windows)]
+pub const BASE_ENV: [&str; 7] = [
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "LOCALAPPDATA",
+];
 /// Names a call may request per invocation.
 pub const MAX_SHELL_ENV_NAMES: usize = 16;
 /// Names the allowlist may hold.

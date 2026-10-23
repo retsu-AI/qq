@@ -24,6 +24,8 @@ pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
+#[cfg(windows)]
+pub(crate) mod windows_owner;
 pub(crate) use shell::forward_shell_chunk;
 mod specs;
 mod tree;
@@ -5616,3 +5618,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, not(windows)))]
+#[path = "tools/windows_owner/arguments.rs"]
+mod windows_arguments;

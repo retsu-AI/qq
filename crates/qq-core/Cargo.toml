@@ -58,6 +58,10 @@ nix.workspace = true
 seccompiler.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+dunce.workspace = true
+directories.workspace = true
+rappct.workspace = true
+tempfile.workspace = true
 subc-jobobject.workspace = true
 win32job.workspace = true
 win-custody.workspace = true
