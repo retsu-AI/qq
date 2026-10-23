@@ -8,6 +8,9 @@ use qq_provider::test_support::LoopbackServer;
 use serde_json::{Value, json};
 use std::{fs, time::Duration};
 
+// Cover the 120-second native preparation allowance and this finite build.
+const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[tokio::test]
 async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let fixture = super::tests::RuntimeFixture::new();
@@ -124,7 +127,7 @@ fs.writeFileSync('exec-stdin.bin', input);
                 complete,
             ]),
         ],
-        Duration::from_secs(60),
+        OBSERVATION_TIMEOUT,
     );
     fs::write(fixture.path("global/config.ron"), format!(
         r#"(version:1, model:"fake/model", providers:{{"fake":Custom(connection:(base_url:"{}/v1",api:OpenAiResponses,auth:NoAuth),models:{{"model":(name:"Fake")}})}})"#,
@@ -216,7 +219,7 @@ fs.writeFileSync('exec-stdin.bin', input);
         .await
         .unwrap();
     let mut observed = Vec::new();
-    let finished = tokio::time::timeout(Duration::from_secs(60), async {
+    let finished = tokio::time::timeout(OBSERVATION_TIMEOUT, async {
         while let Some(event) = events.next().await {
             let event = event.unwrap();
             let done = matches!(event.event, SessionEvent::RunFinished { .. });
