@@ -45,6 +45,59 @@ pub(super) fn identity(scope: &NativeFilesystem) -> io::Result<String> {
     ))
 }
 
+// Read-only authority belongs to a held directory identity, not to every task
+// that uses it. Writable authority remains tied to the task's package SID.
+fn read_capability_name(grant: &NativeDirectoryGrant) -> io::Result<String> {
+    let bytes = serde_json::to_vec(&grant.identity).map_err(io::Error::other)?;
+    Ok(format!("qq.readonly.v1.{:x}", Sha256::digest(bytes)))
+}
+
+fn read_sid(grant: &NativeDirectoryGrant) -> io::Result<LocalBox<Sid>> {
+    let name = read_capability_name(grant)?;
+    let capabilities =
+        rappct::capability::derive_named_capability_sids(&[&name]).map_err(io::Error::other)?;
+    let [capability] = capabilities.as_slice() else {
+        return Err(io::Error::other(
+            "read-only root requires exactly one capability SID",
+        ));
+    };
+    capability.sid_sddl.parse()
+}
+
+fn system_root() -> io::Result<Option<std::path::PathBuf>> {
+    std::env::var_os("SYSTEMROOT")
+        .map(std::path::PathBuf::from)
+        .map(std::fs::canonicalize)
+        .transpose()
+}
+
+fn system_read(grant: &NativeDirectoryGrant, system: Option<&Path>) -> bool {
+    system.is_some_and(|root| grant.path.starts_with(root))
+}
+
+pub(super) fn capabilities(
+    scope: &NativeFilesystem,
+    package: &AppContainerSid,
+) -> io::Result<rappct::SecurityCapabilities> {
+    let NativeFilesystem::Restricted { read_only, .. } = scope else {
+        return Err(io::Error::other(
+            "Windows AppContainer requires explicit file authority",
+        ));
+    };
+    let system = system_root()?;
+    let mut names = vec!["registryRead".to_owned()];
+    for grant in read_only {
+        if !system_read(grant, system.as_deref()) {
+            names.push(read_capability_name(grant)?);
+        }
+    }
+    rappct::SecurityCapabilitiesBuilder::new(package)
+        .with_named(&names.iter().map(String::as_str).collect::<Vec<_>>())
+        .lpac(true)
+        .build()
+        .map_err(io::Error::other)
+}
+
 pub(super) fn prepare(
     scope: &NativeFilesystem,
     package: &AppContainerSid,
@@ -59,11 +112,8 @@ pub(super) fn prepare(
             "Windows AppContainer requires explicit file authority",
         ));
     };
-    let sid: LocalBox<Sid> = package.as_string().parse()?;
-    let system = std::env::var_os("SYSTEMROOT")
-        .map(std::path::PathBuf::from)
-        .map(std::fs::canonicalize)
-        .transpose()?;
+    let package_sid: LocalBox<Sid> = package.as_string().parse()?;
+    let system = system_root()?;
     let mut held = Vec::new();
     let mut count = 0;
     let lock_security = lock_security()?;
@@ -75,21 +125,25 @@ pub(super) fn prepare(
         .map(|grant| (grant, true))
         .chain(read_only.iter().map(|grant| (grant, false)))
     {
-        let system_read = !writable
-            && system
-                .as_ref()
-                .is_some_and(|root| grant.path.starts_with(root));
+        let system_read = !writable && system_read(grant, system.as_deref());
         let root = open(&grant.path, !system_read)?;
         validate_root(grant, &root)?;
         // LPAC's OS baseline already grants access to Windows system images.
         // Do not recursively change system ACLs or request administrator setup.
 
         if !system_read {
+            let shared_read;
+            let sid = if writable {
+                &package_sid
+            } else {
+                shared_read = read_sid(grant)?;
+                &shared_read
+            };
             walk(
                 &grant.path,
                 root.try_clone()?,
                 writable,
-                &sid,
+                sid,
                 &mut count,
                 deadline,
                 &lock_security,
@@ -406,15 +460,26 @@ mod tests {
             let file = open(path, true).unwrap();
             let security = acl(&file);
             let dacl = security.dacl().unwrap();
+            let NativeFilesystem::Restricted { read_only, .. } = &cases[0].scope else {
+                unreachable!();
+            };
+            let shared_sid = read_sid(&read_only[0]).unwrap();
+            assert_eq!(
+                (0..dacl.len())
+                    .filter_map(|index| dacl.get_ace(index))
+                    .filter(|entry| entry.sid() == Some(&shared_sid)
+                        && entry.mask().bits() & READ_EXECUTE == READ_EXECUTE)
+                    .count(),
+                1
+            );
             for input in &cases {
                 let package =
                     rappct::derive_sid_from_name(&identity(&input.scope).unwrap()).unwrap();
                 let sid: LocalBox<Sid> = package.as_string().parse().unwrap();
                 assert!(
-                    (0..dacl.len())
+                    !(0..dacl.len())
                         .filter_map(|index| dacl.get_ace(index))
-                        .any(|entry| entry.sid() == Some(&sid)
-                            && entry.mask().bits() & READ_EXECUTE == READ_EXECUTE)
+                        .any(|entry| entry.sid() == Some(&sid))
                 );
             }
         }
