@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import select
+import selectors
 import signal
 import socket
 import struct
@@ -161,12 +162,12 @@ def child(address, nonce, role):
     # Includes failures before the host authenticates this process. No fixture
     # can wait indefinitely in a protocol read or its own child's waitpid.
     signal.alarm(60)
-    kernel = Kernel()
     connection = socket.socket(socket.AF_UNIX)
     connection.settimeout(30)
     connection.connect(address)
     children = []
     try:
+        kernel = Kernel()
         unprivileged_coalition()
         send_json(connection, {"nonce": nonce, "role": role, "identity": kernel.identity(os.getpid())})
         reader = connection.makefile("rb")
@@ -196,6 +197,41 @@ def child(address, nonce, role):
                 os.waitpid(pid, 0)
             except ChildProcessError:
                 pass
+
+
+def launch(command, nonce=""):
+    # Drain a strict byte bound rather than retaining arbitrary tool output.
+    deadline = time.monotonic() + 20
+    output = bytearray()
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        with selectors.DefaultSelector() as ready:
+            ready.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                assert remaining > 0, "LaunchServices command timed out"
+                assert ready.select(remaining), "LaunchServices output timed out"
+                chunk = os.read(process.stdout.fileno(), 4096)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                assert len(output) <= 65536, "LaunchServices output exceeded its bound"
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+        return code, output.decode(errors="replace")
+    except Exception as error:
+        diagnostic = output[:4096].decode(errors="replace")
+        if nonce:
+            diagnostic = diagnostic.replace(nonce, "<fixture nonce>")
+        raise RuntimeError(f"{error}: {diagnostic}") from error
+    finally:
+        try:
+            if process.poll() is None:
+                # This is our unreaped direct subprocess, never an enumerated PID.
+                process.kill()
+                process.wait(timeout=10)
+        finally:
+            process.stdout.close()
 
 
 def host():
@@ -243,12 +279,11 @@ def host():
                 command = ["/usr/bin/lsappinfo", "launch", f"execpath={json.dumps(sys.executable)}", "applicationtype=Background", "allowedtobecomefrontmost=false"]
                 for argument in ("-I", str(Path(__file__).resolve()), "child", address, nonce, role):
                     command.extend(["-arg", argument])
-                result = subprocess.run(command, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        timeout=20, check=False)
-                launched.append({"role": role, "code": result.returncode})
+                code, output = launch(command, nonce)
+                launched.append({"role": role, "code": code,
+                                 "output": output[:4096].replace(nonce, "<fixture nonce>")})
                 print(json.dumps({"launch": launched[-1]}), flush=True)
-                assert result.returncode == 0, "LaunchServices did not launch the fixture"
+                assert code == 0, "LaunchServices did not launch the fixture"
                 accept(role)
             root = fixtures["root"][2]
             sentinel = fixtures["sentinel"][2]
