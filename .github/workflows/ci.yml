@@ -183,6 +183,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
+      - name: Investigate native macOS coalition custody prerequisites
+        if: runner.os == 'macOS'
+        run: python3 -I .github/scripts/macos-custody-probe.py host
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
