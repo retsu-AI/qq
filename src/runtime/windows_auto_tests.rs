@@ -328,6 +328,12 @@ fn installed_tool_probe() {
         };
         fs::write(format!("{program}-absolute-version.txt"), bytes).unwrap();
         report["version"] = tool_probe_output(output);
+        report["version_with_piped_stdin"] = tool_probe_output(
+            std::process::Command::new(&path)
+                .stdin(std::process::Stdio::piped())
+                .arg("--version")
+                .output(),
+        );
         report["lookup"] = tool_probe_output(
             std::process::Command::new(&program)
                 .arg("--version")
@@ -349,11 +355,16 @@ fn installed_tool_probe() {
         reports.push(report);
     }
     let secret = input["secret"].as_str().unwrap();
+    let null_device = match fs::OpenOptions::new().read(true).write(true).open("NUL") {
+        Ok(_) => json!({"opened": true}),
+        Err(error) => json!({"error": error.to_string(), "code": error.raw_os_error()}),
+    };
     fs::write(
         "tool-probe-report.json",
         serde_json::to_vec_pretty(&json!({
             "tools": reports,
             "host_secret_readable": fs::File::open(secret).is_ok(),
+            "null_device": null_device,
         }))
         .unwrap(),
     )
