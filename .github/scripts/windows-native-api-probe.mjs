@@ -14,6 +14,10 @@ assert.equal(process.platform, 'win32');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-native-api-'));
 const workspace = path.join(root, 'task');
 const home = path.join(workspace, 'home');
+const softwareRoot = path.join(root, 'installed-input');
+fs.mkdirSync(softwareRoot);
+const softwareFile = path.join(softwareRoot, 'read-only-input.txt');
+fs.writeFileSync(softwareFile, 'host-installed-input');
 fs.mkdirSync(path.join(home, 'tmp'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true });
@@ -94,6 +98,12 @@ const expected = Object.fromEntries(Object.entries(tools).map(([name, executable
   return [name, output.stdout.trim()];
 }));
 let requests = 0;
+function assertHostState() {
+  assert.equal(requests, 0);
+  assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+  assert.equal(fs.readFileSync(softwareFile, 'utf8'), 'host-installed-input',
+    'read-only software must remain immutable through a writable hardlink');
+}
 const server = http.createServer((_request, response) => { requests++; response.end('loopback-canary'); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const endpoint = `http://127.0.0.1:${server.address().port}`;
@@ -102,7 +112,7 @@ fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
 fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
 fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
-fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, endpoint }));
+fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, endpoint, softwareFile }));
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -110,6 +120,16 @@ const path = require('node:path');
 (async () => {
   const input = JSON.parse(fs.readFileSync('input.json', 'utf8'));
   const report = { tools: {} };
+  report.softwareRead = fs.readFileSync(input.softwareFile, 'utf8');
+  const alias = 'software-hardlink';
+  try {
+    fs.linkSync(input.softwareFile, alias);
+    report.hardlinkCreated = true;
+    try { fs.writeFileSync(alias, 'changed-through-hardlink'); report.hardlinkWrite = true; }
+    catch (error) { report.hardlinkWrite = false; report.hardlinkWriteError = error.code; }
+  } catch (error) { report.hardlinkCreated = false; report.hardlinkCreateError = error.code; }
+  finally { try { fs.rmSync(alias, { force: true }); } catch (error) { report.hardlinkCleanupError = error.code; } }
+
   for (const name of ['git', 'node', 'cargo']) {
     const output = spawnSync(name, ['--version'], { encoding: 'utf8', timeout: 5000 });
     report.tools[name] = { exit: output.status, stdout: output.stdout, stderr: output.stderr, error: output.error?.message };
@@ -143,7 +163,7 @@ const readonlyPaths = [...new Set([
   // Git's bin launcher needs the rest of its installation. Cargo's proxy
   // needs Rustup's installed toolchains, but not Cargo's credential directory.
   path.dirname(path.dirname(tools.git)),
-  rustup, compiler.installation, sdk.root,
+  rustup, compiler.installation, sdk.root, softwareRoot,
 ])];
 const ancestorPaths = new Set();
 for (const granted of [...readonlyPaths, workspace]) {
@@ -192,7 +212,7 @@ const cases = [
 const outcomes = [];
 try {
   for (const test of cases) {
-    for (const name of ['report.json', 'artifact.txt']) fs.rmSync(path.join(workspace, name), { force: true });
+    for (const name of ['report.json', 'artifact.txt', 'software-hardlink']) fs.rmSync(path.join(workspace, name), { force: true });
     fs.rmSync(path.join(rustTask, 'target'), { recursive: true, force: true });
     const started = performance.now();
     let output;
@@ -218,8 +238,7 @@ try {
     } catch (error) {
       outcomes.push({ name: test.name, error: error.message });
       console.log(JSON.stringify(outcomes.at(-1)));
-      assert.equal(requests, 0);
-      assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+      assertHostState();
       continue;
     }
     const outcome = { name: test.name, elapsedMs: performance.now() - started, ...output };
@@ -243,11 +262,9 @@ try {
     outcomes.push(outcome);
     console.log(JSON.stringify(outcome));
     // These remain unconditional safety assertions, including failed startups.
-    assert.equal(requests, 0);
-    assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+    assertHostState();
   }
-  assert.equal(requests, 0);
-  assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+  assertHostState();
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.secretRead, true,
     'the public-read control must demonstrate the outside read before evaluating deny policies');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-') && outcome.fileBoundary),
