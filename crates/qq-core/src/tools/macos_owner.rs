@@ -25,7 +25,7 @@ use std::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 mod resources;
 
 const RESOURCE_STOPPED: i32 = i32::MIN;
@@ -464,6 +464,18 @@ fn validate_resources(filesystem: &NativeFilesystem, resources: NativeResources)
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn prepare_profile(
+    filesystem: &NativeFilesystem,
+    resources: NativeResources,
+    network: NativeNetwork,
+    pressure: impl FnOnce() -> io::Result<i32>,
+) -> io::Result<String> {
+    validate_resources(filesystem, resources)?;
+    resources::check_pressure(resources, pressure)?;
+    profile(filesystem, network)
+}
+
 fn validate_environment(packet: &Packet) -> io::Result<()> {
     if packet
         .environment
@@ -535,8 +547,12 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     if NativeWorkspaceIdentity::held(cwd.root())? != packet.cwd_identity {
         return Err(io::Error::other("native working directory changed"));
     }
-    validate_resources(&packet.filesystem, packet.resources)?;
-    let profile = profile(&packet.filesystem, packet.network)?;
+    let profile = prepare_profile(
+        &packet.filesystem,
+        packet.resources,
+        packet.network,
+        resources::memory_pressure_level,
+    )?;
     rustix::process::fchdir(cwd.root())?;
     control.write_all(b"RDY!")?;
     let mut authorization = [0];
@@ -601,6 +617,9 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     // process-group cleanup alone does not account for detached descendants.
     use std::os::unix::process::CommandExt as _;
     command.process_group(0);
+    // Authorization may have waited since preparation. Refuse fresh pressure
+    // before creating even a short-lived payload, not at its first sample.
+    resources::check_pressure(packet.resources, resources::memory_pressure_level)?;
     if unix_ms() >= packet.not_after_ms {
         return Err(io::Error::other("native launch authorization expired"));
     }
@@ -1364,5 +1383,46 @@ printf anchored"#,
         )
         .unwrap_err();
         assert!(error.to_string().contains("directory grant changed"));
+    }
+
+    #[test]
+    fn guarded_preparation_checks_pressure_before_authorizing_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let filesystem = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        let guarded = NativeResources::Guarded {
+            memory_bytes: 1024 * 1024,
+            max_tasks: 2,
+        };
+        for (pressure, accepted) in [
+            (Ok(1), true),
+            (Ok(2), false),
+            (Ok(4), false),
+            (Ok(0), false),
+            (Err(io::Error::other("pressure query unavailable")), false),
+        ] {
+            let mut queried = false;
+            let result = prepare_profile(&filesystem, guarded, NativeNetwork::Isolated, || {
+                queried = true;
+                pressure
+            });
+            assert!(
+                queried,
+                "guarded preparation must query pressure before authorizing execution"
+            );
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+        }
+        assert!(
+            prepare_profile(
+                &filesystem,
+                NativeResources::Host,
+                NativeNetwork::Isolated,
+                || panic!("host resources must not require a pressure query"),
+            )
+            .is_ok()
+        );
     }
 }

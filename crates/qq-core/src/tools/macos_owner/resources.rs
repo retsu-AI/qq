@@ -1,6 +1,7 @@
 //! Sample the payload group whose waitable leader the guardian pins.
 //! Detached descendants are outside these samples. Safeguards are not aggregate quotas.
 use crate::command_owner::NativeResources;
+#[cfg(target_os = "macos")]
 use libproc::{
     bsd_info::BSDInfo,
     pid_rusage::{RUsageInfoV0, pidrusage},
@@ -10,6 +11,7 @@ use libproc::{
 };
 use std::io;
 
+#[cfg(target_os = "macos")]
 pub(super) fn check(policy: NativeResources, leader: rustix::process::Pid) -> io::Result<()> {
     let (memory_bytes, max_tasks) = match policy {
         NativeResources::Host => return Ok(()),
@@ -24,7 +26,7 @@ pub(super) fn check(policy: NativeResources, leader: rustix::process::Pid) -> io
             ));
         }
     };
-    check_pressure_level(memory_pressure_level()?)?;
+    check_pressure(policy, memory_pressure_level)?;
     let group = u32::try_from(leader.as_raw_nonzero().get()).map_err(io::Error::other)?;
     let pids = pids_by_type(ProcFilter::ByProgramGroup { pgrpid: group })?;
     if pids.len() >= pids.capacity() || pids.len() > 4096 {
@@ -97,8 +99,18 @@ pub(super) fn check(policy: NativeResources, leader: rustix::process::Pid) -> io
     Ok(())
 }
 
+pub(super) fn check_pressure(
+    policy: NativeResources,
+    query: impl FnOnce() -> io::Result<i32>,
+) -> io::Result<()> {
+    if matches!(policy, NativeResources::Guarded { .. }) {
+        check_pressure_level(query()?)?;
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
-fn memory_pressure_level() -> io::Result<i32> {
+pub(super) fn memory_pressure_level() -> io::Result<i32> {
     use sysctl::Sysctl as _;
     let value = sysctl::Ctl::new("kern.memorystatus_vm_pressure_level")
         .and_then(|ctl| ctl.value())
@@ -113,7 +125,7 @@ fn memory_pressure_level() -> io::Result<i32> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn check_pressure_level(level: i32) -> io::Result<()> {
+pub(super) fn check_pressure_level(level: i32) -> io::Result<()> {
     // XNU exports the dispatch pressure flags here, not its internal enum.
     // See bsd/kern/kern_memorystatus_notify.c in Apple's XNU sources.
     match level {
