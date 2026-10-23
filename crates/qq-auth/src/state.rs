@@ -5,12 +5,13 @@ use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::MutexGuard,
 };
 
 #[cfg(not(windows))]
 use std::{
+    path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };

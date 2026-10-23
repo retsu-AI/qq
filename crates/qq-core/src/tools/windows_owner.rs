@@ -385,7 +385,11 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         rappct::AppContainerProfile::ensure(&name, "QQ task", Some("QQ native task scope"))
             .map_err(io::Error::other)?;
     let _grants = access::prepare(&packet.filesystem, &profile.sid, packet.not_after_ms)?;
+    // Windows process creation reads OS registry configuration. The native
+    // parent/child regression requires this capability even for a Rust child.
+    // No COM, network, or additional filesystem capability is granted.
     let capabilities = rappct::SecurityCapabilitiesBuilder::new(&profile.sid)
+        .with_named(&["registryRead"])
         .lpac(true)
         .build()
         .map_err(io::Error::other)?;

@@ -221,7 +221,6 @@ tempfile.workspace = true
 nix = { workspace = true, features = ["event"] }
 
 [target.'cfg(windows)'.dev-dependencies]
-dunce.workspace = true
 rappct.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true

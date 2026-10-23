@@ -6,8 +6,8 @@ use std::{
     time::Duration,
 };
 
-#[path = "windows/launch_probe.rs"]
-mod launch_probe;
+#[path = "windows/registry.rs"]
+mod registry;
 
 #[test]
 fn payload_probe() {
@@ -22,10 +22,10 @@ fn payload_probe() {
     let token = rappct::token::query_current_process_token().unwrap();
     assert!(token.is_appcontainer, "{token:?}");
     assert!(token.package_sid.is_some(), "{token:?}");
-    assert!(token.capability_sids.is_empty());
     assert!(std::env::var_os("SYSTEMROOT").is_some());
     assert!(std::env::var_os("LOCALAPPDATA").is_some());
     if mode == "ordinary" {
+        assert!(token.capability_sids.is_empty());
         assert_eq!(
             std::fs::read_to_string(&arguments[index + 1]).unwrap(),
             "aap-visible"
@@ -33,6 +33,19 @@ fn payload_probe() {
         println!("ordinary-appcontainer-can-read-aap");
         return;
     }
+    let expected = rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
+        .with_named(&["registryRead"])
+        .lpac(true)
+        .build()
+        .unwrap();
+    assert_eq!(
+        token.capability_sids,
+        expected
+            .caps
+            .iter()
+            .map(|cap| cap.sid_sddl.clone())
+            .collect::<Vec<_>>()
+    );
     assert_low_privilege_token();
     // TokenIsLessPrivilegedAppContainer is reserved and the SDK maps an
     // unsupported query to false. Verify the defining kernel behavior instead:
@@ -42,9 +55,19 @@ fn payload_probe() {
         std::fs::read(&aap).unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied
     );
+    if mode != "blocked" {
+        registry::assert_host_secret_denied();
+    }
     std::fs::write("probe-pid", std::process::id().to_string()).unwrap();
     match mode {
         "files" | "overlap" | "profile" => {
+            if let Some(expected_package) = arguments.get(index + 1) {
+                assert_eq!(
+                    token.package_sid.as_ref().unwrap().as_string(),
+                    expected_package
+                );
+            }
+            assert_network_denied();
             let outside = std::fs::read_to_string("outside-path").unwrap();
             assert!(std::fs::read(&outside).is_err());
             assert!(std::fs::write(&outside, "escaped").is_err());
@@ -55,6 +78,7 @@ fn payload_probe() {
             std::fs::write("nested/new", "new file").unwrap();
             assert_eq!(std::fs::read_to_string("nested/new").unwrap(), "new file");
         }
+        "registry" => {}
         "network" => assert_network_denied(),
         "descendants" => {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -64,9 +88,9 @@ fn payload_probe() {
                     "--nocapture",
                     "--skip",
                     "qq-windows-probe:files",
+                    token.package_sid.as_ref().unwrap().as_string(),
                 ])
                 .spawn()
-                .inspect_err(|_| diagnose_descendant_launch())
                 .expect("an LPAC payload must be able to start an equally restricted child");
             let status = child.wait().expect("wait for the restricted descendant");
             assert!(status.success(), "restricted descendant failed: {status}");
@@ -117,136 +141,6 @@ fn assert_network_denied() {
                 std::panic::resume_unwind(panic);
             }
         }
-    }
-}
-
-fn diagnose_descendant_launch() {
-    use std::os::windows::{fs::OpenOptionsExt as _, io::AsHandle as _};
-    let executable = std::env::current_exe().unwrap();
-    eprintln!(
-        "[DEBUG-lpac-child] executable: {executable:?}; cwd: {:?}",
-        std::env::current_dir()
-    );
-    eprintln!(
-        "[DEBUG-lpac-child] executable read/execute: {:?}",
-        std::fs::File::options()
-            .access_mode(0x0012_00a9)
-            .open(&executable)
-            .map(drop)
-    );
-    eprintln!(
-        "[DEBUG-lpac-child] stdin duplicate: {:?}",
-        std::io::stdin().as_handle().try_clone_to_owned().map(drop)
-    );
-    eprintln!(
-        "[DEBUG-lpac-child] stdout duplicate: {:?}",
-        std::io::stdout().as_handle().try_clone_to_owned().map(drop)
-    );
-    eprintln!(
-        "[DEBUG-lpac-child] stderr duplicate: {:?}",
-        std::io::stderr().as_handle().try_clone_to_owned().map(drop)
-    );
-    // Distinguish token-object access from ordinary file and pipe access.
-    for (label, rights) in [
-        (
-            "query+duplicate",
-            winsafe::co::TOKEN::QUERY | winsafe::co::TOKEN::DUPLICATE,
-        ),
-        (
-            "query+assign-primary",
-            winsafe::co::TOKEN::QUERY | winsafe::co::TOKEN::ASSIGN_PRIMARY,
-        ),
-    ] {
-        eprintln!(
-            "[DEBUG-lpac-child] token {label}: {:?}",
-            winsafe::HPROCESS::GetCurrentProcess()
-                .OpenProcessToken(rights)
-                .map(drop)
-        );
-    }
-    diagnose_explicit_lpac_creation(&executable);
-    // Separate the kernel's process-creation check from Rust's stdio setup.
-    // Keep this diagnostic child suspended and terminate it before execution.
-    diagnose_kernel_creation("no-stdio", &executable, None, winsafe::co::CREATE::NoValue);
-    let cwd = std::env::current_dir().unwrap();
-    let cwd = cwd.to_str().unwrap();
-    let dos_cwd = cwd.strip_prefix(r"\\?\").unwrap_or(cwd);
-    diagnose_kernel_creation(
-        "explicit-cwd",
-        &executable,
-        Some(dos_cwd),
-        winsafe::co::CREATE::NoValue,
-    );
-    diagnose_kernel_creation(
-        "no-console",
-        &executable,
-        None,
-        winsafe::co::CREATE::NO_WINDOW,
-    );
-    let system_image =
-        std::path::PathBuf::from(std::env::var_os("SYSTEMROOT").unwrap()).join("System32/cmd.exe");
-    diagnose_kernel_creation(
-        "system-image",
-        &system_image,
-        None,
-        winsafe::co::CREATE::NoValue,
-    );
-}
-
-// Keep the same package, zero capabilities and LPAC policy explicit. Success
-// here would distinguish implicit child-token inheritance from image access;
-// this diagnostic never resumes the process or provides a host fallback.
-fn diagnose_explicit_lpac_creation(executable: &Path) {
-    let token = rappct::token::query_current_process_token().unwrap();
-    let capabilities =
-        rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
-            .lpac(true)
-            .build()
-            .unwrap();
-    let options = rappct::LaunchOptions {
-        exe: executable.to_owned(),
-        cmdline: Some(format!("\"{}\"", executable.display())),
-        env: Some(Vec::new()),
-        suspended: true,
-        ..Default::default()
-    };
-    match rappct::launch_in_container_with_io(&capabilities, &options) {
-        Ok(mut child) => {
-            eprintln!("[DEBUG-lpac-child] explicit LPAC CreateProcess succeeded");
-            child.terminate(1).unwrap();
-        }
-        Err(error) => eprintln!("[DEBUG-lpac-child] explicit LPAC CreateProcess: {error:?}"),
-    }
-}
-
-fn diagnose_kernel_creation(
-    label: &str,
-    executable: &Path,
-    cwd: Option<&str>,
-    flags: winsafe::co::CREATE,
-) {
-    let command_line = format!("\"{}\"", executable.display());
-    let result = winsafe::CreateProcess(
-        executable.to_str(),
-        Some(&command_line),
-        None,
-        None,
-        false,
-        winsafe::co::CREATE::SUSPENDED | flags,
-        &[],
-        cwd,
-        &mut winsafe::STARTUPINFO::default(),
-    );
-    match result {
-        Ok(child) => {
-            eprintln!("[DEBUG-lpac-child] {label} CreateProcess succeeded");
-            child.hProcess.TerminateProcess(1).unwrap();
-            assert_eq!(
-                child.hProcess.WaitForSingleObject(Some(15_000)).unwrap(),
-                winsafe::co::WAIT::OBJECT_0
-            );
-        }
-        Err(error) => eprintln!("[DEBUG-lpac-child] {label} CreateProcess: {error:?}"),
     }
 }
 
@@ -354,6 +248,11 @@ async fn restricted_files_are_enforced_by_the_real_worker() {
 }
 
 #[tokio::test]
+async fn restricted_registry_is_enforced_by_the_real_worker() {
+    restricted_worker_probe("registry").await;
+}
+
+#[tokio::test]
 async fn restricted_network_is_enforced_by_the_real_worker() {
     restricted_worker_probe("network").await;
 }
@@ -418,6 +317,7 @@ async fn restricted_worker_probe(mode: &str) {
         listener.local_addr().unwrap().to_string(),
     )
     .unwrap();
+    let registry_secret = registry::HostSecret::create(workspace.path());
     let worker = worker(root.path());
     let mut command = request(workspace.path(), mode, &aap.path().join("aap-only"));
     if mode == "overlap" {
@@ -463,6 +363,7 @@ async fn restricted_worker_probe(mode: &str) {
         result.text()
     );
     assert_eq!(std::fs::read_to_string(&secret).unwrap(), "host secret");
+    registry_secret.assert_unchanged();
     if mode == "stdin" {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("stdin-result")).unwrap(),
