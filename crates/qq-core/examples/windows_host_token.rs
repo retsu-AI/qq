@@ -30,6 +30,9 @@ mod proof {
 
     pub(super) fn run() -> io::Result<()> {
         let arguments: Vec<_> = std::env::args().collect();
+        if arguments.get(1).is_some_and(|value| value == "--payload") {
+            return payload(Path::new(&arguments[2]), &arguments[3], &arguments[4]);
+        }
         if arguments.get(1).is_some_and(|value| value == "--launcher") {
             let root = Path::new(&arguments[2]);
             let result = launch_lpac(root, &arguments[3], "filtered");
@@ -48,6 +51,8 @@ mod proof {
         let public = root.join("public.txt");
         fs::write(&outside, b"original")?;
         fs::write(&public, b"public-input")?;
+        let private = root.join("private.txt");
+        fs::write(&private, b"private-canary")?;
         let name = format!("qq.host-token-proof.{}", std::process::id());
         let profile =
             rappct::AppContainerProfile::ensure(&name, &name, Some("QQ owned host token proof"))
@@ -73,44 +78,13 @@ mod proof {
             for relative in ["home/tmp", "home/AppData/Local", "home/AppData/Roaming"] {
                 fs::create_dir_all(workspace.join(relative))?;
             }
-            for mode in ["control", "filtered"] {
-                let script = format!(
-                    r#"@echo off
- echo begin
- >stage-{mode}.txt echo begin
- echo task-written>task-{mode}.txt
- set code=%errorlevel%
- >>stage-{mode}.txt echo task:%code%
- if not "%code%"=="0" exit /b 21
- type nul >nul
- set code=%errorlevel%
- >>stage-{mode}.txt echo nul:%code%
- if not "%code%"=="0" exit /b 22
- copy /b "%SystemRoot%\System32\cmd.exe" os-{mode}.bin >nul
- set code=%errorlevel%
- >>stage-{mode}.txt echo os-read:%code%
- if not "%code%"=="0" exit /b 23
- type "{}" >public-{mode}.txt
- set code=%errorlevel%
- >>stage-{mode}.txt echo public-read:%code%
- if not "%code%"=="0" exit /b 24
- (echo outside-written)>"{}"
- set code=%errorlevel%
- >>stage-{mode}.txt echo outside-write:%code%
- if not "%code%"=="0" (echo denied>outside-{mode}.txt) else (echo allowed>outside-{mode}.txt)
- >>stage-{mode}.txt echo completed
- exit /b 0
-"#,
-                    public.display(),
-                    outside.display(),
-                )
-                .replace('\n', "\r\n");
-                fs::write(workspace.join(format!("{mode}.cmd")), script)?;
-                set_acl(
-                    &workspace.join(format!("{mode}.cmd")),
-                    &format!("D:P(A;;FA;;;{user})(A;;FR;;;{})", profile.sid),
-                )?;
-            }
+            set_acl(&private, &format!("D:P(A;;FA;;;{user})"))?;
+            let payload = workspace.join("owned-payload.exe");
+            fs::copy(std::env::current_exe()?, &payload)?;
+            set_acl(
+                &payload,
+                &format!("D:P(A;;FA;;;{user})(A;;FRFX;;;{})", profile.sid),
+            )?;
             // Establish that ordinary LPAC really can perform the canary write.
             launch_lpac(root, &name, "control")?;
             assert_results(root, "control", "allowed")?;
@@ -119,14 +93,18 @@ mod proof {
                     "ordinary LPAC control did not change the ARAP-writable canary",
                 ));
             }
-            println!("control: task write, NUL, OS read, public read, ARAP outside write passed");
+            println!(
+                "control: task write, OS/public reads, private-read denial and ARAP outside write passed"
+            );
             fs::write(&outside, b"original")?;
             launch_restricted_helper(root, &name, profile.sid.as_string())?;
             assert_results(root, "filtered", "denied")?;
             if fs::read(&outside)? != b"original" {
                 return Err(err("filtered LPAC changed the outside canary"));
             }
-            println!("filtered: task write, NUL, OS/public reads passed; outside write denied");
+            println!(
+                "filtered: task write, OS/public reads, private-read denial passed; outside write denied"
+            );
             Ok(())
         })();
         let cleanup = profile.delete().map_err(err);
@@ -176,8 +154,12 @@ mod proof {
         let home = root.join("task/home");
         let temporary = home.join("tmp");
         let options = rappct::LaunchOptions {
-            exe: Path::new(&windows).join("System32/cmd.exe"),
-            cmdline: Some(format!("cmd.exe /d /c {mode}.cmd")),
+            exe: root.join("task/owned-payload.exe"),
+            cmdline: Some(format!(
+                "owned-payload.exe --payload \"{}\" {mode} {}",
+                root.display(),
+                package.as_string(),
+            )),
             cwd: Some(root.join("task")),
             env: Some(rappct::launch::merge_parent_env(vec![
                 ("SystemRoot".into(), windows.clone()),
@@ -269,35 +251,105 @@ mod proof {
             })
     }
 
+    fn payload(root: &Path, mode: &str, package: &str) -> io::Result<()> {
+        use std::{
+            os::windows::process::CommandExt as _,
+            process::{Command, Stdio},
+        };
+        let task = root.join("task");
+        let token = firehazard::open_process_token(
+            firehazard::get_current_process(),
+            firehazard::token::QUERY,
+        )
+        .map_err(err)?;
+        let restricted = token.restricted_sids().map_err(err)?;
+        let expected = firehazard::convert_string_sid_to_sid_a(package).map_err(err)?;
+        let task_sid_present = restricted
+            .groups()
+            .iter()
+            .any(|group| firehazard::equal_sid(group.sid, (&expected).into()));
+        let app = rappct::token::query_current_process_token().map_err(err)?;
+        let access_flags = token.access_information().map_err(err)?.Flags;
+        let witness = serde_json::json!({
+            "access_information_flags": access_flags,
+            "restricted_sid_count": restricted.group_count(),
+            "task_sid_present": task_sid_present,
+            "is_appcontainer": app.is_appcontainer,
+            "is_lpac": app.is_lpac,
+            "package_matches": app.package_sid.as_ref().is_some_and(|sid| sid.as_string() == package),
+        });
+        println!("{mode} payload token: {witness}");
+        fs::write(task.join(format!("token-{mode}.json")), witness.to_string())?;
+        fs::write(task.join(format!("task-{mode}.txt")), b"task-written")?;
+        let public = fs::read(root.join("public.txt"))?;
+        fs::write(task.join(format!("public-{mode}.txt")), public)?;
+        let private = fs::read(root.join("private.txt"));
+        let private_denied = private
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied);
+        println!("{mode} private read: {private:?}");
+        let nul = fs::OpenOptions::new().read(true).write(true).open("NUL");
+        println!("{mode} independent NUL compatibility: {nul:?}");
+        let windows = std::env::var_os("SystemRoot").ok_or_else(|| err("missing SystemRoot"))?;
+        let image = Path::new(&windows).join("System32").join("cmd.exe");
+        let input = task.join(format!("copy-input-{mode}.txt"));
+        fs::write(&input, b"")?;
+        let mut copy = Command::new(&image);
+        copy.stdin(Stdio::from(fs::File::open(input)?)).current_dir(&task).raw_arg(format!(
+            "/D /S /C \"copy /b \"{}\" os-{mode}.bin >copy-{mode}.log 2>copy-error-{mode}.log\"",
+            image.display(),
+        ));
+        let copied = copy.output();
+        println!("{mode} owned-log COPY: {copied:?}");
+        let outside = fs::write(root.join("outside.txt"), b"outside-written");
+        let outside_denied = outside
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied);
+        println!("{mode} outside write: {outside:?}");
+        let result = serde_json::json!({
+            "private_read_denied": private_denied,
+            "outside_write_allowed": outside.is_ok(),
+            "outside_write_denied": outside_denied,
+            "copy_status_success": copied.as_ref().is_ok_and(|output| output.status.success()),
+            "nul_available": nul.is_ok(),
+        });
+        fs::write(task.join(format!("result-{mode}.json")), result.to_string())?;
+        println!("{mode} payload observations: {result}");
+        Ok(())
+    }
+
     fn assert_results(root: &Path, mode: &str, expected: &str) -> io::Result<()> {
         let task = root.join("task");
-        for name in [
-            "stage", "task", "public", "os", "outside", "stdout", "stderr",
-        ] {
-            let extension = if name == "os" { "bin" } else { "txt" };
-            let file = format!("{name}-{mode}.{extension}");
-            match fs::metadata(task.join(&file)) {
-                Ok(metadata) => println!("artifact {file}: {} bytes", metadata.len()),
-                Err(error) => println!("artifact {file}: {error}"),
-            }
+        let witness: serde_json::Value =
+            serde_json::from_slice(&fs::read(task.join(format!("token-{mode}.json")))?)?;
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(task.join(format!("result-{mode}.json")))?)?;
+        println!("{mode} verified token: {witness}; observations: {result}");
+        let windows = std::env::var_os("SystemRoot").ok_or_else(|| err("missing SystemRoot"))?;
+        let source = fs::read(Path::new(&windows).join("System32").join("cmd.exe"))?;
+        let image = fs::read(task.join(format!("os-{mode}.bin")));
+        println!("{mode} OS copy bytes: {:?}", image.as_ref().map(Vec::len));
+        for name in ["copy", "copy-error", "stdout", "stderr"] {
+            let data = fs::read(task.join(format!("{name}-{mode}.log")))
+                .or_else(|_| fs::read(task.join(format!("{name}-{mode}.txt"))));
+            println!("{mode} {name}: {data:?}");
         }
-        let read = |name: &str| {
-            let file = format!("{name}-{mode}.txt");
-            fs::read_to_string(task.join(&file))
-                .map_err(|error| err(format!("artifact {file}: {error}")))
-        };
-        let stage = read("stage")?;
-        println!("{mode} stages: {stage:?}");
-        let image = format!("os-{mode}.bin");
-        if read("task")?.trim() != "task-written"
-            || read("public")?.trim() != "public-input"
-            || fs::read(task.join(&image))
-                .map_err(|error| err(format!("artifact {image}: {error}")))?
-                .is_empty()
-            || read("outside")?.trim() != expected
-            || !stage.lines().any(|line| line.trim() == "completed")
+        if witness["is_appcontainer"] != true
+            || witness["is_lpac"] != true
+            || witness["package_matches"] != true
+            || (mode == "filtered" && witness["task_sid_present"] != true)
+            || fs::read(task.join(format!("task-{mode}.txt")))? != b"task-written"
+            || fs::read(task.join(format!("public-{mode}.txt")))? != b"public-input"
+            || image? != source
+            || result["private_read_denied"] != true
+            || result["copy_status_success"] != true
+            || result[if expected == "allowed" {
+                "outside_write_allowed"
+            } else {
+                "outside_write_denied"
+            }] != true
         {
-            return Err(err(format!("{mode}: fixture result mismatch")));
+            return Err(err(format!("{mode}: containment proof failed")));
         }
         Ok(())
     }
