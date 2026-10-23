@@ -1385,8 +1385,9 @@ variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
 requesting those limits fails closed.
 
-The Windows adapter launches restricted requests in LPAC with only the
-`registryRead` capability required for ordinary child-process creation, inside
+The Windows adapter launches restricted requests in LPAC with `registryRead`
+for ordinary child-process creation and a directory-identity capability for each
+non-system read-only root, inside
 QQ's existing owned command job. Its trusted helper obtains the user's local
 application-data directory from Windows for its startup environment. The payload
 keeps its frozen environment, including Windows' required `SYSTEMROOT` and
@@ -1399,7 +1400,9 @@ protocol prefix. Full exit codes and output remain observable through the
 existing durable worker.
 
 Windows object ACL grants are prepared through held, non-reparse handles with
-bounded traversal. Writable grants are applied before overlapping read-only
+bounded traversal. Shared read-only roots receive one read/execute capability
+entry, reused across tasks, rather than one package entry per task. Writable
+roots retain task-specific package authority. Writable grants are applied before overlapping read-only
 grants. Non-system hardlinks and reparse points are refused. Directory grants
 are inherited by newly created objects. Grants update the held kernel object
 without requesting a recursive file-object ACL update; each existing object
