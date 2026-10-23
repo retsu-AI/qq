@@ -6,6 +6,7 @@
 #include <sddl.h>
 #include <iostream>
 #include <cwchar>
+#include <cstring>
 #include <cwctype>
 #include <utility>
 #include <map>
@@ -111,13 +112,14 @@ int wmain(int argc, wchar_t** argv) {
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
         const std::wstring mode(argv[3]);
+        const bool reduce_capabilities = mode == L"reduce-capabilities" || mode == L"reduce-capabilities-lpac";
         const bool disable_marker = mode == L"disable-marker" || mode == L"disable-marker-lpac";
-        const bool lpac = mode == L"lpac-inherit" || mode == L"lpac-recreate" || mode == L"disable-marker-lpac";
+        const bool lpac = mode == L"lpac-inherit" || mode == L"lpac-recreate" || mode == L"disable-marker-lpac" || mode == L"reduce-capabilities-lpac";
         const bool with_package = mode == L"package" || mode == L"package-arap" ||
             mode == L"package-arap-registry" || mode == L"package-write";
         const bool with_arap = mode == L"arap" || mode == L"package-arap" || mode == L"package-arap-registry";
-        const bool with_registry = mode == L"package-arap-registry" || mode == L"lpac-recreate";
-        if (!lpac && !disable_marker && !with_package && !with_arap && mode != L"control" && mode != L"user") {
+        const bool with_registry = mode == L"package-arap-registry" || mode == L"lpac-recreate" || reduce_capabilities;
+        if (!lpac && !reduce_capabilities && !disable_marker && !with_package && !with_arap && mode != L"control" && mode != L"user") {
             throw std::runtime_error("unknown token restriction mode");
         }
         std::vector<SID_AND_ATTRIBUTES> sids;
@@ -136,7 +138,7 @@ int wmain(int argc, wchar_t** argv) {
             PSID allocated = nullptr;
             require(ConvertStringSidToSidW(L"S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681", &allocated), "registryRead SID");
             registry.reset(allocated);
-            if (!lpac) sids.push_back({ registry.get(), 0 });
+            if (!lpac && !reduce_capabilities) sids.push_back({ registry.get(), 0 });
         }
         std::unique_ptr<void, decltype(free_sid)> marker(nullptr, free_sid);
         SID_AND_ATTRIBUTES disabled{};
@@ -147,7 +149,32 @@ int wmain(int argc, wchar_t** argv) {
             disabled.Sid = marker.get();
         }
         Handle restricted;
-        if (!lpac || disable_marker) {
+        if (reduce_capabilities) {
+            // The same dynamically loaded API and signature used by Chromium's
+            // base::win::AccessToken::CreateAppContainer. Probe only: do not
+            // introduce an undocumented dependency into the shipped launcher.
+            using CreateToken = BOOL(WINAPI*)(HANDLE, PSECURITY_CAPABILITIES, PHANDLE);
+            const auto module = GetModuleHandleW(L"kernelbase.dll");
+            if (!module) throw std::runtime_error("kernelbase.dll is not loaded");
+            const FARPROC address = GetProcAddress(module, "CreateAppContainerToken");
+            if (!address) throw std::runtime_error("CreateAppContainerToken is unavailable");
+            CreateToken create = nullptr;
+            static_assert(sizeof(create) == sizeof(address));
+            std::memcpy(&create, &address, sizeof(create));
+            SID_AND_ATTRIBUTES read_cap{ registry.get(), SE_GROUP_ENABLED };
+            SECURITY_CAPABILITIES capabilities{};
+            capabilities.AppContainerSid = sid;
+            capabilities.Capabilities = &read_cap;
+            capabilities.CapabilityCount = 1;
+            require(create(current.value, &capabilities, &restricted.value), "CreateAppContainerToken");
+            contained(restricted.value);
+            auto remaining = information(restricted.value, TokenCapabilities);
+            const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(remaining.data());
+            if (groups->GroupCount != 1 || !EqualSid(groups->Groups[0].Sid, registry.get())) {
+                throw std::runtime_error("new token retained unexpected capabilities");
+            }
+            std::cout << "child token has only registryRead capability" << std::endl;
+        } else if (!lpac || disable_marker) {
             const DWORD flags = DISABLE_MAX_PRIVILEGE | (mode == L"package-write" ? WRITE_RESTRICTED : 0);
             require(CreateRestrictedToken(current.value, flags, disable_marker ? 1 : 0, disable_marker ? &disabled : nullptr, 0, nullptr,
                 static_cast<DWORD>(sids.size()), sids.empty() ? nullptr : sids.data(), &restricted.value), "CreateRestrictedToken");
@@ -193,7 +220,7 @@ int wmain(int argc, wchar_t** argv) {
                     &capabilities, sizeof(capabilities), nullptr, nullptr), "UpdateProcThreadAttribute(capabilities)");
             }
             const DWORD flags = CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
-            const BOOL created = disable_marker
+            const BOOL created = (disable_marker || reduce_capabilities)
                 ? CreateProcessAsUserW(restricted.value, argv[1], mutable_command.data(), nullptr, nullptr, TRUE,
                     flags, block.data(), nullptr, &startup.StartupInfo, &process)
                 : CreateProcessW(argv[1], mutable_command.data(), nullptr, nullptr, TRUE,

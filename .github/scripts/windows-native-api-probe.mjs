@@ -225,9 +225,9 @@ const cases = [
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
   { name: 'token-user-sid-control',
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} user`, payload: true },
-  ...['package', 'arap', 'package-arap', 'package-arap-registry', 'package-write', 'disable-marker', 'disable-marker-lpac', 'lpac-inherit', 'lpac-recreate'].map(mode => ({
+  ...['package', 'arap', 'package-arap', 'package-arap-registry', 'package-write', 'disable-marker', 'disable-marker-lpac', 'reduce-capabilities', 'reduce-capabilities-lpac', 'lpac-inherit', 'lpac-recreate'].map(mode => ({
     name: 'restricted-' + mode,
-    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(mode.startsWith('lpac-') || mode === 'disable-marker-lpac' ? relayPath : payload)} ${mode}`,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(mode.startsWith('lpac-') || mode.endsWith('-lpac') || mode === 'reduce-capabilities' ? relayPath : payload)} ${mode}`,
     payload: true,
   })),
 ];
