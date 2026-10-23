@@ -44,6 +44,9 @@ jobs:
       - name: Test explicit desktop option and retained buffer
         shell: pwsh
         run: cargo test --manifest-path (Join-Path $env:RUNNER_TEMP 'rappct-private-desktop/Cargo.toml') --locked --lib desktop_tests
+      - name: Test explicit token and birth job ownership
+        shell: pwsh
+        run: cargo test --manifest-path (Join-Path $env:RUNNER_TEMP 'rappct-private-desktop/Cargo.toml') --locked --lib broker_tests
       - name: Compile the safe API composition
         shell: pwsh
         run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG build --locked -p qq-core --example windows_host_token

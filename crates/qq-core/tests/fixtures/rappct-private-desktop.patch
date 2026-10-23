@@ -1,5 +1,338 @@
+diff --git a/src/ffi/attr_list.rs b/src/ffi/attr_list.rs
+index 4ad228d..cc3c2c5 100755
+--- a/src/ffi/attr_list.rs
++++ b/src/ffi/attr_list.rs
+@@ -76,6 +76,24 @@ impl AttrList {
+         }
+     }
+
++    /// Attach the sole owned command job; caller retains the array through attribute destruction.
++    pub(crate) fn set_job_list(&mut self, jobs: &[HANDLE]) -> Result<()> {
++        use windows::Win32::System::Threading::PROC_THREAD_ATTRIBUTE_JOB_LIST;
++        // SAFETY: Retained slice and live owned job outlive the attribute list.
++        unsafe {
++            UpdateProcThreadAttribute(
++                self.ptr,
++                0,
++                PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
++                Some(jobs.as_ptr().cast()),
++                std::mem::size_of_val(jobs),
++                None,
++                None,
++            )
++        }
++        .map_err(|error| AcError::Win32(format!("UpdateProcThreadAttribute(JobList): {error}")))
++    }
++
+     /// Attach a handle inheritance list.
+     /// The slice must remain valid until CreateProcessW returns.
+     pub(crate) fn set_handle_list(&mut self, handles: &[HANDLE]) -> Result<()> {
+diff --git a/src/ffi/handles.rs b/src/ffi/handles.rs
+index 033dd94..346deab 100755
+--- a/src/ffi/handles.rs
++++ b/src/ffi/handles.rs
+@@ -68,6 +68,54 @@ impl Handle {
+     }
+ }
+
++pub(crate) fn duplicate_primary_token(token: BorrowedHandle<'_>) -> Result<Handle> {
++    use windows::Win32::Security::{
++        GetTokenInformation, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_TYPE,
++        TokenPrimary, TokenType,
++    };
++    let raw = HANDLE(token.as_raw_handle());
++    let mut kind = TOKEN_TYPE::default();
++    let mut returned = 0;
++    // SAFETY: BorrowedHandle is live; the output describes one TOKEN_TYPE.
++    unsafe {
++        GetTokenInformation(
++            raw,
++            TokenType,
++            Some((&mut kind as *mut TOKEN_TYPE).cast()),
++            std::mem::size_of::<TOKEN_TYPE>() as u32,
++            &mut returned,
++        )
++    }
++    .map_err(|error| AcError::Win32(format!("GetTokenInformation(primary type): {error}")))?;
++    if kind != TokenPrimary {
++        return Err(AcError::Win32(
++            "explicit launch token must be primary".into(),
++        ));
++    }
++    let mut duplicate = HANDLE::default();
++    // SAFETY: Token handle remains live; duplicate is immediately owned below.
++    let ok = unsafe {
++        DuplicateHandle(
++            GetCurrentProcess(),
++            raw,
++            GetCurrentProcess(),
++            &mut duplicate,
++            (TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY).0,
++            0,
++            0,
++        )
++    };
++    if ok == 0 {
++        return Err(AcError::LaunchFailed {
++            stage: "DuplicateHandle(primary token)",
++            hint: "minimal token rights",
++            source: Box::new(std::io::Error::last_os_error()),
++        });
++    }
++    // SAFETY: DuplicateHandle returned one uniquely owned token, closed by CloseHandle.
++    unsafe { Handle::from_raw(duplicate.0) }
++}
++
+ pub(crate) fn duplicate_handle(handle: BorrowedHandle<'_>, inherit: bool) -> Result<Handle> {
+     let mut duplicated = HANDLE::default();
+     // SAFETY: DuplicateHandle expects live handles and returns BOOL. Current process handles
+diff --git a/src/launch/attributes.rs b/src/launch/attributes.rs
+index eeef2ee..01e834a 100644
+--- a/src/launch/attributes.rs
++++ b/src/launch/attributes.rs
+@@ -44,6 +44,7 @@ pub(super) struct LaunchAttributes {
+     security_caps: Rc<OwnedSecurityCapabilities>,
+     lpac_policy: Option<Box<u32>>,
+     handle_list: Vec<HANDLE>,
++    birth_jobs: Option<Box<[HANDLE; 1]>>,
+ }
+
+ impl LaunchAttributes {
+@@ -52,11 +53,30 @@ impl LaunchAttributes {
+         lpac: bool,
+         handles: &[HANDLE],
+     ) -> Result<Self> {
+-        let mut attr_list = FAttrList::with_capacity(attribute_count(lpac, handles))?;
+-        attr_list.set_security_capabilities(security_caps.as_ref())?;
++        Self::new_with_job(security_caps, lpac, handles, None)
++    }
+
+-        let lpac_policy = apply_lpac_policy(&mut attr_list, lpac)?;
++    pub(super) fn new_with_job(
++        security_caps: Rc<OwnedSecurityCapabilities>,
++        lpac: bool,
++        handles: &[HANDLE],
++        job: Option<HANDLE>,
++    ) -> Result<Self> {
++        // These buffers must outlive attr_list on every registration error as well.
++        let birth_jobs = job.map(|job| Box::new([job]));
++        let lpac_policy = lpac.then(|| Box::new(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT));
+         let handle_list = handles.to_vec();
++        let mut attr_list =
++            FAttrList::with_capacity(attribute_count(lpac, handles) + u32::from(job.is_some()))?;
++        if let Some(jobs) = &birth_jobs {
++            attr_list.set_job_list(jobs.as_ref())?;
++        }
++
++        attr_list.set_security_capabilities(security_caps.as_ref())?;
++
++        if let Some(policy) = &lpac_policy {
++            attr_list.set_all_app_packages_policy(policy.as_ref())?;
++        }
+         if !handle_list.is_empty() {
+             attr_list.set_handle_list(&handle_list)?;
+         }
+@@ -66,6 +86,7 @@ impl LaunchAttributes {
+             security_caps,
+             lpac_policy,
+             handle_list,
++            birth_jobs,
+         })
+     }
+
+@@ -75,7 +96,12 @@ impl LaunchAttributes {
+     }
+
+     fn keep_alive(&self) {
+-        let _ = (&self.security_caps, &self.lpac_policy, &self.handle_list);
++        let _ = (
++            &self.security_caps,
++            &self.lpac_policy,
++            &self.handle_list,
++            &self.birth_jobs,
++        );
+     }
+ }
+
+@@ -128,13 +154,3 @@ fn attribute_count(lpac: bool, handles: &[HANDLE]) -> u32 {
+     }
+     count
+ }
+-
+-fn apply_lpac_policy(attr_list: &mut FAttrList, lpac: bool) -> Result<Option<Box<u32>>> {
+-    if !lpac {
+-        return Ok(None);
+-    }
+-
+-    let policy = Box::new(PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT);
+-    attr_list.set_all_app_packages_policy(policy.as_ref())?;
+-    Ok(Some(policy))
+-}
+diff --git a/src/launch/broker_tests.rs b/src/launch/broker_tests.rs
+new file mode 100644
+index 0000000..eefd877
+--- /dev/null
++++ b/src/launch/broker_tests.rs
+@@ -0,0 +1,111 @@
++use super::*;
++use windows::Win32::Security::{TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY};
++use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
++
++fn current_primary() -> FHandle {
++    let mut token = windows::Win32::Foundation::HANDLE::default();
++    // SAFETY: Current process and initialized token out pointer are valid.
++    unsafe {
++        OpenProcessToken(
++            GetCurrentProcess(),
++            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
++            &mut token,
++        )
++    }
++    .unwrap();
++    handles::from_win32(token).unwrap()
++}
++
++fn options() -> LaunchOptions {
++    LaunchOptions {
++        join_job: Some(super::super::JobLimits {
++            kill_on_job_close: true,
++            ..Default::default()
++        }),
++        ..Default::default()
++    }
++}
++
++#[test]
++fn explicit_token_requires_kill_on_close_job() {
++    let token = current_primary();
++    assert!(
++        LaunchOptions::default()
++            .try_with_primary_token(token.as_borrowed())
++            .is_err()
++    );
++}
++
++#[test]
++fn token_clone_is_owned_noninheritable_and_forces_suspension() {
++    use windows::Win32::Foundation::GetHandleInformation;
++    let token = current_primary();
++    let options = options()
++        .try_with_primary_token(token.as_borrowed())
++        .unwrap();
++    drop(token);
++    assert!(options.suspended);
++    let clone = options.extra.primary_token.as_ref().unwrap();
++    let mut flags = 0_u32;
++    // SAFETY: Cloned token is owned by options; flags is valid output storage.
++    unsafe { GetHandleInformation(clone.as_win32(), &mut flags) }.unwrap();
++    assert_eq!(flags & 1, 0);
++}
++
++#[test]
++fn caller_cannot_remove_required_suspension() {
++    let token = current_primary();
++    let mut options = options()
++        .try_with_primary_token(token.as_borrowed())
++        .unwrap();
++    options.suspended = false;
++    let sec = SecurityCapabilities {
++        package: crate::AppContainerSid::try_from_sddl("S-1-15-2-1").unwrap(),
++        caps: vec![],
++        lpac: false,
++    };
++    assert!(
++        matches!(launch_impl(&sec, &options), Err(AcError::Win32(message))
++        if message == "explicit token requires suspended kill-on-close job")
++    );
++}
++
++#[test]
++fn birth_job_attribute_keeps_job_owned_until_attribute_destruction() {
++    let limits = super::super::JobLimits {
++        kill_on_job_close: true,
++        ..Default::default()
++    };
++    let job = job::create_birth_job_guard(&limits).unwrap();
++    let sec = SecurityCapabilities {
++        package: crate::AppContainerSid::try_from_sddl("S-1-15-2-1").unwrap(),
++        caps: vec![],
++        lpac: false,
++    };
++    let caps = inflate_security_caps(&sec).unwrap();
++    let attrs = LaunchAttributes::new_with_job(caps, false, &[], Some(job.as_handle())).unwrap();
++    drop(attrs);
++    assert_eq!(job.active_processes().unwrap(), 0);
++}
++
++#[test]
++fn explicit_token_refuses_startup_timeout_before_and_after_builder() {
++    let token = current_primary();
++    let mut initial = options();
++    initial.startup_timeout = Some(std::time::Duration::ZERO);
++    assert!(
++        matches!(initial.try_with_primary_token(token.as_borrowed()),
++        Err(AcError::Win32(message)) if message == "explicit token requires no startup timeout")
++    );
++    let mut options = options()
++        .try_with_primary_token(token.as_borrowed())
++        .unwrap();
++    options.startup_timeout = Some(std::time::Duration::ZERO);
++    let sec = SecurityCapabilities {
++        package: crate::AppContainerSid::try_from_sddl("S-1-15-2-1").unwrap(),
++        caps: vec![],
++        lpac: false,
++    };
++    assert!(matches!(launch_impl(&sec, &options),
++        Err(AcError::Win32(message)) if message == "explicit token requires no startup timeout"));
++}
+diff --git a/src/launch/job.rs b/src/launch/job.rs
+index 463ff18..1246e79 100644
+--- a/src/launch/job.rs
++++ b/src/launch/job.rs
+@@ -19,6 +19,27 @@ impl JobGuard {
+     pub fn as_handle(&self) -> HANDLE {
+         self.0.as_win32()
+     }
++
++    /// Number of processes currently held by this command job.
++    pub fn active_processes(&self) -> Result<u32> {
++        use windows::Win32::System::JobObjects::{
++            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
++            QueryInformationJobObject,
++        };
++        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
++        // SAFETY: Owned job and correctly sized output buffer remain live.
++        unsafe {
++            QueryInformationJobObject(
++                Some(self.0.as_win32()),
++                JobObjectBasicAccountingInformation,
++                (&mut info as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
++                std::mem::size_of_val(&info) as u32,
++                None,
++            )
++        }
++        .map_err(|error| AcError::Win32(format!("QueryInformationJobObject(active): {error}")))?;
++        Ok(info.ActiveProcesses)
++    }
+ }
+
+ /// Job object drop-guard that enables kill-on-close by default.
+@@ -63,6 +84,13 @@ impl JobObjectDropGuard {
+     }
+ }
+
++pub(super) fn create_birth_job_guard(limits: &JobLimits) -> Result<JobGuard> {
++    let handle = create_job_handle()?;
++    apply_extended_limits(&handle, limits)?;
++    apply_cpu_limit(&handle, limits.cpu_rate_percent)?;
++    Ok(JobGuard(handle))
++}
++
+ pub(super) fn create_job_guard(
+     limits: Option<&JobLimits>,
+     process: HANDLE,
 diff --git a/src/launch/mod.rs b/src/launch/mod.rs
-index ac985c5..b3d496a 100755
+index ac985c5..fdbb825 100755
 --- a/src/launch/mod.rs
 +++ b/src/launch/mod.rs
 @@ -58,6 +58,8 @@ pub struct LaunchOptions {
@@ -11,7 +344,15 @@ index ac985c5..b3d496a 100755
      pub env: Option<Vec<(std::ffi::OsString, std::ffi::OsString)>>,
      pub stdio: StdioConfig,
      pub suspended: bool,
-@@ -100,6 +102,7 @@ impl Default for LaunchOptions {
+@@ -76,6 +78,7 @@ pub struct LaunchOptions {
+ #[doc(hidden)]
+ pub struct LaunchExtra {
+     handle_list: Vec<Arc<FHandle>>,
++    primary_token: Option<Arc<FHandle>>,
+     stdio: StdioOverrides,
+ }
+
+@@ -100,6 +103,7 @@ impl Default for LaunchOptions {
          Self {
              exe,
              cmdline: None,
@@ -19,19 +360,88 @@ index ac985c5..b3d496a 100755
              cwd,
              env: None,
              stdio: StdioConfig::Inherit,
+@@ -113,6 +117,29 @@ impl Default for LaunchOptions {
+ }
+
+ impl LaunchOptions {
++    /// Launch as this primary token, cloned with minimal rights and never inherited.
++    /// Requires a kill-on-close job, no startup timeout, and explicit child resume.
++    #[cfg(windows)]
++    pub fn try_with_primary_token(mut self, token: BorrowedHandle<'_>) -> Result<Self> {
++        if !self
++            .join_job
++            .as_ref()
++            .is_some_and(|job| job.kill_on_job_close)
++        {
++            return Err(crate::AcError::Win32(
++                "explicit token requires kill-on-close job".into(),
++            ));
++        }
++        if self.startup_timeout.is_some() {
++            return Err(crate::AcError::Win32(
++                "explicit token requires no startup timeout".into(),
++            ));
++        }
++        self.extra.primary_token = Some(Arc::new(handles::duplicate_primary_token(token)?));
++        self.suspended = true;
++        Ok(self)
++    }
++
+     /// Duplicate additional inheritable handles for the child.
+     ///
+     /// # Panics
 diff --git a/src/launch/spawn.rs b/src/launch/spawn.rs
-index 7310cb2..e163145 100644
+index 7310cb2..faed2ae 100644
 --- a/src/launch/spawn.rs
 +++ b/src/launch/spawn.rs
+@@ -16,9 +16,9 @@ use core::ffi::c_void;
+ use std::cell::{Cell, RefCell};
+ use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+ use windows::Win32::System::Threading::{
+-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+-    INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOEXW, TerminateProcess,
+-    WaitForSingleObject,
++    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, CreateProcessW,
++    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
++    STARTUPINFOEXW, TerminateProcess, WaitForSingleObject,
+ };
+ use windows::core::{PCWSTR, PWSTR};
+
 @@ -27,6 +27,7 @@ struct ProcessInputs {
      exe_w: WideString,
      args_w: Option<Vec<u16>>,
      cwd_w: Option<WideString>,
 +    desktop_w: Option<Vec<u16>>,
  }
- 
+
  struct ChildHandles {
-@@ -45,6 +46,11 @@ pub(super) fn launch_impl(sec: &SecurityCapabilities, opts: &LaunchOptions) -> R
+@@ -42,15 +43,52 @@ std::thread_local! {
+
+ pub(super) fn launch_impl(sec: &SecurityCapabilities, opts: &LaunchOptions) -> Result<LaunchedIo> {
+     ensure_lpac_supported(sec)?;
++    let explicit_token = opts.extra.primary_token.as_deref();
++    let birth_job = if explicit_token.is_some() {
++        if opts.startup_timeout.is_some() {
++            return Err(AcError::Win32(
++                "explicit token requires no startup timeout".into(),
++            ));
++        }
++        if !opts.suspended
++            || !opts
++                .join_job
++                .as_ref()
++                .is_some_and(|job| job.kill_on_job_close)
++        {
++            return Err(AcError::Win32(
++                "explicit token requires suspended kill-on-close job".into(),
++            ));
++        }
++        Some(job::create_birth_job_guard(
++            opts.join_job.as_ref().expect("validated job"),
++        )?)
++    } else {
++        None
++    };
      let mut inputs = ProcessInputs::from_options(opts)?;
      let mut inherit_list = InheritList::default();
      let mut startup_info = base_startup_info();
@@ -40,18 +450,135 @@ index 7310cb2..e163145 100644
 +        .desktop_w
 +        .as_mut()
 +        .map_or(PWSTR::null(), |buffer| PWSTR(buffer.as_mut_ptr()));
- 
+
      let stdio = setup_stdio(opts, &mut startup_info, &mut inherit_list)?;
      duplicate_additional_handles(&opts.extra.handle_list, &mut inherit_list)?;
-@@ -104,6 +110,7 @@ impl ProcessInputs {
+
+     let security_caps = inflate_security_caps(sec)?;
+-    let attributes = LaunchAttributes::new(security_caps, sec.lpac, inherit_list.slice())?;
++    let attributes = if let Some(job) = &birth_job {
++        LaunchAttributes::new_with_job(
++            security_caps,
++            sec.lpac,
++            inherit_list.slice(),
++            Some(job.as_handle()),
++        )?
++    } else {
++        LaunchAttributes::new(security_caps, sec.lpac, inherit_list.slice())?
++    };
+     let mut startup_guard = StartUpInfoExGuard::new(startup_info, attributes);
+     let mut pi = PROCESS_INFORMATION::default();
+     let flags = creation_flags(opts, inputs.env_block.is_some());
+@@ -62,11 +100,12 @@ pub(super) fn launch_impl(sec: &SecurityCapabilities, opts: &LaunchOptions) -> R
+         inherit_handles,
+         flags,
+         &mut pi,
++        explicit_token,
+     )?;
+     drop(inherit_list);
+
+     let mut child = process_handles(pi)?;
+-    let job_guard = match prepare_child(opts, &child) {
++    let job_guard = match prepare_child(opts, &child, birth_job) {
+         Ok(guard) => guard,
+         Err(error) => {
+             return match terminate_and_reap(&child.process) {
+@@ -104,6 +143,7 @@ impl ProcessInputs {
              exe_w: WideString::from_os_str(opts.exe.as_os_str()),
              args_w: make_cmd_args(&opts.cmdline),
              cwd_w: build_cwd(opts),
 +            desktop_w: desktop_buffer(opts)?,
          })
      }
- 
-@@ -357,3 +364,58 @@ fn trace_create_process(
+
+@@ -169,30 +209,51 @@ fn create_child_process(
+     inherit_handles: bool,
+     flags: PROCESS_CREATION_FLAGS,
+     pi: &mut PROCESS_INFORMATION,
++    token: Option<&FHandle>,
+ ) -> Result<()> {
+     trace_create_process(inputs, inherit_handles, flags);
+     let env_ptr = inputs.env_ptr();
+     let cwd_ptr = inputs.cwd_ptr();
+     let cmd_ptr = inputs.cmd_ptr();
+
+-    // SAFETY: CreateProcessW receives buffers that remain alive for the call duration.
++    let stage = if token.is_some() {
++        "CreateProcessAsUserW"
++    } else {
++        "CreateProcessW"
++    };
++    // SAFETY: All token/UTF16/env/attribute owners outlive this synchronous call.
+     let create_res = unsafe {
+-        CreateProcessW(
+-            inputs.exe_w.as_pcwstr(),
+-            cmd_ptr,
+-            None,
+-            None,
+-            inherit_handles,
+-            flags,
+-            env_ptr,
+-            cwd_ptr,
+-            &info.StartupInfo,
+-            pi,
+-        )
++        if let Some(token) = token {
++            CreateProcessAsUserW(
++                Some(token.as_win32()),
++                inputs.exe_w.as_pcwstr(),
++                cmd_ptr,
++                None,
++                None,
++                inherit_handles,
++                flags,
++                env_ptr,
++                cwd_ptr,
++                &info.StartupInfo,
++                pi,
++            )
++        } else {
++            CreateProcessW(
++                inputs.exe_w.as_pcwstr(),
++                cmd_ptr,
++                None,
++                None,
++                inherit_handles,
++                flags,
++                env_ptr,
++                cwd_ptr,
++                &info.StartupInfo,
++                pi,
++            )
++        }
+     };
+-
+     create_res.map_err(|_| AcError::LaunchFailed {
+-        stage: "CreateProcessW",
++        stage,
+         hint: "launch",
+         source: Box::new(std::io::Error::last_os_error()),
+     })
+@@ -245,10 +306,17 @@ fn launched_io(
+     }
+ }
+
+-fn prepare_child(opts: &LaunchOptions, child: &ChildHandles) -> Result<Option<job::JobGuard>> {
++fn prepare_child(
++    opts: &LaunchOptions,
++    child: &ChildHandles,
++    birth_job: Option<job::JobGuard>,
++) -> Result<Option<job::JobGuard>> {
+     #[cfg(test)]
+     fail_post_spawn_setup_for_test(child)?;
+-    let guard = job::create_job_guard(opts.join_job.as_ref(), child.process.as_win32())?;
++    let guard = match birth_job {
++        Some(job) => Some(job),
++        None => job::create_job_guard(opts.join_job.as_ref(), child.process.as_win32())?,
++    };
+     startup::wait_for_startup(opts, child.process.as_win32())?;
+     Ok(guard)
+ }
+@@ -357,3 +425,62 @@ fn trace_create_process(
      _flags: PROCESS_CREATION_FLAGS,
  ) {
  }
@@ -110,3 +637,7 @@ index 7310cb2..e163145 100644
 +        );
 +    }
 +}
++
++#[cfg(test)]
++#[path = "broker_tests.rs"]
++mod broker_tests;

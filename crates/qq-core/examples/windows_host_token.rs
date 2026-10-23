@@ -33,16 +33,6 @@ mod proof {
         if arguments.get(1).is_some_and(|value| value == "--payload") {
             return payload(Path::new(&arguments[2]), &arguments[3], &arguments[4]);
         }
-        if arguments.get(1).is_some_and(|value| value == "--launcher") {
-            let root = Path::new(&arguments[2]);
-            let result = launch_lpac(root, "filtered");
-            if let Err(error) = &result {
-                fs::write(root.join("task/launcher-error.txt"), error.to_string())?;
-                // No console or inherited host stdio is required by this helper.
-                std::process::exit(1);
-            }
-            return result;
-        }
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let workspace = root.join("task");
@@ -176,10 +166,8 @@ mod proof {
             fs::write(&outside, b"original")?;
             // Controls have joined their pipe readers before this synchronous
             // process-station selection interval begins.
-            fs::write(workspace.join("private-station.txt"), &name)?;
-            fs::write(workspace.join("private-desktop.txt"), "Task")?;
             let ui = PrivateUi::create(&name, &user, &write_sid, profile.sid.as_string())?;
-            let launched = launch_restricted_helper(root, &name, &write_sid, &ui.path);
+            let launched = launch_restricted_payload(root, &write_sid, &ui.path);
             if let Err(error) = launched {
                 // Failed cleanup is not evidence of job quiescence. Retain
                 // private objects until this bounded diagnostic process exits.
@@ -259,6 +247,14 @@ mod proof {
     }
 
     fn launch_lpac(root: &Path, mode: &str) -> io::Result<()> {
+        launch_lpac_as(root, mode, None)
+    }
+
+    fn launch_lpac_as(
+        root: &Path,
+        mode: &str,
+        primary: Option<(std::os::windows::io::BorrowedHandle<'_>, &str)>,
+    ) -> io::Result<()> {
         let token = firehazard::open_process_token(
             firehazard::get_current_process(),
             firehazard::token::QUERY,
@@ -268,10 +264,15 @@ mod proof {
         if mode == "control" {
             println!("control launcher: restricting SID count={count}");
         } else {
-            fs::write(root.join("task/restricting-count.txt"), count.to_string())?;
+            fs::write(
+                root.join("task/broker-restricting-count.txt"),
+                count.to_string(),
+            )?;
         }
-        if mode == "filtered" && count != 1 {
-            return Err(err("trusted launcher lost its sole task restricting SID"));
+        if primary.is_some() {
+            println!(
+                "filtered broker caller restricting SID count={count}; explicit task token supplied"
+            );
         }
         let mut capabilities = read_identities(root)?;
         capabilities.lpac = mode != "ordinary";
@@ -327,13 +328,13 @@ mod proof {
             startup_timeout: None,
             ..Default::default()
         };
-        let options = if mode == "filtered" {
-            let station = fs::read_to_string(root.join("task/private-station.txt"))?;
-            let desktop = fs::read_to_string(root.join("task/private-desktop.txt"))?;
+        let options = if let Some((token, desktop)) = primary {
             rappct::LaunchOptions {
-                desktop: Some(format!("{station}\\{desktop}").into()),
+                desktop: Some(desktop.into()),
                 ..options
             }
+            .try_with_primary_token(token)
+            .map_err(err)?
         } else {
             options
         };
@@ -342,6 +343,24 @@ mod proof {
         drop(child.stdin.take());
         let stdout = capture(child.stdout.take(), "stdout")?;
         let stderr = capture(child.stderr.take(), "stderr")?;
+        if primary.is_some() {
+            let active = child
+                .job_guard
+                .as_ref()
+                .ok_or_else(|| err("missing birth job guard"))?
+                .active_processes()
+                .map_err(err)?;
+            if active != 1 || root.join("task/task-filtered.txt").exists() {
+                return Err(err("payload ran before suspended birth-job admission"));
+            }
+            println!(
+                "filtered birth job: one suspended process; payload artifact absent before release"
+            );
+            child.resume().map_err(err)?;
+            if child.resume().is_ok() {
+                return Err(err("payload resumed more than once"));
+            }
+        }
         let result = match child.wait(Some(Duration::from_secs(20))) {
             Ok(code) => Ok(code),
             Err(error) => {
@@ -351,12 +370,32 @@ mod proof {
         };
         // Close the owned command job before joining pipe readers, so a
         // descendant cannot retain a writer after the command has finished.
+        let active = if primary.is_some() {
+            Some(
+                child
+                    .job_guard
+                    .as_ref()
+                    .ok_or_else(|| err("missing birth job guard"))?
+                    .active_processes()
+                    .map_err(err)?,
+            )
+        } else {
+            None
+        };
         drop(child.job_guard.take());
         let stdout = stdout.join().map_err(|_| err("stdout reader panicked"))??;
         let stderr = stderr.join().map_err(|_| err("stderr reader panicked"))??;
         fs::write(root.join(format!("task/stdout-{mode}.txt")), &stdout)?;
         fs::write(root.join(format!("task/stderr-{mode}.txt")), &stderr)?;
         let code = result?;
+        if let Some(active) = active {
+            if active != 0 {
+                return Err(err(format!(
+                    "birth job still has {active} active processes"
+                )));
+            }
+            println!("filtered birth job: zero active processes before private UI cleanup");
+        }
         let diagnostic = format!(
             "exit={code:#x}; stdout={:?}; stderr={:?}",
             String::from_utf8_lossy(&stdout),
@@ -658,17 +697,18 @@ mod proof {
         io::Error::new(source.kind(), AdmissionError { operation, source })
     }
 
-    fn launch_restricted_helper(
+    fn launch_restricted_payload(
         root: &Path,
-        name: &str,
         write_sid: &str,
         desktop_path: &str,
     ) -> io::Result<()> {
-        use firehazard::{job, process, token};
+        use firehazard::token;
+        use firehazard_sid as firehazard;
+        use std::os::windows::io::AsHandle as _;
         let host =
             firehazard::open_process_token(firehazard::get_current_process(), token::ALL_ACCESS)
                 .map_err(|error| admission_error("OpenProcessToken(host)", error))?;
-        let sid = firehazard::convert_string_sid_to_sid_a(write_sid)
+        let sid = firehazard::convert_string_sid_to_sid_w(write_sid)
             .map_err(|error| admission_error("ConvertStringSidToSid(task)", error))?;
         let flags = token::DISABLE_MAX_PRIVILEGE | token::WRITE_RESTRICTED;
         let restricting = [firehazard::sid::AndAttributes::new(&sid, None)];
@@ -695,11 +735,10 @@ mod proof {
         let old_default = filtered
             .default_dacl()
             .map_err(|error| admission_error("GetTokenInformation(default DACL)", error))?;
-        let old_acl = old_default.default_dacl();
-        if old_acl.as_pacl().is_null() {
-            return Err(err("proof requires an existing non-null default DACL"));
-        }
-        let original_count = old_acl.ace_count();
+        let old_acl = old_default
+            .default_dacl()
+            .ok_or_else(|| err("proof requires a non-null default DACL"))?;
+        let original_count = old_acl.aces().len();
         let mut default_acl = firehazard::acl::Builder::new(firehazard::acl::REVISION_DS);
         default_acl
             .add_acl(firehazard::acl::REVISION_DS, 0, old_acl)
@@ -707,7 +746,7 @@ mod proof {
         default_acl
             .add_access_allowed_ace(
                 firehazard::acl::REVISION_DS,
-                firehazard::access::GENERIC_ALL.into(),
+                firehazard::access::GENERIC_ALL,
                 &sid,
             )
             .map_err(|error| admission_error("AddAccessAllowedAce(task default DACL)", error))?;
@@ -718,8 +757,10 @@ mod proof {
         let readback = filtered.default_dacl().map_err(|error| {
             admission_error("GetTokenInformation(default DACL readback)", error)
         })?;
-        let readback = readback.default_dacl();
-        if readback.ace_count() != original_count + 1 {
+        let readback = readback
+            .default_dacl()
+            .ok_or_else(|| err("default DACL readback was null"))?;
+        if readback.aces().len() != original_count + 1 {
             return Err(err("task default-DACL ACE readback count mismatch"));
         }
         // The old safe ACE wrapper exposes a header and Debug witness, but no
@@ -729,7 +770,9 @@ mod proof {
             "filtered host default DACL: preserved {original_count} ACEs; appended {:?}",
             readback.aces().last()
         );
-        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY
+            .lookup_luid()
+            .map_err(err)?;
         let privileges = filtered.privileges().map_err(err)?;
         let notify_enabled = privileges.privileges().iter().any(|entry| {
             entry.luid == change_notify
@@ -741,122 +784,6 @@ mod proof {
         if !notify_enabled {
             return Err(err("filtered host lacks enabled SeChangeNotifyPrivilege"));
         }
-        let job = firehazard::create_job_object_w(None, ())
-            .map_err(|error| admission_error("CreateJobObjectW", error))?;
-        let limits = job::object::ExtendedLimitInformation {
-            basic_limit_information: job::object::BasicLimitInformation {
-                limit_flags: job::object::limit::KILL_ON_JOB_CLOSE,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        firehazard::set_information_job_object(&job, limits)
-            .map_err(|error| admission_error("SetInformationJobObject", error))?;
-        let image = std::env::current_exe()
-            .map_err(|error| admission_error("current_exe(helper)", error))?;
-        let mut command: Vec<u16> = format!(
-            "\"{}\" --launcher \"{}\" {name}\0",
-            image.display(),
-            root.display()
-        )
-        .encode_utf16()
-        .collect();
-        let jobs = [job::Handle::from(&job)];
-        let mut attributes = process::ThreadAttributeList::with_attribute_capacity(1)
-            .map_err(|error| admission_error("InitializeProcThreadAttributeList", error))?;
-        attributes
-            .update(process::ThreadAttributeRef::job_list(&jobs))
-            .map_err(|error| admission_error("UpdateProcThreadAttribute(job list)", error))?;
-        let desktop: Vec<u16> = desktop_path.encode_utf16().chain(Some(0)).collect();
-        let mut startup = process::StartupInfoExW {
-            attribute_list: Some(attributes),
-            ..Default::default()
-        };
-        startup.startup_info.desktop =
-            Some(firehazard::abistr::CStrNonNull::from_units_with_nul(&desktop).map_err(err)?);
-        let child = firehazard::create_process_as_user_w(
-            &filtered,
-            (),
-            Some(&mut command),
-            None,
-            None,
-            false,
-            process::CREATE_SUSPENDED
-                | process::CREATE_NO_WINDOW
-                | process::EXTENDED_STARTUPINFO_PRESENT,
-            process::environment::Inherit,
-            (),
-            &startup,
-        )
-        .map_err(|error| admission_error("CreateProcessAsUserW(filtered helper)", error))?;
-        // The original process handle pins this PID across the safe OpenProcess.
-        let observer = match winsafe::HPROCESS::OpenProcess(
-            winsafe::co::PROCESS::SYNCHRONIZE,
-            false,
-            child.process_id,
-        ) {
-            Ok(observer) => observer,
-            Err(error) => {
-                firehazard::terminate_job_object(&job, 125)
-                    .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
-                firehazard::wait_for_process(&child.process)
-                    .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
-                return Err(admission_error(
-                    "OpenProcess(observer)",
-                    io::Error::other(error),
-                ));
-            }
-        };
-        if let Err(error) = firehazard::resume_thread(&child.thread) {
-            firehazard::terminate_job_object(&job, 125)
-                .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
-            firehazard::wait_for_process(&child.process)
-                .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
-            return Err(admission_error("ResumeThread(filtered helper)", error));
-        }
-        match observer.WaitForSingleObject(Some(30_000)) {
-            Ok(winsafe::co::WAIT::OBJECT_0) => {}
-            result => {
-                firehazard::terminate_job_object(&job, 125)
-                    .map_err(|error| admission_error("TerminateJobObject(cleanup)", error))?;
-                firehazard::wait_for_process(&child.process)
-                    .map_err(|error| admission_error("wait_for_process(cleanup)", error))?;
-                return Err(match result {
-                    Err(error) => admission_error(
-                        "WaitForSingleObject(filtered helper)",
-                        io::Error::other(error),
-                    ),
-                    Ok(status) => err(format!(
-                        "WaitForSingleObject(filtered helper): unexpected status {status:?}"
-                    )),
-                });
-            }
-        }
-        let code = firehazard::get_exit_code_process(&child.process)
-            .map_err(|error| admission_error("GetExitCodeProcess(filtered helper)", error))?;
-        if code != 0 {
-            let detail = fs::read_to_string(root.join("task/launcher-error.txt"))
-                .unwrap_or_else(|_| "no helper error report".to_owned());
-            return Err(err(format!(
-                "filtered trusted launcher exited {code:#x}: {detail}"
-            )));
-        }
-        let accounting = firehazard::query_information_job_object::<
-            job::object::BasicAccountingInformation,
-        >(&job)
-        .map_err(|error| {
-            admission_error("QueryInformationJobObject(final active processes)", error)
-        })?;
-        if accounting.active_processes != 0 {
-            firehazard::terminate_job_object(&job, 125).map_err(|error| {
-                admission_error("TerminateJobObject(non-quiescent proof)", error)
-            })?;
-            return Err(err(format!(
-                "helper job still has {} active processes",
-                accounting.active_processes
-            )));
-        }
-        println!("filtered helper job: zero active processes before private UI cleanup");
-        Ok(())
+        launch_lpac_as(root, "filtered", Some((filtered.as_handle(), desktop_path)))
     }
 }
