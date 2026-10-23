@@ -7,7 +7,7 @@ jobs:
   native-command-owner:
     strategy:
       matrix:
-        os: [windows-latest]
+        os: [windows-11-arm]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -71,4 +71,5 @@ jobs:
             }
           }
           '@
+          [System.Environment]::OSVersion.VersionString
           [NullSecurityProbe]::Read()
