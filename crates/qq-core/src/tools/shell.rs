@@ -682,6 +682,12 @@ pub(super) async fn run_shell(
         ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
         outcome => outcome,
     };
+    #[cfg(target_os = "macos")]
+    let hint = if child.resource_stopped() {
+        Some("native resource safeguard stopped the command group".to_owned())
+    } else {
+        hint
+    };
     let elapsed = started.elapsed();
     let mut result = async {
         match outcome {

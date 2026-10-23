@@ -142,6 +142,12 @@ impl LinuxOwner {
         }
         let resources = match native.map(|native| native.resources) {
             None | Some(crate::command_owner::NativeResources::Host) => None,
+            Some(crate::command_owner::NativeResources::Guarded { .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "sampled resource safeguards are not implemented by this launcher",
+                ));
+            }
             Some(crate::command_owner::NativeResources::Limited { limits }) => {
                 let root = self.launcher.cgroup_root.as_ref().ok_or_else(|| {
                     io::Error::new(
