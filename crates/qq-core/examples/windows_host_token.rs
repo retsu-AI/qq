@@ -472,18 +472,18 @@ mod proof {
     impl PrivateUi {
         fn create(name: &str, user: &str, task: &str, package: &str) -> io::Result<Self> {
             use firehazard_sid as ui;
-            let user = ui::convert_string_sid_to_sid_a(user).map_err(err)?;
-            let task = ui::convert_string_sid_to_sid_a(task).map_err(err)?;
-            let package = ui::convert_string_sid_to_sid_a(package).map_err(err)?;
+            let user = ui::convert_string_sid_to_sid_w(user).map_err(err)?;
+            let task = ui::convert_string_sid_to_sid_w(task).map_err(err)?;
+            let package = ui::convert_string_sid_to_sid_w(package).map_err(err)?;
             let mut station_acl = ui::acl::Builder::new(ui::acl::REVISION);
             let mut desktop_acl = ui::acl::Builder::new(ui::acl::REVISION);
             station_acl
-                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &*user)
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &user)
                 .map_err(err)?;
             desktop_acl
-                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &*user)
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &user)
                 .map_err(err)?;
-            for participant in [&*task, &*package] {
+            for participant in [&task, &package] {
                 station_acl
                     .add_access_allowed_ace(ui::acl::REVISION, station_participant(), participant)
                     .map_err(err)?;
