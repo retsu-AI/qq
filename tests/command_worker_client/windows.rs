@@ -368,7 +368,7 @@ async fn restricted_worker_probe(mode: &str) {
     if mode == "shell" {
         command.tool = "shell".to_owned();
         command.arguments = serde_json::json!({"command":
-            "echo shell-output>\"result with spaces.txt\" && echo native-windows-boundary-enforced"}).to_string();
+            r#"echo shell-output>"result with spaces.txt" && .\probe.exe --exact windows::payload_probe --nocapture --skip qq-windows-probe:files"#}).to_string();
     }
     let values = ["", "with space", "quote\"value", "trailing path\\"];
     if mode == "arguments" {
@@ -412,7 +412,7 @@ async fn restricted_worker_probe(mode: &str) {
             "shell-output"
         );
     }
-    if matches!(mode, "files" | "descendants") {
+    if matches!(mode, "files" | "descendants" | "shell") {
         assert_eq!(
             std::fs::read_to_string(workspace.path().join("artifact")).unwrap(),
             "task output"
