@@ -36,17 +36,47 @@ mod probe {
             firehazard::token::QUERY | firehazard::token::DUPLICATE,
         )
         .map_err(err)?;
-        describe_token("host", &host, false)?;
+        describe_token("host", &host, false, None)?;
         let before = opens("host")?.ok_or_else(|| {
             err("host could not read NUL security descriptor; metadata baseline unavailable")
         })?;
+        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        let host_privileges = host.privileges().map_err(err)?;
+        let original_notify = host_privileges
+            .privileges()
+            .iter()
+            .find(|entry| entry.luid == change_notify)
+            .ok_or_else(|| {
+                err("host lacks SeChangeNotifyPrivilege; traversal control unavailable")
+            })?
+            .attributes;
+        control(&host, "disabled-admin", None)?;
+        control(&host, "change-notify-only", Some(original_notify))?;
+        let after = opens("host-after")?
+            .ok_or_else(|| err("host could not reread NUL security descriptor"))?;
+        if before != after {
+            return Err(err("NUL security descriptor changed during metadata probe"));
+        }
+        println!(
+            "Security descriptor unchanged; same-account control retains other groups and ownership relations"
+        );
+        Ok(())
+    }
+
+    fn control(
+        host: &firehazard::token::OwnedHandle,
+        label: &'static str,
+        retained_notify: Option<firehazard::privilege::Attributes>,
+    ) -> io::Result<()> {
         let administrators = firehazard::sid!(S - 1 - 5 - 32 - 544);
-        // flags=0: DISABLE_MAX_PRIVILEGE would retain SeChangeNotifyPrivilege.
+        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        // flags=0 permits exact removal while preserving the retained entry's
+        // original enabled state. No privilege is enabled by this fixture.
         let filtered = firehazard::create_restricted_token_filter(
-            &host,
+            host,
             firehazard::token::RestrictedFlags::default(),
             |entry| *entry.sid == *administrators,
-            |_| true,
+            |entry| retained_notify.is_none() || entry.luid != change_notify,
             None,
         )
         .map_err(err)?;
@@ -77,8 +107,8 @@ mod probe {
                     true,
                 )
                 .map_err(err)?;
-                describe_token("disabled-admin", &effective, true)?;
-                opens("disabled-admin")?;
+                describe_token(label, &effective, true, retained_notify)?;
+                opens(label)?;
                 Ok(())
             })();
             firehazard::revert_to_self().map_err(err)?;
@@ -86,14 +116,6 @@ mod probe {
         })
         .join()
         .map_err(|_| err("probe thread panicked"))??;
-        let after = opens("host-after")?
-            .ok_or_else(|| err("host could not reread NUL security descriptor"))?;
-        if before != after {
-            return Err(err("NUL security descriptor changed during metadata probe"));
-        }
-        println!(
-            "Security descriptor unchanged; same-account control retains other groups and ownership relations"
-        );
         Ok(())
     }
 
@@ -101,6 +123,7 @@ mod probe {
         label: &str,
         token: &firehazard::token::OwnedHandle,
         require_control: bool,
+        retained_notify: Option<firehazard::privilege::Attributes>,
     ) -> io::Result<()> {
         let groups = token.groups().map_err(err)?;
         let administrators = firehazard::sid!(S - 1 - 5 - 32 - 544);
@@ -112,19 +135,29 @@ mod probe {
         let enabled = admin.is_some_and(|g| {
             g.attributes & firehazard::sid::group::ENABLED == firehazard::sid::group::ENABLED
         });
-        let privileges = token.privileges().map_err(err)?.privilege_count();
+        let entries = token.privileges().map_err(err)?;
+        let privileges = entries.privilege_count();
+        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        let exact_privileges = match retained_notify {
+            None => privileges == 0,
+            Some(attributes) => {
+                privileges == 1
+                    && entries.privileges()[0].luid == change_notify
+                    && entries.privileges()[0].attributes == attributes
+            }
+        };
         let integrity = token.integrity_level().map_err(err)?;
         let medium = *integrity.label().sid == *firehazard::sid!(S - 1 - 16 - 8192);
         println!(
-            "{label}: admin_present={} admin_enabled={enabled} admin_deny_only={deny_only} privileges={privileges} integrity={:?}",
+            "{label}: admin_present={} admin_enabled={enabled} admin_deny_only={deny_only} privileges={privileges} retained_notify={retained_notify:?} integrity={:?}",
             admin.is_some(),
             integrity.label().sid
         );
         if require_control
-            && (enabled || (admin.is_some() && !deny_only) || privileges != 0 || !medium)
+            && (enabled || (admin.is_some() && !deny_only) || !exact_privileges || !medium)
         {
             return Err(err(
-                "effective thread token does not meet disabled-admin, zero-privilege, medium-integrity control",
+                "effective thread token does not meet disabled-admin, exact-privilege, medium-integrity control",
             ));
         }
         Ok(())
