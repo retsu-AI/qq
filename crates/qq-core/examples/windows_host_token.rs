@@ -483,14 +483,21 @@ mod proof {
             desktop_acl
                 .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &user)
                 .map_err(err)?;
-            for participant in [&task, &package] {
-                station_acl
-                    .add_access_allowed_ace(ui::acl::REVISION, station_participant(), participant)
-                    .map_err(err)?;
-                desktop_acl
-                    .add_access_allowed_ace(ui::acl::REVISION, desktop_participant(), participant)
-                    .map_err(err)?;
-            }
+            // CreateProcessAsUser requires full access for the trusted helper.
+            // Its task SID is granted this only on these fresh noninteractive
+            // objects; the LPAC package keeps the narrower participant rights.
+            station_acl
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &task)
+                .map_err(err)?;
+            desktop_acl
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &task)
+                .map_err(err)?;
+            station_acl
+                .add_access_allowed_ace(ui::acl::REVISION, station_participant(), &package)
+                .map_err(err)?;
+            desktop_acl
+                .add_access_allowed_ace(ui::acl::REVISION, desktop_participant(), &package)
+                .map_err(err)?;
             station_acl.finish().map_err(err)?;
             desktop_acl.finish().map_err(err)?;
             let mut label = ui::acl::Builder::new(ui::acl::REVISION);
@@ -596,10 +603,63 @@ mod proof {
         let restricting = filtered.restricted_sids().map_err(|error| {
             admission_error("GetTokenInformation(filtered, TokenRestrictedSids)", error)
         })?;
+        if restricting.group_count() != 1
+            || !firehazard::equal_sid(restricting.groups()[0].sid, (&sid).into())
+        {
+            return Err(err(
+                "filtered host must retain exactly the task restricting SID",
+            ));
+        }
+        println!("filtered host: exactly one restricting SID, matching task");
+        let old_default = filtered
+            .default_dacl()
+            .map_err(|error| admission_error("GetTokenInformation(default DACL)", error))?;
+        let old_acl = old_default.default_dacl();
+        if old_acl.as_pacl().is_null() {
+            return Err(err("proof requires an existing non-null default DACL"));
+        }
+        let original_count = old_acl.ace_count();
+        let mut default_acl = firehazard::acl::Builder::new(firehazard::acl::REVISION_DS);
+        default_acl
+            .add_acl(firehazard::acl::REVISION_DS, 0, old_acl)
+            .map_err(|error| admission_error("AddAce(preserve default DACL)", error))?;
+        default_acl
+            .add_access_allowed_ace(
+                firehazard::acl::REVISION_DS,
+                firehazard::access::GENERIC_ALL.into(),
+                &sid,
+            )
+            .map_err(|error| admission_error("AddAccessAllowedAce(task default DACL)", error))?;
+        default_acl.finish().map_err(err)?;
+        filtered
+            .set_default_dacl(&mut default_acl)
+            .map_err(|error| admission_error("SetTokenInformation(task default DACL)", error))?;
+        let readback = filtered.default_dacl().map_err(|error| {
+            admission_error("GetTokenInformation(default DACL readback)", error)
+        })?;
+        let readback = readback.default_dacl();
+        if readback.ace_count() != original_count + 1 {
+            return Err(err("task default-DACL ACE readback count mismatch"));
+        }
+        // The old safe ACE wrapper exposes a header and Debug witness, but no
+        // typed allowed-ACE SID accessor. Retain the actual appended ACE without
+        // treating Debug formatting as a security predicate.
         println!(
-            "filtered host: restricting SID count={}",
-            restricting.group_count()
+            "filtered host default DACL: preserved {original_count} ACEs; appended {:?}",
+            readback.aces().last()
         );
+        let change_notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        let privileges = filtered.privileges().map_err(err)?;
+        let notify_enabled = privileges.privileges().iter().any(|entry| {
+            entry.luid == change_notify
+                && entry.attributes & firehazard::privilege::ENABLED != Default::default()
+        });
+        println!(
+            "filtered host: SeChangeNotifyPrivilege enabled={notify_enabled}; no privilege adjustments"
+        );
+        if !notify_enabled {
+            return Err(err("filtered host lacks enabled SeChangeNotifyPrivilege"));
+        }
         let job = firehazard::create_job_object_w(None, ())
             .map_err(|error| admission_error("CreateJobObjectW", error))?;
         let limits = job::object::ExtendedLimitInformation {
