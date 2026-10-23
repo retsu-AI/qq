@@ -12,6 +12,41 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Read null-device security without changing it
+        shell: pwsh
+        run: |
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          using Microsoft.Win32.SafeHandles;
+          public static class NullSecurityProbe {
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+            [DllImport("advapi32.dll", SetLastError=true)]
+            static extern uint GetSecurityInfo(SafeFileHandle handle, uint type, uint requested, out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr descriptor);
+            [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+            static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(IntPtr descriptor, uint revision, uint requested, out IntPtr text, out uint length);
+            [DllImport("kernel32.dll")]
+            static extern IntPtr LocalFree(IntPtr memory);
+            public static void Read() {
+              using (var handle = CreateFile(@"\\.\NUL", 0x20000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero)) {
+                if (handle.IsInvalid) { Console.WriteLine("NUL READ_CONTROL failed: " + Marshal.GetLastWin32Error()); return; }
+                IntPtr owner, group, dacl, sacl, descriptor;
+                // SE_KERNEL_OBJECT; OWNER | GROUP | DACL | LABEL only. No writes.
+                uint flags = 1 | 2 | 4 | 16;
+                uint error = GetSecurityInfo(handle, 6, flags, out owner, out group, out dacl, out sacl, out descriptor);
+                if (error != 0) { Console.WriteLine("NUL security read failed: " + error); return; }
+                try {
+                  IntPtr text; uint length;
+                  if (ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, flags, out text, out length)) {
+                    try { Console.WriteLine("NUL SDDL: " + Marshal.PtrToStringUni(text)); } finally { LocalFree(text); }
+                  } else { Console.WriteLine("NUL SDDL conversion failed: " + Marshal.GetLastWin32Error()); }
+                } finally { LocalFree(descriptor); }
+              }
+            }
+          }
+          '@
+          [NullSecurityProbe]::Read()
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
