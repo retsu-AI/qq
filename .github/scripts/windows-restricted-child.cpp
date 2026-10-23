@@ -116,22 +116,15 @@ static int inspect() {
 // Do not infer permission failure from Node's path loader. Probe each Win32
 // access mask directly, without changing any file or existing security object.
 static int inspect_files() {
-    wchar_t ready_text[64]{}, release_text[64]{};
-    if (GetEnvironmentVariableW(L"QQ_NATIVE_READY_HANDLE", ready_text, 64)) {
-        require(GetEnvironmentVariableW(L"QQ_NATIVE_RELEASE_HANDLE", release_text, 64) != 0, "view release handle");
-        const auto handle = [](const wchar_t* text) {
-            wchar_t* end = nullptr;
-            const auto value = wcstoull(text, &end, 10);
-            if (!value || !end || *end || static_cast<unsigned long long>(static_cast<UINT_PTR>(value)) != value) {
-                throw std::runtime_error("invalid view synchronization handle");
-            }
-            return reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(value));
-        };
-        Handle ready, release;
-        ready.value = handle(ready_text);
-        release.value = handle(release_text);
-        require(SetEvent(ready.value), "view source ready");
-        if (WaitForSingleObject(release.value, 15000) != WAIT_OBJECT_0) throw std::runtime_error("view source release failed");
+    wchar_t waiting[8]{};
+    if (GetEnvironmentVariableW(L"QQ_NATIVE_WAIT_VIEW", waiting, 8)) {
+        const char ready[] = "READY\n";
+        DWORD written = 0, read = 0;
+        require(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), ready, 6, &written, nullptr), "view source ready frame");
+        if (written != 6) throw std::runtime_error("short view ready frame");
+        BYTE release = 0;
+        require(ReadFile(GetStdHandle(STD_INPUT_HANDLE), &release, 1, &read, nullptr), "view source release frame");
+        if (read != 1 || release != 1) throw std::runtime_error("invalid view release frame");
     }
     inspect();
     wchar_t current[32768]{};
@@ -546,7 +539,7 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
         host_restrictions = information(restricted_host.value, TokenRestrictedSids);
     }
     SIZE_T size = 0;
-    const DWORD attribute_count = lpac ? 2 : 1;
+    const DWORD attribute_count = (lpac ? 2 : 1) + 1;
     InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &size);
     if (!size || size > 65536) throw std::runtime_error("invalid policy attribute size");
     std::vector<BYTE> storage(size);
@@ -579,15 +572,25 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     PROCESS_INFORMATION source{};
     // Outside the explicit control case, the source is never resumed. Its
     // primary token gives the exact identity of this newly created policy.
-    Handle ready, release;
+    Handle input, child_input, output, child_output;
     std::map<std::wstring, std::wstring> additions;
     if (after_ready) {
         SECURITY_ATTRIBUTES synchronization{ static_cast<DWORD>(sizeof(SECURITY_ATTRIBUTES)), nullptr, TRUE };
-        ready.value = CreateEventW(&synchronization, TRUE, FALSE, nullptr);
-        release.value = CreateEventW(&synchronization, TRUE, FALSE, nullptr);
-        require(ready.value != nullptr && release.value != nullptr, "view synchronization events");
-        additions[L"QQ_NATIVE_READY_HANDLE"] = std::to_wstring(reinterpret_cast<UINT_PTR>(ready.value));
-        additions[L"QQ_NATIVE_RELEASE_HANDLE"] = std::to_wstring(reinterpret_cast<UINT_PTR>(release.value));
+        require(CreatePipe(&child_input.value, &input.value, &synchronization, 65536), "view release pipe");
+        require(SetHandleInformation(input.value, HANDLE_FLAG_INHERIT, 0), "private view release writer");
+        require(CreatePipe(&output.value, &child_output.value, &synchronization, 65536), "view ready pipe");
+        require(SetHandleInformation(output.value, HANDLE_FLAG_INHERIT, 0), "private view ready reader");
+        startup.StartupInfo.hStdInput = child_input.value;
+        startup.StartupInfo.hStdOutput = child_output.value;
+        additions[L"QQ_NATIVE_WAIT_VIEW"] = L"1";
+    }
+    // Match the SDK's explicit stdio allowlist. The native launch must not
+    // inherit unrelated host handles, including namespace and token handles.
+    HANDLE inherited_stdio[] = { startup.StartupInfo.hStdInput, startup.StartupInfo.hStdOutput, startup.StartupInfo.hStdError };
+    if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherited_stdio, sizeof(inherited_stdio), nullptr, nullptr)) {
+        const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
+        require(FALSE, "native source stdio allowlist");
     }
     auto source_environment = ::environment(additions);
     const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
@@ -597,6 +600,8 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
         : CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
             flags, source_environment.data(), workspace, &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
+    if (child_input.value) { CloseHandle(child_input.value); child_input.value = nullptr; }
+    if (child_output.value) { CloseHandle(child_output.value); child_output.value = nullptr; }
     DeleteProcThreadAttributeList(attributes);
     SetLastError(launch_error);
     require(launched, "suspended native policy source");
@@ -625,10 +630,34 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     if (control) {
         if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) throw std::runtime_error("native policy control resume failed");
         if (after_ready) {
-            const HANDLE waiters[] = { ready.value, process.value };
-            if (WaitForMultipleObjects(2, waiters, FALSE, 15000) != WAIT_OBJECT_0) throw std::runtime_error("source did not reach the post-initialization view handshake");
+            char frame[6]{};
+            DWORD count = 0;
+            while (count < sizeof(frame)) {
+                DWORD received = 0;
+                require(ReadFile(output.value, frame + count, static_cast<DWORD>(sizeof(frame)) - count, &received, nullptr), "initialized source ready pipe");
+                if (!received) throw std::runtime_error("source exited before view readiness");
+                count += received;
+            }
+            if (std::memcmp(frame, "READY\n", sizeof(frame))) throw std::runtime_error("unexpected source ready frame");
             install_device_map(process.value, sid, device_map);
-            require(SetEvent(release.value), "release initialized view source");
+            const BYTE release = 1;
+            DWORD written = 0;
+            require(WriteFile(input.value, &release, 1, &written, nullptr), "release initialized view source");
+            if (written != 1) throw std::runtime_error("short source release frame");
+            // Drain while the fixed inspector runs, so pipe capacity never
+            // turns completion into a deadlock. Outer job ownership bounds
+            // failed initialization and closes these pipes on controller exit.
+            char buffer[4096];
+            for (;;) {
+                DWORD received = 0;
+                if (!ReadFile(output.value, buffer, sizeof(buffer), &received, nullptr)) {
+                    if (GetLastError() == ERROR_BROKEN_PIPE) break;
+                    require(FALSE, "initialized source output");
+                }
+                if (!received) break;
+                std::cout.write(buffer, received);
+                if (!std::cout) throw std::runtime_error("source output forwarding failed");
+            }
         }
         if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("native policy control wait failed");
         DWORD result = 0;
