@@ -444,7 +444,8 @@ function Fixture() {
 }
 // `?app`: the real App (title bar, store, dialogs) over mocked IPC and events.
 // `welcome` opens no project, `empty` shows a new session's starters,
-// `signed-out` has no models, `trust` holds the project's configuration, and
+// `signed-out` has no models, `trust` holds the project's configuration,
+// `deny-links` refuses external links as a missing opener scope does, and
 // `open=palette|providers|worktree|goal|menu-file` opens that overlay.
 async function renderApp() {
   const query = new URLSearchParams(location.search);
@@ -461,8 +462,12 @@ async function renderApp() {
   };
   mockWindows("main");
   mockIPC(
-    async (command) => {
+    async (command, args) => {
       switch (command) {
+        case "plugin:opener|open_url":
+          if (query.has("deny-links"))
+            throw `Not allowed to open url ${(args as { url: string }).url}`;
+          return undefined;
         case "plugin:window|is_maximized":
           return false;
         case "plugin:app|version":
