@@ -146,7 +146,21 @@ mod proof {
                 "control: task write, OS/public reads, private-read denial and ARAP outside write passed"
             );
             fs::write(&outside, b"original")?;
-            launch_restricted_helper(root, &name, &write_sid)?;
+            // Controls have joined their pipe readers before this synchronous
+            // process-station selection interval begins.
+            fs::write(workspace.join("private-station.txt"), &name)?;
+            fs::write(workspace.join("private-desktop.txt"), "Task")?;
+            let ui = PrivateUi::create(&name, &user, &write_sid, profile.sid.as_string())?;
+            let launched = launch_restricted_helper(root, &name, &write_sid, &ui.path);
+            if let Err(error) = launched {
+                // Failed cleanup is not evidence of job quiescence. Retain
+                // private objects until this bounded diagnostic process exits.
+                std::mem::forget(ui);
+                return Err(error);
+            }
+            // Successful launch verifies zero active job processes before UI
+            // close; field order closes the desktop before its station.
+            drop(ui);
             assert_results(root, "filtered", "denied")?;
             if fs::read(&outside)? != b"original" {
                 return Err(err("filtered LPAC changed the outside canary"));
@@ -239,6 +253,16 @@ mod proof {
             }),
             startup_timeout: None,
             ..Default::default()
+        };
+        let options = if mode == "filtered" {
+            let station = fs::read_to_string(root.join("task/private-station.txt"))?;
+            let desktop = fs::read_to_string(root.join("task/private-desktop.txt"))?;
+            rappct::LaunchOptions {
+                desktop: Some(format!("{station}\\{desktop}").into()),
+                ..options
+            }
+        } else {
+            options
         };
         let mut child = rappct::launch_in_container_with_io(&capabilities, &options)
             .map_err(|error| err(format!("{mode}: LPAC preparation with pipes: {error:?}")))?;
@@ -419,6 +443,120 @@ mod proof {
         Ok(())
     }
 
+    // Diagnostic-only owned UI objects. Fields drop in order: desktop, station.
+    struct PrivateUi {
+        _desktop: firehazard_sid::desktop::OwnedHandle,
+        _station: firehazard_sid::winsta::OwnedHandle,
+        path: String,
+    }
+
+    fn station_participant() -> firehazard_sid::winsta::AccessRights {
+        use firehazard_sid::winsta::*;
+        READATTRIBUTES
+            | WRITEATTRIBUTES
+            | ENUMDESKTOPS
+            | ACCESSGLOBALATOMS
+            | firehazard_sid::access::READ_CONTROL
+    }
+
+    fn desktop_participant() -> firehazard_sid::desktop::AccessRights {
+        use firehazard_sid::desktop::*;
+        READOBJECTS
+            | WRITEOBJECTS
+            | CREATEWINDOW
+            | CREATEMENU
+            | ENUMERATE
+            | firehazard_sid::access::READ_CONTROL
+    }
+
+    impl PrivateUi {
+        fn create(name: &str, user: &str, task: &str, package: &str) -> io::Result<Self> {
+            use firehazard_sid as ui;
+            let user = ui::convert_string_sid_to_sid_a(user).map_err(err)?;
+            let task = ui::convert_string_sid_to_sid_a(task).map_err(err)?;
+            let package = ui::convert_string_sid_to_sid_a(package).map_err(err)?;
+            let mut station_acl = ui::acl::Builder::new(ui::acl::REVISION);
+            let mut desktop_acl = ui::acl::Builder::new(ui::acl::REVISION);
+            station_acl
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &*user)
+                .map_err(err)?;
+            desktop_acl
+                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &*user)
+                .map_err(err)?;
+            for participant in [&*task, &*package] {
+                station_acl
+                    .add_access_allowed_ace(ui::acl::REVISION, station_participant(), participant)
+                    .map_err(err)?;
+                desktop_acl
+                    .add_access_allowed_ace(ui::acl::REVISION, desktop_participant(), participant)
+                    .map_err(err)?;
+            }
+            station_acl.finish().map_err(err)?;
+            desktop_acl.finish().map_err(err)?;
+            let mut label = ui::acl::Builder::new(ui::acl::REVISION);
+            // SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, with a Low object label.
+            label
+                .add_mandatory_ace(
+                    ui::acl::REVISION,
+                    Default::default(),
+                    1,
+                    &ui::sid::integrity::Low,
+                )
+                .map_err(err)?;
+            label.finish().map_err(err)?;
+            let station_sd = ui::security::DescriptorBuilder::new()
+                .dacl(station_acl.as_acl(), false)
+                .map_err(err)?
+                .sacl(label.as_acl(), false)
+                .map_err(err)?
+                .finish();
+            let desktop_sd = ui::security::DescriptorBuilder::new()
+                .dacl(desktop_acl.as_acl(), false)
+                .map_err(err)?
+                .sacl(label.as_acl(), false)
+                .map_err(err)?
+                .finish();
+            let station = ui::create_window_station_w(
+                name,
+                None,
+                ui::access::GENERIC_ALL,
+                Some(&ui::security::Attributes::new(Some(&station_sd), false)),
+            )
+            .map_err(|error| admission_error("CreateWindowStationW(private)", error))?;
+            let original = ui::open_process_window_station().map_err(err)?;
+            ui::set_process_window_station(&station).map_err(err)?;
+            let desktop = ui::create_desktop_w(
+                "Task",
+                (),
+                None,
+                None,
+                ui::access::GENERIC_ALL,
+                Some(&ui::security::Attributes::new(Some(&desktop_sd), false)),
+            );
+            // Always attempt restoration, including CreateDesktop failure.
+            let restored = ui::set_process_window_station(&original);
+            // This duplicate becomes the process connection on restoration.
+            // Retain it until this bounded diagnostic exits; this is NOT a
+            // reusable production lifetime design. Host ACLs are unchanged.
+            std::mem::forget(original);
+            if let Err(error) = restored {
+                // Restoration failure leaves the private station connected.
+                // Do not invoke Close* on still-connected objects; the bounded
+                // diagnostic process releases them on exit and reports failure.
+                std::mem::forget(station);
+                std::mem::forget(desktop);
+                return Err(admission_error("SetProcessWindowStation(restore)", error));
+            }
+            let desktop =
+                desktop.map_err(|error| admission_error("CreateDesktopW(private)", error))?;
+            Ok(Self {
+                _desktop: desktop,
+                _station: station,
+                path: format!("{name}\\Task"),
+            })
+        }
+    }
+
     #[derive(Debug, thiserror::Error)]
     #[error("{operation}: {source}")]
     struct AdmissionError {
@@ -432,7 +570,12 @@ mod proof {
         io::Error::new(source.kind(), AdmissionError { operation, source })
     }
 
-    fn launch_restricted_helper(root: &Path, name: &str, write_sid: &str) -> io::Result<()> {
+    fn launch_restricted_helper(
+        root: &Path,
+        name: &str,
+        write_sid: &str,
+        desktop_path: &str,
+    ) -> io::Result<()> {
         use firehazard::{job, process, token};
         let host =
             firehazard::open_process_token(firehazard::get_current_process(), token::ALL_ACCESS)
@@ -483,10 +626,13 @@ mod proof {
         attributes
             .update(process::ThreadAttributeRef::job_list(&jobs))
             .map_err(|error| admission_error("UpdateProcThreadAttribute(job list)", error))?;
-        let startup = process::StartupInfoExW {
+        let desktop: Vec<u16> = desktop_path.encode_utf16().chain(Some(0)).collect();
+        let mut startup = process::StartupInfoExW {
             attribute_list: Some(attributes),
             ..Default::default()
         };
+        startup.startup_info.desktop =
+            Some(firehazard::abistr::CStrNonNull::from_units_with_nul(&desktop).map_err(err)?);
         let child = firehazard::create_process_as_user_w(
             &filtered,
             (),
@@ -554,6 +700,22 @@ mod proof {
                 "filtered trusted launcher exited {code:#x}: {detail}"
             )));
         }
+        let accounting = firehazard::query_information_job_object::<
+            job::object::BasicAccountingInformation,
+        >(&job)
+        .map_err(|error| {
+            admission_error("QueryInformationJobObject(final active processes)", error)
+        })?;
+        if accounting.active_processes != 0 {
+            firehazard::terminate_job_object(&job, 125).map_err(|error| {
+                admission_error("TerminateJobObject(non-quiescent proof)", error)
+            })?;
+            return Err(err(format!(
+                "helper job still has {} active processes",
+                accounting.active_processes
+            )));
+        }
+        println!("filtered helper job: zero active processes before private UI cleanup");
         Ok(())
     }
 }

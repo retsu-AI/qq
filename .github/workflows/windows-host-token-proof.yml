@@ -22,9 +22,34 @@ jobs:
         with:
           key: windows-host-token-corrected-${{ matrix.os }}
           cache-on-failure: true
+      - name: Prepare exact diagnostic dependency patch
+        shell: pwsh
+        run: |
+          $rappct = Join-Path $env:RUNNER_TEMP rappct-private-desktop
+          git clone --no-checkout https://github.com/cpjet64/rappct $rappct
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $rappct checkout --detach c02f9dd960645522009da3827a79bdc99f50c9c1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $patch = Join-Path $env:GITHUB_WORKSPACE crates/qq-core/tests/fixtures/rappct-private-desktop.patch
+          git -C $rappct apply --check $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $rappct apply $patch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = Join-Path $env:RUNNER_TEMP rappct-private-desktop.toml
+          $path = $rappct.Replace([IO.Path]::DirectorySeparatorChar, [char]'/')
+          "[patch.'https://github.com/cpjet64/rappct']`nrappct = { path = '$path' }" | Set-Content $config
+          "QQ_RAPPCT_DIAGNOSTIC_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Append
+          cargo --config $config update -p rappct
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test explicit desktop option and retained buffer
+        shell: pwsh
+        run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG test --locked -p rappct desktop_tests
       - name: Compile the safe API composition
         shell: pwsh
-        run: cargo build --locked -p qq-core --example windows_host_token
+        run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG build --locked -p qq-core --example windows_host_token
+      - name: Lint the native diagnostic example
+        shell: pwsh
+        run: cargo --config $env:QQ_RAPPCT_DIAGNOSTIC_CONFIG clippy --locked -p qq-core --example windows_host_token -- -D warnings
       - name: Run ordinary LPAC control then host restricted token composition
         shell: pwsh
         run: .\target\debug\examples\windows_host_token.exe
