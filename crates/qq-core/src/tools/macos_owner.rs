@@ -783,6 +783,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
             read_write,
         } => {
             filesystem.validate()?;
+            let mut protected_directories = std::collections::BTreeSet::new();
             for (grant, writable) in read_only
                 .iter()
                 .map(|grant| (grant, false))
@@ -804,11 +805,9 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     if writable { "file-write*" } else { "" }
                 ));
                 if writable {
-                    // An enclosing writable grant must not allow replacing a
-                    // nested authority root. Contents remain fully writable.
-                    profile.push_str(&format!(
-                        "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {quoted})))\n"
-                    ));
+                    // Moving an ancestor also relocates the authority root.
+                    // Unrelated directories and grant contents stay writable.
+                    protected_directories.extend(grant.path.ancestors());
                 }
                 for ancestor in grant.path.ancestors().skip(1) {
                     let quoted = serde_json::to_string(
@@ -821,6 +820,22 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     if profile.len() > 64 * 1024 {
                         return Err(io::Error::other("native sandbox profile exceeds its bound"));
                     }
+                }
+            }
+            // Emit denials after every allow so overlapping grants cannot
+            // restore permission to replace an authority root or its ancestors.
+            for directory in protected_directories {
+                let quoted = serde_json::to_string(
+                    directory
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("non UTF-8 native grant"))?,
+                )
+                .map_err(io::Error::other)?;
+                profile.push_str(&format!(
+                    "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {quoted})))\n"
+                ));
+                if profile.len() > 64 * 1024 {
+                    return Err(io::Error::other("native sandbox profile exceeds its bound"));
                 }
             }
         }
