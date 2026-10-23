@@ -483,6 +483,22 @@ fn prepare_profile(
     profile(filesystem, network)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn check_launch_pressure(
+    control: &mut impl io::Write,
+    resources: NativeResources,
+    query: impl FnOnce() -> io::Result<i32>,
+) -> io::Result<bool> {
+    if resources::check_pressure(resources, query).is_err() {
+        // Authorization already transferred custody to this guardian, but no
+        // payload exists yet. Confirm that terminal refusal with the normal
+        // resource-stop frame; a failed write must still retain uncertainty.
+        control.write_all(&RESOURCE_STOPPED.to_le_bytes())?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
 fn validate_environment(packet: &Packet) -> io::Result<()> {
     if packet
         .environment
@@ -626,7 +642,13 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     command.process_group(0);
     // Authorization may have waited since preparation. Refuse fresh pressure
     // before creating even a short-lived payload, not at its first sample.
-    resources::check_pressure(packet.resources, resources::memory_pressure_level)?;
+    if !check_launch_pressure(
+        &mut control,
+        packet.resources,
+        resources::memory_pressure_level,
+    )? {
+        return Ok(0);
+    }
     if unix_ms() >= packet.not_after_ms {
         return Err(io::Error::other("native launch authorization expired"));
     }
@@ -1431,5 +1453,92 @@ printf anchored"#,
             )
             .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn post_authorization_pressure_refusal_confirms_no_payload_before_settlement() {
+        struct LimitedWriter {
+            stream: std::os::unix::net::UnixStream,
+            remaining: usize,
+        }
+        impl io::Write for LimitedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.remaining == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "injected receipt failure",
+                    ));
+                }
+                let end = bytes.len().min(self.remaining);
+                let written = io::Write::write(&mut self.stream, &bytes[..end])?;
+                self.remaining -= written;
+                Ok(written)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                io::Write::flush(&mut self.stream)
+            }
+        }
+        for (pressure, budget) in [
+            (Ok(2), usize::MAX),
+            (Ok(4), usize::MAX),
+            (
+                Err(io::Error::other("pressure query unavailable")),
+                usize::MAX,
+            ),
+            (Ok(2), 0),
+            (Ok(4), 2),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let marker = root.path().join("payload-ran");
+            let mut inner = tokio::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            assert!(inner.wait().await.unwrap().success());
+            let (control, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+            control.set_nonblocking(true).unwrap();
+            let mut writer = LimitedWriter {
+                stream,
+                remaining: budget,
+            };
+            let tasks = crate::tools::dispatch::ToolTasks::default();
+            let mut lease = tasks.enter();
+            lease.process_started();
+            let mut child = Child {
+                inner,
+                control: Some(tokio::net::UnixStream::from_std(control).unwrap()),
+                lease: Some(lease),
+                reported: None,
+                result_bytes: [0; 4],
+                result_read: 0,
+                stopping: false,
+                resource_stopped: false,
+            };
+            let admitted = check_launch_pressure(
+                &mut writer,
+                NativeResources::Guarded {
+                    memory_bytes: 1024 * 1024,
+                    max_tasks: 2,
+                },
+                || pressure,
+            );
+            if matches!(admitted, Ok(true)) {
+                std::fs::write(&marker, b"payload started").unwrap();
+            }
+            drop(writer);
+            let result = child.wait().await;
+            let resource_stopped = child.resource_stopped();
+            drop(child);
+            let drained = tasks.drain().await;
+            assert!(
+                !marker.exists(),
+                "pressure refusal must never launch a payload"
+            );
+            let delivered = budget == usize::MAX;
+            assert_eq!(admitted.is_ok(), delivered, "{admitted:?}");
+            assert_eq!(result.is_ok(), delivered, "{result:?}");
+            assert_eq!(resource_stopped, delivered);
+            assert_eq!(drained.is_ok(), delivered, "{drained:?}");
+        }
     }
 }
