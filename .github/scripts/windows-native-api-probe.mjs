@@ -227,7 +227,7 @@ async function projectionRoot(request) {
   return projection;
 }
 
-async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false, taskAcl = false, lowLabel = false, normalMap = false, selfMap = false) {
+async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false, taskAcl = false, lowLabel = false, normalMap = false, selfMap = false, projectedPayload = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
   const volume = await volumeMetadata();
   const projection = projected ? await projectionRoot(request) : undefined;
@@ -244,10 +244,11 @@ async function runWithNativePolicy(request, inheritParent = false, control = fal
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, selfMap ? 'host-normal-projected-self' : normalMap ? (afterReady ? 'host-normal-projected-after-ready' : 'host-normal-projected') : taskAcl ? (lowLabel ? 'host-policy-task-acl-low' : 'host-policy-task-acl') : projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, projectedPayload ? 'host-policy-projected-payload' : selfMap ? 'host-normal-projected-self' : normalMap ? (afterReady ? 'host-normal-projected-after-ready' : 'host-normal-projected') : taskAcl ? (lowLabel ? 'host-policy-task-acl-low' : 'host-policy-task-acl') : projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
         QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid,
+        QQ_NATIVE_PAYLOAD_NODE: tools.node, QQ_NATIVE_PAYLOAD_SCRIPT: path.join(workspace, 'payload.cjs'),
         QQ_NATIVE_PRIVATE_CREDENTIAL: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL,
         QQ_NATIVE_SOFTWARE_FILE: softwareFile,
         QQ_NATIVE_PUBLIC_WRITABLE_GUID: volume.guid + publicWritable.slice(3),
@@ -489,6 +490,7 @@ cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, n
 cases.push({ name: 'restricted-recreated-token-inherited-native-policy', payload: false, nativePolicy: true, nativePolicyParent: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-host-write-token', payload: false, nativePolicy: true, nativePolicyWrite: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-host-write-token-lpac', payload: false, nativePolicy: true, nativePolicyWrite: true, nativePolicyLpac: true, command: relayCommand });
+cases.push({ name: 'restricted-native-policy-projected-payload', payload: true, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, projectedPayload: true, command: relayCommand });
 cases.push({ name: 'native-policy-projected-file-control', payload: false, nativePolicy: true, nativePolicyProjected: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-projected-drive', payload: false, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, command: relayCommand });
 // The SDK removes same-path enumerate+deny pairs. Probe the native contract
@@ -546,7 +548,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady, test.taskAcl, test.lowLabel, test.normalMap, test.selfMap) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady, test.taskAcl, test.lowLabel, test.normalMap, test.selfMap, test.projectedPayload) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

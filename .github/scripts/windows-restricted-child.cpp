@@ -600,7 +600,7 @@ static void grant_task_directory(PSID package, const wchar_t* directory, bool lo
     }
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false, bool normal_control = false, bool self_control = false) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false, bool normal_control = false, bool self_control = false, bool payload = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -678,7 +678,23 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     require(GetModuleFileNameW(nullptr, image, 32768) != 0, "policy source image");
     const DWORD workspace_size = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", workspace, 32768);
     if (!workspace_size || workspace_size >= 32768) throw std::runtime_error("missing policy task workspace");
-    const auto command = L"\"" + std::wstring(image) + L"\" inspect-files";
+    std::wstring command = L"\"" + std::wstring(image) + L"\" inspect-files";
+    if (payload) {
+        if (!control || normal_control || !projected || after_ready || restrict_host) {
+            throw std::runtime_error("payload requires the projected native policy control");
+        }
+        wchar_t script[32768]{};
+        const DWORD image_size = GetEnvironmentVariableW(L"QQ_NATIVE_PAYLOAD_NODE", image, 32768);
+        const DWORD script_size = GetEnvironmentVariableW(L"QQ_NATIVE_PAYLOAD_SCRIPT", script, 32768);
+        if (!image_size || image_size >= 32768 || !script_size || script_size >= 32768) {
+            throw std::runtime_error("missing bounded payload paths");
+        }
+        if (std::wstring(image).find_first_of(L"\"\r\n") != std::wstring::npos ||
+            std::wstring(script).find_first_of(L"\"\r\n") != std::wstring::npos) {
+            throw std::runtime_error("invalid payload path quoting");
+        }
+        command = L"\"" + std::wstring(image) + L"\" \"" + std::wstring(script) + L"\"";
+    }
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(0);
     STARTUPINFOEXW startup{};
@@ -819,6 +835,7 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl") return host_create_policy(argv[2], false, true, true, false, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl-low") return host_create_policy(argv[2], false, true, true, false, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected-payload") return host_create_policy(argv[2], false, true, false, false, true, false, false, false, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected") return host_create_policy(argv[2], false, true, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"volume-name") {
             wchar_t volume[128]{}, target[32768]{};
