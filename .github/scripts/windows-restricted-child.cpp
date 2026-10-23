@@ -114,7 +114,8 @@ int wmain(int argc, wchar_t** argv) {
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
         if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
         const std::wstring mode(argv[3]);
-        const bool default_dacl = mode == L"write-sid-default-dacl";
+        const bool inline_node = mode == L"write-sid-inline" || mode == L"write-sid-default-dacl-inline";
+        const bool default_dacl = mode == L"write-sid-default-dacl" || mode == L"write-sid-default-dacl-inline";
         Handle current;
         require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |
             (default_dacl ? TOKEN_ADJUST_DEFAULT : 0), &current.value), "OpenProcessToken");
@@ -123,7 +124,7 @@ int wmain(int argc, wchar_t** argv) {
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
         const bool write_sid = mode == L"write-sid" || mode == L"write-sid-lpac" ||
-            mode == L"write-sid-no-window" || mode == L"write-sid-native" || mode == L"write-sid-native-no-window" || default_dacl;
+            mode == L"write-sid-no-window" || mode == L"write-sid-native" || mode == L"write-sid-native-no-window" || default_dacl || inline_node;
         const bool no_window = mode == L"write-sid-no-window" || mode == L"write-sid-native-no-window";
         if (argc != (write_sid ? 5 : 4)) throw std::runtime_error("unexpected restriction arguments");
         const bool reduce_capabilities = mode == L"reduce-capabilities" || mode == L"reduce-capabilities-lpac";
@@ -238,7 +239,8 @@ int wmain(int argc, wchar_t** argv) {
 
         }
         auto block = environment();
-        const std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" \"" + std::wstring(argv[2]) + L"\"";
+        const std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" " +
+            (inline_node ? L"-e " : L"") + L"\"" + std::wstring(argv[2]) + L"\"";
         std::vector<wchar_t> mutable_command(command.begin(), command.end());
         mutable_command.push_back(0);
         STARTUPINFOEXW startup{};

@@ -294,12 +294,38 @@ for (const mode of ['write-sid', 'write-sid-lpac', 'write-sid-default-dacl']) {
   cases.push({ name: 'restricted-private-desktop-' + mode, payload: true, privateDesktop: true,
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(relayPath)} ${mode} ${quote(writeSid)}` });
 }
+const inlineBootstrap = `
+const bootstrapFs = require('node:fs');
+const bootstrapPath = require('node:path');
+const diagnostic = { cwd: process.cwd(), paths: {} };
+for (const name of ['.', '..', 'captured-environment.json', 'payload.cjs', bootstrapPath.resolve('payload.cjs')]) {
+  const result = {};
+  try { result.metadata = bootstrapFs.statSync(name).isFile() ? 'file' : 'directory'; } catch (error) { result.metadataError = error.code; }
+  try { result.realpath = bootstrapFs.realpathSync.native(name); } catch (error) { result.realpathError = error.code; }
+  if (name.endsWith('.json') || name.endsWith('.cjs')) {
+    try { result.readBytes = bootstrapFs.readFileSync(name).length; } catch (error) { result.readError = error.code; }
+  }
+  diagnostic.paths[name] = result;
+}
+console.log('native-path-diagnostic:' + JSON.stringify(diagnostic));
+const bootstrapEnvironment = JSON.parse(bootstrapFs.readFileSync('captured-environment.json', 'utf8'));
+Object.assign(process.env, bootstrapEnvironment);
+eval(bootstrapFs.readFileSync('payload.cjs', 'utf8'));
+`;
+const inlineExpression = `eval(Buffer.from('${Buffer.from(inlineBootstrap).toString('base64')}','base64').toString())`;
+for (const mode of ['write-sid-inline', 'write-sid-default-dacl-inline']) {
+  cases.push({ name: 'restricted-private-desktop-' + mode, payload: true, privateDesktop: true,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(inlineExpression)} ${mode} ${quote(writeSid)}` });
+}
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
   for (const test of cases) {
     for (const name of ['report.json', 'artifact.txt', 'software-hardlink', 'payload-ready.txt', 'host-created-file.txt']) fs.rmSync(path.join(workspace, name), { force: true });
     fs.rmSync(path.join(rustTask, 'target'), { recursive: true, force: true });
+    for (const name of ['contained-relay.cjs', 'payload.cjs', 'captured-environment.json']) {
+      assert.ok(fs.existsSync(path.join(workspace, name)), `host input is missing: ${name}`);
+    }
     fs.rmSync(futureSecret, { force: true });
     fs.writeFileSync(publicWritable, 'public-input');
     let futureCreated = false;
