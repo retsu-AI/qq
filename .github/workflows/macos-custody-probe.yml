@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [seatbelt-nesting, launchservices]
+        mode: [launchservices, launchservices-seatbelt]
     runs-on: macos-latest
     timeout-minutes: 5
     steps:

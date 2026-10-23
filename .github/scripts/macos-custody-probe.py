@@ -206,6 +206,14 @@ def child(address, nonce, role):
             command = reader.readline(32)
             if command == b"ping\n":
                 connection.sendall(b"alive\n")
+            elif command.startswith(b"signal "):
+                target = int(command.split()[1])
+                try:
+                    os.kill(target, signal.SIGCONT)
+                    result = 0
+                except OSError as error:
+                    result = error.errno
+                send_json(connection, {"signal_errno": result})
             elif command == b"spawn\n":
                 arguments = [sys.executable, "-I", str(Path(__file__).resolve()), "child", address, nonce, "escaped"]
                 pid = os.posix_spawn(sys.executable, arguments, {}, setpgroup=0)
@@ -265,7 +273,7 @@ def launch(command, nonce=""):
             process.stdout.close()
 
 
-def host(use_launchservices=False):
+def host(use_launchservices=False, use_seatbelt=False):
     kernel = Kernel()
     assert os.geteuid() != 0
     controller = kernel.identity(os.getpid())
@@ -313,6 +321,17 @@ def host(use_launchservices=False):
                 configuration = Path(temporary) / f"{role}.plist"
                 arguments = [sys.executable, "-I", str(Path(__file__).resolve()),
                              "child", address, nonce, role]
+                if use_seatbelt and role == "root":
+                    # Exercise the production process restrictions, while keeping
+                    # fixture reads broad. This is not a filesystem qualification.
+                    policy = "\n".join([
+                        "(version 1)", "(deny default)",
+                        "(allow file-read* process-exec process-fork sysctl-read)",
+                        "(allow signal (target same-sandbox))",
+                        "(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))",
+                        "(allow network-outbound (literal " + json.dumps(address) + "))",
+                    ])
+                    arguments = ["/usr/bin/sandbox-exec", "-p", policy, *arguments]
                 if use_launchservices:
                     bundle = Path(temporary) / f"{role}.app"
                     executable = bundle / "Contents" / "MacOS" / "worker"
@@ -363,6 +382,12 @@ def host(use_launchservices=False):
             coalitions = [controller["coalitions"][0], root["coalitions"][0], sentinel["coalitions"][0]]
             assert 0 not in coalitions and len(set(coalitions)) == 3, "coalitions are not private"
             connection, reader, _ = fixtures["root"]
+            if use_seatbelt:
+                connection.sendall(f"signal {sentinel['pid']}\n".encode())
+                result = read_json(reader)
+                assert result == {"signal_errno": errno.EPERM}, result
+                ping("sentinel")
+                print(json.dumps({"seatbelt_signal_boundary": "enforced"}), flush=True)
             connection.sendall(b"spawn\n")
             spawned = read_json(reader)["spawned"]
             escaped = accept("escaped")
@@ -422,13 +447,14 @@ if __name__ == "__main__":
     elif sys.argv[1:] == ["layout-check"]:
         layouts()
         print("LP64 probe layouts checked")
-    elif sys.argv[1:] in (["host"], ["launchservices"]):
+    elif sys.argv[1:] in (["host"], ["launchservices"], ["launchservices-seatbelt"]):
         try:
-            host(use_launchservices=sys.argv[1] == "launchservices")
+            host(use_launchservices=sys.argv[1] != "host",
+                 use_seatbelt=sys.argv[1] == "launchservices-seatbelt")
         except Exception as error:
             print(json.dumps({"prerequisites_passed": False, "error": f"{type(error).__name__}: {error}"}), flush=True)
             raise
     elif len(sys.argv) == 5 and sys.argv[1] == "child":
         child(*sys.argv[2:])
     else:
-        raise SystemExit("usage: macos-custody-probe.py host|launchservices|seatbelt-nesting|layout-check|child ADDRESS NONCE ROLE")
+        raise SystemExit("usage: macos-custody-probe.py host|launchservices|launchservices-seatbelt|seatbelt-nesting|layout-check|child ADDRESS NONCE ROLE")
