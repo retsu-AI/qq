@@ -257,6 +257,7 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::implicit_owner_cleanup_closes_sqlite_off_the_async_worker
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
+            bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
             bash .github/scripts/test-exact.sh command_owner::tests::windows_processes::descendants_stop_on_completion_cancellation_and_deadline
             bash .github/scripts/test-exact.sh command_owner::tests::windows_shared_state_is_refused_before_recovery_or_admission
             bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
@@ -430,9 +431,11 @@ jobs:
       - name: Report size
         run: |
           size=$(stat -c%s target/release/qq)
-          echo "### qq release binary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "$(numfmt --to=iec "$size") ($size bytes)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### qq release binary"
+            echo ""
+            echo "$(numfmt --to=iec "$size") ($size bytes)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   turn-overhead:
     name: controlled turn overhead
