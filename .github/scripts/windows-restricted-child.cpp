@@ -74,8 +74,35 @@ static std::vector<wchar_t> environment() {
     return result;
 }
 
+static std::string sid_text(PSID sid) {
+    LPSTR value = nullptr;
+    require(ConvertSidToStringSidA(sid, &value), "ConvertSidToStringSidA");
+    std::string text(value);
+    LocalFree(value);
+    return text;
+}
+
+static int inspect() {
+    Handle token;
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value), "inspect token");
+    contained(token.value);
+    auto package = information(token.value, TokenAppContainerSid);
+    std::cout << "appcontainer=1; package=" << sid_text(reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer) << std::endl;
+    auto capabilities = information(token.value, TokenCapabilities);
+    const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(capabilities.data());
+    if (groups->GroupCount > 128) throw std::runtime_error("too many capabilities");
+    for (DWORD i = 0; i < groups->GroupCount; ++i) {
+        std::cout << "capability=" << sid_text(groups->Groups[i].Sid) << "; attributes=" << groups->Groups[i].Attributes << std::endl;
+    }
+    DWORD lpac = 0, size = 0;
+    const BOOL available = GetTokenInformation(token.value, TokenIsLessPrivilegedAppContainer, &lpac, sizeof(lpac), &size);
+    std::cout << "lpac-query-available=" << available << "; lpac=" << lpac << std::endl;
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
         if (argc != 4) throw std::runtime_error("expected node path, payload path, restriction mode");
         Handle current;
         require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &current.value), "OpenProcessToken");

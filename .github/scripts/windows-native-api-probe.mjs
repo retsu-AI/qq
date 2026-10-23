@@ -23,8 +23,11 @@ fs.mkdirSync(path.join(home, 'tmp'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true });
 const secret = process.env.QQ_NATIVE_SCOPE_CANARY;
+const markerSecret = process.env.QQ_NATIVE_MARKER_CANARY;
+assert.ok(markerSecret, 'the host must provide a separate marker-only canary');
 assert.ok(secret, 'the host must provide a canary with explicit public AppContainer read access');
 assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+assert.equal(fs.readFileSync(markerSecret, 'utf8'), 'outside-marker');
 function installed(name) {
   const found = process.env.PATH.split(path.delimiter)
     .filter(directory => path.isAbsolute(directory))
@@ -111,6 +114,7 @@ let requests = 0;
 function assertHostState() {
   assert.equal(requests, 0);
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+  assert.equal(fs.readFileSync(markerSecret, 'utf8'), 'outside-marker');
   assert.equal(fs.readFileSync(softwareFile, 'utf8'), 'host-installed-input',
     'read-only software must remain immutable through a writable hardlink');
 }
@@ -122,7 +126,7 @@ fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
 fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
 fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
-fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, endpoint, softwareFile }));
+fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, endpoint, softwareFile, restrictedHelper }));
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -130,6 +134,8 @@ const path = require('node:path');
 (async () => {
   const input = JSON.parse(fs.readFileSync('input.json', 'utf8'));
   const report = { tools: {} };
+  const token = spawnSync(input.restrictedHelper, ['inspect'], { encoding: 'utf8', timeout: 5000 });
+  report.token = { exit: token.status, stdout: token.stdout, stderr: token.stderr, error: token.error?.message };
   report.softwareRead = fs.readFileSync(input.softwareFile, 'utf8');
   const alias = 'software-hardlink';
   try {
@@ -162,18 +168,27 @@ const path = require('node:path');
   report.rustCheck = { exit: rust.status, stdout: rust.stdout, stderr: rust.stderr, error: rust.error?.message };
   try { fs.readFileSync(input.secret); report.secretRead = true; } catch { report.secretRead = false; }
   try { fs.writeFileSync(input.secret, 'changed'); report.secretWrite = true; } catch { report.secretWrite = false; }
+  try { fs.readFileSync(input.markerSecret); report.markerRead = true; } catch { report.markerRead = false; }
+  try { fs.writeFileSync(input.markerSecret, 'changed'); report.markerWrite = true; } catch { report.markerWrite = false; }
   try { await fetch(input.endpoint, { signal: AbortSignal.timeout(2500) }); report.loopback = true; } catch { report.loopback = false; }
   fs.writeFileSync('artifact.txt', 'native-api-output');
   fs.writeFileSync('report.json', JSON.stringify(report));
 })().catch(error => { console.error(error.message); process.exitCode = 1; });
 `);
+const toolchainDirectory = path.join(rustup, 'toolchains');
+const toolchainEntries = fs.readdirSync(toolchainDirectory);
+assert.ok(toolchainEntries.length <= 32, 'bounded installed toolchain inputs');
+const resolvedToolchains = toolchainEntries.map(name => path.join(toolchainDirectory, name))
+  .filter(root => fs.existsSync(path.join(root, 'bin', 'rustc.exe')))
+  .map(root => fs.realpathSync.native(root));
+console.log(JSON.stringify({ resolvedToolchains }));
 const readonlyPaths = [...new Set([
   process.env.SystemRoot,
   ...Object.values(tools).map(file => path.dirname(file)),
   // Git's bin launcher needs the rest of its installation. Cargo's proxy
   // needs Rustup's installed toolchains, but not Cargo's credential directory.
   path.dirname(path.dirname(tools.git)),
-  rustup, compiler.installation, sdk.root, softwareRoot,
+  rustup, ...resolvedToolchains, compiler.installation, sdk.root, softwareRoot,
 ])];
 const ancestorPaths = new Set();
 for (const granted of [...readonlyPaths, workspace]) {
@@ -201,7 +216,7 @@ fs.writeFileSync(relayPath, relay);
 
 const cases = [
   { name: 'public-read-baseline', command: relayCommand, payload: true },
-  { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret] },
+  { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret, markerSecret] },
   { name: 'token-creation-control',
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
   { name: 'token-user-sid-control',
@@ -254,17 +269,17 @@ try {
       // own reported result and remains required by QQ's production fixture.
       outcome.fileBoundary = output.exitCode === 0 && !output.timedOut
         && report.tools.node.exit === 0 && report.secretRead === false
-        && report.secretWrite === false && report.loopback === false
+        && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'));
       outcome.frozenProfiles = ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'].every(name => {
         const profile = report.profiles[name];
         return profile.directory === environment[name] && profile.nodeWrite === true
           && profile.exit === 0 && profile.written === true;
       });
-      outcome.qualified = outcome.frozenProfiles && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
+      outcome.qualified = outcome.frozenProfiles && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
-        && report.secretRead === false && report.secretWrite === false && report.loopback === false
+        && report.secretRead === false && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
     }
@@ -276,6 +291,8 @@ try {
   assertHostState();
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.secretRead, true,
     'the public-read control must demonstrate the outside read before evaluating deny policies');
+  assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.markerRead, true,
+    'the marker-read control must demonstrate its separate outside read');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('restricted-') && outcome.qualified),
     'No additional token restriction both ran real tools and denied the public outside canary');
 } finally {
