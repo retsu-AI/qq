@@ -1,0 +1,25 @@
+name: Windows worker ambient write baseline
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ambient-write-baseline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: command-owner-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Expose the real worker's existing ambient write authority
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client windows::arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker -- --exact --nocapture
