@@ -17,7 +17,7 @@ pub(super) fn check(policy: NativeResources, leader: rustix::process::Pid) -> io
             memory_bytes,
             max_tasks,
         } => (memory_bytes, max_tasks),
-        NativeResources::Limited { .. } => {
+        NativeResources::Limited { .. } | NativeResources::Committed { .. } => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "macOS aggregate resource enforcement is unavailable",

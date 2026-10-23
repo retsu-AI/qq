@@ -54,16 +54,16 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux, the binary creates detached task scopes for ordinary Auto runs and
-their children. Built-ins use the private task tree; native commands receive its
+On Linux and macOS, the binary creates detached task scopes for ordinary Auto
+runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-is enabled on Linux first. Other platforms retain their existing permission
-behavior until macOS resource limits and Windows containment are implemented
-and qualified. Authorized network egress, credential brokering, per-task aggregate
-resource budgets and concurrent source writers still require further work.
+uses kernel resource limits on Linux and explicit sampled resource safeguards
+on macOS. Windows retains its existing permission behavior pending native
+containment integration and qualification. Authorized network egress, credential
+brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with

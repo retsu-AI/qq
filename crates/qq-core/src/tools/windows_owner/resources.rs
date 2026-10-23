@@ -11,7 +11,7 @@ pub(super) fn apply(policy: NativeResources) -> io::Result<Option<u32>> {
             max_processes,
             cpu_percent,
         } => (memory_bytes, max_processes, cpu_percent),
-        NativeResources::Limited { .. } => {
+        NativeResources::Limited { .. } | NativeResources::Guarded { .. } => {
             return Err(io::Error::other(
                 "requested resource accounting is unavailable on Windows",
             ));
@@ -33,4 +33,19 @@ pub(super) fn apply(policy: NativeResources) -> io::Result<Option<u32>> {
     // command job still owns cancellation, crashes and complete drain.
     job.assign_current_process()?;
     Ok(Some(cpu_percent))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampled_safeguards_are_refused_before_creating_a_job() {
+        let error = apply(NativeResources::Guarded {
+            memory_bytes: 1024,
+            max_tasks: 2,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unavailable on Windows"));
+    }
 }

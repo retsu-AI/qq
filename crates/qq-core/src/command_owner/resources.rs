@@ -1,4 +1,4 @@
-//! Aggregate process-tree limits chosen by the trusted host.
+//! Process-tree resource policy chosen by the trusted host.
 use serde::{Deserialize, Serialize};
 use std::io;
 

@@ -457,9 +457,9 @@ fn validate_resources(filesystem: &NativeFilesystem, resources: NativeResources)
         NativeResources::Guarded { .. } => Err(io::Error::other(
             "resource safeguards require restricted filesystem authority",
         )),
-        NativeResources::Limited { .. } => Err(io::Error::other(
-            "macOS aggregate resource enforcement is unavailable",
-        )),
+        NativeResources::Limited { .. } | NativeResources::Committed { .. } => Err(
+            io::Error::other("macOS aggregate resource enforcement is unavailable"),
+        ),
     }
 }
 
@@ -864,6 +864,15 @@ mod tests {
             (NativeFilesystem::Host, NativeResources::Host, true),
             (NativeFilesystem::Host, guarded, false),
             (restricted.clone(), guarded, true),
+            (
+                restricted.clone(),
+                NativeResources::Committed {
+                    memory_bytes: 1024,
+                    max_processes: 2,
+                    cpu_percent: 50,
+                },
+                false,
+            ),
             (
                 restricted,
                 NativeResources::Guarded {
