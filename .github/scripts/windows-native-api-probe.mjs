@@ -1,7 +1,8 @@
 // Temporary behavioral probe for Microsoft's native process-security API.
 // This is diagnostic code, not a QQ runtime dependency or a backend selection.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -105,14 +106,31 @@ environment.LIB = [path.join(compiler.toolset, 'lib', architecture),
 environment.INCLUDE = [path.join(compiler.toolset, 'include'),
   ...['ucrt', 'um', 'shared'].map(name => path.join(sdk.root, 'Include', sdk.version, name))].join(path.delimiter);
 console.log(JSON.stringify({ compiler: compiler.binaries, sdk: path.join(sdk.root, sdk.version) }));
-const restrictedHelper = path.join(workspace, 'restricted-child.exe');
-const helperBuild = spawnSync(path.join(compiler.binaries, 'cl.exe'), [
-  '/nologo', '/EHsc', '/W4', '/WX', '/std:c++20', '/MT',
-  fileURLToPath(new URL('./windows-restricted-child.cpp', import.meta.url)),
-  `/Fe:${restrictedHelper}`, `/Fo:${path.join(workspace, 'restricted-child.obj')}`,
-// Host fixture compilation is outside the sandbox timing measurements.
-], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 120_000 });
-assert.equal(helperBuild.status, 0, `token probe build: ${helperBuild.error ?? ''} ${helperBuild.stdout} ${helperBuild.stderr}`);
+// Controller images and request snapshots remain outside writable task files.
+const restrictedHelper = path.join(softwareRoot, 'restricted-child.exe');
+const desktopHelper = path.join(softwareRoot, 'private-desktop.exe');
+for (const [source, output] of [
+  ['windows-restricted-child.cpp', restrictedHelper],
+  ['windows-private-desktop.cpp', desktopHelper],
+]) {
+  const build = spawnSync(path.join(compiler.binaries, 'cl.exe'), [
+    '/nologo', '/EHsc', '/W4', '/WX', '/std:c++20', '/MT',
+    fileURLToPath(new URL(source, import.meta.url)),
+    `/Fe:${output}`, `/Fo:${output}.obj`,
+  ], { cwd: softwareRoot, env: environment, encoding: 'utf8', timeout: 120_000 });
+  assert.equal(build.status, 0, `${source}: ${build.error ?? ''} ${build.stdout} ${build.stderr}`);
+}
+const execFileAsync = promisify(execFile);
+const requestFile = path.join(softwareRoot, 'private-desktop-request.json');
+async function runOnPrivateDesktop(request) {
+  fs.writeFileSync(requestFile, JSON.stringify(request));
+  const { stdout, stderr } = await execFileAsync(desktopHelper, [
+    tools.node, fileURLToPath(new URL('./windows-native-api-probe-host.mjs', import.meta.url)), requestFile, writeSid,
+  ], { cwd: softwareRoot, encoding: 'utf8', timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  const envelope = JSON.parse(stdout);
+  assert.equal(envelope.ok, true, envelope.error);
+  return { ...envelope.result, desktopController: stderr.trim() };
+}
 
 const expected = Object.fromEntries(Object.entries(tools).map(([name, executable]) => {
   const output = spawnSync(executable, ['--version'], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 10_000 });
@@ -264,13 +282,17 @@ const cases = [
     payload: true,
   })),
 ];
-for (const mode of ['write-sid', 'write-sid-lpac', 'write-sid-no-window']) {
+for (const mode of ['write-sid', 'write-sid-lpac', 'write-sid-no-window', 'write-sid-default-dacl']) {
   cases.push({ name: 'restricted-' + mode, payload: true,
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(relayPath)} ${mode} ${quote(writeSid)}` });
 }
 for (const mode of ['write-sid-native', 'write-sid-native-no-window']) {
   cases.push({ name: 'restricted-' + mode, payload: false,
     command: `${quote(restrictedHelper)} ${quote(restrictedHelper)} inspect ${mode} ${quote(writeSid)}` });
+}
+for (const mode of ['write-sid', 'write-sid-lpac', 'write-sid-default-dacl']) {
+  cases.push({ name: 'restricted-private-desktop-' + mode, payload: true, privateDesktop: true,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(relayPath)} ${mode} ${quote(writeSid)}` });
 }
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
@@ -294,7 +316,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await run({
+      output = await (test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

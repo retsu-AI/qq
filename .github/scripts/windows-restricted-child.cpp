@@ -4,6 +4,7 @@
 #define _UNICODE
 #include <windows.h>
 #include <sddl.h>
+#include <aclapi.h>
 #include <iostream>
 #include <cwchar>
 #include <cstring>
@@ -112,15 +113,17 @@ int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
         if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
+        const std::wstring mode(argv[3]);
+        const bool default_dacl = mode == L"write-sid-default-dacl";
         Handle current;
-        require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &current.value), "OpenProcessToken");
+        require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY |
+            (default_dacl ? TOKEN_ADJUST_DEFAULT : 0), &current.value), "OpenProcessToken");
         contained(current.value);
         auto package = information(current.value, TokenAppContainerSid);
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
-        const std::wstring mode(argv[3]);
         const bool write_sid = mode == L"write-sid" || mode == L"write-sid-lpac" ||
-            mode == L"write-sid-no-window" || mode == L"write-sid-native" || mode == L"write-sid-native-no-window";
+            mode == L"write-sid-no-window" || mode == L"write-sid-native" || mode == L"write-sid-native-no-window" || default_dacl;
         const bool no_window = mode == L"write-sid-no-window" || mode == L"write-sid-native-no-window";
         if (argc != (write_sid ? 5 : 4)) throw std::runtime_error("unexpected restriction arguments");
         const bool reduce_capabilities = mode == L"reduce-capabilities" || mode == L"reduce-capabilities-lpac";
@@ -205,6 +208,31 @@ int wmain(int argc, wchar_t** argv) {
                 const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(entries.data());
                 if (groups->GroupCount != 1 || !EqualSid(groups->Groups[0].Sid, write_restriction.get())) {
                     throw std::runtime_error("write restriction did not retain exactly the task SID");
+                }
+                if (default_dacl) {
+                    // New private kernel objects must satisfy the extra access
+                    // check too. This changes only the newly minted token's
+                    // default DACL, never an existing host object's ACL.
+                    auto original = information(current.value, TokenDefaultDacl);
+                    const auto* defaults = reinterpret_cast<const TOKEN_DEFAULT_DACL*>(original.data());
+                    if (!defaults->DefaultDacl) throw std::runtime_error("missing original default DACL");
+                    EXPLICIT_ACCESS_W entry{};
+                    entry.grfAccessPermissions = GENERIC_ALL;
+                    entry.grfAccessMode = GRANT_ACCESS;
+                    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+                    entry.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+                    entry.Trustee.ptstrName = reinterpret_cast<LPWSTR>(write_restriction.get());
+                    PACL expanded = nullptr;
+                    const DWORD code = SetEntriesInAclW(1, &entry, defaults->DefaultDacl, &expanded);
+                    if (code != ERROR_SUCCESS) {
+                        SetLastError(code);
+                        require(FALSE, "private kernel default DACL");
+                    }
+                    std::unique_ptr<void, decltype(free_sid)> owned(expanded, free_sid);
+                    TOKEN_DEFAULT_DACL replacement{ expanded };
+                    require(SetTokenInformation(restricted.value, TokenDefaultDacl, &replacement,
+                        static_cast<DWORD>(sizeof(replacement))), "set private kernel default DACL");
+                    std::cout << "task SID included in new token default DACL" << std::endl;
                 }
             }
 
