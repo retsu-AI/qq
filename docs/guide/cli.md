@@ -95,7 +95,7 @@ serves clients until it is stopped.
 | `run [--bind ADDR] [--allow-origin ORIGIN]…` | serve in the foreground until stopped, SIGTERM or `Ctrl-C` |
 | `run --detach` | start in the background and return once it serves; report an already running daemon instead |
 | `status` | print the running daemon's address, pid, version and log path; exit 1 when none runs |
-| `stop` | ask the daemon to stop and wait until it has closed the store |
+| `stop` | ask the daemon to stop and wait until it has closed the store, also when it is already stopping |
 | `restart [--bind ADDR] [--allow-origin ORIGIN]…` | `stop`, then start this binary with `--detach` |
 
 ## `qq goal …`
