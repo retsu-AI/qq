@@ -119,7 +119,9 @@ int wmain(int argc, wchar_t** argv) {
         auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
         if (!sid) throw std::runtime_error("missing AppContainer package SID");
         const std::wstring mode(argv[3]);
-        const bool write_sid = mode == L"write-sid" || mode == L"write-sid-lpac";
+        const bool write_sid = mode == L"write-sid" || mode == L"write-sid-lpac" ||
+            mode == L"write-sid-no-window" || mode == L"write-sid-native" || mode == L"write-sid-native-no-window";
+        const bool no_window = mode == L"write-sid-no-window" || mode == L"write-sid-native-no-window";
         if (argc != (write_sid ? 5 : 4)) throw std::runtime_error("unexpected restriction arguments");
         const bool reduce_capabilities = mode == L"reduce-capabilities" || mode == L"reduce-capabilities-lpac";
         const bool disable_marker = mode == L"disable-marker" || mode == L"disable-marker-lpac";
@@ -255,7 +257,8 @@ int wmain(int argc, wchar_t** argv) {
             require(created, "CreateProcessW(LPAC child)");
         } else {
             require(CreateProcessAsUserW(restricted.value, argv[1], mutable_command.data(), nullptr, nullptr,
-                TRUE, CREATE_UNICODE_ENVIRONMENT, block.data(), nullptr, &startup.StartupInfo, &process), "CreateProcessAsUserW");
+                TRUE, CREATE_UNICODE_ENVIRONMENT | (no_window ? CREATE_NO_WINDOW : 0),
+                block.data(), nullptr, &startup.StartupInfo, &process), "CreateProcessAsUserW");
         }
         Handle child, thread;
         child.value = process.hProcess;

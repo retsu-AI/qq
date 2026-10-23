@@ -264,9 +264,13 @@ const cases = [
     payload: true,
   })),
 ];
-for (const mode of ['write-sid', 'write-sid-lpac']) {
+for (const mode of ['write-sid', 'write-sid-lpac', 'write-sid-no-window']) {
   cases.push({ name: 'restricted-' + mode, payload: true,
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(relayPath)} ${mode} ${quote(writeSid)}` });
+}
+for (const mode of ['write-sid-native', 'write-sid-native-no-window']) {
+  cases.push({ name: 'restricted-' + mode, payload: false,
+    command: `${quote(restrictedHelper)} ${quote(restrictedHelper)} inspect ${mode} ${quote(writeSid)}` });
 }
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
