@@ -10,6 +10,7 @@ import errno
 import json
 import os
 from pathlib import Path
+import plistlib
 import secrets
 import select
 import selectors
@@ -210,13 +211,13 @@ def launch(command, nonce=""):
             ready.register(process.stdout, selectors.EVENT_READ)
             while True:
                 remaining = deadline - time.monotonic()
-                assert remaining > 0, "LaunchServices command timed out"
-                assert ready.select(remaining), "LaunchServices output timed out"
+                assert remaining > 0, "launchd command timed out"
+                assert ready.select(remaining), "launchd output timed out"
                 chunk = os.read(process.stdout.fileno(), 4096)
                 if not chunk:
                     break
                 output.extend(chunk)
-                assert len(output) <= 65536, "LaunchServices output exceeded its bound"
+                assert len(output) <= 65536, "launchd output exceeded its bound"
         code = process.wait(timeout=max(0, deadline - time.monotonic()))
         return code, output.decode(errors="replace")
     except Exception as error:
@@ -240,6 +241,7 @@ def host():
     controller = kernel.identity(os.getpid())
     fixtures = {}
     launched = []
+    services = []
     exits = ExitWatch()
     with tempfile.TemporaryDirectory(prefix="qq-coal-", dir="/tmp") as temporary:
         address = str(Path(temporary).resolve() / "control")
@@ -276,15 +278,36 @@ def host():
 
         try:
             for role in ("root", "sentinel"):
-                command = ["/usr/bin/lsappinfo", "launch", f"execpath={json.dumps(sys.executable)}", "applicationtype=Background", "allowedtobecomefrontmost=false"]
-                for argument in ("-I", str(Path(__file__).resolve()), "child", address, nonce, role):
-                    command.extend(["-arg", argument])
-                code, output = launch(command, nonce)
+                label = f"ai.retsu.qq.custody-probe.{nonce}.{role}"
+                service = f"user/{os.getuid()}/{label}"
+                configuration = Path(temporary) / f"{role}.plist"
+                arguments = [sys.executable, "-I", str(Path(__file__).resolve()),
+                             "child", address, nonce, role]
+                configuration.write_bytes(plistlib.dumps({
+                    "Label": label, "ProgramArguments": arguments,
+                    "RunAtLoad": True, "KeepAlive": False,
+                    "ProcessType": "Background",
+                    "StandardOutPath": str(Path(temporary) / f"{role}.stdout"),
+                    "StandardErrorPath": str(Path(temporary) / f"{role}.stderr"),
+                }))
+                configuration.chmod(0o600)
+                services.append(service)
+                code, output = launch(["/bin/launchctl", "bootstrap",
+                                       f"user/{os.getuid()}", str(configuration)], nonce)
                 launched.append({"role": role, "code": code,
                                  "output": output[:4096].replace(nonce, "<fixture nonce>")})
                 print(json.dumps({"launch": launched[-1]}), flush=True)
-                assert code == 0, "LaunchServices did not launch the fixture"
-                accept(role)
+                assert code == 0, "launchd did not accept the fixture"
+                try:
+                    accept(role)
+                except Exception:
+                    for stream in ("stdout", "stderr"):
+                        path = Path(temporary) / f"{role}.{stream}"
+                        if path.exists():
+                            with path.open("rb") as report:
+                                output = report.read(4096).decode(errors="replace")
+                            print(json.dumps({"role": role, stream: output.replace(nonce, "<fixture nonce>")}), flush=True)
+                    raise
             root = fixtures["root"][2]
             sentinel = fixtures["sentinel"][2]
             coalitions = [controller["coalitions"][0], root["coalitions"][0], sentinel["coalitions"][0]]
@@ -309,6 +332,7 @@ def host():
             ping("sentinel")
         finally:
             try:
+                signal_errors = []
                 for _, _, tracked in fixtures.values():
                     if tracked["pid"] not in exits.pending:
                         continue
@@ -317,16 +341,28 @@ def host():
                         assert code in (0, errno.ESRCH), f"fixture kill failed: {code}"
                     except OSError as error:
                         if error.errno not in (errno.ESRCH, errno.ENOENT):
-                            raise
+                            signal_errors.append(str(error))
+                    except Exception as error:
+                        signal_errors.append(str(error))
                 # NOTE_EXIT observes the registered process instance, even when
                 # its PID has already disappeared. Socket EOF alone is not exit.
                 exits.drain(20)
+                assert not signal_errors, f"fixture signal failures: {signal_errors}"
             finally:
                 for connection, reader, _ in fixtures.values():
                     reader.close()
                     connection.close()
                 listener.close()
                 exits.queue.close()
+                removal_errors = []
+                for service in services:
+                    try:
+                        code, output = launch(["/bin/launchctl", "bootout", service], nonce)
+                        if code not in (0, 3):
+                            removal_errors.append(f"{code}: {output[:4096].replace(nonce, '<fixture nonce>')}")
+                    except Exception as error:
+                        removal_errors.append(str(error))
+                assert not removal_errors, f"fixture service removal failed: {removal_errors}"
         print(json.dumps({"prerequisites_passed": True, "controller": controller, "root": root, "escaped": escaped, "sentinel": sentinel, "not_a_containment_qualification": True}), flush=True)
 
 
