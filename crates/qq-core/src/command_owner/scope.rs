@@ -14,6 +14,9 @@ use super::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeCommandScope {
+    /// Trusted tool settings, persisted with the task rather than read from worker ambient state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<super::NativeEnvironment>,
     pub workspace: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
     pub network: NativeNetwork,

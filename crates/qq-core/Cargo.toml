@@ -58,6 +58,8 @@ nix.workspace = true
 seccompiler.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+mxc-sdk.workspace = true
+firehazard.workspace = true
 dunce.workspace = true
 directories.workspace = true
 rappct.workspace = true

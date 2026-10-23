@@ -23,6 +23,7 @@ async fn pending_check(
     crate::sessions::native_scope::load(
         store,
         vec![NativeCommandScope {
+            environment: None,
             workspace: NativeDirectoryGrant::capture(workspace).unwrap(),
             read_only,
             network: NativeNetwork::Isolated,
@@ -331,7 +332,7 @@ async fn persist_detached_check_scope(
         let plan = crate::plan::CompiledAgentPlan::compile_blocking(crate::plan::AgentProfile::embedded(&runtime, source.clone())).unwrap();
         let limits = crate::task_workspace::TaskWorkspaceLimits { max_entries: 16, max_bytes: 1024 };
         let workspace = crate::task_workspace::TaskWorkspace::import(&crate::task_workspace::TaskWorkspaceSource::from_plan(&plan).unwrap(), &root.join("detached-task"), &[], limits).unwrap();
-        let scope = NativeCommandScope {
+        let scope = NativeCommandScope { environment: None,
             workspace: workspace.directory_grant(),
             read_only: vec![],
             network: NativeNetwork::Isolated,
@@ -340,7 +341,7 @@ async fn persist_detached_check_scope(
         let record = serde_json::json!({"source": NativeDirectoryGrant::capture(&source).unwrap(), "workspace": workspace, "scope": scope}).to_string();
         let control = root.join("task-control");
         std::fs::create_dir(&control).unwrap();
-        (record, crate::sessions::TaskWorkspacePolicy { directory: NativeDirectoryGrant::capture(&control).unwrap(), read_only: vec![], resources: NativeResources::Host, limits })
+        (record, crate::sessions::TaskWorkspacePolicy { environment: None, directory: NativeDirectoryGrant::capture(&control).unwrap(), read_only: vec![], resources: NativeResources::Host, limits })
     }).await.unwrap();
     let run = claim.identity.run_id;
     store
@@ -416,6 +417,7 @@ async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execut
             crate::sessions::native_scope::load(
                 &store,
                 vec![NativeCommandScope {
+                    environment: None,
                     workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
                     read_only: vec![],
                     network: NativeNetwork::Isolated,

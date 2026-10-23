@@ -161,6 +161,13 @@ async fn once_check(success: bool, native: bool) {
         use crate::command_owner::*;
         let workspace = directory.path().canonicalize().unwrap();
         options.native_scopes.push(NativeCommandScope {
+            environment: Some(
+                NativeEnvironment::from_values([(
+                    "QQ_CAPTURED_TOOL_INPUT".to_owned(),
+                    "completion-tool-settings".into(),
+                )])
+                .unwrap(),
+            ),
             workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
             read_only: vec![],
             network: NativeNetwork::Isolated,
@@ -1862,6 +1869,10 @@ impl crate::command_owner::NativeCommandService for CheckService {
         assert!(matches!(command.network, NativeNetwork::Isolated));
         assert!(matches!(command.resources, NativeResources::Limited { .. }));
         assert!(command.not_after_ms.is_some());
+        assert_eq!(
+            command.environment.get("QQ_CAPTURED_TOOL_INPUT"),
+            Some("completion-tool-settings".into())
+        );
         Box::pin(async { Ok(()) })
     }
     fn wait(
@@ -1909,6 +1920,7 @@ async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() 
     .await
     .unwrap();
     let mut scope = NativeCommandScope {
+        environment: None,
         workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
         read_only: vec![],
         network: NativeNetwork::Isolated,

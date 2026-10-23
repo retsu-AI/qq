@@ -39,6 +39,7 @@ static PUBLICATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)
 /// `directory` is a private control root outside every project and task grant.
 #[derive(Debug, Clone)]
 pub struct TaskWorkspacePolicy {
+    pub environment: Option<crate::command_owner::NativeEnvironment>,
     pub directory: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
     pub resources: NativeResources,
@@ -425,6 +426,12 @@ pub(super) async fn prepare(
             identity: NativeWorkspaceIdentity::held(source.root())?,
         };
         let source_authority = TaskWorkspaceSource::from_plan(&source_plan)?;
+        let mut policy = policy;
+        // A software-input root must never expose the current source checkout's
+        // protected configuration or Git trust files to its detached payload.
+        policy.read_only.retain(|root| {
+            !root.path.starts_with(&source_grant.path) && !source_grant.path.starts_with(&root.path)
+        });
         let mut record: TaskRecord = match saved {
             Some(saved) => serde_json::from_str(&saved)?,
             None => {
@@ -489,6 +496,7 @@ pub(super) async fn prepare(
                     &is_stopped,
                 )?;
                 let scope = NativeCommandScope {
+                    environment: policy.environment.clone(),
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
                     network: NativeNetwork::Isolated,

@@ -26,6 +26,46 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
+    let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    // Prove the host listener is reachable before the contained command tries it.
+    drop(std::net::TcpStream::connect(address).unwrap());
+    fs::write(source.join("verify.js"), format!(r#"
+const fs = require('fs');
+const net = require('net');
+try {{
+  fs.readFileSync({secret});
+  throw new Error('host secret was readable');
+}} catch (error) {{
+  if (!['EACCES', 'EPERM'].includes(error.code)) throw error;
+}}
+const socket = net.connect({port}, '127.0.0.1');
+socket.setTimeout(5000, () => {{ socket.destroy(); throw new Error('network denial was not confirmed'); }});
+socket.once('connect', () => {{ socket.destroy(); throw new Error('host loopback was reachable'); }});
+socket.once('error', () => fs.writeFileSync('node-output.txt', 'node task output; host read and loopback denied'));
+"#, secret = serde_json::to_string(&secret).unwrap(), port = address.port())).unwrap();
+    fs::write(
+        source.join("Cargo.toml"),
+        r#"[package]
+name = "native-auto-fixture"
+version = "0.1.0"
+edition = "2024"
+"#,
+    )
+    .unwrap();
+    fs::create_dir(source.join("src")).unwrap();
+    fs::write(
+        source.join("src/lib.rs"),
+        r#"
+#[test]
+fn writes_verified_artifact() {
+    let value: u32 = (1..=100).sum();
+    assert_eq!(value, 5050);
+    std::fs::write("rust-tested.txt", value.to_string()).unwrap();
+}
+"#,
+    )
+    .unwrap();
     let mut script = format!(
         "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
         secret.display()
@@ -44,9 +84,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     for (program, _) in &tool_versions {
         script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
     }
-    script.push_str(
-        " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
-    );
+    script.push_str(" & node verify.js & cargo test --offline >cargo-test-output.txt 2>&1");
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
@@ -202,7 +240,16 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     }
     assert_eq!(
         fs::read_to_string(source.join("node-output.txt")).unwrap(),
-        "node task output"
+        "node task output; host read and loopback denied"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("rust-tested.txt")).unwrap(),
+        "5050"
+    );
+    let cargo_output = fs::read_to_string(source.join("cargo-test-output.txt")).unwrap();
+    assert!(
+        cargo_output.contains("1 passed; 0 failed"),
+        "{cargo_output}"
     );
     let connection = rusqlite::Connection::open(fixture.path("data/sessions.sqlite3")).unwrap();
     let record: String = connection

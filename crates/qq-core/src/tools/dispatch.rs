@@ -617,6 +617,12 @@ pub(crate) async fn execute_with_images(
                     Ok(environment) => environment,
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
+                let environment = if let Some(trusted) = scope.as_ref().and_then(|scope| scope.environment.as_ref()) {
+                    match environment.with_overrides(trusted) {
+                        Ok(environment) => environment,
+                        Err(error) => return ToolOutput::refused(error.to_string()),
+                    }
+                } else { environment };
                 let environment = if let Some(home) = tasks.0.task_home.get() {
                     match environment.with_task_home(home) {
                         Ok(environment) => environment,

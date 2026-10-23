@@ -23,6 +23,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 mod access;
 mod arguments;
 mod directory;
+mod native_api;
 mod resources;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
@@ -385,6 +386,9 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         return Err(io::Error::other(
             "native launch directory changed during normalization",
         ));
+    }
+    if native_api::available() {
+        return native_api::execute(packet, input);
     }
     let name = access::identity(&packet.filesystem)?;
     let profile =

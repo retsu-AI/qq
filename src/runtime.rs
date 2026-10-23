@@ -1,5 +1,8 @@
 //! Application configuration to model-runtime composition.
 
+#[cfg(windows)]
+mod windows_tools;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
@@ -3472,7 +3475,12 @@ fn task_workspace_policy(
             std::env::var_os("SYSTEMROOT")
                 .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable"))?,
         )?);
+        #[cfg(windows)]
+        let environment = windows_tools::capture(&mut read_only)?;
+        #[cfg(not(windows))]
+        let environment = None;
         Ok(qq_core::TaskWorkspacePolicy {
+            environment,
             directory: directory_grant,
             read_only: read_only
                 .into_iter()

@@ -46,6 +46,7 @@ impl NativeCommandService for Recording {
 
 fn scope(path: &Path) -> NativeCommandScope {
     NativeCommandScope {
+        environment: None,
         workspace: NativeDirectoryGrant::capture(path).unwrap(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -116,7 +117,15 @@ async fn native_scope_survives_restart_and_applies_to_child_sessions() {
     let database = path.join("sessions.sqlite3");
     let service = Recording::default();
     let mut initial = options(&database);
-    initial.native_scopes = vec![scope(&workspace)];
+    let mut captured = scope(&workspace);
+    captured.environment = Some(
+        crate::command_owner::NativeEnvironment::from_values([(
+            "QQ_CAPTURED_TOOL_INPUT".to_owned(),
+            "persisted-tool-settings".into(),
+        )])
+        .unwrap(),
+    );
+    initial.native_scopes = vec![captured];
     initial.native_commands = Some(Arc::new(service.clone()));
     let runtime = SessionRuntime::open(initial, loader()).await.unwrap();
     let (parent, first) = run(&runtime, &workspace, None).await;
@@ -146,6 +155,10 @@ async fn native_scope_survives_restart_and_applies_to_child_sessions() {
     assert_eq!(requests.len(), 2);
     for request in requests.iter() {
         assert_eq!(request.workspace, workspace);
+        assert_eq!(
+            request.environment.get("QQ_CAPTURED_TOOL_INPUT"),
+            Some("persisted-tool-settings".into())
+        );
         assert_eq!(request.network, NativeNetwork::Isolated);
         assert!(
             matches!(request.resources, NativeResources::Limited { limits } if limits.cpu_millicores==500 && limits.max_processes==16 && limits.memory_bytes==64*1024*1024)

@@ -72,7 +72,10 @@ impl NativeDirectoryGrant {
 /// no implicit home, toolchain, temporary or workspace roots are added.
 /// macOS applies a default-deny Seatbelt profile with these explicit roots;
 /// its loader baseline also permits listing the root directory itself.
-/// It does not create a private mount tree. Windows uses LPAC with the
+/// It does not create a private mount tree. Windows uses the process-security
+/// environment API when version 1.1 is available, with explicit paths and no host
+/// ACL augmentation. That path inspects writable inputs for aliases, while public
+/// read-only installation trees are not recursively inspected. Otherwise it uses LPAC with the
 /// registryRead and identity-bound read-only root capabilities. Writable grants
 /// use task-specific package SIDs. It requires isolated networking and accepts
 /// Host or Committed resource policy. Non-system roots must contain regular, unaliased

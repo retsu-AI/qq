@@ -1391,7 +1391,23 @@ variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
 requesting those limits fails closed.
 
-The Windows adapter launches restricted requests in LPAC with `registryRead`
+On Windows with process-security environment API version 1.1, the adapter
+creates the payload with explicit filesystem roots, default-deny ingress and
+egress, denied host loopback, and `registryRead`. It permits ancestor-directory
+metadata enumeration for Node path resolution. User32 initialization remains
+available; clipboard and input injection are disabled in the requested policy.
+The adapter refuses launch if the API reports warnings, unsupported enumeration,
+or a requirement to augment host ACLs. It holds each root against replacement
+and inspects writable inputs for reparse points and hardlinks without changing
+host tool ACLs. Read-only installation trees are not recursively inspected.
+The payload does not exist until the worker releases authorization. Memory,
+process and CPU jobs include the helper and descendants; the enclosing command
+job owns cancellation and cleanup. This path has not yet passed QQ's native
+integration tests on Windows 11, and the API is absent on the tested Windows
+Server 2025 image.
+
+When that API is unavailable, the Windows adapter launches restricted requests
+in LPAC with `registryRead`
 for ordinary child-process creation and a directory-identity capability for each
 non-system read-only root, inside
 QQ's existing owned command job. Its trusted helper obtains the user's local
@@ -1425,13 +1441,18 @@ helper in that budget. It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
-Windows Auto uses this adapter with detached task files, checked copy-based
+Windows Auto uses the selected native adapter with detached task files, checked copy-based
 publication and a private cache retained for goal continuation. Control-root
 owner and ACL validation runs before admitting task authority.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
 Exec programs retain their original directory spelling.
+Windows Auto captures installed tool directories and public SDK trees as
+read-only inputs. Rustup settings persist with the task and apply to shell and
+completion checks; Cargo uses a private task home. Roots overlapping the source
+checkout are excluded to preserve its protected configuration boundary. Captured
+settings do not add filesystem authority when current host grants are revoked.
 Native containment does not itself grant credential access.
 
 `shell` runs one command via `tokio::process::Command` with:

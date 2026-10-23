@@ -82,6 +82,8 @@ qq-protocol = { path = "crates/qq-protocol" }
 qq-reasoning = { path = "crates/qq-reasoning" }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
+mxc-sdk = { version = "=1.0.1", default-features = false }
+firehazard = { git = "https://github.com/MaulingMonkey/firehazard", rev = "1b5818d8fa6c489addb8cbb133a62ab917cc1715" }
 # The published 0.13 release moves SECURITY_CAPABILITIES after registering its
 # pointer. Pin the owned attribute-storage fix and explicit stdio handle list.
 rappct = { git = "https://github.com/cpjet64/rappct", rev = "c02f9dd960645522009da3827a79bdc99f50c9c1" }

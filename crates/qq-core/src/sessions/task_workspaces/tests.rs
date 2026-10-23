@@ -63,6 +63,7 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
     .unwrap();
     std::fs::write(workspace.path().join("vendor/policy.md"), "agent edit").unwrap();
     let scope = NativeCommandScope {
+        environment: None,
         workspace: workspace.directory_grant(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -100,6 +101,7 @@ async fn open_session(
         let control = root.join("control");
         std::fs::create_dir(&control).unwrap();
         let policy = TaskWorkspacePolicy {
+            environment: None,
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,
@@ -468,6 +470,13 @@ async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
     let (runtime, session) = open_session(root.path(), &source, loader.clone()).await;
     let goal = qq_protocol::GoalId::generate().unwrap();
     let owner = task.owner;
+    task.record.lock().unwrap().scope.environment = Some(
+        crate::command_owner::NativeEnvironment::from_values([(
+            "QQ_CAPTURED_TOOL_INPUT".to_owned(),
+            "original-task-tools".into(),
+        )])
+        .unwrap(),
+    );
     let encoded = encode(&task.record.lock().unwrap()).unwrap();
     save(
         &runtime.inner.store,
@@ -484,6 +493,24 @@ async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
     .await
     .unwrap();
     let mut policy = runtime.inner.task_workspaces.clone().unwrap();
+    policy.environment = Some(
+        crate::command_owner::NativeEnvironment::from_values([(
+            "QQ_CAPTURED_TOOL_INPUT".to_owned(),
+            "replacement-host-tools".into(),
+        )])
+        .unwrap(),
+    );
+    let external_tools = root.path().canonicalize().unwrap().join("installed-tools");
+    std::fs::create_dir(&external_tools).unwrap();
+    policy.read_only = [
+        root.path(),
+        &source,
+        &source.join("vendor"),
+        &external_tools,
+    ]
+    .into_iter()
+    .map(|path| NativeDirectoryGrant::capture(&path.canonicalize().unwrap()).unwrap())
+    .collect();
     runtime.shutdown().await.unwrap();
     runtime.close().await.unwrap();
     drop(runtime);
@@ -535,6 +562,17 @@ async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
         .unwrap()
         .expect("goal continuation restores its retained task");
     assert_eq!(restored.scope.workspace.path, task.scope.workspace.path);
+    assert_eq!(
+        restored
+            .scope
+            .environment
+            .as_ref()
+            .unwrap()
+            .get("QQ_CAPTURED_TOOL_INPUT"),
+        Some("original-task-tools".into())
+    );
+    assert_eq!(restored.scope.read_only.len(), 1);
+    assert_eq!(restored.scope.read_only[0].path, external_tools);
     let published = publish_fixture(restored, &runtime, session).await;
     runtime.shutdown().await.unwrap();
     assert!(

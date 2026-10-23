@@ -1,0 +1,41 @@
+name: Windows native integration
+on:
+  push:
+    branches: [fix/windows-native-api]
+  workflow_dispatch:
+jobs:
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-11-arm, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-native-integration
+      - name: Build the real command helpers
+        run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo build --locked -p qq-server --example command_owner_launcher
+      - name: Default Auto runs installed tools and denies host access
+        run: cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
+      - name: Durable worker cancellation, recovery and resource containment
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Captured environment, restart and completion checks
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq-core command_owner::environment::tests:: -- --nocapture
+          cargo test --locked -p qq-core sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions -- --exact
+          cargo test --locked -p qq-core sessions::tests::goal_check::scoped_goal_check_uses_durable_service_and_typed_success -- --exact
+      - name: Native Clippy
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy --locked -p qq-core --all-targets -- -D warnings
+          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings

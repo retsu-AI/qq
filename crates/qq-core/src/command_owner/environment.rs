@@ -7,6 +7,9 @@ use std::ffi::OsString;
 #[serde(transparent)]
 pub struct NativeEnvironment(Vec<(String, Value)>);
 
+// Reserve bounded slots for task-owned tool settings and private Cargo storage.
+const MAX_ENTRIES: usize = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES + 4;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Value {
@@ -61,7 +64,7 @@ impl NativeEnvironment {
     ) -> Result<Self, CommandOwnerError> {
         let mut entries = Vec::new();
         for (name, value) in values {
-            if entries.len() >= crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+            if entries.len() >= MAX_ENTRIES {
                 return Err(CommandOwnerError::Invalid);
             }
             #[cfg(unix)]
@@ -87,6 +90,17 @@ impl NativeEnvironment {
         Ok(environment)
     }
 
+    /// Apply host-supplied tool settings before the final private-home overrides.
+    pub(crate) fn with_overrides(mut self, trusted: &Self) -> Result<Self, CommandOwnerError> {
+        let mut trusted = trusted.clone();
+        trusted.normalize()?;
+        self.0
+            .retain(|(name, _)| !trusted.0.iter().any(|(other, _)| same_name(name, other)));
+        self.0.extend(trusted.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(crate) fn with_task_home(
         mut self,
         home: &std::path::Path,
@@ -100,6 +114,10 @@ impl NativeEnvironment {
             let mut values = overrides;
             values.extend([
                 ("USERPROFILE".to_owned(), home.as_os_str().to_owned()),
+                (
+                    "CARGO_HOME".to_owned(),
+                    home.join(".cargo").into_os_string(),
+                ),
                 ("TEMP".to_owned(), home.join("tmp").into_os_string()),
                 ("TMP".to_owned(), home.join("tmp").into_os_string()),
                 (
@@ -124,7 +142,7 @@ impl NativeEnvironment {
     }
 
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
-        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+        if self.0.len() > MAX_ENTRIES {
             return Err(CommandOwnerError::Invalid);
         }
         self.0.sort_by(|a, b| a.0.cmp(&b.0));
@@ -220,7 +238,7 @@ mod tests {
                 Err(CommandOwnerError::Invalid)
             ));
         }
-        let capacity = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES;
+        let capacity = MAX_ENTRIES;
         assert!(
             NativeEnvironment::from_values((0..capacity).map(|n| (format!("VAR_{n}"), "x".into())))
                 .is_ok()
@@ -235,6 +253,76 @@ mod tests {
             NativeEnvironment::capture(&vec!["UNSET".to_owned(); crate::MAX_SHELL_ENV_NAMES + 1])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn trusted_tool_settings_survive_encoding_and_cannot_replace_the_private_home() {
+        let caller = NativeEnvironment::from_values([
+            ("PATH".to_owned(), "caller-code-path".into()),
+            ("HOME".to_owned(), "caller-home".into()),
+            ("RUSTUP_HOME".to_owned(), "caller-rustup".into()),
+        ])
+        .unwrap();
+        let trusted = NativeEnvironment::from_values([
+            ("HOME".to_owned(), "trusted-host-home".into()),
+            ("RUSTUP_HOME".to_owned(), "captured-tool-inputs".into()),
+        ])
+        .unwrap();
+        let encoded = serde_json::to_vec(&trusted).unwrap();
+        let restored = serde_json::from_slice(&encoded).unwrap();
+        let private = std::path::Path::new("private-task-home");
+        let invocation = caller
+            .with_overrides(&restored)
+            .unwrap()
+            .with_task_home(private)
+            .unwrap();
+        assert_eq!(
+            invocation.get("RUSTUP_HOME"),
+            Some("captured-tool-inputs".into())
+        );
+        assert_eq!(invocation.get("PATH"), Some("caller-code-path".into()));
+        assert_eq!(invocation.get("HOME"), Some(private.as_os_str().to_owned()));
+        assert!(!format!("{invocation:?}").contains("captured-tool-inputs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn private_tool_settings_preserve_the_full_per_call_environment_allowance() {
+        let environment = NativeEnvironment::from_values(
+            crate::BASE_ENV
+                .iter()
+                .map(|name| ((*name).to_owned(), "host".into()))
+                .chain(
+                    (0..crate::MAX_SHELL_ENV_NAMES)
+                        .map(|n| (format!("CUSTOM_{n}"), "per-call".into())),
+                ),
+        )
+        .unwrap();
+        let trusted = NativeEnvironment::from_values([
+            ("RUSTUP_HOME".to_owned(), "trusted-toolchain".into()),
+            ("RUSTUP_TOOLCHAIN".to_owned(), "selected-toolchain".into()),
+        ])
+        .unwrap();
+        let private = std::path::Path::new(r"C:\private-task");
+        let environment = environment
+            .with_overrides(&trusted)
+            .unwrap()
+            .with_task_home(private)
+            .unwrap();
+        assert_eq!(
+            environment.get("CARGO_HOME"),
+            Some(private.join(".cargo").into_os_string())
+        );
+        assert_eq!(
+            environment.get("RUSTUP_HOME"),
+            Some("trusted-toolchain".into())
+        );
+        for n in 0..crate::MAX_SHELL_ENV_NAMES {
+            assert_eq!(
+                environment.get(&format!("CUSTOM_{n}")),
+                Some("per-call".into())
+            );
+        }
     }
 
     #[test]

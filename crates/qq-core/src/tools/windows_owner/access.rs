@@ -164,6 +164,61 @@ pub(super) fn prepare(
     Ok(held)
 }
 
+/// Hold each admitted root against replacement without modifying its ACL.
+/// Writable inputs still require independent, non-reparse file objects.
+pub(super) fn hold(scope: &NativeFilesystem, deadline: u64) -> io::Result<Vec<File>> {
+    let NativeFilesystem::Restricted {
+        read_only,
+        read_write,
+    } = scope
+    else {
+        return Err(io::Error::other("native Windows file authority is missing"));
+    };
+    let mut held = Vec::new();
+    let mut count = 0;
+    for grant in read_write.iter().chain(read_only) {
+        let root = open(&grant.path, false)?;
+        validate_root(grant, &root)?;
+        if read_write
+            .iter()
+            .any(|writable| writable.identity == grant.identity)
+        {
+            inspect(root.try_clone()?, &mut count, deadline)?;
+        }
+        held.push(root);
+    }
+    Ok(held)
+}
+
+fn inspect(file: File, count: &mut usize, deadline: u64) -> io::Result<()> {
+    *count += 1;
+    if *count > MAX_ENTRIES || super::unix_ms() >= deadline {
+        return Err(io::Error::other(
+            "native file preparation exceeds its bound",
+        ));
+    }
+    let info = winapi_util::file::information(&file)?;
+    let metadata = file.metadata()?;
+    if info.file_attributes() & 0x400 != 0
+        || (!metadata.is_dir() && (!metadata.is_file() || info.number_of_links() != 1))
+    {
+        return Err(io::Error::other(
+            "native file grant contains a reparse point or aliased file",
+        ));
+    }
+    if metadata.is_dir() {
+        let directory = cap_std::fs::Dir::from_std_file(file);
+        for entry in directory.entries()? {
+            inspect(
+                open_child(&directory, &entry?.file_name(), false)?,
+                count,
+                deadline,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_root(grant: &NativeDirectoryGrant, root: &File) -> io::Result<()> {
     if !root.metadata()?.is_dir()
         || NativeWorkspaceIdentity::held(&cap_std::fs::Dir::from_std_file(root.try_clone()?))?
@@ -174,11 +229,15 @@ fn validate_root(grant: &NativeDirectoryGrant, root: &File) -> io::Result<()> {
     Ok(())
 }
 
-fn open_child(parent: &cap_std::fs::Dir, name: &std::ffi::OsStr) -> io::Result<File> {
+fn open_child(
+    parent: &cap_std::fs::Dir,
+    name: &std::ffi::OsStr,
+    write_dacl: bool,
+) -> io::Result<File> {
     use cap_std::fs::OpenOptionsExt as _;
     let mut options = cap_std::fs::OpenOptions::new();
     options
-        .access_mode(0x0006_0080)
+        .access_mode(if write_dacl { 0x0006_0080 } else { 0x0002_0080 })
         .share_mode(3)
         .custom_flags(0x0200_0000 | 0x0020_0000);
     parent
@@ -336,7 +395,7 @@ fn walk(
             let path = path.join(&name);
             walk(
                 &path,
-                open_child(&parent, &name)?,
+                open_child(&parent, &name, true)?,
                 writable,
                 sid,
                 count,

@@ -239,6 +239,10 @@ async fn run_inner(
             .1,
     )?;
     let environment = NativeEnvironment::capture(&[])?;
+    let environment = match scope.as_ref().and_then(|scope| scope.environment.as_ref()) {
+        Some(trusted) => environment.with_overrides(trusted)?,
+        None => environment,
+    };
     let environment = match resources.task_home() {
         Some(home) => environment.with_task_home(&home)?,
         None => environment,
@@ -458,6 +462,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
         let scope = Arc::new(crate::command_owner::NativeCommandScope {
+            environment: None,
             workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
             read_only: vec![],
             network: crate::command_owner::NativeNetwork::Isolated,
