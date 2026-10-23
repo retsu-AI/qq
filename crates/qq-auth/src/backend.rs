@@ -41,6 +41,7 @@ pub trait KeyringBackend: Send + Sync {
     )
 )]
 pub(crate) enum WindowsProtectedError {
+    #[cfg(any(test, not(windows)))]
     Unavailable,
     Missing,
     Failure,
@@ -58,6 +59,7 @@ pub(crate) fn windows_protected_auth_error(
     name: &str,
 ) -> AuthError {
     match error {
+        #[cfg(any(test, not(windows)))]
         WindowsProtectedError::Unavailable => AuthError::WindowsProtectionUnavailable {
             operation,
             name: name.to_owned(),
