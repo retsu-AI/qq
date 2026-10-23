@@ -165,7 +165,7 @@ mod proof {
         };
         let mut child = rappct::launch_in_container(&capabilities, &options).map_err(|error| {
             err(format!(
-                "{mode}: LPAC preparation (including NUL stdio): {error}"
+                "{mode}: LPAC preparation (including NUL stdio): {error:?}"
             ))
         })?;
         let result = child.wait(Some(Duration::from_secs(20)));
