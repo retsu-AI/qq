@@ -24,8 +24,8 @@ mod proof {
         wrappers::SetSecurityInfo,
     };
 
-    fn err(error: impl std::fmt::Display) -> io::Error {
-        io::Error::other(error.to_string())
+    fn err(error: impl std::fmt::Debug) -> io::Error {
+        io::Error::other(format!("{error:?}"))
     }
 
     pub(super) fn run() -> io::Result<()> {
