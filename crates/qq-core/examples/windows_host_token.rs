@@ -35,7 +35,7 @@ mod proof {
         }
         if arguments.get(1).is_some_and(|value| value == "--launcher") {
             let root = Path::new(&arguments[2]);
-            let result = launch_lpac(root, &arguments[3], "filtered");
+            let result = launch_lpac(root, "filtered");
             if let Err(error) = &result {
                 fs::write(root.join("task/launcher-error.txt"), error.to_string())?;
                 // No console or inherited host stdio is required by this helper.
@@ -117,9 +117,37 @@ mod proof {
                 &format!("D:P(A;;FA;;;{user})(A;;FRFX;;;{})", profile.sid),
             )?;
             fs::write(workspace.join("expected-write-sid.txt"), &write_sid)?;
+            // Resolve Userenv-backed identities before applying the host write
+            // restriction. The helper receives trusted data, not new authority.
+            let package = rappct::derive_sid_from_name(&name).map_err(err)?;
+            if package != profile.sid {
+                return Err(err("prepared package differs from the created profile"));
+            }
+            let baseline = rappct::SecurityCapabilitiesBuilder::new(&package)
+                .with_named(&["registryRead"])
+                .lpac(true)
+                .build()
+                .map_err(err)?;
+            let identities = serde_json::json!({
+                "package": baseline.package.as_string(),
+                "caps": baseline.caps.iter().map(|cap| serde_json::json!({
+                    "sid": cap.sid_sddl, "attributes": cap.attributes,
+                })).collect::<Vec<_>>(),
+                "lpac": baseline.lpac,
+            });
+            let identity_path = root.join("launch-identities.json");
+            fs::write(&identity_path, serde_json::to_vec(&identities)?)?;
+            // Outside the task write tree, with no package/public/task ACE.
+            set_acl(&identity_path, &format!("D:P(A;;FA;;;{user})"))?;
+            if read_identities(root)? != baseline {
+                return Err(err(
+                    "prepared identity roundtrip changed SID bytes or attributes",
+                ));
+            }
+            println!("parent prepared exact baseline identities: {identities}");
             // Match the established native fixture: ordinary AppContainer must
             // read this exact AAP-only input before LPAC denial is meaningful.
-            launch_lpac(root, &name, "ordinary")?;
+            launch_lpac(root, "ordinary")?;
             if fs::read(workspace.join("aap-ordinary.bin"))? != fs::read(&aap)? {
                 return Err(err(
                     "ordinary AppContainer did not read the AAP-only canary",
@@ -135,7 +163,7 @@ mod proof {
             }
             println!("ordinary AppContainer: exact AAP-only bytes readable");
             // Establish that ordinary LPAC really can perform the canary write.
-            launch_lpac(root, &name, "control")?;
+            launch_lpac(root, "control")?;
             assert_results(root, "control", "allowed")?;
             if fs::read_to_string(&outside)?.trim() != "outside-written" {
                 return Err(err(
@@ -192,7 +220,45 @@ mod proof {
         )
     }
 
-    fn launch_lpac(root: &Path, name: &str, mode: &str) -> io::Result<()> {
+    fn read_identities(root: &Path) -> io::Result<rappct::SecurityCapabilities> {
+        let bytes = fs::read(root.join("launch-identities.json"))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let package = value["package"]
+            .as_str()
+            .ok_or_else(|| err("missing package SID"))?;
+        let package = rappct::AppContainerSid::try_from_sddl(package).map_err(err)?;
+        let rows = value["caps"]
+            .as_array()
+            .ok_or_else(|| err("missing capability identities"))?;
+        if rows.is_empty() || rows.len() > 8 || value["lpac"] != true {
+            return Err(err("invalid prepared capability manifest"));
+        }
+        let caps = rows
+            .iter()
+            .map(|row| {
+                let sid = row["sid"]
+                    .as_str()
+                    .ok_or_else(|| err("missing capability SID"))?;
+                // Advapi SID parsing requires no Userenv/profile derivation.
+                let _validated = firehazard::convert_string_sid_to_sid_a(sid).map_err(err)?;
+                let attributes = row["attributes"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .ok_or_else(|| err("invalid capability attributes"))?;
+                Ok(rappct::sid::SidAndAttributes {
+                    sid_sddl: sid.to_owned(),
+                    attributes,
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok(rappct::SecurityCapabilities {
+            package,
+            caps,
+            lpac: true,
+        })
+    }
+
+    fn launch_lpac(root: &Path, mode: &str) -> io::Result<()> {
         let token = firehazard::open_process_token(
             firehazard::get_current_process(),
             firehazard::token::QUERY,
@@ -207,12 +273,19 @@ mod proof {
         if mode == "filtered" && count != 1 {
             return Err(err("trusted launcher lost its sole task restricting SID"));
         }
-        let package = rappct::derive_sid_from_name(name).map_err(err)?;
-        let capabilities = rappct::SecurityCapabilitiesBuilder::new(&package)
-            .with_named(&["registryRead"])
-            .lpac(mode != "ordinary")
-            .build()
-            .map_err(err)?;
+        let mut capabilities = read_identities(root)?;
+        capabilities.lpac = mode != "ordinary";
+        let package = &capabilities.package;
+        fs::write(
+            root.join(format!("task/used-identities-{mode}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "package": package.as_string(),
+                "caps": capabilities.caps.iter().map(|cap| serde_json::json!({
+                    "sid": cap.sid_sddl, "attributes": cap.attributes,
+                })).collect::<Vec<_>>(),
+                "lpac": capabilities.lpac,
+            }))?,
+        )?;
         let windows = std::env::var_os("SystemRoot").ok_or_else(|| err("missing SystemRoot"))?;
         let home = root.join("task/home");
         let temporary = home.join("tmp");
@@ -406,6 +479,14 @@ mod proof {
 
     fn assert_results(root: &Path, mode: &str, expected: &str) -> io::Result<()> {
         let task = root.join("task");
+        let baseline: serde_json::Value =
+            serde_json::from_slice(&fs::read(root.join("launch-identities.json"))?)?;
+        let used: serde_json::Value = serde_json::from_slice(&fs::read(
+            task.join(format!("used-identities-{mode}.json")),
+        )?)?;
+        if used != baseline {
+            return Err(err("launcher changed parent-prepared identities"));
+        }
         let witness: serde_json::Value =
             serde_json::from_slice(&fs::read(task.join(format!("token-{mode}.json")))?)?;
         let result: serde_json::Value =
