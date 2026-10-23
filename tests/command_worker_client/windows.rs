@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+#[path = "windows/peers.rs"]
+mod peers;
 #[path = "windows/registry.rs"]
 mod registry;
 
@@ -38,14 +40,20 @@ fn payload_probe() {
         .lpac(true)
         .build()
         .unwrap();
-    assert_eq!(
-        token.capability_sids,
-        expected
-            .caps
-            .iter()
-            .map(|cap| cap.sid_sddl.clone())
-            .collect::<Vec<_>>()
-    );
+    let mut expected_sids = expected
+        .caps
+        .iter()
+        .map(|cap| cap.sid_sddl.clone())
+        .collect::<Vec<_>>();
+    match std::fs::read("expected-read-capabilities") {
+        Ok(bytes) => expected_sids.extend(serde_json::from_slice::<Vec<String>>(&bytes).unwrap()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("read expected token authority: {error}"),
+    }
+    expected_sids.sort();
+    let mut actual_sids = token.capability_sids;
+    actual_sids.sort();
+    assert_eq!(actual_sids, expected_sids);
     assert_low_privilege_token();
     // TokenIsLessPrivilegedAppContainer is reserved and the SDK maps an
     // unsupported query to false. Verify the defining kernel behavior instead:
@@ -77,6 +85,32 @@ fn payload_probe() {
             std::fs::create_dir("nested").unwrap();
             std::fs::write("nested/new", "new file").unwrap();
             assert_eq!(std::fs::read_to_string("nested/new").unwrap(), "new file");
+        }
+        "peer" | "peer-child" => {
+            peers::assert_peer_denied();
+            assert_network_denied();
+            if mode == "peer" {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "windows::payload_probe",
+                        "--nocapture",
+                        "--skip",
+                        "qq-windows-probe:peer-child",
+                        token.package_sid.as_ref().unwrap().as_string(),
+                    ])
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "shared-capability descendant failed: {status}"
+                );
+            } else {
+                assert_eq!(
+                    token.package_sid.as_ref().unwrap().as_string(),
+                    &arguments[index + 1]
+                );
+            }
         }
         "registry" => {}
         "network" => assert_network_denied(),
