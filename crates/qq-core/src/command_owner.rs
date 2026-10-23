@@ -613,18 +613,35 @@ impl CommandOwner {
         // Validation and the reserve probe share one filesystem admission.
         // This work only reads metadata; abandoning its observer cannot launch
         // a payload or mutate files, even if a started OS read finishes later.
-        let preparation = blocking(move || {
-            let workspace = crate::workspace::Workspace::open(&path)?;
-            if NativeWorkspaceIdentity::held(workspace.root())? != expected_workspace {
-                return Err(CommandOwnerError::WorkspaceChanged);
-            }
-            let pressure = if restricted {
-                crate::storage::check_blocking(&workspace, 0).err()
-            } else {
-                None
+        let preparation = async {
+            let (workspace, pressure) = blocking(move || {
+                let workspace = crate::workspace::Workspace::open(&path)?;
+                if NativeWorkspaceIdentity::held(workspace.root())? != expected_workspace {
+                    return Err(CommandOwnerError::WorkspaceChanged);
+                }
+                let pressure = if restricted {
+                    crate::storage::check_blocking(&workspace, 0).err()
+                } else {
+                    None
+                };
+                Ok((workspace, pressure))
+            })
+            .await?;
+            #[cfg(test)]
+            wait_at_async_hook(&STORAGE_ADMISSION_HOOKS, request.id).await;
+            let storage = match pressure {
+                Some(pressure) => Err(pressure),
+                None => {
+                    crate::storage::NativeStorage::capture(
+                        workspace.clone(),
+                        &request.filesystem,
+                        self.0.journal.storage_path(),
+                    )
+                    .await
+                }
             };
-            Ok((workspace, pressure))
-        })
+            Ok((workspace, storage))
+        }
         .instrument(tracing::info_span!(target: "qq::diagnostic", "native_workspace"));
         let prepared = tokio::select! {
             biased;
@@ -640,7 +657,7 @@ impl CommandOwner {
                 output
             });
         };
-        let (workspace, pressure) = match prepared {
+        let (workspace, storage) = match prepared {
             Ok(prepared) => prepared,
             Err(CommandOwnerError::Io(error)) => {
                 return Ok(ToolOutput::refused(format!(
@@ -654,18 +671,7 @@ impl CommandOwner {
             }
             Err(error) => return Err(error),
         };
-        #[cfg(test)]
-        wait_at_async_hook(&STORAGE_ADMISSION_HOOKS, request.id).await;
-        if let Some(pressure) = pressure {
-            return Ok(ToolOutput::refused(pressure.to_string()));
-        }
-        let guarded_storage = match crate::storage::NativeStorage::capture(
-            workspace.clone(),
-            &request.filesystem,
-            self.0.journal.storage_path(),
-        )
-        .await
-        {
+        let guarded_storage = match storage {
             Ok(storage) => storage,
             Err(pressure) => return Ok(ToolOutput::refused(pressure.to_string())),
         };
