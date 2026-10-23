@@ -1402,7 +1402,9 @@ existing durable worker.
 Windows object ACL grants are prepared through held, non-reparse handles with
 bounded traversal. Shared read-only roots receive one read/execute capability
 entry, reused across tasks, rather than one package entry per task. Writable
-roots retain task-specific package authority. Writable grants are applied before overlapping read-only
+roots retain task-specific package authority. A root listed as both readable and
+writable uses only its private package authority; both supplied root identities
+are still validated. Writable grants are applied before overlapping read-only
 grants. Non-system hardlinks and reparse points are refused. Directory grants
 are inherited by newly created objects. Grants update the held kernel object
 without requesting a recursive file-object ACL update; each existing object

@@ -75,11 +75,19 @@ fn system_read(grant: &NativeDirectoryGrant, system: Option<&Path>) -> bool {
     system.is_some_and(|root| grant.path.starts_with(root))
 }
 
+fn writable_root(grant: &NativeDirectoryGrant, writable: &[NativeDirectoryGrant]) -> bool {
+    writable.iter().any(|root| root.identity == grant.identity)
+}
+
 pub(super) fn capabilities(
     scope: &NativeFilesystem,
     package: &AppContainerSid,
 ) -> io::Result<rappct::SecurityCapabilities> {
-    let NativeFilesystem::Restricted { read_only, .. } = scope else {
+    let NativeFilesystem::Restricted {
+        read_only,
+        read_write,
+    } = scope
+    else {
         return Err(io::Error::other(
             "Windows AppContainer requires explicit file authority",
         ));
@@ -87,7 +95,7 @@ pub(super) fn capabilities(
     let system = system_root()?;
     let mut names = vec!["registryRead".to_owned()];
     for grant in read_only {
-        if !system_read(grant, system.as_deref()) {
+        if !system_read(grant, system.as_deref()) && !writable_root(grant, read_write) {
             names.push(read_capability_name(grant)?);
         }
     }
@@ -131,7 +139,9 @@ pub(super) fn prepare(
         // LPAC's OS baseline already grants access to Windows system images.
         // Do not recursively change system ACLs or request administrator setup.
 
-        if !system_read {
+        // A duplicate read grant is already covered by the private writable
+        // package. Validate its held root above, but add no shared authority.
+        if !system_read && (writable || !writable_root(grant, read_write)) {
             let shared_read;
             let sid = if writable {
                 &package_sid
@@ -483,6 +493,57 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn duplicate_read_grants_keep_writable_roots_private_and_validate_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("task");
+        let wrong = temporary.path().join("other");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&wrong).unwrap();
+        std::fs::write(root.join("input"), "private input").unwrap();
+        let grant = NativeDirectoryGrant::capture(&root).unwrap();
+        let mut scope = NativeFilesystem::Restricted {
+            read_only: vec![grant.clone()],
+            read_write: vec![grant.clone()],
+        };
+        let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+        let _held = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
+        let caps = capabilities(&scope, &package).unwrap();
+        let expected = rappct::capability::derive_named_capability_sids(&["registryRead"]).unwrap();
+        assert_eq!(caps.caps, expected);
+        let shared_sid = read_sid(&grant).unwrap();
+        let private_sid: LocalBox<Sid> = package.as_string().parse().unwrap();
+        for path in [&root, &root.join("input")] {
+            let file = open(path, true).unwrap();
+            let security = acl(&file);
+            let dacl = security.dacl().unwrap();
+            assert!(
+                !(0..dacl.len())
+                    .filter_map(|index| dacl.get_ace(index))
+                    .any(|entry| entry.sid() == Some(&shared_sid))
+            );
+            assert!(
+                (0..dacl.len())
+                    .filter_map(|index| dacl.get_ace(index))
+                    .any(|entry| entry.sid() == Some(&private_sid)
+                        && entry.mask().bits() & READ_WRITE_EXECUTE_DELETE
+                            == READ_WRITE_EXECUTE_DELETE)
+            );
+        }
+        let NativeFilesystem::Restricted { read_only, .. } = &mut scope else {
+            unreachable!();
+        };
+        // Equal claimed identity is not sufficient: the duplicate path must
+        // still open the same object even though its ACL update is redundant.
+        read_only[0].path = wrong;
+        let error = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("native directory authority changed")
+        );
     }
 
     #[test]
