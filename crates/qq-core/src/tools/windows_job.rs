@@ -35,6 +35,7 @@ pub(crate) struct Child {
     inner: tokio::process::Child,
     _directory: cap_std::fs::Dir,
     lease: ToolTaskLease,
+    pub(super) _native_image: Option<Arc<super::windows_owner::HelperImage>>,
 }
 
 impl Deref for Child {
@@ -118,6 +119,7 @@ pub(super) async fn spawn(
             inner: contained.child,
             _directory: directory,
             lease,
+            _native_image: None,
         })
     })
     .await

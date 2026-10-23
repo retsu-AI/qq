@@ -45,6 +45,8 @@ struct ToolTaskState {
     linux_owner: Option<super::linux_owner::LinuxOwner>,
     #[cfg(target_os = "macos")]
     macos_owner: Option<super::macos_owner::MacosOwner>,
+    #[cfg(windows)]
+    windows_owner: Option<super::windows_owner::WindowsOwner>,
     native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
     native_deadline_ms: std::sync::atomic::AtomicU64,
     task_home: OnceLock<std::path::PathBuf>,
@@ -179,6 +181,18 @@ impl ToolTasks {
             None,
         ))
     }
+    #[cfg(windows)]
+    pub(crate) fn owned_windows(
+        launcher: crate::command_owner::CommandLauncher,
+    ) -> std::io::Result<Self> {
+        Ok(Self(
+            Arc::new(ToolTaskState {
+                windows_owner: Some(super::windows_owner::WindowsOwner::discover(launcher)?),
+                ..ToolTaskState::default()
+            }),
+            None,
+        ))
+    }
     pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
     where
         F: Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> Fut + Send + Sync + 'static,
@@ -275,6 +289,10 @@ impl ToolTaskLease {
     #[cfg(target_os = "macos")]
     pub(super) fn macos_owner(&self) -> Option<&super::macos_owner::MacosOwner> {
         self.tasks.macos_owner.as_ref()
+    }
+    #[cfg(windows)]
+    pub(super) fn windows_owner(&self) -> Option<&super::windows_owner::WindowsOwner> {
+        self.tasks.windows_owner.as_ref()
     }
     /// Keep native startup and its child tracked if the awaiting task unwinds.
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]

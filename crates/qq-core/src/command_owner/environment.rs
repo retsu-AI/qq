@@ -199,11 +199,21 @@ mod tests {
                 Err(CommandOwnerError::Invalid)
             ));
         }
+        let capacity = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES;
         assert!(
-            NativeEnvironment::from_values((0..22).map(|n| (format!("VAR_{n}"), "x".into())))
+            NativeEnvironment::from_values((0..capacity).map(|n| (format!("VAR_{n}"), "x".into())))
+                .is_ok()
+        );
+        assert!(
+            NativeEnvironment::from_values(
+                (0..=capacity).map(|n| (format!("VAR_{n}"), "x".into()))
+            )
+            .is_err()
+        );
+        assert!(
+            NativeEnvironment::capture(&vec!["UNSET".to_owned(); crate::MAX_SHELL_ENV_NAMES + 1])
                 .is_err()
         );
-        assert!(NativeEnvironment::capture(&vec!["UNSET".to_owned(); 17]).is_err());
     }
 
     #[cfg(unix)]

@@ -39,7 +39,7 @@ pub(crate) fn lost_output(output: &str) -> ToolOutput {
 }
 
 #[cfg(windows)]
-mod windows_state;
+pub(crate) mod windows_state;
 use journal::Journal;
 
 pub use crate::tools::dispatch::ToolDrainError as CommandCleanupError;
@@ -111,7 +111,7 @@ impl CommandLauncher {
 }
 
 /// Trusted native launch entry point, called before starting a runtime.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
     #[cfg(target_os = "linux")]
     {
@@ -120,6 +120,10 @@ pub fn execute_native_launch(encoded: &str) -> std::io::Result<u8> {
     #[cfg(target_os = "macos")]
     {
         crate::tools::macos_owner::execute(encoded)
+    }
+    #[cfg(windows)]
+    {
+        crate::tools::windows_owner::execute(encoded)
     }
 }
 
@@ -334,7 +338,11 @@ impl CommandOwner {
         let tools =
             blocking(move || ToolTasks::owned_macos(launcher).map_err(CommandOwnerError::Io))
                 .await?;
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(windows)]
+        let tools =
+            blocking(move || ToolTasks::owned_windows(launcher).map_err(CommandOwnerError::Io))
+                .await?;
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let tools = {
             let _ = launcher;
             ToolTasks::default()

@@ -112,7 +112,7 @@ mod tests {
                 context_id: ToolCallId::generate().unwrap(),
                 arguments_sha256: ContentHash::from_bytes([1; 32]),
                 manifest_sha256: images.digest(),
-                base_env_present: 31,
+                base_env_present: ((1_u16 << crate::BASE_ENV.len()) - 1) as u8,
                 requested_env: false,
                 locale: Locale::C,
                 cwd: CwdIdentity::HeldDirectory {
@@ -135,6 +135,12 @@ mod tests {
             }),
         });
         assert!(receipt.valid());
+        let mut invalid = receipt.clone();
+        invalid.facts_mut().base_env_present = 1 << crate::BASE_ENV.len();
+        assert!(
+            !invalid.valid(),
+            "unknown environment bits cannot qualify a receipt"
+        );
         let json = serde_json::to_string(&receipt).unwrap();
         assert!(json.len() <= super::super::MAX_EXECUTION_CONTEXT_BYTES);
         assert_eq!(

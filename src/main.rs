@@ -32,7 +32,7 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         return match std::env::args_os()
             .nth(2)
@@ -46,6 +46,14 @@ fn main() -> ExitCode {
             Ok(code) => ExitCode::from(code),
             Err(error) => {
                 eprintln!("native launch: {error}");
+                let mut cause = std::error::Error::source(&error);
+                for _ in 0..8 {
+                    let Some(source) = cause else {
+                        break;
+                    };
+                    eprintln!("caused by: {source}");
+                    cause = source.source();
+                }
                 ExitCode::FAILURE
             }
         };

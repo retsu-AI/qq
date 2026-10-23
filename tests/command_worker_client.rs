@@ -52,7 +52,10 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
         a.unwrap();
         b.unwrap();
         let mut last = None;
-        let finished = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        // Preparation may take up to 120 seconds, including the initial
+        // debug-image producer hash. This is an observation safety guard,
+        // not an additional latency limit on the worker's startup contract.
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(150), async {
             let mut after = 0;
             loop {
                 let snapshot = client.wait(request.id, after).await.unwrap();
@@ -220,3 +223,11 @@ mod runtime;
 #[cfg(target_os = "macos")]
 #[path = "command_worker_client/macos.rs"]
 mod macos;
+
+#[cfg(windows)]
+#[path = "command_worker_client/windows.rs"]
+mod windows;
+
+#[cfg(windows)]
+#[path = "../crates/qq-core/src/tools/windows_owner/arguments.rs"]
+mod windows_arguments;
