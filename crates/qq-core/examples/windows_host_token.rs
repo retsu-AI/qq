@@ -49,7 +49,9 @@ mod proof {
         fs::write(&outside, b"original")?;
         fs::write(&public, b"public-input")?;
         let name = format!("qq.host-token-proof.{}", std::process::id());
-        let profile = rappct::AppContainerProfile::ensure(&name, &name, None).map_err(err)?;
+        let profile =
+            rappct::AppContainerProfile::ensure(&name, &name, Some("QQ owned host token proof"))
+                .map_err(err)?;
         let outcome = (|| {
             let user = win_custody::current_user_sid_string()?;
             // All ACL changes are confined to these freshly created objects.

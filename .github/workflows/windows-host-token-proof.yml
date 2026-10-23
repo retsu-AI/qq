@@ -17,6 +17,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-host-token-proof
+          cache-on-failure: true
       - name: Compile the safe API composition
         run: cargo build --locked -p qq-core --example windows_host_token
       - name: Run ordinary LPAC control then host restricted token composition
