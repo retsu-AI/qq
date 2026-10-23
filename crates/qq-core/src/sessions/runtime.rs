@@ -1327,6 +1327,8 @@ impl SessionRuntime {
     ) -> Result<(), SessionRuntimeError> {
         let recovery = self.inner.native_recovery.get();
         let mut settlements = self.inner.settlements.subscribe();
+        let mut shutdown = self.inner.shutdown.subscribe();
+        let mut failed = self.inner.failed.subscribe();
         loop {
             let (active, blocked) =
                 self.inner
@@ -1348,13 +1350,18 @@ impl SessionRuntime {
             {
                 return Ok(());
             }
-            if recovery.is_none() || *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+            if recovery.is_none() || *failed.borrow() || *shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
-            settlements
-                .changed()
-                .await
-                .map_err(|_| SessionRuntimeError::Unavailable)?;
+            // Shutdown can stop observation after its final database commit
+            // but before its settlement notification. Recheck durable state
+            // on lifecycle changes as well as completed observations.
+            tokio::select! {
+                changed = settlements.changed() => changed,
+                changed = shutdown.changed() => changed,
+                changed = failed.changed() => changed,
+            }
+            .map_err(|_| SessionRuntimeError::Unavailable)?;
         }
     }
 

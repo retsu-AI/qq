@@ -158,7 +158,7 @@ async fn unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_e
             .unwrap();
         store.close().await.unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        for _ in 0..2 {
+        for fail_runtime in [false, true] {
             let mut options = SessionRuntimeOptions::new(database.clone());
             options.native_commands = Some(Arc::new(Worker(fault)));
             tokio::time::pause();
@@ -174,10 +174,41 @@ async fn unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_e
             .unwrap();
             wait_for_recovery(&reopened, claimed.identity.run_id).await;
             tokio::time::resume();
+            let mut barrier = Box::pin(reopened.await_recovered_commands(
+                claimed.identity.workspace_id,
+                claimed.identity.session_id,
+            ));
+            assert!(futures_util::poll!(barrier.as_mut()).is_pending());
             let (state, pending): (String, bool) = reopened.inner.store.call(Priority::Control, move |connection| {
                 Ok(connection.query_row("SELECT state, EXISTS(SELECT 1 FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0) FROM tool_calls WHERE id=?1", [id.to_string()], |row| Ok((row.get(0)?,row.get(1)?)))?)
             }).await.unwrap();
-            reopened.shutdown().await.unwrap();
+            // The intervening store call drains the barrier's initial read;
+            // this poll registers its wait before shutdown stops observation.
+            assert!(futures_util::poll!(barrier.as_mut()).is_pending());
+            if fail_runtime {
+                reopened.inner.failed.send_replace(true);
+            } else {
+                reopened.shutdown().await.unwrap();
+            }
+            let result = match futures_util::poll!(barrier.as_mut()) {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => {
+                    // Drain the authoritative recheck after the shutdown wake.
+                    reopened
+                        .inner
+                        .store
+                        .call(Priority::Control, |_| Ok(()))
+                        .await
+                        .unwrap();
+                    match futures_util::poll!(barrier.as_mut()) {
+                        std::task::Poll::Ready(result) => result,
+                        std::task::Poll::Pending => {
+                            panic!("runtime termination left the recovery barrier asleep")
+                        }
+                    }
+                }
+            };
+            assert!(matches!(result, Err(SessionRuntimeError::Unavailable)));
             assert_eq!(state, "interrupted");
             assert!(pending, "unknown command evidence must remain unreclaimed");
             assert!(requests.lock().unwrap().is_empty());
