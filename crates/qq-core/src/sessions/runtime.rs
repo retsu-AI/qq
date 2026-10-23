@@ -1471,6 +1471,7 @@ impl SessionRuntime {
 
     /// Retains accepted runs until they settle naturally. An explicit interrupt
     /// requests ordinary shutdown, cancelling and draining the remaining work.
+    /// External shutdown or runtime failure interrupts the wait as unavailable.
     pub async fn close_when_idle(
         &self,
         interrupt: impl std::future::Future<Output = ()>,
@@ -1481,9 +1482,11 @@ impl SessionRuntime {
             self.inner.draining.store(true, Ordering::Release);
         }
         let mut settlements = self.inner.settlements.subscribe();
+        let mut failed = self.inner.failed.subscribe();
+        let mut shutdown = self.inner.shutdown.subscribe();
         loop {
             let lifecycle = self.inner.lifecycle.write().await;
-            if *self.inner.failed.borrow() {
+            if *failed.borrow() || *shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
             let unfinished = tokio::select! {
@@ -1504,6 +1507,12 @@ impl SessionRuntime {
                 biased;
                 () = interrupt.as_mut() => return self.close().await,
                 changed = settlements.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+                changed = failed.changed() => {
+                    changed.map_err(|_| SessionRuntimeError::Unavailable)?;
+                }
+                changed = shutdown.changed() => {
                     changed.map_err(|_| SessionRuntimeError::Unavailable)?;
                 }
             }

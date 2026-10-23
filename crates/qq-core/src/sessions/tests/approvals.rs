@@ -4478,3 +4478,31 @@ async fn selecting_equivalent_delegate_policy_preserves_an_inflight_reviewer_app
     ));
     harness.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn idle_close_observes_termination_without_a_settlement() {
+    for shutdown in [false, true] {
+        let (directory, runtime) = test_runtime().await;
+        super::execution_context::process_call_fixture(&runtime.inner.store, directory.path())
+            .await;
+        let mut closing = Box::pin(runtime.close_when_idle(std::future::pending()));
+        assert!(futures_util::poll!(closing.as_mut()).is_pending());
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(futures_util::poll!(closing.as_mut()).is_pending());
+
+        if shutdown {
+            runtime.inner.shutdown.send_replace(true);
+        } else {
+            runtime.inner.failed.send_replace(true);
+        }
+        assert!(matches!(
+            futures_util::poll!(closing.as_mut()),
+            std::task::Poll::Ready(Err(SessionRuntimeError::Unavailable))
+        ));
+    }
+}
