@@ -269,6 +269,7 @@ const expected = Object.fromEntries(Object.entries(tools).map(([name, executable
 let requests = 0;
 function assertHostState() {
   assert.equal(requests, 0);
+  assert.equal(fs.readFileSync(process.env.QQ_NATIVE_PRIVATE_CREDENTIAL, 'utf8'), 'private-credential');
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
   assert.equal(fs.readFileSync(markerSecret, 'utf8'), 'outside-marker');
   if (fs.existsSync(futureSecret)) assert.equal(fs.readFileSync(futureSecret, 'utf8'), 'future-outside');
@@ -283,7 +284,7 @@ fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
 fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
 fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
-fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, futureSecret, publicWritable, endpoint, softwareFile, restrictedHelper }));
+fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, futureSecret, publicWritable, privateCredential: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL, endpoint, softwareFile, restrictedHelper }));
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -306,6 +307,8 @@ const path = require('node:path');
     fs.writeFileSync('payload-ready.txt', 'ready');
     check();
   });
+  try { fs.readFileSync(input.privateCredential); report.privateRead = true; } catch { report.privateRead = false; }
+  try { fs.writeFileSync(input.privateCredential, 'changed'); report.privateWrite = true; } catch { report.privateWrite = false; }
   try { fs.readFileSync(input.futureSecret); report.futureRead = true; } catch { report.futureRead = false; }
   try { fs.writeFileSync(input.futureSecret, 'changed'); report.futureWrite = true; } catch { report.futureWrite = false; }
   try { fs.writeFileSync(input.publicWritable, 'payload-write'); report.publicWrite = true; } catch (error) { report.publicWrite = false; report.publicWriteError = error.code; }
@@ -397,6 +400,8 @@ fs.writeFileSync(relayPath, relay);
 
 const cases = [
   { name: 'public-read-baseline', command: relayCommand, payload: true },
+  { name: 'readonly-public-write-control', command: relayCommand, payload: true, extraReadonly: [publicWritable] },
+  { name: 'readonly-volume-write-control', command: relayCommand, payload: true, extraReadonly: [path.parse(workspace).root] },
   { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret, markerSecret, publicWritable, process.env.QQ_NATIVE_FUTURE_DIRECTORY] },
   { name: 'deny-volume-root', command: relayCommand, payload: true, deniedPaths: [path.parse(workspace).root] },
   { name: 'deny-volume-root-without-enumeration', command: relayCommand, payload: true, deniedPaths: [path.parse(workspace).root], enumeratePaths: [] },
@@ -523,7 +528,7 @@ try {
         inheritDefaultEnvironment: false,
         environment: test.environment ?? environment,
         filesystem: {
-          readonlyPaths: readonlyPaths.map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value),
+          readonlyPaths: [...readonlyPaths, ...(test.extraReadonly ?? [])].map(value => test.namespacedGrants ? path.toNamespacedPath(value) : value),
           readwritePaths: [workspace],
           deniedPaths: test.deniedPaths ?? [],
         },
@@ -548,8 +553,8 @@ try {
       // This probe isolates public-file containment. Rust compilation has its
       // own reported result and remains required by QQ's production fixture.
       outcome.fileBoundary = output.exitCode === 0 && !output.timedOut
-        && report.tools.node.exit === 0 && report.secretRead === false
-        && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.futureRead === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
+        && report.tools.node.exit === 0 && report.privateRead === false && report.privateWrite === false
+        && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'));
       outcome.frozenProfiles = ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'].every(name => {
         const profile = report.profiles[name];
@@ -559,7 +564,7 @@ try {
       outcome.qualified = outcome.frozenProfiles && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
-        && report.secretRead === false && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.futureRead === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
+        && report.privateRead === false && report.privateWrite === false && report.secretWrite === false && report.markerWrite === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
     }
@@ -581,8 +586,10 @@ try {
     'the baseline must read the outside file created after sandbox launch');
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.publicWrite, true,
     'the write control must actually modify the same outside file before restricted write denial can qualify');
+  assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.privateRead, false,
+    'the private credential control must remain unreadable despite public file reads');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('restricted-') && outcome.qualified),
-    'No additional token restriction both ran real tools and denied the public outside canary');
+    'No additional token restriction ran real tools with task-scoped writes and private credential denial');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
