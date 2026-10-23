@@ -111,13 +111,6 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
-            // Ordinary Windows tools append slash-separated names to these
-            // values. Keep verbatim syntax only when DOS paths change identity.
-            for (_, value) in &mut values {
-                *value = dunce::simplified(std::path::Path::new(value))
-                    .as_os_str()
-                    .to_owned();
-            }
             values
         };
         self.0.retain(|(name, _)| {
@@ -300,7 +293,7 @@ mod tests {
             ("APPDATA", "AppData/Roaming"),
             ("LOCALAPPDATA", "AppData/Local"),
         ];
-        let exercise = |label: &str, task_home: &Path, prefix: &str| {
+        let exercise = |label: &str, task_home: &Path, prefix: &str, mixed_spelling: bool| {
             let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
             let environment = NativeEnvironment::from_values([
                 ("SYSTEMROOT".to_owned(), system.clone()),
@@ -326,7 +319,13 @@ mod tests {
             script.push_str(&format!("call \"owned {label}.cmd\""));
             let raw = format!("/D /S /C \"{script}\"");
             eprintln!("{label} raw cmd arguments: {raw:?}");
-            let mut command = Command::new(Path::new(&system).join("System32/cmd.exe"));
+            let program = if mixed_spelling {
+                Path::new(&system).join("System32/cmd.exe")
+            } else {
+                Path::new(&system).join("System32").join("cmd.exe")
+            };
+            eprintln!("{label} cmd program: {program:?}");
+            let mut command = Command::new(program);
             command.env_clear().current_dir(&workspace).raw_arg(raw);
             for (name, _) in &environment.0 {
                 command.env(name, environment.get(name).unwrap());
@@ -343,6 +342,7 @@ mod tests {
                 "{label} profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}"
             );
             output.status.success()
+                && output.stderr.is_empty()
                 && proofs.iter().all(|(name, result)| {
                     result
                         .as_deref()
@@ -352,17 +352,17 @@ mod tests {
                     .as_deref()
                     .is_ok_and(|value| value.trim() == "called-batch")
         };
-        // Diagnose cmd's leading-redirection parser independently of canonical
-        // paths and of the production transformation. The real Auto script
-        // starts with echo; use that same command shape for the regression.
-        let leading = exercise("dos-leading", &home, "");
-        eprintln!("ordinary DOS home with leading redirection succeeded: {leading}");
+        // Keep the original mixed-separator launch as an independent fixture
+        // diagnostic. Asserted controls use the same native path spelling as
+        // production and must complete without shell errors.
+        let mixed = exercise("dos-mixed", &home, "echo fixture-control & ", true);
+        eprintln!("ordinary DOS home with mixed cmd spelling succeeded: {mixed}");
         assert!(
-            exercise("dos-echo", &home, "echo fixture-control & "),
+            exercise("dos-echo", &home, "echo fixture-control & ", false),
             "ordinary DOS task home must validate the echo-first shell fixture",
         );
         assert!(
-            exercise("canonical", &canonical, "echo fixture-regression & "),
+            exercise("canonical", &canonical, "echo fixture-regression & ", false,),
             "canonical task home must support ordinary shell path suffixes and called batches",
         );
     }
