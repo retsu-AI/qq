@@ -12,20 +12,20 @@ use crate::tools;
 /// nothing.
 struct CompactionRunGate;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 struct BufferedToolOutputHook {
     tool_call_id: ToolCallId,
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static BUFFERED_TOOL_OUTPUT_HOOKS: Mutex<Vec<BufferedToolOutputHook>> = Mutex::new(Vec::new());
 
 /// Holds the execution loop immediately after one call's live output enters
 /// the bounded batch. Tests use this exact handoff to make cancellation-versus-
 /// timer ordering deterministic without adding production sleeps or hooks.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn hold_buffered_tool_output(
     tool_call_id: ToolCallId,
 ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -42,7 +42,7 @@ pub(super) fn hold_buffered_tool_output(
     (entered_rx, release)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn pause_after_buffering_tool_output(tool_call_id: ToolCallId) {
     let hook = {
         let mut hooks = BUFFERED_TOOL_OUTPUT_HOOKS.lock().unwrap();
@@ -216,6 +216,7 @@ impl RunResources {
         self.tools.has_native_scope()
     }
 
+    #[cfg(unix)]
     pub(super) fn process_lease(&self) -> crate::tools::ToolTaskLease {
         self.tools.enter()
     }
@@ -3048,7 +3049,7 @@ async fn execute_started_run(
                     }
                 }
                 pending_tool_output.push_str(&chunk);
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 pause_after_buffering_tool_output(id).await;
                 if pending_tool_output.len() >= OUTPUT_BATCH_BYTES {
                     if let Err(error) = flush_pending_tool_output(

@@ -17,8 +17,6 @@ use ignore::{
     overrides::{Override, OverrideBuilder},
 };
 
-#[cfg(test)]
-use super::dispatch::ToolCancellation;
 use crate::workspace::Workspace;
 
 /// Directories qq never lists or searches by default, regardless of ignore
@@ -544,6 +542,7 @@ impl ScanBudget {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::tools::dispatch::ToolCancellation;
 
     #[test]
     fn ab2_directory_listing_stops_at_mid_enumeration_cancellation() {

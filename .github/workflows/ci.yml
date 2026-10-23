@@ -183,6 +183,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
+          # Retain compiled dependencies when a native regression fails.
+          cache-on-failure: true
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
@@ -191,12 +193,14 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
-      - name: Native macOS Clippy
-        if: runner.os == 'macOS'
+      - name: Native core Clippy
+        if: ${{ !cancelled() }}
         shell: bash
-        run: |
-          cargo clippy --locked -p qq-core --all-targets -- -D warnings
-          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
+      - name: Native client Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
       - name: macOS group quiescence
         if: runner.os == 'macOS'
         shell: bash
@@ -204,11 +208,16 @@ jobs:
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
       - name: Native ownership, cancellation and durable observations
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo build --locked -p qq-server --example command_owner_launcher
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
+            cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+          fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            cargo build --locked -p qq-core --example command_owner
-            cargo build --locked -p qq-server --example command_owner_launcher
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
@@ -248,11 +257,21 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::implicit_owner_cleanup_closes_sqlite_off_the_async_worker
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_children_are_owned_before_command_job_assignment
+            bash .github/scripts/test-exact.sh tools::windows_job::tests::suspended_startup_rechecks_cancellation_and_deadline_before_resume
             bash .github/scripts/test-exact.sh command_owner::tests::windows_processes::descendants_stop_on_completion_cancellation_and_deadline
             bash .github/scripts/test-exact.sh command_owner::tests::windows_shared_state_is_refused_before_recovery_or_admission
             bash .github/scripts/test-exact.sh command_owner::tests::windows_hardlinked_journal_files_are_refused
             bash .github/scripts/test-exact.sh command_owner::tests::windows_junction_state_directories_are_refused
           fi
+      - name: Windows environment bounds and cross-process ACL grants
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh command_owner::environment::tests::invalid_wire_environments_are_rejected_before_execution
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::duplicate_read_grants_keep_writable_roots_private_and_validate_aliases
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::native_grant_validates_the_opened_object_before_acl_changes
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_walk_cannot_follow_a_retargeted_ancestor_junction
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_updates_serialize_across_helper_processes
       - name: macOS sandbox failure diagnostics
         if: failure() && runner.os == 'macOS'
         shell: bash
@@ -383,6 +402,12 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::private_command_routes_authenticate_before_parsing_or_cancelling qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::saturated_completion_waits_do_not_block_command_cancellation qq-server
           cargo test --locked -p qq --no-default-features --test command_owner_process --test command_worker_client
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' > "$RUNNER_TEMP/qq-windows-tests.txt"
+            for name in restricted_payload_can_start_an_equally_restricted_descendant restricted_files_are_enforced_by_the_real_worker restricted_network_is_enforced_by_the_real_worker native_arguments_survive_worker_transport native_stdin_follows_the_authorization_prefix overlapping_grants_retain_writable_task_authority native_shell_retains_its_task_working_directory native_profile_does_not_expose_host_local_appdata cancelling_a_restricted_command_drains_its_job_and_keeps_output linked_files_are_refused_before_the_payload_runs; do
+              grep -Fx "windows::$name: test" "$RUNNER_TEMP/qq-windows-tests.txt"
+            done
+          fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
               grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
@@ -406,9 +431,11 @@ jobs:
       - name: Report size
         run: |
           size=$(stat -c%s target/release/qq)
-          echo "### qq release binary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "$(numfmt --to=iec "$size") ($size bytes)" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### qq release binary"
+            echo ""
+            echo "$(numfmt --to=iec "$size") ($size bytes)"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   turn-overhead:
     name: controlled turn overhead

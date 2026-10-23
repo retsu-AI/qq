@@ -3299,6 +3299,7 @@ enum AutoCompactScript {
     /// calls `read_tool_result` with the `t:` handle found in that
     /// result's marker and the given JSON arguments, then streams the
     /// text. The handle is discovered the way a model would.
+    #[cfg(unix)]
     ShellThenRecall {
         command: String,
         recall: serde_json::Value,
@@ -3910,6 +3911,7 @@ impl Provider for AutoCompactProvider {
                     ]))
                 }
             }
+            #[cfg(unix)]
             AutoCompactScript::ShellThenRecall {
                 command,
                 recall,
@@ -8315,13 +8317,6 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
             tokio::task::yield_now().await;
         }
     });
-    let (stop_watchdog, stopped) = std::sync::mpsc::channel();
-    let (expired, watchdog) = tokio::sync::oneshot::channel();
-    let watchdog_thread = std::thread::spawn(move || {
-        if stopped.recv_timeout(Duration::from_secs(10)).is_err() {
-            let _ = expired.send(());
-        }
-    });
     let cancellation = RunCancellation::new();
     let deadline_cancelled = cancellation.clone();
     let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
@@ -8341,7 +8336,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     let workspace = runtime.workspace_path(workspace_id).await.unwrap();
     std::fs::write(Path::new(&workspace).join("note.txt"), "evidence").unwrap();
     let (entered, release) = crate::tools::hold_tool_read(Path::new(&workspace));
-    let task = {
+    let mut task = {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
@@ -8351,13 +8346,11 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     };
     tokio::select! {
         result = entered => result.unwrap(),
-        _ = watchdog => {
+        result = &mut task => {
             keep_clock.abort();
-            panic!("blocked inspection did not enter before the independent watchdog");
+            panic!("side question completed before the blocked inspection entered: {result:?}");
         }
     }
-    stop_watchdog.send(()).unwrap();
-    watchdog_thread.join().unwrap();
     // Past the deadline with the read still blocked, nothing has settled.
     tokio::time::advance(Duration::from_millis(400)).await;
     keep_clock.abort();

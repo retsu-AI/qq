@@ -5,11 +5,14 @@ use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
-    sync::{
-        MutexGuard,
-        atomic::{AtomicU64, Ordering},
-    },
+    path::Path,
+    sync::MutexGuard,
+};
+
+#[cfg(not(windows))]
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,6 +27,7 @@ pub(crate) const INDEX_STATE_VERSION: u32 = 2;
 const LEGACY_INDEX_STATE_VERSION: u32 = 1;
 const FALLBACK_STATE_VERSION: u32 = 1;
 
+#[cfg(not(windows))]
 static TEMPORARY_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl From<CredentialRecord> for CredentialMetadata {
@@ -437,6 +441,7 @@ pub(crate) fn validate_regular_metadata(
 
 /// Returns the open handle's metadata so the caller can act on the verified
 /// mode without a further stat.
+#[cfg(unix)]
 pub(crate) fn verify_open_directory(path: &Path, file: &File) -> Result<fs::Metadata, AuthError> {
     let open_metadata = file.metadata().map_err(|source| AuthError::Io {
         operation: "inspect",
@@ -689,6 +694,7 @@ pub(crate) fn ensure_atomic_replacement_supported(path: &Path) -> Result<(), Aut
     Ok(())
 }
 
+#[cfg(not(windows))]
 pub(crate) fn temporary_path(parent: &Path, destination: &Path) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)

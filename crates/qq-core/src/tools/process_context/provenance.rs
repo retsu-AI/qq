@@ -150,6 +150,9 @@ fn hash_executable(cancelled: &ToolCancellation, deadline: Instant) -> Option<Co
         if length == 0 || length > 512 * 1024 * 1024 {
             return None;
         }
+        let _phase =
+            tracing::info_span!(target: "qq::diagnostic", "native_producer_image", bytes = length)
+                .entered();
         let mut digest = Sha256::new();
         let mut buffer = [0_u8; 64 * 1024];
         let mut read = 0_u64;

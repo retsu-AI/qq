@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use subc_jobobject::{ContainedChild, JobObject};
+use subc_jobobject::JobObject;
 
 use super::dispatch::{ToolCancellation, ToolTaskLease};
 
@@ -35,6 +35,7 @@ pub(crate) struct Child {
     inner: tokio::process::Child,
     _directory: cap_std::fs::Dir,
     lease: ToolTaskLease,
+    pub(super) _native_image: Option<Arc<super::windows_owner::HelperImage>>,
 }
 
 impl Deref for Child {
@@ -76,11 +77,22 @@ impl Child {
 }
 
 pub(super) async fn spawn(
-    mut command: tokio::process::Command,
+    command: tokio::process::Command,
     directory: cap_std::fs::Dir,
     process: &ToolTaskLease,
     cancelled: &ToolCancellation,
     deadline: Instant,
+) -> io::Result<Child> {
+    spawn_prepared(command, directory, process, cancelled, deadline, |_| {}).await
+}
+
+async fn spawn_prepared(
+    mut command: tokio::process::Command,
+    directory: cap_std::fs::Dir,
+    process: &ToolTaskLease,
+    cancelled: &ToolCancellation,
+    mut deadline: Instant,
+    before_resume: impl FnOnce(&mut Instant) + Send + 'static,
 ) -> io::Result<Child> {
     let permit = tokio::select! {
         biased;
@@ -90,7 +102,7 @@ pub(super) async fn spawn(
     };
     let mut lease = process.fork();
     let cancelled = cancelled.clone();
-    tokio::task::spawn_blocking(move || {
+    let (mut child, admitted) = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         if cancelled.is_cancelled() {
             return Err(io::Error::new(
@@ -106,22 +118,61 @@ pub(super) async fn spawn(
         }
         root_job()?;
         let job = JobObject::new()?;
+        command.kill_on_drop(true);
         subc_jobobject::suspend_on_create_async(&mut command);
         let child = command.spawn()?;
         lease.process_started();
         let pid = child
             .id()
             .ok_or_else(|| io::Error::other("new child has no process identity"))?;
-        let contained = ContainedChild::contain(child, job, pid)?;
-        Ok(Child {
-            job: Arc::new(Mutex::new(contained.job)),
-            inner: contained.child,
+        let child = Child {
+            job: Arc::new(Mutex::new(job)),
+            inner: child,
             _directory: directory,
             lease,
-        })
+            _native_image: None,
+        };
+        let admitted = (|| {
+            child
+                .job
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .assign(&child.inner)?;
+            before_resume(&mut deadline);
+            // CreateProcess and job setup may outlive the admission checked
+            // above. The payload is still suspended: reject it before resume.
+            if cancelled.is_cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "command startup was cancelled",
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "command startup timed out",
+                ));
+            }
+            // The live child handle pins this PID until resume completes.
+            subc_jobobject::resume_main_thread(pid)
+        })();
+        Ok((child, admitted))
     })
     .await
-    .map_err(io::Error::other)?
+    .map_err(io::Error::other)??;
+    if let Err(error) = admitted {
+        // Terminate the held job, then confirm exit before releasing its lease.
+        // Failed cleanup retains the existing unconfirmed-process fence.
+        // Job assignment itself may have failed. Also target the original
+        // suspended process handle, so an empty job cannot leave it alive.
+        let root_stopped = child.inner.start_kill();
+        let job_stopped = child.start_kill();
+        job_stopped?;
+        root_stopped?;
+        child.wait().await?;
+        return Err(error);
+    }
+    Ok(child)
 }
 
 #[cfg(test)]
@@ -150,5 +201,61 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn suspended_startup_rechecks_cancellation_and_deadline_before_resume() {
+        use crate::{cancellation::RunCancellation, tools::dispatch::ToolTasks};
+        use std::time::Duration;
+
+        for ending in ["cancellation", "deadline"] {
+            let root = tempfile::tempdir().unwrap();
+            let marker = root.path().join("payload-started.txt");
+            let mut command = tokio::process::Command::new("cmd");
+            command
+                .args(["/d", "/c"])
+                .arg(format!("echo started>\"{}\"", marker.display()))
+                .kill_on_drop(true);
+            let tasks = ToolTasks::default();
+            let lease = tasks.enter();
+            let run = RunCancellation::new();
+            let cancelled = super::ToolCancellation::new(run.clone());
+            let result = super::spawn_prepared(
+                command,
+                cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority())
+                    .unwrap(),
+                &lease,
+                &cancelled,
+                super::Instant::now() + Duration::from_secs(30),
+                move |deadline| match ending {
+                    "cancellation" => run.cancel(),
+                    "deadline" => *deadline = super::Instant::now(),
+                    _ => unreachable!(),
+                },
+            )
+            .await;
+            let error = match result {
+                Ok(mut child) => {
+                    child.wait().await.unwrap();
+                    panic!("{ending}: suspended payload was incorrectly resumed");
+                }
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.kind(),
+                if ending == "cancellation" {
+                    std::io::ErrorKind::Interrupted
+                } else {
+                    std::io::ErrorKind::TimedOut
+                },
+                "{ending}"
+            );
+            assert!(
+                !marker.exists(),
+                "{ending}: payload executed before rejection"
+            );
+            drop(lease);
+            tasks.drain().await.unwrap();
+        }
     }
 }

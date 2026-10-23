@@ -33,8 +33,15 @@ impl NativeDirectoryGrant {
 /// no implicit home, toolchain, temporary or workspace roots are added.
 /// macOS applies a default-deny Seatbelt profile with these explicit roots;
 /// its loader baseline also permits listing the root directory itself.
-/// It does not create a private mount tree. Windows currently refuses restricted
-/// requests. Neither backend silently substitutes host access.
+/// It does not create a private mount tree. Windows uses LPAC with the
+/// registryRead and identity-bound read-only root capabilities. Writable grants
+/// use task-specific package SIDs. It requires isolated networking and currently
+/// accepts Host resource policy only. Non-system roots must contain regular, unaliased
+/// files without reparse points. These roots must be private task inputs:
+/// Windows ACL authority follows objects moved outside the original directory.
+/// System loader access uses the OS LPAC baseline; the package's own OS profile
+/// storage is available too. No backend silently
+/// substitutes host access.
 /// This does not bound CPU/memory or broker credentials in readable inputs,
 /// and is not a complete Auto sandbox. Nested mounts need explicit grants.
 /// Grants are additive: a writable ancestor includes its descendants, including

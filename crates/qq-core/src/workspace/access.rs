@@ -72,13 +72,13 @@ fn same_directory(left: &Dir, right: &Dir) -> std::io::Result<bool> {
 static OPEN_OBSERVERS: Mutex<Vec<(PathBuf, tokio::sync::oneshot::Sender<std::thread::ThreadId>)>> =
     Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 type WriteCheckedHook = (PathBuf, Box<dyn FnOnce() + Send>);
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static WRITE_CHECKED_HOOKS: Mutex<Vec<WriteCheckedHook>> = Mutex::new(Vec::new());
 
 impl Workspace {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn on_write_path_checked(&self, hook: impl FnOnce() + Send + 'static) {
         WRITE_CHECKED_HOOKS
             .lock()
@@ -370,7 +370,7 @@ impl Workspace {
         }
         self.capture_protected_directories()
             .map_err(|source| WorkspacePathError::Resolve { source })?;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         {
             let hook = {
                 let mut hooks = WRITE_CHECKED_HOOKS.lock().unwrap();
