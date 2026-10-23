@@ -179,6 +179,11 @@ function ProviderRow({
       await openUrl(signIn.url);
     });
 
+  const openLink = (url: string) =>
+    openUrl(url).catch((failure) =>
+      onError(`Could not open ${url} in your browser: ${String(failure)}`),
+    );
+
   const signOut = () =>
     run(async () => {
       await api.authSignOut(provider.id);
@@ -249,7 +254,7 @@ function ProviderRow({
             <Loader2 className="h-3.5 w-3.5 animate-spin text-accent" />
             <span className="flex-1">Finish signing in in your browser…</span>
             <button
-              onClick={() => void openUrl(browser.url)}
+              onClick={() => void openLink(browser.url)}
               className="flex items-center gap-1 text-accent hover:underline"
             >
               Open again <ExternalLink className="h-3 w-3" />
@@ -304,7 +309,7 @@ function ProviderRow({
 
       {showKeyForm && !browser && copy.keyUrl && (
         <button
-          onClick={() => void openUrl(copy.keyUrl!)}
+          onClick={() => void openLink(copy.keyUrl!)}
           className="mt-1.5 flex items-center gap-1 text-small text-muted hover:text-accent"
         >
           Get {/^[AEIOU]/.test(copy.name) ? "an" : "a"} {copy.name} API key <ExternalLink className="h-3 w-3" />
