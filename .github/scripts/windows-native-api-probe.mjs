@@ -41,6 +41,53 @@ const environment = {
   CARGO_HOME: path.join(home, '.cargo'), RUSTUP_HOME: rustup,
 };
 if (process.env.RUSTUP_TOOLCHAIN) environment.RUSTUP_TOOLCHAIN = process.env.RUSTUP_TOOLCHAIN;
+// Read installation metadata only: discovery never runs a host tool.
+function directories(root) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+  assert.ok(entries.length <= 256, 'bounded installation discovery');
+  return entries.filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
+    .map(entry => entry.name).sort((a, b) => b.localeCompare(a, 'en', { numeric: true }));
+}
+const programFiles = [...new Set(['ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432']
+  .map(name => process.env[name]).filter(Boolean))];
+const architecture = { arm64: 'arm64', x64: 'x64', ia32: 'x86' }[process.arch];
+assert.ok(architecture, 'native compiler architecture');
+let compiler;
+for (const base of programFiles) {
+  const installation = path.join(base, 'Microsoft Visual Studio');
+  for (const year of directories(installation).filter(name => /^\d+$/.test(name))) {
+    for (const edition of ['Enterprise', 'Professional', 'Community', 'BuildTools']) {
+      const toolsets = path.join(installation, year, edition, 'VC', 'Tools', 'MSVC');
+      for (const version of directories(toolsets).filter(name => /^\d+(\.\d+)+$/.test(name))) {
+        const toolset = path.join(toolsets, version);
+        const host = process.arch === 'arm64' ? ['Hostarm64', 'Hostx64'] : ['Hostx64', 'Hostx86'];
+        const binaries = host.map(name => path.join(toolset, 'bin', name, architecture))
+          .find(directory => fs.existsSync(path.join(directory, 'link.exe')));
+        if (!binaries || !fs.existsSync(path.join(toolset, 'lib', architecture))) continue;
+        compiler ??= { installation, toolset, binaries };
+      }
+    }
+  }
+}
+assert.ok(compiler, 'an installed native MSVC linker is required');
+let sdk;
+for (const base of programFiles) {
+  const root = path.join(base, 'Windows Kits', '10');
+  for (const version of directories(path.join(root, 'Lib')).filter(name => /^\d+(\.\d+)+$/.test(name))) {
+    if (['ucrt', 'um'].every(name => fs.existsSync(path.join(root, 'Lib', version, name, architecture)))) {
+      sdk ??= { root, version };
+    }
+  }
+}
+assert.ok(sdk, 'an installed native Windows SDK is required');
+environment.PATH = compiler.binaries + path.delimiter + environment.PATH;
+environment.LIB = [path.join(compiler.toolset, 'lib', architecture),
+  ...['ucrt', 'um'].map(name => path.join(sdk.root, 'Lib', sdk.version, name, architecture))].join(path.delimiter);
+environment.INCLUDE = [path.join(compiler.toolset, 'include'),
+  ...['ucrt', 'um', 'shared'].map(name => path.join(sdk.root, 'Include', sdk.version, name))].join(path.delimiter);
+console.log(JSON.stringify({ compiler: compiler.binaries, sdk: path.join(sdk.root, sdk.version) }));
 const expected = Object.fromEntries(Object.entries(tools).map(([name, executable]) => {
   const output = spawnSync(executable, ['--version'], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 10_000 });
   assert.equal(output.status, 0, `host ${name}: ${output.error ?? output.stderr}`);
@@ -96,7 +143,7 @@ const readonlyPaths = [...new Set([
   // Git's bin launcher needs the rest of its installation. Cargo's proxy
   // needs Rustup's installed toolchains, but not Cargo's credential directory.
   path.dirname(path.dirname(tools.git)),
-  rustup,
+  rustup, compiler.installation, sdk.root,
 ])];
 const ancestorPaths = new Set();
 for (const granted of [...readonlyPaths, workspace]) {
