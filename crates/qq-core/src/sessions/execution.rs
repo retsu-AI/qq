@@ -2,10 +2,7 @@ use super::*;
 use super::{
     approvals::SessionToolGate,
     runtime::SessionRuntimeInner,
-    subagents::{
-        ChildTasks, SessionAuditHook, SessionHistorySearcher, SessionSpillReader,
-        SessionSubagentSpawner,
-    },
+    subagents::{ChildTasks, SessionAuditHook, SessionEvidenceReader, SessionSubagentSpawner},
 };
 use crate::runtime::RunDeadline;
 use crate::tools;
@@ -497,6 +494,10 @@ async fn prepare_execution(
                 return Err(internal_failure("steering registry is poisoned"));
             }
         }
+        let session_reader = Arc::new(SessionEvidenceReader::new(
+            Arc::clone(inner),
+            claimed.identity.session_id,
+        ));
         let base = base
             .with_limits(claimed.limits, loaded.resolved_model().pricing.clone())
             .with_goal_paid(goal_paid.clone())
@@ -505,15 +506,8 @@ async fn prepare_execution(
                 inner.store.clone(),
                 claimed,
             ))
-            .with_history(Arc::new(SessionHistorySearcher::new(
-                Arc::clone(inner),
-                claimed.identity.session_id,
-                claimed.identity.run_id,
-            )))
-            .with_spills(Arc::new(SessionSpillReader::new(
-                Arc::clone(inner),
-                claimed.identity.session_id,
-            )))
+            .with_history(session_reader.clone())
+            .with_spills(session_reader)
             .with_steering(receiver)
             .with_compactor(Arc::new(
                 super::in_run_compaction::SessionInRunCompactor::new(

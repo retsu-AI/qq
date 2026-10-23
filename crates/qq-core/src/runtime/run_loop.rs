@@ -3221,7 +3221,7 @@ impl RunState {
                                             }
                                             Ok(arguments) => {
                                                 let limit = arguments.limit.clamp(1, crate::runtime::MAX_HISTORY_MATCHES);
-                                                match history.search(arguments.query.clone(), limit).await {
+                                                match history.search(arguments.query.clone(), limit, arguments.cursor).await {
                                                     Ok(search) => tools::bounded_result(
                                                         render_history_matches(&arguments.query, &search),
                                                         false,

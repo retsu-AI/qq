@@ -42,8 +42,9 @@ use crate::{
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
     catalog::EffectClass,
     runtime::{
-        HISTORY_SCAN_BUDGET_BYTES, HistoryMatch, HistorySearch, HistorySearchFuture,
-        HistorySearcher, SpillHandle, SpillReadFuture, SpillReader, excerpt_around,
+        HISTORY_SCAN_BUDGET_BYTES, HISTORY_SCAN_STEPS, HistoryCursor, HistoryMatch, HistorySearch,
+        HistorySearchFuture, HistorySearcher, SpillHandle, SpillReadFuture, SpillReader,
+        excerpt_around,
     },
     workspace::{FileState, FileStateUpdate},
 };
@@ -63,6 +64,7 @@ mod goal_paid;
 mod goal_policy;
 pub use goal_policy::{GoalPolicy, GoalPolicyError, GoalPolicyFuture};
 mod goals;
+mod history;
 pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
 pub(crate) use goals::GoalRunInput;
 pub use goals::GoalValidationError;
@@ -300,12 +302,12 @@ pub mod bench_support {
         let search = search_session_history(
             connection,
             session_id,
-            RunId::from_bytes([9; 16]),
             query,
             crate::runtime::MAX_HISTORY_MATCHES,
+            None,
         )
         .expect("search");
-        (search.matches.len(), search.truncated)
+        (search.matches.len(), search.next_cursor.is_some())
     }
 }
 
@@ -329,6 +331,7 @@ use codec::*;
 use commands::*;
 use compaction::*;
 use events::*;
+use history::search_session_history;
 use settlement::*;
 use snapshots::*;
 use streaming::*;

@@ -1441,13 +1441,13 @@ impl Store {
     pub(super) async fn search_history(
         &self,
         session_id: SessionId,
-        calling_run: RunId,
         query: String,
         limit: usize,
+        cursor: Option<HistoryCursor>,
     ) -> Result<HistorySearch, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
             let transaction = connection.transaction()?;
-            search_session_history(&transaction, session_id, calling_run, &query, limit)
+            search_session_history(&transaction, session_id, &query, limit, cursor)
         })
         .await
     }
@@ -3048,8 +3048,7 @@ mod tests {
         let run_id = RunId::generate().unwrap();
         let session_id = SessionId::generate().unwrap();
         let mut cancellation = Box::pin(store.cancellation_requested(run_id));
-        let mut search =
-            Box::pin(store.search_history(session_id, run_id, "anything".to_owned(), 4));
+        let mut search = Box::pin(store.search_history(session_id, "anything".to_owned(), 4, None));
         let mut reload = Box::pin(store.load_summarizer_input(session_id, None));
         assert!(futures_util::poll!(cancellation.as_mut()).is_pending());
         assert!(futures_util::poll!(search.as_mut()).is_pending());

@@ -3529,18 +3529,40 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
         })
         .expect("search_history must dispatch in a session run");
     assert!(!is_error, "{result}");
-    // Limit 2 caps the three transcript hits (prompt, tool result,
-    // assistant text), in transcript order.
+    // The prompt and newest assistant reply fill the first page. The
+    // remaining earlier tool result must be reachable using its cursor.
     assert!(result.starts_with("2 history match(es)"), "{result}");
     assert!(
         result.contains("[user message #1]\nnever touch"),
         "{result}"
     );
-    assert!(
-        result.contains("[read_file result, user message #1 turn 1 call 1]\nread "),
-        "{result}"
+    assert!(result.contains("noted: the parser"), "{result}");
+    let cursor_json = result
+        .rsplit_once("next_cursor: ")
+        .unwrap()
+        .1
+        .strip_suffix("]\n")
+        .unwrap();
+    let cursor = serde_json::from_str(cursor_json).unwrap();
+    let page = harness
+        .runtime
+        .inner
+        .store
+        .search_history(
+            harness.session_id,
+            "LEGACY/PARSER".to_owned(),
+            2,
+            Some(cursor),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.matches.len(), 1, "{page:?}");
+    assert_eq!(
+        page.matches[0].citation,
+        "read_file result, user message #1 turn 1 call 1"
     );
-    assert!(!result.contains("noted: the parser"), "{result}");
+    assert!(page.matches[0].excerpt.contains("src/legacy/parser.rs"));
+    assert!(page.next_cursor.is_none());
     {
         let requests = harness.requests.lock().unwrap();
         let request = requests.last().unwrap();
@@ -4287,26 +4309,40 @@ fn history_search_is_scan_bounded_and_newest_first() {
         3,
         8 * 1024,
     );
-    let calling_run = RunId::from_bytes([9; 16]);
 
-    let absent =
-        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+    let absent = search_session_history(&connection, session_id, "no-such-term", 8, None).unwrap();
     assert!(absent.matches.is_empty());
-    assert!(absent.truncated, "an absent term must hit the scan budget");
+    assert!(
+        absent.next_cursor.is_some(),
+        "an absent term must hit the scan budget"
+    );
 
     // The newest prompt's needle is found; the oldest prompt's needle lies
     // behind the budget and is reported as unexamined rather than absent.
-    let newest =
-        search_session_history(&connection, session_id, calling_run, "needle-1999", 8).unwrap();
+    let newest = search_session_history(&connection, session_id, "needle-1999", 8, None).unwrap();
     assert_eq!(newest.matches.len(), 1, "{newest:?}");
     assert!(newest.matches[0].citation.starts_with("user message #"));
-    let oldest =
-        search_session_history(&connection, session_id, calling_run, "needle-0 ", 8).unwrap();
+    let oldest = search_session_history(&connection, session_id, "needle-0", 8, None).unwrap();
     assert!(oldest.matches.is_empty());
-    assert!(oldest.truncated);
+    assert!(oldest.next_cursor.is_some());
+    let mut cursor = oldest.next_cursor;
+    let mut pages = 1;
+    loop {
+        let page = search_session_history(&connection, session_id, "needle-0", 8, cursor).unwrap();
+        pages += 1;
+        if !page.matches.is_empty() {
+            assert_eq!(page.matches.len(), 1);
+            assert!(page.matches[0].excerpt.contains("needle-0"));
+            break;
+        }
+        cursor = page.next_cursor;
+        assert!(cursor.is_some(), "pagination lost the oldest prompt");
+        assert!(pages < 1_000, "cursor failed to make progress");
+    }
+    assert!(pages > 1);
 
-    // A common term returns the newest `limit` hits in transcript order.
-    let common = search_session_history(&connection, session_id, calling_run, "prompt", 5).unwrap();
+    // A common term returns the newest `limit` hits first.
+    let common = search_session_history(&connection, session_id, "prompt", 5, None).unwrap();
     assert_eq!(common.matches.len(), 5);
     let ordinals: Vec<u64> = common
         .matches
@@ -4319,10 +4355,10 @@ fn history_search_is_scan_bounded_and_newest_first() {
         })
         .collect();
     assert!(
-        ordinals.windows(2).all(|pair| pair[0] < pair[1]),
+        ordinals.windows(2).all(|pair| pair[0] > pair[1]),
         "{ordinals:?}"
     );
-    assert!(ordinals[4] > 3_990, "newest first: {ordinals:?}");
+    assert!(ordinals[0] > 3_990, "newest first: {ordinals:?}");
 
     // A small session searches to the end and is not marked truncated.
     let directory = tempfile::tempdir().unwrap();
@@ -4334,9 +4370,9 @@ fn history_search_is_scan_bounded_and_newest_first() {
         128,
     );
     let complete =
-        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+        search_session_history(&connection, session_id, "no-such-term", 8, None).unwrap();
     assert!(complete.matches.is_empty());
-    assert!(!complete.truncated);
+    assert!(complete.next_cursor.is_none());
 }
 
 /// Every provider request the summarizer sent, in order, with the message
@@ -6989,6 +7025,142 @@ async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_message
         .await
         .unwrap();
     store.close().await.unwrap();
+}
+
+#[test]
+fn history_recall_includes_applied_steering_and_live_run_evidence_without_search_echoes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, session) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        1,
+        0,
+        1,
+        128,
+    );
+    connection
+        .execute("UPDATE runs SET status = 'running'", [])
+        .unwrap();
+    for (ordinal, state, text) in [
+        (10, "complete", "APPLIED_CONSTRAINT"),
+        (11, "queued", "PENDING_CONSTRAINT"),
+    ] {
+        connection.execute(
+            "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state, output, created_at_ms, steering)
+             SELECT ?1, session_id, run_id, ?2, 2, 'user', ?3, ?4, 1, 1 FROM messages WHERE ordinal = 1",
+            params![MessageId::generate().unwrap().to_string(), ordinal, state, text],
+        ).unwrap();
+    }
+    connection
+        .execute("UPDATE tool_calls SET result = 'EARLIER_LIVE_RESULT'", [])
+        .unwrap();
+    let live =
+        search_session_history(&connection, session, "EARLIER_LIVE_RESULT", 20, None).unwrap();
+    assert!(
+        live.matches
+            .iter()
+            .any(|hit| hit.citation.contains("result")),
+        "{live:?}"
+    );
+    let applied =
+        search_session_history(&connection, session, "APPLIED_CONSTRAINT", 8, None).unwrap();
+    assert_eq!(applied.matches.len(), 1);
+    assert_eq!(applied.matches[0].citation, "user message #10");
+    assert!(
+        search_session_history(&connection, session, "PENDING_CONSTRAINT", 8, None)
+            .unwrap()
+            .matches
+            .is_empty()
+    );
+
+    let raw: String = connection
+        .query_row(
+            "SELECT assistant_content_json FROM model_turns",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut blocks: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    blocks.as_array_mut().unwrap().push(serde_json::json!({
+        "type": "tool_call", "id": "history-call", "name": "search_history", "arguments": {"query": "SEARCH_ECHO"}
+    }));
+    connection
+        .execute(
+            "UPDATE model_turns SET assistant_content_json = ?1",
+            [blocks.to_string()],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal, provider_call_id, name, arguments_json, state, result, requested_at_ms, effect)
+         SELECT ?1, run_id, turn_ordinal, 2, 'history-call', 'search_history', ?2, 'completed', 'SEARCH_ECHO', 1, 'read_only'
+         FROM tool_calls WHERE call_ordinal = 1",
+        params![ToolCallId::generate().unwrap().to_string(), serde_json::json!({"query": "SEARCH_ECHO"}).to_string()],
+    ).unwrap();
+    assert!(
+        search_session_history(&connection, session, "SEARCH_ECHO", 8, None)
+            .unwrap()
+            .matches
+            .is_empty()
+    );
+    let foreign = search_session_history(
+        &connection,
+        SessionId::from_bytes([7; 16]),
+        "read_file",
+        8,
+        Some(HistoryCursor::Result {
+            prompt: 1,
+            turn: 1,
+            before: u16::MAX,
+        }),
+    )
+    .unwrap();
+    assert!(foreign.matches.is_empty());
+    assert!(foreign.next_cursor.is_none());
+}
+
+#[test]
+fn history_pages_cover_oversized_turns_without_skipping_older_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, session) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        2,
+        0,
+        1,
+        128,
+    );
+    connection
+        .execute(
+            "UPDATE messages SET output = 'PAGED_NEEDLE oldest constraint' WHERE ordinal = 1",
+            [],
+        )
+        .unwrap();
+    let raw: String = connection.query_row(
+        "SELECT assistant_content_json FROM model_turns WHERE run_id = (SELECT run_id FROM messages WHERE ordinal = 3)",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut blocks: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    blocks[0]["text"] = serde_json::Value::String(format!(
+        "{} PAGED_NEEDLE",
+        "x".repeat(HISTORY_SCAN_BUDGET_BYTES + 1)
+    ));
+    connection.execute(
+        "UPDATE model_turns SET assistant_content_json = ?1 WHERE run_id = (SELECT run_id FROM messages WHERE ordinal = 3)",
+        [blocks.to_string()],
+    ).unwrap();
+    let first = search_session_history(&connection, session, "PAGED_NEEDLE", 8, None).unwrap();
+    assert_eq!(first.matches.len(), 1);
+    assert!(first.matches[0].citation.starts_with("assistant"));
+    let next = first
+        .next_cursor
+        .expect("large row must stop the page after examining it");
+    let second =
+        search_session_history(&connection, session, "PAGED_NEEDLE", 8, Some(next)).unwrap();
+    assert_eq!(
+        second.matches.len(),
+        1,
+        "the large row must not be searched twice"
+    );
+    assert_eq!(second.matches[0].citation, "user message #1");
+    assert!(second.next_cursor.is_none());
 }
 
 #[tokio::test]

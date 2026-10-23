@@ -1133,38 +1133,32 @@ impl Drop for CancelChildOnDrop {
     }
 }
 
-/// `search_history` over the run's own session. Read-only and bounded; an
-/// overloaded store retries briefly rather than surfacing a transient error
-/// to the model as history that does not exist.
-pub(super) struct SessionHistorySearcher {
+/// Read-only evidence for one session. History cursors and spill handles
+/// cannot select another session; the reader supplies that scope.
+pub(super) struct SessionEvidenceReader {
     inner: Arc<SessionRuntimeInner>,
     session_id: SessionId,
-    run_id: RunId,
 }
 
-impl SessionHistorySearcher {
-    pub(super) fn new(
-        inner: Arc<SessionRuntimeInner>,
-        session_id: SessionId,
-        run_id: RunId,
-    ) -> Self {
-        Self {
-            inner,
-            session_id,
-            run_id,
-        }
+impl SessionEvidenceReader {
+    pub(super) fn new(inner: Arc<SessionRuntimeInner>, session_id: SessionId) -> Self {
+        Self { inner, session_id }
     }
 }
 
-impl HistorySearcher for SessionHistorySearcher {
-    fn search(&self, query: String, limit: usize) -> HistorySearchFuture {
+impl HistorySearcher for SessionEvidenceReader {
+    fn search(
+        &self,
+        query: String,
+        limit: usize,
+        cursor: Option<HistoryCursor>,
+    ) -> HistorySearchFuture {
         let inner = Arc::clone(&self.inner);
         let session_id = self.session_id;
-        let run_id = self.run_id;
         Box::pin(async move {
             inner
                 .store
-                .search_history(session_id, run_id, query, limit)
+                .search_history(session_id, query, limit, cursor)
                 .await
                 .map_err(|error| format!("history search failed: {error}"))
         })
@@ -1174,18 +1168,7 @@ impl HistorySearcher for SessionHistorySearcher {
 /// `read_tool_result` over the run's own session: the store answers only for
 /// spills this session wrote, so a handle copied from another session reads
 /// as foreign rather than as data.
-pub(super) struct SessionSpillReader {
-    inner: Arc<SessionRuntimeInner>,
-    session_id: SessionId,
-}
-
-impl SessionSpillReader {
-    pub(super) fn new(inner: Arc<SessionRuntimeInner>, session_id: SessionId) -> Self {
-        Self { inner, session_id }
-    }
-}
-
-impl SpillReader for SessionSpillReader {
+impl SpillReader for SessionEvidenceReader {
     fn read(&self, handle: SpillHandle) -> SpillReadFuture {
         let inner = Arc::clone(&self.inner);
         let session_id = self.session_id;
