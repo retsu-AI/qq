@@ -109,7 +109,8 @@ jobs:
             $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
             Set-Acl -LiteralPath $fixture.Path -AclObject $acl
             $directoryAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
-            $writableAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadWrite', 'Allow'))
+            $writeRights = [System.Security.AccessControl.FileSystemRights]::Read -bor [System.Security.AccessControl.FileSystemRights]::Write
+            $writableAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, $writeRights, 'Allow'))
           }
           Set-Acl -LiteralPath $probeDirectory -AclObject $directoryAcl
           Set-Acl -LiteralPath $writableCanary -AclObject $writableAcl
