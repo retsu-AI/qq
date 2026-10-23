@@ -2995,3 +2995,106 @@ async fn model_fallback_provenance_survives_commands_and_run_reservation() {
     }
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn session_deletion_preserves_unresolved_native_custody_and_ownership() {
+    for relation in ["self", "ancestor", "descendant"] {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let store = Store::open(root.join("sessions.sqlite3")).await.unwrap();
+        let (native, id, _) = execution_context::process_call_fixture(&store, &root).await;
+        let owner = StoreId::from_bytes([7; 16]);
+        store
+            .set_native_owner(native.identity, id, Some(owner))
+            .await
+            .unwrap();
+        let mut other = None;
+        let mut ownership = None;
+        let target = if relation == "self" {
+            native.identity.session_id
+        } else {
+            let (_, session, claimed) = create_claimed_parent(&store, &root).await;
+            let native_run = native.identity.run_id;
+            let native_session = native.identity.session_id;
+            let other_run = claimed.identity.run_id;
+            ownership = Some((session, native_session, native_run, other_run));
+            other = Some(claimed);
+            session
+        };
+        for run in std::iter::once(&native).chain(other.iter()) {
+            store
+                .finish_run(
+                    run,
+                    RunOutcome::Interrupted,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+        }
+        // Establish the deletion topology after ordinary settlement; changing
+        // paid ancestry on a live fixture would require unrelated goal billing.
+        if let Some((session, native_session, native_run, other_run)) = ownership {
+            store
+                .call(Priority::Control, move |connection| {
+                    if relation == "ancestor" {
+                        connection.execute(
+                            "UPDATE sessions SET parent_id=?2,owner_run_id=?3,depth=1 WHERE id=?1",
+                            params![
+                                session.to_string(),
+                                native_session.to_string(),
+                                native_run.to_string()
+                            ],
+                        )?;
+                    } else {
+                        connection.execute(
+                            "UPDATE runs SET goal_paid_owner_run_id=?2 WHERE id=?1",
+                            params![native_run.to_string(), other_run.to_string()],
+                        )?;
+                    }
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::DeleteSession { session_id: target }
+                )
+                .await
+                .err()
+                .unwrap(),
+            SessionRuntimeError::SessionActive,
+            "deletion must retain {relation} native obligations after model interruption",
+        );
+        let retained: bool = store.call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM native_command_owners native JOIN tool_calls call ON call.id=native.tool_call_id JOIN runs run ON run.id=call.run_id WHERE native.tool_call_id=?1 AND native.result_saved=0)",
+                [id.to_string()], |row| row.get(0),
+            )?)
+        }).await.unwrap();
+        assert!(
+            retained,
+            "refused deletion must preserve recoverable provenance"
+        );
+        // The deletion boundary consumes the durable completion flag; native
+        // recovery tests separately establish who may commit that evidence.
+        store.call(Priority::Control, move |connection| {
+            connection.execute("UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2", params![id.to_string(),owner.to_string()])?;
+            Ok(())
+        }).await.unwrap();
+        let deleted = store
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::DeleteSession { session_id: target },
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(deleted.receipt.outcome, CommandOutcome::SessionDeleted { session_id } if session_id==target)
+        );
+        store.close().await.unwrap();
+    }
+}

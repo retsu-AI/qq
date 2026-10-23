@@ -2337,6 +2337,11 @@ pub(super) fn delete_idle_session(
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
+                    ) OR EXISTS(
+                        SELECT 1 FROM native_command_owners native
+                        JOIN tool_calls call ON call.id=native.tool_call_id
+                        JOIN runs run ON run.id=call.run_id
+                        WHERE run.session_id=sessions.id AND native.result_saved=0
                     )
              FROM sessions WHERE id = ?1",
             [session_id.to_string()],
@@ -2378,6 +2383,9 @@ pub(super) fn delete_idle_session(
                  WHERE owner.id IS NULL OR ancestor.id IS NULL
                      OR owner.status NOT IN
                          ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused')
+                     OR EXISTS(SELECT 1 FROM native_command_owners native
+                         JOIN tool_calls call ON call.id=native.tool_call_id
+                         WHERE call.run_id=owner.id AND native.result_saved=0)
                      OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
              )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],
@@ -2395,9 +2403,16 @@ pub(super) fn delete_idle_session(
          ) SELECT EXISTS(
             SELECT 1 FROM paid JOIN runs r ON r.id=paid.run_id
             WHERE r.status IN ('queued','running') OR EXISTS(
+                SELECT 1 FROM native_command_owners native
+                JOIN tool_calls call ON call.id=native.tool_call_id
+                WHERE call.run_id=r.id AND native.result_saved=0
+            ) OR EXISTS(
                 SELECT 1 FROM runs helper WHERE helper.kind='compaction'
                   AND helper.auto_compaction=1 AND helper.auto_compaction_for_run_id=r.id
-                  AND helper.session_id=r.session_id AND helper.status IN ('queued','running')
+                  AND helper.session_id=r.session_id AND (helper.status IN ('queued','running')
+                    OR EXISTS(SELECT 1 FROM native_command_owners native
+                        JOIN tool_calls call ON call.id=native.tool_call_id
+                        WHERE call.run_id=helper.id AND native.result_saved=0))
             )
          )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],

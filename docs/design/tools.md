@@ -1456,9 +1456,14 @@ saved them or deliberately discarded them, then call `CommandOwner::acknowledge`
 (or the authenticated private `/acknowledge` endpoint) with 1–128 call IDs.
 Acknowledgement atomically removes terminal output, receipts and results while
 retaining compact command IDs and request hashes that prevent re-execution.
-A terminal `Lost` observation is saved as an unobserved result, including its
-retained output prefix, before acknowledgement.
-The 10,000-observation limit therefore counts unacknowledged commands; compact
+`Lost` means the journal no longer owns a live invocation; it does not attest
+that its original process group finished cleanup. Sessions retain that binding
+without acknowledging it or releasing its workspace for reuse. A live observer
+also keeps its teardown unconfirmed.
+Worker journals retain at most 10,000 unacknowledged commands. The session store
+also bounds unresolved native bindings to 10,000 across worker generations;
+new admission refuses capacity exhaustion before submission, and recovery
+reports overflow rather than silently omitting obligations. Compact
 retired identities continue to grow with history. Running commands cannot be
 acknowledged, repeated acknowledgements are harmless, and an acknowledged
 command returns `Retired` rather than becoming eligible for admission again.
@@ -1467,8 +1472,18 @@ acknowledgement intent with the actual terminal result. Only then can worker
 observations be reclaimed. Reopening captures pending native invocation IDs and
 observes their original journal in the background, retaining the original run
 until those invocations drain. Server startup does not wait for a worker.
-The observer retains process receipts and terminal output, acknowledges only
-saved results, and handles explicit cancellation through the original worker.
+An unavailable or mismatched worker interrupts model execution while its unsaved
+native obligations remain durable. Those obligations block conflicting workspace
+admission, including goal continuation and completion checks, across restarts.
+Other workspaces can continue. Observation retries the same owner with bounded
+backoff; bounded wait quanta prevent long commands from starving other retained
+observations. Shutdown stops and joins observation before closing session storage.
+Authenticated late results retain receipts and output without reopening the
+settled model run, changing its accounting, republishing artifacts, or clearing
+a completion-check acknowledgment hold. The workspace remains blocked until all
+original invocations have confirmed terminal results. A journal `Lost` entry
+cannot supply that confirmation. The observer acknowledges only saved results
+and handles explicit cancellation through the original worker.
 An invocation bound before admission is fenced with durable cancellation if
 its journal entry is absent, preventing a delayed admission from starting it.
 No command is submitted again and its original deadline remains in force.

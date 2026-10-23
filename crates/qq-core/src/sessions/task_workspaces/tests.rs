@@ -503,7 +503,8 @@ async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
     } else {
         policy.limits.max_entries = 4;
     }
-    let mut options = SessionRuntimeOptions::new(root.path().join("sessions.sqlite3"));
+    let mut options =
+        SessionRuntimeOptions::new(root.path().canonicalize().unwrap().join("sessions.sqlite3"));
     options.task_workspaces = Some(policy);
     let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
     let workspace = runtime

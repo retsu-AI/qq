@@ -1041,15 +1041,16 @@ async fn native_result_context_exhaustion_settles_only_its_run_and_retains_the_r
 }
 
 #[tokio::test]
-async fn lost_native_commands_are_saved_as_unobserved_and_reclaimed() {
+async fn lost_native_commands_retain_unconfirmed_custody_without_acknowledgment() {
     use crate::command_owner::{
-        CommandOwner, CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+        CommandOwner, CommandSnapshot, CommandStatus, NativeCommand, NativeCommandFuture,
         NativeCommandService,
     };
     struct LostWorker {
         owner: CommandOwner,
         database: PathBuf,
         with_receipt: bool,
+        acknowledgments: Arc<std::sync::atomic::AtomicUsize>,
     }
     impl NativeCommandService for LostWorker {
         fn identity(&self) -> NativeCommandFuture<StoreId> {
@@ -1059,6 +1060,8 @@ async fn lost_native_commands_are_saved_as_unobserved_and_reclaimed() {
             NativeCommandService::wait(&self.owner, id, version)
         }
         fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
+            self.acknowledgments
+                .fetch_add(ids.len(), std::sync::atomic::Ordering::SeqCst);
             NativeCommandService::acknowledge(&self.owner, ids)
         }
         fn cancel(&self, id: ToolCallId) -> NativeCommandFuture<()> {
@@ -1107,7 +1110,8 @@ async fn lost_native_commands_are_saved_as_unobserved_and_reclaimed() {
         )
         .await
         .unwrap();
-        let mut harness = scripted_runs_harness_with_commands(
+        let acknowledgments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let harness = scripted_runs_harness_with_commands(
             ApprovalMode::Full,
             vec![vec![("shell", r#"{"command":"unused"}"#.to_owned())]],
             None,
@@ -1116,35 +1120,36 @@ async fn lost_native_commands_are_saved_as_unobserved_and_reclaimed() {
                 owner: owner.clone(),
                 database: owner_path.join("commands.sqlite3"),
                 with_receipt,
+                acknowledgments: acknowledgments.clone(),
             })),
         )
         .await;
         let mut failed = harness.runtime.inner.failed.subscribe();
         let run = submit_prompt(&harness, "execute").await;
-        let terminal = tokio::select! {
-            terminal = collect_until(&mut harness.events, finished_for(run)) => terminal,
-            () = async { let _ = failed.wait_for(|failed| *failed).await; } => panic!("a terminal Lost observation must not leave an active process lease"),
-        };
-        assert!(matches!(
-            terminal.last().unwrap().event,
-            SessionEvent::RunFinished {
-                outcome: RunOutcome::Completed,
-                ..
-            }
-        ));
-        harness.runtime.shutdown().await.unwrap();
-        let (id, result, bindings): (String, String, u64) = harness.runtime.inner.store.call(Priority::Control, move |connection| {
-            Ok(connection.query_row("SELECT id,result,(SELECT COUNT(*) FROM native_command_owners) FROM tool_calls WHERE run_id=?1", [run.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?)
+        tokio::time::timeout(Duration::from_secs(3), failed.wait_for(|failed| *failed))
+            .await
+            .expect("Lost must fail teardown rather than claim that its process was reaped")
+            .unwrap();
+        let (id, result, unresolved, settled): (String, Option<String>, u64, bool) = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+            Ok(connection.query_row("SELECT t.id,t.result,(SELECT COUNT(*) FROM native_command_owners n WHERE n.tool_call_id=t.id AND n.result_saved=0),r.outcome_json IS NOT NULL FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE t.run_id=?1", [run.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?)
         }).await.unwrap();
-        assert!(result.contains("not replayed"));
-        if with_receipt {
-            assert!(result.contains("last-known-output"));
+        if let Some(result) = result {
+            assert!(result.contains("not replayed"));
+            if with_receipt {
+                assert!(result.contains("last-known-output"));
+            }
         }
-        assert_eq!(bindings, 0);
-        assert!(matches!(
-            owner.snapshot(parse_id(&id).unwrap()).await,
-            Err(CommandOwnerError::Retired)
-        ));
+        assert!(!settled, "Lost is not proof of terminal native cleanup");
+        assert_eq!(
+            unresolved, 1,
+            "the original binding must remain an unresolved obligation"
+        );
+        assert_eq!(acknowledgments.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            owner.snapshot(parse_id(&id).unwrap()).await.unwrap().status,
+            CommandStatus::Lost,
+            "the worker's observation must not be reclaimed without cleanup proof"
+        );
         owner.shutdown().await.unwrap();
     }
 }

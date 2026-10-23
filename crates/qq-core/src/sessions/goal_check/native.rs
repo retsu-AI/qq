@@ -331,6 +331,11 @@ pub(in crate::sessions) fn recover_result(
     if identity.kind != RunKind::GoalCheck {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
+    if result.native_outcome.is_none() {
+        // Missing typed evidence is not a completed audit. Let recovery settle
+        // the model interruption while retaining the invocation and check hold.
+        return Err(SessionRuntimeError::Unavailable);
+    }
     let (state, previous, is_error, previous_context): (String,Option<String>,bool,Option<String>) = transaction.query_row(
         "SELECT state,result,is_error,execution_context_json FROM tool_calls WHERE id=?1 AND run_id=?2",
         params![id.to_string(),identity.run_id.to_string()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
@@ -352,7 +357,8 @@ pub(in crate::sessions) fn recover_result(
     }
     let tail = result.model_text[start..].to_owned();
     let mut events = Vec::new();
-    if state == "running" {
+    let settled = run_is_settled(&transaction, identity.run_id)?;
+    if state == "running" || (matches!(state.as_str(), "interrupted" | "failed") && settled) {
         events.push(
             tool_calls::finish_tool_call_in_transaction(
                 &transaction,
@@ -381,7 +387,17 @@ pub(in crate::sessions) fn recover_result(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    if let Some(outcome) = outcome {
+    if settled {
+        // Retain late original-owner evidence without reinterpreting an already
+        // interrupted check, its goal, budget, or human acknowledgment hold.
+        let saved = transaction.execute(
+            "UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id=?1 AND owner_id=?2 AND result_saved=0",
+            params![id.to_string(), owner.to_string()],
+        )?;
+        if saved != 1 && events.is_empty() {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    } else if let Some(outcome) = outcome {
         let (captured, origin): (String,String) = transaction.query_row(
             "SELECT goal_snapshot_json,origin_json FROM runs WHERE id=?1 AND session_id=?2 AND kind='goal_check'",
             params![identity.run_id.to_string(),identity.session_id.to_string()], |row|Ok((row.get(0)?,row.get(1)?)),

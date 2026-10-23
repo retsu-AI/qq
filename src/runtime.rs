@@ -3395,6 +3395,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         )
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
+        | SessionRuntimeError::NativeCommandCapacity
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached

@@ -291,6 +291,24 @@ jobs:
           bash .github/scripts/test-exact.sh command_owner::tests::acknowledgement_is_bounded_atomic_and_never_discards_running_work
           bash .github/scripts/test-exact.sh command_owner::tests::escaped_valid_arguments_fit_the_owner_transport_bound
           bash .github/scripts/test-exact.sh command_owner::tests::utf8_split_across_native_reads_is_preserved_in_durable_output
+      - name: Native session recovery custody
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
+          bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_effects
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_releases_only_fully_drained_workspaces_without_reaccounting
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::transient_native_outage_recovers_same_owner_without_another_restart
+          bash .github/scripts/test-exact.sh sessions::tests::execution_context::lost_native_commands_retain_unconfirmed_custody_without_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::reopening_retains_lost_uncertainty_but_reclaims_unadmitted_invocations
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_prompt_start
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::newly_unknown_native_work_refuses_an_already_reserved_check_start
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_interrupted_check_result_preserves_goal_and_human_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_failed_check_result_preserves_goal_and_human_acknowledgment
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_removes_failed_placeholder_spill_when_original_has_no_spill
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::late_native_evidence_replaces_failed_unobserved_placeholder_without_reaccounting
+          bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unresolved_native_capacity_preserves_existing_bindings_and_reopens_after_saved_evidence
+          bash .github/scripts/test-exact.sh sessions::tests::commands::session_deletion_preserves_unresolved_native_custody_and_ownership
       - name: Exercise the embedding caller
         run: cargo run --locked -p qq-core --example command_owner
       - name: Detached task workspace import and shared tool files

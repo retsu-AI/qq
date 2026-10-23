@@ -1273,6 +1273,11 @@ pub(super) async fn execute_run(
                         .await;
                         return;
                     }
+                    Ok(Err(claim::GoalStartRefusal::NativeRecoveryPending)) => {
+                        // The reservation was released without starting the model.
+                        // Authenticated native recovery wakes queued work.
+                        return;
+                    }
                     Ok(Err(claim::GoalStartRefusal::Reprepare { limits, final_slot })) => {
                         // The stream has not been polled. Reassemble under the
                         // tighter bounds while retaining resolved input bytes.
@@ -1317,7 +1322,8 @@ pub(super) async fn execute_run(
                             claim::GoalStartRefusal::PerRunDuration => {
                                 per_run_duration_exhaustion()
                             }
-                            claim::GoalStartRefusal::Reprepare { .. } => {
+                            claim::GoalStartRefusal::NativeRecoveryPending
+                            | claim::GoalStartRefusal::Reprepare { .. } => {
                                 unreachable!("reprepare handled before terminal refusal")
                             }
                         };

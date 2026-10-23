@@ -721,7 +721,9 @@ pub(super) fn try_start(
         AND (s.active_run_id IS NOT NULL OR (s.preparing_run_id IS NOT NULL AND s.preparing_run_id!=?2 AND EXISTS(SELECT 1 FROM runs preparing WHERE preparing.id=s.preparing_run_id AND preparing.kind!='goal_check'))))
         OR EXISTS(SELECT 1 FROM side_questions q JOIN sessions s ON s.id=q.session_id WHERE s.workspace_id=?1 AND q.state='running')",
         params![claimed.identity.workspace_id.to_string(),claimed.identity.run_id.to_string()],|row|row.get(0))?;
-    if busy {
+    if busy
+        || super::native_recovery::workspace_blocked(&transaction, claimed.identity.workspace_id)?
+    {
         return Ok(Start::Waiting);
     }
     let started = transaction.execute(

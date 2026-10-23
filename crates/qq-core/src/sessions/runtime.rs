@@ -1318,20 +1318,17 @@ impl SessionRuntime {
             .is_some_and(|recovery| recovery.contains(run))
     }
 
-    /// Wait for this session's commands inherited from the previous coordinator.
-    /// Other sessions and ordinary live runs are unaffected. No effects replay
-    /// and the worker keeps the original invocation's deadline.
+    /// Wait for inherited commands and unresolved native custody in this
+    /// workspace. No effects replay; original invocation deadlines remain fixed.
     pub async fn await_recovered_commands(
         &self,
         workspace: WorkspaceId,
         session: SessionId,
     ) -> Result<(), SessionRuntimeError> {
-        let Some(recovery) = self.inner.native_recovery.get() else {
-            return Ok(());
-        };
+        let recovery = self.inner.native_recovery.get();
         let mut settlements = self.inner.settlements.subscribe();
         loop {
-            let active =
+            let (active, blocked) =
                 self.inner
                     .store
                     .call(store::Priority::Control, move |connection| {
@@ -1340,13 +1337,18 @@ impl SessionRuntime {
                     params![session.to_string(), workspace.to_string()],
                     |row| row.get::<_, Option<String>>(0),
                 ).optional()?.ok_or(SessionRuntimeError::SessionNotFound)?;
-                        run.map(|run| parse_id::<RunId>(&run)).transpose()
+                        Ok((
+                            run.map(|run| parse_id::<RunId>(&run)).transpose()?,
+                            super::native_recovery::workspace_blocked(connection, workspace)?,
+                        ))
                     })
                     .await?;
-            if active.is_none_or(|run| !recovery.contains(run)) {
+            if !blocked
+                && active.is_none_or(|run| recovery.is_none_or(|recovery| !recovery.contains(run)))
+            {
                 return Ok(());
             }
-            if *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
+            if recovery.is_none() || *self.inner.failed.borrow() || *self.inner.shutdown.borrow() {
                 return Err(SessionRuntimeError::Unavailable);
             }
             settlements
@@ -1418,6 +1420,9 @@ impl SessionRuntime {
                 // cannot race this success boundary.
                 if *self.inner.failed.borrow() {
                     return Err(SessionRuntimeError::Unavailable);
+                }
+                if let Some(recovery) = self.inner.native_recovery.get() {
+                    recovery.stop().await;
                 }
                 if let Some(acknowledgements) = &self.inner.native_ack {
                     acknowledgements.shutdown().await;
@@ -1708,6 +1713,10 @@ pub(super) fn validate_slash_prompt(prompt: &str) -> Result<(), SlashCommandErro
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SessionRuntimeError {
+    #[error(
+        "native command capacity reached: at most 10000 unresolved invocations may be retained; original worker completion is required"
+    )]
+    NativeCommandCapacity,
     #[error("invalid native execution scope: {reason}")]
     InvalidNativeScope { reason: String },
     #[error("goal identity or revision conflicts with the current goal")]

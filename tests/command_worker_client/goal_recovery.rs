@@ -477,3 +477,266 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
         }
     }
 }
+
+/// A loader witness stops before provider/tool work, so a forbidden admission
+/// is observable without letting the replacement mutate the original files.
+struct RecoveryAdmissionWitness(tokio::sync::mpsc::Sender<String>);
+impl qq_core::RuntimeLoader for RecoveryAdmissionWitness {
+    fn load(&self, request: qq_core::RuntimeLoadRequest) -> qq_core::RuntimeLoadFuture {
+        self.0.try_send(request.workspace).unwrap();
+        Box::pin(async {
+            Err(qq_core::RuntimeLoadError {
+                kind: qq_protocol::RunFailureKind::Configuration,
+                message: "admission witnessed; no replacement execution".into(),
+            })
+        })
+    }
+}
+
+struct WrongRecoveryOwner(qq_protocol::StoreId);
+impl qq_core::command_owner::NativeCommandService for WrongRecoveryOwner {
+    fn identity(&self) -> qq_core::command_owner::NativeCommandFuture<qq_protocol::StoreId> {
+        let id = self.0;
+        Box::pin(async move { Ok(id) })
+    }
+    fn acknowledge(
+        &self,
+        _: Vec<qq_protocol::ToolCallId>,
+    ) -> qq_core::command_owner::NativeCommandFuture<()> {
+        panic!("a different owner cannot acknowledge the original result")
+    }
+    fn submit(
+        &self,
+        _: qq_core::command_owner::NativeCommand,
+    ) -> qq_core::command_owner::NativeCommandFuture<()> {
+        panic!("recovery cannot replay a native invocation")
+    }
+    fn wait(
+        &self,
+        _: qq_protocol::ToolCallId,
+        _: u64,
+    ) -> qq_core::command_owner::NativeCommandFuture<qq_core::command_owner::CommandSnapshot> {
+        panic!("a different owner cannot observe the original invocation")
+    }
+    fn cancel(
+        &self,
+        _: qq_protocol::ToolCallId,
+    ) -> qq_core::command_owner::NativeCommandFuture<()> {
+        panic!("a different owner cannot cancel the original invocation")
+    }
+}
+
+async fn queue_recovery_witness(
+    runtime: &qq_core::SessionRuntime,
+    session_id: qq_protocol::SessionId,
+) {
+    runtime
+        .command(
+            qq_protocol::CommandId::generate().unwrap(),
+            qq_protocol::SessionCommand::SubmitPrompt {
+                session_id,
+                input: vec![qq_protocol::InputPart::text("continue the work")],
+                limits: Default::default(),
+                correlation: Default::default(),
+                output: None,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_native_owner_fences_restarts_until_authenticated_result_arrives() {
+    use qq_core::{
+        SessionRuntime, SessionRuntimeOptions, command_owner::NativeCommandService as _,
+    };
+    use qq_protocol::{CommandId, CommandOutcome, SessionCommand};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let workspace = home.join("workspace");
+    let independent = home.join("independent");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&independent).unwrap();
+    let marker = format!("qq-client-{}", qq_protocol::ToolCallId::generate().unwrap());
+    let listener = tokio::net::UnixListener::bind(workspace.join(&marker)).unwrap();
+    let arguments = json!({"program":std::env::current_exe().unwrap(),"args":["--exact","cli::blocked_command","--nocapture","--skip",marker]}).to_string();
+    let provider = LoopbackServer::respond_sequence_with_timeout(
+        vec![tool_reply("exec", arguments)],
+        Duration::from_secs(30),
+    );
+    let config = format!(
+        r#"(version: 1, model: "fake/model", providers: {{"fake": Custom(connection: (base_url: "{}/v1", api: OpenAiResponses, auth: NoAuth), models: {{"model": (name: "Fake")}})}})"#,
+        provider.base_url
+    );
+    let mut original = configured_cli(&home, &workspace, &config)
+        .args([
+            "run",
+            "--approval",
+            "full",
+            "--format",
+            "jsonl",
+            "make the artifact once",
+        ])
+        .spawn()
+        .unwrap();
+    let (mut barrier, _) = listener.accept().await.unwrap();
+    let mut ready = [0; 5];
+    barrier.read_exact(&mut ready).await.unwrap();
+    assert_eq!(&ready, b"ready");
+    let worker_process = Worker::child_of(original.id().unwrap());
+    original.start_kill().unwrap();
+    assert_eq!(
+        original.wait_with_output().await.unwrap().status.signal(),
+        Some(9)
+    );
+    let database = home.join("data/qq/sessions.sqlite3");
+    let read_db = || {
+        rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+    };
+    let (session, call, owner): (String, String, String) = read_db().query_row(
+        "SELECT r.session_id,t.id,n.owner_id FROM native_command_owners n JOIN tool_calls t ON t.id=n.tool_call_id JOIN runs r ON r.id=t.run_id",
+        [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).unwrap();
+    let session = session.parse().unwrap();
+    let call: qq_protocol::ToolCallId = call.parse().unwrap();
+    let wrong = qq_protocol::StoreId::generate().unwrap();
+    assert_ne!(wrong.to_string(), owner);
+    let (loaded, mut admissions) = tokio::sync::mpsc::channel(16);
+    let loader = Arc::new(RecoveryAdmissionWitness(loaded));
+
+    // No service on first restart; another owner on the next two. Interrupting
+    // the model must neither erase its command binding nor free its workspace.
+    for replacement in [false, true, true] {
+        let mut options = SessionRuntimeOptions::new(database.clone());
+        if replacement {
+            options.native_commands = Some(Arc::new(WrongRecoveryOwner(wrong)));
+        }
+        let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
+        queue_recovery_witness(&runtime, session).await;
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::ResolveWorkspace {
+                    path: independent.to_str().unwrap().into(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::WorkspaceResolved { workspace_id } = receipt.outcome else {
+            panic!("workspace")
+        };
+        let receipt = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::CreateSession {
+                    workspace_id,
+                    parent_id: None,
+                    model: qq_protocol::ModelSelection {
+                        model: Some("fake/model".into()),
+                        ..Default::default()
+                    },
+                    approval_mode: qq_protocol::ApprovalMode::Full,
+                    profile: Default::default(),
+                    reasoning_effort: None,
+                    correlation: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+        let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
+            panic!("session")
+        };
+        queue_recovery_witness(&runtime, session_id).await;
+        assert_eq!(
+            admissions.recv().await.unwrap(),
+            independent.to_str().unwrap(),
+            "unknown native work must fence its own workspace, while unrelated work proceeds"
+        );
+        runtime.close().await.unwrap();
+        assert!(
+            admissions.try_recv().is_err(),
+            "the original workspace must remain fenced"
+        );
+        let unresolved: bool = read_db().query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_command_owners WHERE tool_call_id=?1 AND result_saved=0)",
+            [call.to_string()], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            unresolved,
+            "interruption and wrong-owner recovery cannot discharge native custody"
+        );
+        let interrupted: bool = read_db().query_row(
+            "SELECT r.status='interrupted' FROM runs r JOIN tool_calls t ON t.run_id=r.id WHERE t.id=?1",
+            [call.to_string()], |row| row.get(0),
+        ).unwrap();
+        assert!(
+            interrupted,
+            "the model interruption must remain distinct from command completion"
+        );
+        assert!(!workspace.join("artifact").exists());
+    }
+
+    let worker = Arc::new(
+        super::client::CommandWorker::new(
+            home.join("data/qq/command-owner-v3"),
+            env!("CARGO_BIN_EXE_qq").into(),
+            concat!(
+                env!("CARGO_PKG_VERSION"),
+                "+",
+                env!("QQ_BUILD_REVISION"),
+                ".",
+                env!("QQ_BUILD_DATE")
+            ),
+        )
+        .unwrap(),
+    );
+    assert_eq!(worker.identity().await.unwrap().to_string(), owner);
+    let mut options = SessionRuntimeOptions::new(database.clone());
+    options.native_commands = Some(worker.clone());
+    let runtime = SessionRuntime::open(options, loader).await.unwrap();
+    queue_recovery_witness(&runtime, session).await;
+    barrier.write_all(b"e").await.unwrap();
+    assert_eq!(
+        admissions.recv().await.unwrap(),
+        workspace.to_str().unwrap(),
+        "only the original owner's terminal result may release replacement work"
+    );
+    runtime.close().await.unwrap();
+    assert!(
+        admissions.try_recv().is_err(),
+        "the queued work must be admitted once"
+    );
+    let (state, result, receipt): (String, String, Option<String>) = read_db()
+        .query_row(
+            "SELECT state,result,execution_context_json FROM tool_calls WHERE id=?1",
+            [call.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(state, "completed");
+    assert!(result.contains("native-result"), "{result}");
+    assert!(
+        receipt.is_some(),
+        "late recovery must retain process evidence"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("executions")).unwrap(),
+        "once\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("artifact")).unwrap(),
+        "native-once"
+    );
+    worker_process.stop().await;
+    let captured = tokio::task::spawn_blocking(move || provider.capture_all())
+        .await
+        .unwrap();
+    assert_eq!(
+        captured.len(),
+        1,
+        "recovery must never invoke the model or replay work"
+    );
+}
