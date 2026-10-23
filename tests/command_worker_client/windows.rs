@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "windows/launch_probe.rs"]
+mod launch_probe;
+
 #[test]
 fn payload_probe() {
     let arguments = std::env::args().collect::<Vec<_>>();
@@ -52,32 +55,7 @@ fn payload_probe() {
             std::fs::write("nested/new", "new file").unwrap();
             assert_eq!(std::fs::read_to_string("nested/new").unwrap(), "new file");
         }
-        "network" => {
-            let address = std::fs::read_to_string("tcp-address")
-                .unwrap()
-                .parse()
-                .unwrap();
-            // LPAC can deny Winsock provider initialization itself. Rust's
-            // Windows socket adapter asserts WSAStartup succeeded rather than
-            // returning that error from connect_timeout. Accept only its exact
-            // WSASYSCALLFAILURE diagnostic; unrelated panics must still fail.
-            match std::panic::catch_unwind(|| {
-                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1))
-            }) {
-                Ok(connection) => assert!(connection.is_err(), "network escaped LPAC"),
-                Err(panic) => {
-                    let diagnostic = panic
-                        .downcast_ref::<String>()
-                        .map(String::as_str)
-                        .or_else(|| panic.downcast_ref::<&str>().copied());
-                    if diagnostic
-                        != Some("assertion `left == right` failed\n  left: 10107\n right: 0")
-                    {
-                        std::panic::resume_unwind(panic);
-                    }
-                }
-            }
-        }
+        "network" => assert_network_denied(),
         "descendants" => {
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
@@ -115,6 +93,31 @@ fn payload_probe() {
         _ => panic!("unknown native Windows probe"),
     }
     println!("native-windows-boundary-enforced");
+}
+
+fn assert_network_denied() {
+    let address = std::fs::read_to_string("tcp-address")
+        .unwrap()
+        .parse()
+        .unwrap();
+    // LPAC can deny Winsock provider initialization itself. Rust's
+    // Windows socket adapter asserts WSAStartup succeeded rather than
+    // returning that error from connect_timeout. Accept only its exact
+    // WSASYSCALLFAILURE diagnostic; unrelated panics must still fail.
+    match std::panic::catch_unwind(|| {
+        std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1))
+    }) {
+        Ok(connection) => assert!(connection.is_err(), "network escaped LPAC"),
+        Err(panic) => {
+            let diagnostic = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied());
+            if diagnostic != Some("assertion `left == right` failed\n  left: 10107\n right: 0") {
+                std::panic::resume_unwind(panic);
+            }
+        }
+    }
 }
 
 fn diagnose_descendant_launch() {
