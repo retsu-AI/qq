@@ -627,6 +627,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn foreign_resource_accounting_is_refused_before_launch() {
+        use crate::command_owner::{
+            NativeEnvironment, NativeFilesystem, NativeNetwork, NativeResources,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let cwd =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        let owner = LinuxOwner::discover(crate::command_owner::tests::launcher()).unwrap();
+        for resources in [
+            NativeResources::Guarded {
+                memory_bytes: 1024,
+                max_tasks: 2,
+            },
+            NativeResources::Committed {
+                memory_bytes: 1024,
+                max_processes: 2,
+                cpu_percent: 50,
+            },
+        ] {
+            let native = super::super::process_context::NativeExecution {
+                environment: NativeEnvironment::from_values([]).unwrap(),
+                filesystem: NativeFilesystem::Host,
+                network: NativeNetwork::Host,
+                resources,
+            };
+            let result = owner.wrap(
+                tokio::process::Command::new("/bin/true"),
+                &cwd,
+                None,
+                Some(&native),
+            );
+            let error = result
+                .err()
+                .expect("foreign accounting must not reach launch");
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported, "{resources:?}");
+        }
+    }
+
+    #[test]
     fn owner_writable_dynamic_loader_or_dependencies_are_refused() {
         let root = tempfile::tempdir().unwrap();
         let library = root.path().join("library.c");
