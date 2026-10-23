@@ -339,8 +339,15 @@ After confirming the check and any work it started have stopped, API clients
 can send `acknowledge_check_interruption` with that `workspace_id` and `run_id`
 to `POST /v1/workspaces/check-interruptions/acknowledge`, using the normal
 command envelope and authentication. Repeat for any next hold reported by the
-snapshot. Acknowledgment releases queued workspace work; the matching goal
-stays paused until a separate resume and any fresh check authorization.
+snapshot. Acknowledgment clears that check's manual hold. Queued workspace
+work resumes once all other holds are cleared; the matching goal stays paused
+until a separate resume and any fresh check authorization.
+
+Unconfirmed native commands impose a separate workspace hold. QQ retries the
+original worker and retains that hold until its original invocation has a
+confirmed terminal result. An unavailable worker or a `Lost` journal entry is
+not proof of cleanup, and acknowledging the check does not override native
+custody. Other workspaces remain usable.
 
 ## Getting more detail
 

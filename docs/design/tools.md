@@ -1488,8 +1488,8 @@ An invocation bound before admission is fenced with durable cancellation if
 its journal entry is absent, preventing a delayed admission from starting it.
 No command is submitted again and its original deadline remains in force.
 Explicit CLI resume waits for inherited commands; queued prompts start only
-after their results are saved. Interrupting that wait cancels and drains the
-inherited run and pauses its owning live goal. Observation-only recovered runs
+after their results are saved. If the inherited run remains active,
+interrupting that wait cancels and drains it and pauses its owning live goal. Observation-only recovered runs
 reject steering; queued pre-crash steering is published as superseded when the
 run settles. The interrupted model run settles; the durable goal driver can
 then queue a successor for the same active goal within its remaining shared
