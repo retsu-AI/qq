@@ -33,6 +33,13 @@ mod proof {
         if arguments.get(1).is_some_and(|value| value == "--payload") {
             return payload(Path::new(&arguments[2]), &arguments[3], &arguments[4]);
         }
+        if arguments
+            .get(1)
+            .is_none_or(|value| value != "--ordinary-broker")
+        {
+            return launch_ordinary_broker();
+        }
+        verify_ordinary_broker("before full proof")?;
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         let workspace = root.join("task");
@@ -411,14 +418,13 @@ mod proof {
     }
 
     fn capture(
-        pipe: Option<fs::File>,
+        pipe: Option<impl io::Read + Send + 'static>,
         name: &'static str,
     ) -> io::Result<std::thread::JoinHandle<io::Result<Vec<u8>>>> {
         let mut pipe = pipe.ok_or_else(|| err(format!("missing prepared {name} pipe")))?;
         std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
-                use io::Read as _;
                 const LIMIT: usize = 16 * 1024;
                 let mut retained = Vec::with_capacity(LIMIT);
                 let mut buffer = [0; 4096];
@@ -692,6 +698,283 @@ mod proof {
         source: io::Error,
     }
 
+    fn privileged_group(sid: &str) -> bool {
+        if let Some(rid) = sid.strip_prefix("S-1-5-32-") {
+            return matches!(
+                rid,
+                "544"
+                    | "547"
+                    | "548"
+                    | "549"
+                    | "550"
+                    | "551"
+                    | "552"
+                    | "556"
+                    | "569"
+                    | "578"
+                    | "580"
+                    | "582"
+            );
+        }
+        sid.starts_with("S-1-5-21-")
+            && matches!(
+                sid.rsplit('-').next(),
+                Some("512" | "518" | "519" | "520" | "526" | "527")
+            )
+    }
+
+    fn verify_ordinary_broker(stage: &str) -> io::Result<()> {
+        use firehazard_sid as fh;
+        let token =
+            fh::open_process_token(fh::get_current_process(), fh::token::QUERY).map_err(err)?;
+        let integrity = token.integrity_level().map_err(err)?;
+        if !fh::equal_sid(integrity.label().sid, (&fh::sid::integrity::Medium).into()) {
+            return Err(err(
+                "broker process primary token must have Medium integrity",
+            ));
+        }
+        let groups = token.groups().map_err(err)?;
+        let mut administrators = false;
+        let mut disabled = 0;
+        for group in groups.groups() {
+            let sid = fh::convert_sid_to_string_sid_a(&group.sid)
+                .ok_or_else(|| err("group SID was null"))?
+                .to_string();
+            if privileged_group(&sid) {
+                if group.attributes & fh::sid::group::USE_FOR_DENY_ONLY == Default::default()
+                    || group.attributes & fh::sid::group::ENABLED != Default::default()
+                {
+                    return Err(err(format!(
+                        "broker privileged group must be deny-only: {sid}"
+                    )));
+                }
+                administrators |= sid == "S-1-5-32-544";
+                disabled += 1;
+            }
+        }
+        if !administrators {
+            return Err(err(
+                "qualification requires Administrators deny-only witness",
+            ));
+        }
+        let notify = fh::privilege::name::CHANGE_NOTIFY
+            .lookup_luid()
+            .map_err(err)?;
+        let privileges = token.privileges().map_err(err)?;
+        if privileges.privileges().len() != 1
+            || privileges.privileges()[0].luid != notify
+            || privileges.privileges()[0].attributes & fh::privilege::ENABLED == Default::default()
+        {
+            return Err(err(
+                "broker must have only originally enabled ChangeNotify privilege; AssignPrimary/IncreaseQuota absent",
+            ));
+        }
+        if token.restricted_sids().map_err(err)?.group_count() != 0 {
+            return Err(err("ordinary broker must have no restricting SID list"));
+        }
+        println!(
+            "ordinary broker actual primary token ({stage}): Medium; {disabled} admin/operator groups deny-only; only enabled ChangeNotify; AssignPrimary/IncreaseQuota absent; zero restrictors"
+        );
+        Ok(())
+    }
+
+    fn capture_bounded(
+        mut pipe: impl io::Read + Send + 'static,
+        name: &str,
+    ) -> io::Result<std::sync::mpsc::Receiver<io::Result<Vec<u8>>>> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                let result = (|| {
+                    let mut retained = Vec::new();
+                    let mut buffer = [0; 4096];
+                    loop {
+                        let count = match pipe.read(&mut buffer) {
+                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                            result => result?,
+                        };
+                        if count == 0 {
+                            return Ok(retained);
+                        }
+                        let keep = count.min((16 * 1024_usize).saturating_sub(retained.len()));
+                        retained.extend_from_slice(&buffer[..keep]);
+                    }
+                })();
+                let _ = sender.send(result);
+            })?;
+        Ok(receiver)
+    }
+
+    fn launch_ordinary_broker() -> io::Result<()> {
+        use fh::{job, process};
+        use firehazard as fh;
+        let host = fh::open_process_token(fh::get_current_process(), fh::token::ALL_ACCESS)
+            .map_err(err)?;
+        let notify = fh::privilege::name::CHANGE_NOTIFY.luid();
+        let privileges = host.privileges().map_err(err)?;
+        if !privileges.privileges().iter().any(|p| {
+            p.luid == notify && p.attributes & fh::privilege::ENABLED != Default::default()
+        }) {
+            return Err(err("original host ChangeNotify must already be enabled"));
+        }
+        let groups = host.groups().map_err(err)?;
+        let disabled: Vec<_> = groups
+            .groups()
+            .iter()
+            .filter(|g| {
+                fh::convert_sid_to_string_sid_a(&g.sid)
+                    .map(|s| privileged_group(&s.to_string()))
+                    .unwrap_or(true)
+            })
+            .copied()
+            .collect();
+        let deleted: Vec<_> = privileges
+            .privileges()
+            .iter()
+            .filter(|p| p.luid != notify)
+            .copied()
+            .collect();
+        let token = fh::create_restricted_token(&host, None, Some(&disabled), Some(&deleted), None)
+            .map_err(err)?;
+        token
+            .set_integrity_level(fh::sid::AndAttributes::new(
+                &fh::sid::integrity::Medium,
+                None,
+            ))
+            .map_err(err)?;
+        let job = fh::create_job_object_w(None, ()).map_err(err)?;
+        fh::set_information_job_object(
+            &job,
+            job::object::ExtendedLimitInformation {
+                basic_limit_information: job::object::BasicLimitInformation {
+                    limit_flags: job::object::limit::KILL_ON_JOB_CLOSE,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .map_err(err)?;
+        let inherit = fh::security::Attributes::new(None, true);
+        let (stdin, stdin_writer) = fh::create_pipe(Some(&inherit), 0).map_err(err)?;
+        let (stdout_reader, stdout) = fh::create_pipe(Some(&inherit), 0).map_err(err)?;
+        let (stderr_reader, stderr) = fh::create_pipe(Some(&inherit), 0).map_err(err)?;
+        drop(stdin_writer);
+        fh::set_handle_information(&stdout_reader, fh::handle::FLAG_INHERIT, None).map_err(err)?;
+        fh::set_handle_information(&stderr_reader, fh::handle::FLAG_INHERIT, None).map_err(err)?;
+        let handles = [
+            fh::handle::Borrowed::from(&stdin),
+            fh::handle::Borrowed::from(&stdout),
+            fh::handle::Borrowed::from(&stderr),
+        ];
+        let jobs = [job::Handle::from(&job)];
+        let mut attributes =
+            process::ThreadAttributeList::with_attribute_capacity(2).map_err(err)?;
+        attributes
+            .update(process::ThreadAttributeRef::job_list(&jobs))
+            .map_err(err)?;
+        attributes
+            .update(process::ThreadAttributeRef::handle_list(&handles))
+            .map_err(err)?;
+        let mut startup = process::StartupInfoExW {
+            attribute_list: Some(attributes),
+            ..Default::default()
+        };
+        startup.startup_info.flags = 0x100; // STARTF_USESTDHANDLES
+        startup.startup_info.std_input = Some((&stdin).into());
+        startup.startup_info.std_output = Some((&stdout).into());
+        startup.startup_info.std_error = Some((&stderr).into());
+        let image = std::env::current_exe()?;
+        let mut command: Vec<u16> = format!("\"{}\" --ordinary-broker\0", image.display())
+            .encode_utf16()
+            .collect();
+        let captured_stdout = capture_bounded(stdout_reader, "ordinary-broker-stdout")?;
+        let captured_stderr = capture_bounded(stderr_reader, "ordinary-broker-stderr")?;
+        let child = fh::create_process_as_user_w(
+            &token,
+            (),
+            Some(&mut command),
+            None,
+            None,
+            true,
+            process::CREATE_SUSPENDED
+                | process::CREATE_NO_WINDOW
+                | process::EXTENDED_STARTUPINFO_PRESENT,
+            process::environment::Inherit,
+            (),
+            &startup,
+        )
+        .map_err(|e| admission_error("CreateProcessAsUserW(ordinary broker wrapper)", e))?;
+        drop(startup);
+        drop(stdin);
+        drop(stdout);
+        drop(stderr);
+        let observer = match winsafe::HPROCESS::OpenProcess(
+            winsafe::co::PROCESS::SYNCHRONIZE,
+            false,
+            child.process_id,
+        ) {
+            Ok(observer) => observer,
+            Err(error) => {
+                fh::terminate_job_object(&job, 125).map_err(err)?;
+                return Err(err(format!(
+                    "ordinary broker observer unavailable; termination requested, cleanup unconfirmed: {error}"
+                )));
+            }
+        };
+        let result = (|| {
+            if fh::resume_thread(&child.thread).map_err(err)? != 1 {
+                return Err(err("ordinary broker suspension count was not exactly one"));
+            }
+            match observer
+                .WaitForSingleObject(Some(60_000))
+                .map_err(io::Error::other)?
+            {
+                winsafe::co::WAIT::OBJECT_0 => {}
+                status => return Err(err(format!("ordinary broker wait: {status:?}"))),
+            }
+            let code = fh::get_exit_code_process(&child.process).map_err(err)?;
+            if code != 0 {
+                return Err(err(format!("ordinary broker exit {code:#x}")));
+            }
+            let accounting =
+                fh::query_information_job_object::<job::object::BasicAccountingInformation>(&job)
+                    .map_err(err)?;
+            if accounting.active_processes != 0 {
+                return Err(err("ordinary broker job not quiescent"));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            fh::terminate_job_object(&job, 125).map_err(err)?;
+            if observer
+                .WaitForSingleObject(Some(5_000))
+                .map_err(io::Error::other)?
+                != winsafe::co::WAIT::OBJECT_0
+            {
+                return Err(err(
+                    "ordinary broker cleanup unconfirmed after bounded wait",
+                ));
+            }
+        }
+        drop(job);
+        let output = captured_stdout
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(err)??;
+        let errors = captured_stderr
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(err)??;
+        println!(
+            "ordinary broker stdout: {}",
+            String::from_utf8_lossy(&output)
+        );
+        println!(
+            "ordinary broker stderr: {}",
+            String::from_utf8_lossy(&errors)
+        );
+        result
+    }
+
     fn admission_error(operation: &'static str, source: impl Into<io::Error>) -> io::Error {
         let source = source.into();
         io::Error::new(source.kind(), AdmissionError { operation, source })
@@ -784,6 +1067,7 @@ mod proof {
         if !notify_enabled {
             return Err(err("filtered host lacks enabled SeChangeNotifyPrivilege"));
         }
+        verify_ordinary_broker("immediately before CreateProcessAsUserW")?;
         launch_lpac_as(root, "filtered", Some((filtered.as_handle(), desktop_path)))
     }
 }
