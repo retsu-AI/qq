@@ -97,6 +97,9 @@ const quote = value => { assert.ok(!/["\r\n]/.test(value)); return `"${value}"`;
 const copiedNode = path.join(workspace, 'node-control.exe');
 fs.copyFileSync(tools.node, copiedNode);
 const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
+// Inline input separates root-metadata startup failures from deny inheritance.
+const inlinePayload = `eval(Buffer.from('${fs.readFileSync(payload).toString('base64')}','base64').toString())`;
+const inlineCommand = `${quote(tools.node)} -e ${quote(inlinePayload)}`;
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const volumeRoots = [...new Set([...readonlyPaths, workspace].map(value => path.parse(value).root))];
 const cases = [
@@ -104,6 +107,7 @@ const cases = [
   { name: 'deny-volume-roots-with-ancestor-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots },
   { name: 'deny-volume-roots-without-root-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots,
     enumeratePaths: [...ancestorPaths].filter(value => !volumeRoots.includes(value)) },
+  { name: 'deny-volume-root-inline-payload', command: inlineCommand, payload: true, deniedPaths: volumeRoots },
   { name: 'deny-volume-children-star', command: payloadCommand(tools.node), payload: true,
     deniedPaths: volumeRoots.map(root => `${root}*`) },
   { name: 'deny-volume-children-double-star', command: payloadCommand(tools.node), payload: true,
