@@ -242,6 +242,7 @@ jobs:
             bash .github/scripts/test-exact.sh tools::macos_owner::resources::tests::pressure_warning_and_critical_stop_guarded_work_unknown_levels_fail_closed
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::guarded_preparation_checks_pressure_before_authorizing_payloads
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::post_authorization_pressure_refusal_confirms_no_payload_before_settlement
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::confirmed_launch_failure_releases_custody_without_reporting_an_exit
             bash .github/scripts/test-exact.sh tools::macos_owner::resources::tests::native_memory_pressure_query_is_available_without_setup
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
