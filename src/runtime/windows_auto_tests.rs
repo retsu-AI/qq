@@ -12,12 +12,19 @@ use std::{fs, time::Duration};
 async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let tool_versions = tokio::task::spawn_blocking(|| {
         ["git", "node", "cargo"].map(|program| {
-            let output = std::process::Command::new(program)
+            let path = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+                .filter(|directory| directory.is_absolute())
+                .map(|directory| directory.join(format!("{program}.exe")))
+                .find(|path| path.is_file())
+                .unwrap_or_else(|| panic!("host {program} must be installed on PATH"))
+                .canonicalize()
+                .unwrap();
+            let output = std::process::Command::new(&path)
                 .arg("--version")
                 .output()
                 .unwrap_or_else(|error| panic!("host {program} must be installed: {error}"));
             assert!(output.status.success(), "host {program}: {output:?}");
-            (program, String::from_utf8(output.stdout).unwrap())
+            (program, path, String::from_utf8(output.stdout).unwrap())
         })
     })
     .await
@@ -26,6 +33,20 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
+    fs::copy(
+        std::env::current_exe().unwrap(),
+        source.join("tool-probe.exe"),
+    )
+    .unwrap();
+    fs::write(
+        source.join("tool-probe-input.json"),
+        serde_json::to_vec(&json!({
+            "tools": tool_versions.iter().map(|(program, path, _)| (program, path)).collect::<Vec<_>>(),
+            "secret": secret,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut script = format!(
         "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
         secret.display()
@@ -41,11 +62,13 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     ] {
         script.push_str(&format!(" & echo private-{name}>\"%{name}%/proof-{name}\""));
     }
-    for (program, _) in &tool_versions {
-        script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
+    for (program, _, _) in &tool_versions {
+        script.push_str(&format!(
+            r#" & {program} --version>"{program}-version.txt" 2>"{program}-shell-error.txt""#
+        ));
     }
     script.push_str(
-        " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
+        r" & .\tool-probe.exe --exact runtime::windows_auto_tests::installed_tool_probe --nocapture --skip qq-installed-tool-probe",
     );
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
@@ -191,15 +214,29 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
-    for (program, expected) in &tool_versions {
-        assert_eq!(
-            fs::read_to_string(source.join(format!("{program}-version.txt")))
-                .unwrap()
-                .trim(),
-            expected.trim(),
-            "Auto must run the host's installed {program} with a private task home",
-        );
+    let report: Value = serde_json::from_slice(
+        &fs::read(source.join("tool-probe-report.json")).unwrap_or_else(|error| {
+            panic!("native tool probe report is missing: {error}; {events:?}")
+        }),
+    )
+    .unwrap();
+    assert_eq!(report["host_secret_readable"], false, "{report:#}");
+    let mut failures = Vec::new();
+    for (program, _, expected) in &tool_versions {
+        for variant in ["version", "absolute-version"] {
+            let actual =
+                fs::read_to_string(source.join(format!("{program}-{variant}.txt"))).unwrap();
+            if actual.trim() != expected.trim() {
+                failures.push(format!(
+                    "{program} {variant}: expected {expected:?}, got {actual:?}"
+                ));
+            }
+        }
     }
+    assert!(
+        failures.is_empty(),
+        "Auto must run installed tools with a private task home: {failures:?}; {report:#}",
+    );
     assert_eq!(
         fs::read_to_string(source.join("node-output.txt")).unwrap(),
         "node task output"
@@ -254,6 +291,84 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "{}",
         calls[1].body()
     );
+}
+
+/// Runs only as a copied task payload, through the production Auto command.
+/// Collect every tool's result before the parent asserts, so one denied image
+/// does not conceal independent loader or private-home failures.
+#[test]
+fn installed_tool_probe() {
+    use std::io::Read as _;
+    if !std::env::args().any(|argument| argument == "qq-installed-tool-probe") {
+        return;
+    }
+    let token = rappct::token::query_current_process_token().unwrap();
+    assert!(token.is_appcontainer, "{token:?}");
+    let input: Value = serde_json::from_slice(&fs::read("tool-probe-input.json").unwrap()).unwrap();
+    let tools: Vec<(String, PathBuf)> = serde_json::from_value(input["tools"].clone()).unwrap();
+    let mut reports = Vec::new();
+    for (program, path) in tools {
+        let readable = fs::File::open(&path).and_then(|mut file| {
+            let mut header = [0; 2];
+            file.read_exact(&mut header)?;
+            Ok(header == *b"MZ")
+        });
+        let mut report = json!({
+            "program": program,
+            "path": path,
+            "read_image": match readable {
+                Ok(executable) => json!({"pe_header": executable}),
+                Err(error) => json!({"error": error.to_string(), "code": error.raw_os_error()}),
+            },
+        });
+        let output = std::process::Command::new(&path).arg("--version").output();
+        let bytes = match &output {
+            Ok(output) => output.stdout.as_slice(),
+            Err(_) => &[],
+        };
+        fs::write(format!("{program}-absolute-version.txt"), bytes).unwrap();
+        report["version"] = tool_probe_output(output);
+        report["lookup"] = tool_probe_output(
+            std::process::Command::new(&program)
+                .arg("--version")
+                .output(),
+        );
+        report["shell_stderr"] = json!(String::from_utf8_lossy(
+            &fs::read(format!("{program}-shell-error.txt")).unwrap(),
+        ));
+        if program == "node" {
+            report["write_artifact"] = tool_probe_output(
+                std::process::Command::new(&path)
+                    .args([
+                        "-e",
+                        "require('fs').writeFileSync('node-output.txt','node task output')",
+                    ])
+                    .output(),
+            );
+        }
+        reports.push(report);
+    }
+    let secret = input["secret"].as_str().unwrap();
+    fs::write(
+        "tool-probe-report.json",
+        serde_json::to_vec_pretty(&json!({
+            "tools": reports,
+            "host_secret_readable": fs::File::open(secret).is_ok(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn tool_probe_output(output: std::io::Result<std::process::Output>) -> Value {
+    match output {
+        Ok(output) => json!({
+            "exit": output.status.code(),
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+        }),
+        Err(error) => json!({"error": error.to_string(), "code": error.raw_os_error()}),
+    }
 }
 
 fn response(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
