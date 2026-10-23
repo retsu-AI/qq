@@ -121,6 +121,12 @@ lockfile remain independent of desktop dependencies.
   Latest resumes it. The UI exposes the retained native snapshot, not an independent
   transcript database or a new history-paging protocol.
 
+`tests/render.html?app` mounts the whole app (title bar, store, dialogs) over
+mocked IPC and events, combinable with `demo`, `changes` and `approval`. Add
+`welcome` (no project open), `empty` (a new session's starters), `signed-out`
+(no models) or `trust` (configuration awaiting trust), or
+`open=palette|providers|worktree|goal|menu-file` to open that overlay.
+
 The development-only `tests/render.html?rows=2048&running&reject` fixture renders
 512 fake sessions and bounded transcript rows with mocked IPC. It reads no engine
 state or credentials and is excluded from the production bundle. Remove `reject`
