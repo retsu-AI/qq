@@ -159,6 +159,8 @@ try {
   }
   assert.equal(requests, 0);
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
+  assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.secretRead, true,
+    'the public-read control must demonstrate the outside read before evaluating deny policies');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-roots') && outcome.qualified),
     'No volume-deny candidate both ran real tools and denied the public outside canary');
 } finally {
