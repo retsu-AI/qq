@@ -108,6 +108,16 @@ jobs:
             $directoryAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
           }
           Set-Acl -LiteralPath $probeDirectory -AclObject $directoryAcl
+          $futureDirectory = Join-Path $probeDirectory 'future-public-files'
+          New-Item -ItemType Directory -Force $futureDirectory | Out-Null
+          $futureAcl = Get-Acl -LiteralPath $futureDirectory
+          foreach ($fixture in $fixtures) {
+            $identity = [System.Security.Principal.SecurityIdentifier]::new($fixture.Sid)
+            $futureAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+              $identity, 'ReadAndExecute', 'ContainerInherit, ObjectInherit', 'None', 'Allow'))
+          }
+          Set-Acl -LiteralPath $futureDirectory -AclObject $futureAcl
+          $env:QQ_NATIVE_FUTURE_DIRECTORY = $futureDirectory
           $env:QQ_NATIVE_SCOPE_CANARY = $canary
           $env:QQ_NATIVE_MARKER_CANARY = $markerCanary
           Add-Type -Path .github/scripts/windows-basic-user-probe.cs

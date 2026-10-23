@@ -24,6 +24,8 @@ fs.mkdirSync(path.join(home, 'AppData', 'Roaming'), { recursive: true });
 fs.mkdirSync(path.join(home, 'AppData', 'Local'), { recursive: true });
 const secret = process.env.QQ_NATIVE_SCOPE_CANARY;
 const markerSecret = process.env.QQ_NATIVE_MARKER_CANARY;
+assert.ok(process.env.QQ_NATIVE_FUTURE_DIRECTORY);
+const futureSecret = path.join(process.env.QQ_NATIVE_FUTURE_DIRECTORY, 'created-after-launch.txt');
 assert.ok(markerSecret, 'the host must provide a separate marker-only canary');
 assert.ok(secret, 'the host must provide a canary with explicit public AppContainer read access');
 assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
@@ -115,6 +117,7 @@ function assertHostState() {
   assert.equal(requests, 0);
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
   assert.equal(fs.readFileSync(markerSecret, 'utf8'), 'outside-marker');
+  if (fs.existsSync(futureSecret)) assert.equal(fs.readFileSync(futureSecret, 'utf8'), 'future-outside');
   assert.equal(fs.readFileSync(softwareFile, 'utf8'), 'host-installed-input',
     'read-only software must remain immutable through a writable hardlink');
 }
@@ -126,7 +129,7 @@ fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
 fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
 fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
-fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, endpoint, softwareFile, restrictedHelper }));
+fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, markerSecret, futureSecret, endpoint, softwareFile, restrictedHelper }));
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
@@ -134,6 +137,24 @@ const path = require('node:path');
 (async () => {
   const input = JSON.parse(fs.readFileSync('input.json', 'utf8'));
   const report = { tools: {} };
+  // Event-driven handshake: the host creates a new public file only after
+  // this payload is running inside the already-created security environment.
+  await new Promise((resolve, reject) => {
+    let observer;
+    const timer = setTimeout(() => { observer.close(); reject(new Error('host creation handshake timed out')); }, 5000);
+    const check = () => {
+      if (fs.existsSync('host-created-file.txt')) {
+        clearTimeout(timer); observer.close(); resolve();
+      }
+    };
+    observer = fs.watch('.', check);
+    observer.on('error', error => { clearTimeout(timer); observer.close(); reject(error); });
+    fs.writeFileSync('payload-ready.txt', 'ready');
+    check();
+  });
+  try { fs.readFileSync(input.futureSecret); report.futureRead = true; } catch { report.futureRead = false; }
+  try { fs.writeFileSync(input.futureSecret, 'changed'); report.futureWrite = true; } catch { report.futureWrite = false; }
+
   const token = spawnSync(input.restrictedHelper, ['inspect'], { encoding: 'utf8', timeout: 5000 });
   report.token = { exit: token.status, stdout: token.stdout, stderr: token.stderr, error: token.error?.message };
   report.softwareRead = fs.readFileSync(input.softwareFile, 'utf8');
@@ -220,7 +241,9 @@ fs.writeFileSync(relayPath, relay);
 
 const cases = [
   { name: 'public-read-baseline', command: relayCommand, payload: true },
-  { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret, markerSecret] },
+  { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret, markerSecret, process.env.QQ_NATIVE_FUTURE_DIRECTORY] },
+  { name: 'deny-canary-directory', command: relayCommand, payload: true, deniedPaths: [path.dirname(secret)] },
+  { name: 'deny-parent-with-allowed-children', command: relayCommand, payload: true, deniedPaths: [root, path.dirname(secret)] },
   { name: 'token-creation-control',
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
   { name: 'token-user-sid-control',
@@ -235,8 +258,20 @@ const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false }
 const outcomes = [];
 try {
   for (const test of cases) {
-    for (const name of ['report.json', 'artifact.txt', 'software-hardlink']) fs.rmSync(path.join(workspace, name), { force: true });
+    for (const name of ['report.json', 'artifact.txt', 'software-hardlink', 'payload-ready.txt', 'host-created-file.txt']) fs.rmSync(path.join(workspace, name), { force: true });
     fs.rmSync(path.join(rustTask, 'target'), { recursive: true, force: true });
+    fs.rmSync(futureSecret, { force: true });
+    let futureCreated = false;
+    let creationError;
+    const creationObserver = fs.watch(workspace, () => {
+      if (futureCreated || creationError || !fs.existsSync(path.join(workspace, 'payload-ready.txt'))) return;
+      try {
+        fs.writeFileSync(futureSecret, 'future-outside');
+        futureCreated = true;
+        fs.writeFileSync(path.join(workspace, 'host-created-file.txt'), 'created');
+      } catch (error) { creationError = error; }
+    });
+    creationObserver.on('error', error => { creationError = error; });
     const started = performance.now();
     let output;
     try {
@@ -263,17 +298,19 @@ try {
       console.log(JSON.stringify(outcomes.at(-1)));
       assertHostState();
       continue;
-    }
+    } finally { creationObserver.close(); }
+    if (creationError) throw creationError;
     const outcome = { name: test.name, elapsedMs: performance.now() - started, ...output };
     const reportPath = path.join(workspace, 'report.json');
     if (test.payload && fs.existsSync(reportPath)) {
       const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+      assert.equal(futureCreated, true, 'outside file must be created after payload launch');
       outcome.report = report;
       // This probe isolates public-file containment. Rust compilation has its
       // own reported result and remains required by QQ's production fixture.
       outcome.fileBoundary = output.exitCode === 0 && !output.timedOut
         && report.tools.node.exit === 0 && report.secretRead === false
-        && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.loopback === false
+        && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.futureRead === false && report.futureWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'));
       outcome.frozenProfiles = ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'].every(name => {
         const profile = report.profiles[name];
@@ -283,7 +320,7 @@ try {
       outcome.qualified = outcome.frozenProfiles && report.token.exit === 0 && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
-        && report.secretRead === false && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.loopback === false
+        && report.secretRead === false && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.futureRead === false && report.futureWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
     }
@@ -297,6 +334,8 @@ try {
     'the public-read control must demonstrate the outside read before evaluating deny policies');
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.markerRead, true,
     'the marker-read control must demonstrate its separate outside read');
+  assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.futureRead, true,
+    'the baseline must read the outside file created after sandbox launch');
   assert.ok(outcomes.some(outcome => outcome.name.startsWith('restricted-') && outcome.qualified),
     'No additional token restriction both ran real tools and denied the public outside canary');
 } finally {
