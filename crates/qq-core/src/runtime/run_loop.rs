@@ -33,6 +33,9 @@ struct RunScope {
     /// a live assistant message (ENG-991).
     live_turns: Vec<u32>,
     summarizer_rejected_turns: u8,
+    inherited_compaction_attempted: bool,
+    summary_fold: runtime::SummaryFold,
+    summary_fold_text: String,
     stall: runtime::StallScope,
     loop_guard: LoopGuard,
     guard_eligible: Vec<(ToolCallId, CallKey)>,
@@ -131,7 +134,6 @@ struct TurnScope {
     empty_output_retries: u16,
     reasoning_only_truncations: u16,
     provider_overflowed: bool,
-    reactive_compaction_turn: Option<u32>,
     wait_delivered_for: Option<u32>,
 }
 
@@ -811,10 +813,9 @@ impl plan::CompiledAgentPlan {
                    // The provider rejected the previous request for its window even
                    // though the estimate said it fit. The provider's verdict is
                    // authoritative: the next attempt compacts before sending
-                   // regardless of the estimate. Granted once per turn ordinal; a
-                   // second rejection of the same turn fails the run as before.
+                   // regardless of the estimate. Recovery needs a reducible
+                   // active span or an inherited prefix not already compacted.
                    let provider_overflowed = false;
-                   let reactive_compaction_turn: Option<u32> = None;
                    // A summarizer gets one turn of rejected calls to recover with a
                    // summary; a second fails closed.
                    let summarizer_rejected_turns = 0_u8;
@@ -832,6 +833,9 @@ impl plan::CompiledAgentPlan {
                        goal_final_slot_announced: false,
                        live_turns,
                        summarizer_rejected_turns,
+                       inherited_compaction_attempted: false,
+                       summary_fold: runtime::SummaryFold::new(messages.len().saturating_sub(1)),
+                       summary_fold_text: String::new(),
                        stall,
                        loop_guard: LoopGuard::default(),
                        guard_eligible: Vec::new(),
@@ -863,7 +867,6 @@ impl plan::CompiledAgentPlan {
                        empty_output_retries,
                        reasoning_only_truncations,
                        provider_overflowed,
-                       reactive_compaction_turn,
                        wait_delivered_for,
                    };
 
@@ -1214,10 +1217,15 @@ impl RunState {
                             ));
                         if still_overflows && let Some(compactor) = compactor.as_ref() {
                             let run_start = reducible_messages.saturating_add(1 + usize::from(goal.is_some()));
-                            let boundary = sessions::in_run_compaction_boundary(
-                                &messages[run_start..],
-                                sessions::CONTEXT_PRUNE_KEEP_TURNS,
-                            );
+                            let inherited_prefix = provider_rejected_window && reducible_messages > 0 && !run.inherited_compaction_attempted
+                                && sessions::in_run_compaction_boundary(&messages[run_start..], sessions::CONTEXT_PRUNE_KEEP_TURNS).is_none();
+                            let boundary = if inherited_prefix {
+                                Some((0, 0))
+                            } else {
+                                sessions::in_run_compaction_boundary(
+                                    &messages[run_start..], sessions::CONTEXT_PRUNE_KEEP_TURNS,
+                                )
+                            };
                             if let Some((replace_through, replaced_turns)) = boundary {
                                 // The cutoff is the stored ordinal of the last
                                 // replaced turn, the unit replay compares against
@@ -1228,7 +1236,7 @@ impl RunState {
                                     .iter()
                                     .filter(|message| message.role() == Role::Assistant)
                                     .count();
-                                let turn_cutoff = match run.live_turns.get(replaced_turns.wrapping_sub(1)) {
+                                let turn_cutoff = if inherited_prefix { 0 } else { match run.live_turns.get(replaced_turns.wrapping_sub(1)) {
                                     Some(ordinal) if run.live_turns.len() == live_assistant_messages => *ordinal,
                                     // Every live assistant message records its stored
                                     // ordinal; a mismatch would compact against the
@@ -1243,7 +1251,7 @@ impl RunState {
                                         });
                                         yield TurnStep::Stop; return;
                                     }
-                                };
+                                }};
                                 // The summarizer sends the request this turn would
                                 // have sent, cut at the boundary: the same system
                                 // prompt, tools, and message prefix, so it reads the
@@ -1254,6 +1262,7 @@ impl RunState {
                                 // rejected the estimate, the session context before
                                 // the prompt is dropped: a cache miss, not a request
                                 // over the window.
+                                if inherited_prefix { run.inherited_compaction_attempted = true; }
                                 let cut = run_start + replace_through;
                                 let summarizer_fits = !provider_rejected_window
                                     && plan.runtime.context_window.is_none_or(|context_window| {
@@ -1270,7 +1279,9 @@ impl RunState {
                                         ))
                                             <= u64::from(context_window)
                                     });
-                                let transcript = if summarizer_fits {
+                                let transcript = if inherited_prefix {
+                                    &messages[..reducible_messages]
+                                } else if summarizer_fits {
                                     &messages[..cut]
                                 } else {
                                     &messages[reducible_messages..cut]
@@ -1278,7 +1289,7 @@ impl RunState {
                                 // What the next request carries besides the
                                 // summary; the store adds the summary and
                                 // re-bases the reservation to the sum.
-                                let goal_notice = goal.as_ref().and_then(|goal| goal.post_summary_notice(run.goal_handoff_requested)).map(Arc::<str>::from);
+                                let goal_notice = (!inherited_prefix).then(|| goal.as_ref().and_then(|goal| goal.post_summary_notice(run.goal_handoff_requested)).map(Arc::<str>::from)).flatten();
                                 let post_summary_notice = goal_notice.as_ref().map(|text| Message::user(text.as_ref()));
                                 let retained_bytes = system_bytes
                                     .saturating_add(tool_schema_bytes)
@@ -1286,6 +1297,10 @@ impl RunState {
                                     .saturating_add(measure_messages(&messages[reducible_messages..run_start]))
                                     .saturating_add(measure_messages(&messages[cut..]))
                                     .saturating_add(post_summary_notice.as_ref().map_or(0, measure_message));
+                                let retained_bytes = if inherited_prefix {
+                                    system_bytes.saturating_add(tool_schema_bytes)
+                                        .saturating_add(measure_messages(&messages[reducible_messages..]))
+                                } else { retained_bytes };
                                 // The summarizer is one silent provider turn; this
                                 // run's next turn reports `WaitingForProvider` again.
                                 yield TurnStep::Emit(RuntimeEvent::ActivityChanged {
@@ -1313,6 +1328,7 @@ impl RunState {
                                         .compact(runtime::InRunCompactionRequest {
                                             transcript: transcript.to_vec(),
                                             turn_cutoff,
+                                            inherited_prefix,
                                             system: Arc::clone(system),
                                             tools: Arc::clone(&run.tool_specs),
                                             retained_bytes,
@@ -1380,17 +1396,22 @@ impl RunState {
                                         run.budget.charge_child(summary.usage, summary.estimated_cost_usd_nanos);
                                         let summary = Message::user(format!(
                                             "{}\n\n{}",
-                                            sessions::IN_RUN_COMPACTION_PREAMBLE, summary.summary
+                                            if inherited_prefix { sessions::COMPACTION_SUMMARY_PREAMBLE } else { sessions::IN_RUN_COMPACTION_PREAMBLE }, summary.summary
                                         ));
                                         let live = Arc::make_mut(messages);
-                                        match post_summary_notice {
+                                        if inherited_prefix {
+                                            live.splice(..reducible_messages, [summary]);
+                                            env.reducible_messages = 1;
+                                            inherited_effects.clear();
+                                            window.reducible_message_bytes = measure_messages(&messages[..1]);
+                                        } else { match post_summary_notice {
                                             Some(notice) => {
                                                 live.splice(run_start..run_start + replace_through, [summary, notice]);
                                             }
                                             None => {
                                                 live.splice(run_start..run_start + replace_through, [summary]);
                                             }
-                                        }
+                                        }}
                                         run.live_turns.drain(..replaced_turns);
                                         // A new window: the measured chain covered
                                         // the replaced turns (the next provider usage
@@ -1398,7 +1419,7 @@ impl RunState {
                                         // counts this window only (ADR-0048 § 1).
                                         window.compatible_request = None;
                                         window.model_text_bytes = 0;
-                                        window.irreducible_message_bytes = measure_messages(&messages[reducible_messages..]);
+                                        window.irreducible_message_bytes = measure_messages(&messages[if inherited_prefix { 1 } else { reducible_messages }..]);
                                         slice.pending_reserved_goal_notices = slice.pending_goal_notices.len();
                                         yield TurnStep::Emit( RuntimeEvent::InRunCompacted { turn_ordinal, turn_cutoff });
                                         if let Err(kind) = run.budget.remaining(tokio::time::Instant::now()) {
@@ -1420,9 +1441,9 @@ impl RunState {
                                             | runtime::InRunCompactionError::SummarizerUnavailable { .. }
                                             | runtime::InRunCompactionError::BudgetExhausted { .. }
                                             | runtime::InRunCompactionError::Unavailable(_) => RuntimeEvent::Failed {
-                                                kind: RunFailureKind::Policy,
+                                                kind: if inherited_prefix { RunFailureKind::ProviderContextExceeded } else { RunFailureKind::Policy },
                                                 message: format!(
-                                                    "the context grew past the model window during this run and in-run compaction did not produce a usable smaller context: {error}; run /compact or start a new session, then retry"
+                                                    "automatic context recovery could not produce a smaller usable request: {error}; all session history is preserved"
                                                 ),
                                             },
                                         });
@@ -1924,6 +1945,7 @@ impl RunState {
                                 Err(error) => {
                                     attempt.rejected_before_work = matches!(&error,
                                         qq_provider::ProviderError::Api { .. }
+                                        | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. }
                                         | qq_provider::ProviderError::Configuration(_)
                                         | qq_provider::ProviderError::CredentialsUnavailable(_))
                                         && attempt.blocks.is_empty() && attempt.pending_calls.is_empty()
@@ -1933,6 +1955,34 @@ impl RunState {
                                         yield TurnStep::Emit(RuntimeEvent::GoalRequestRejected);
                                     }
                                     let kind = run_failure_kind(error.kind());
+                                    if summarizer.is_some()
+                                        && attempt.rejected_before_work
+                                        && kind == RunFailureKind::ProviderContextExceeded
+                                        && run.summary_fold.split(Arc::make_mut(messages))
+                                    {
+                                        run.summary_fold_text.clear();
+                                        yield TurnStep::Emit(RuntimeEvent::AssistantTurnCompleted {
+                                            model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                                            turn_ordinal,
+                                            message: Message::assistant(String::new()),
+                                            usage: Some(TokenUsage::default()),
+                                            calls: Vec::new(),
+                                            truncated: false,
+                                            notice: None,
+                                            goal_notices: Vec::new(),
+                                            reserved_goal_notices: 0,
+                                        });
+                                        env.reducible_messages = messages.len().saturating_sub(1);
+                                        env.inherited_effects.clear();
+                                        window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
+                                        window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
+                                        window.compatible_request = None;
+                                        yield TurnStep::Emit(RuntimeEvent::ProviderOverflow {
+                                            turn_ordinal,
+                                            message: error.to_string(),
+                                        });
+                                        yield TurnStep::NextTurn; return;
+                                    }
                                     // The provider's window verdict overrides the
                                     // estimate. With turns to compact and a compactor
                                     // to do it, re-plan this turn once with compaction
@@ -1940,18 +1990,15 @@ impl RunState {
                                     let reactive_compaction = kind
                                         == RunFailureKind::ProviderContextExceeded
                                         && compactor.is_some()
-                                        && recovery.reactive_compaction_turn != Some(turn_ordinal)
                                         && attempt.blocks.is_empty()
                                         && attempt.pending_calls.is_empty()
                                         && !attempt.reasoning_observed
                                         && attempt.replay.is_none()
-                                        && sessions::in_run_compaction_boundary(
+                                        && (reducible_messages > 0 && !run.inherited_compaction_attempted || sessions::in_run_compaction_boundary(
                                             &messages[reducible_messages.saturating_add(1)..],
                                             sessions::CONTEXT_PRUNE_KEEP_TURNS,
-                                        )
-                                        .is_some();
+                                        ).is_some());
                                     if reactive_compaction {
-                                        recovery.reactive_compaction_turn = Some(turn_ordinal);
                                         recovery.provider_overflowed = true;
                                         yield TurnStep::Emit( RuntimeEvent::ProviderOverflow {
                                             turn_ordinal,
@@ -2199,6 +2246,17 @@ impl RunState {
                             run.budget.charge_turn(terminal_usage);
                         }
                         run.budget.charge_tool_calls(calls.iter().filter(|call| call.rejection.is_none()).count());
+                        if summarizer.is_some() {
+                            if calls.is_empty() {
+                                for block in assistant.content() {
+                                    if let ContentBlock::Text { text } = block {
+                                        run.summary_fold_text.push_str(text);
+                                    }
+                                }
+                            } else {
+                                run.summary_fold_text.clear();
+                            }
+                        }
                         if summarizer.is_some() && !calls.is_empty() {
                             run.summarizer_rejected_turns += 1;
                             if run.summarizer_rejected_turns > 1 {
@@ -2665,7 +2723,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<()>> + Send + '_ {
         stream! {
             let Self { env, messages, steering, run, window, slice, .. } = self;
-            let RunEnvironment { plan, file_state, audit_hook, output, limits, deadline, audit_prompt, goal, .. } = env;
+            let RunEnvironment { plan, file_state, audit_hook, output, limits, deadline, audit_prompt, goal, summarizer, .. } = env;
             let refreshed_goal_notice = if !run.goal_handoff_requested && let Some(goal) = goal {
                 let refreshed = tokio::select! {
                     biased;
@@ -2905,6 +2963,16 @@ impl RunState {
                         for steer in applied { yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }); }
                         yield TurnStep::NextTurn; return;
                     }
+                     if summarizer.is_some()
+                         && let Some(next) = run.summary_fold.advance(&mut run.summary_fold_text) {
+                             *messages = Arc::new(next);
+                             env.reducible_messages = messages.len().saturating_sub(1);
+                             env.inherited_effects.clear();
+                             window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
+                             window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
+                             window.compatible_request = None;
+                             yield TurnStep::NextTurn; return;
+                     }
                     yield TurnStep::Emit( RuntimeEvent::Completed { final_output });
                     yield TurnStep::Stop; return;
 

@@ -25,7 +25,7 @@ pub use audit::{
 pub(crate) use budget::{BUDGET_FINAL_RESPONSE_NOTICE, BudgetDecision, BudgetMeter, ChildBudget};
 pub(crate) use compaction::{
     InRunCompaction, InRunCompactionError, InRunCompactionFuture, InRunCompactionRequest,
-    InRunCompactor, SummarizeError, SummarizeStep,
+    InRunCompactor, SummarizeError, SummarizeStep, SummaryFold,
 };
 pub(crate) use deadline::RunDeadline;
 pub(crate) use events::{

@@ -15,6 +15,96 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use qq_protocol::RunFailureKind;
 use qq_provider::{Message, ToolSpec};
 
+/// Bounded hierarchical summarization. Splitting changes representation, not
+/// coverage: every byte of transcript text is queued until a summary consumes
+/// it. Tool calls/results are inert evidence, not executable messages.
+pub(crate) struct SummaryFold {
+    pending: Vec<Vec<Message>>,
+    splits: u8,
+    instruction_at: usize,
+}
+
+impl SummaryFold {
+    /// The caller appends the instruction before any summary fragments or
+    /// continuation notices. Its position is control data, not model text.
+    pub(crate) fn new(instruction_at: usize) -> Self {
+        Self {
+            pending: Vec::new(),
+            splits: 0,
+            instruction_at,
+        }
+    }
+
+    pub(crate) fn split(&mut self, messages: &mut Vec<Message>) -> bool {
+        if self.splits >= 32 {
+            return false;
+        }
+        let Some(instruction) = messages.get(self.instruction_at) else {
+            return false;
+        };
+        if instruction.role() != qq_provider::Role::User {
+            return false;
+        }
+        let transcript = &messages[..self.instruction_at];
+        let mut text = String::new();
+        for message in transcript {
+            text.push_str(&format!("\n[{:?}]\n", message.role()));
+            for block in message.content() {
+                use qq_provider::ContentBlock;
+                match block {
+                    ContentBlock::Text { text: value } => text.push_str(value),
+                    ContentBlock::ToolCall {
+                        name, arguments, ..
+                    } => {
+                        text.push_str(&format!("[Tool call {name}] {}", arguments.get()));
+                    }
+                    ContentBlock::ToolResult {
+                        call_id,
+                        content,
+                        is_error,
+                    } => {
+                        text.push_str(&format!(
+                            "[Tool result {call_id}; error={is_error}] {content}"
+                        ));
+                    }
+                }
+                text.push('\n');
+            }
+        }
+        let mut cut = text.len() / 2;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        if cut < 1024 {
+            return false;
+        }
+        let next = vec![Message::user(text[cut..].to_owned()), instruction.clone()];
+        let first = vec![Message::user(text[..cut].to_owned()), instruction.clone()];
+        if crate::measure_messages(&first) >= crate::measure_messages(messages) {
+            return false;
+        }
+        self.splits += 1;
+        self.pending.push(next);
+        *messages = first;
+        self.instruction_at = 1;
+        true
+    }
+
+    /// Consume a completed portion only when another portion is queued. The
+    /// caller keeps the final response without cloning it to probe the fold.
+    pub(crate) fn advance(&mut self, summary: &mut String) -> Option<Vec<Message>> {
+        let mut next = self.pending.pop()?;
+        let mut preceding = std::mem::take(summary);
+        preceding.insert_str(
+            0,
+            "Summary of the preceding portion; fold it together with the following evidence:\n",
+        );
+        next.insert(0, Message::user(preceding));
+        self.instruction_at = next.len() - 1;
+        Some(next)
+    }
+}
+
 /// What the loop hands the compactor: the run's live request cut after the
 /// last turn to replace, and the ordinal of that turn. The compactor sees no
 /// retained turns, so it cannot summarize what stays verbatim. The request
@@ -28,6 +118,9 @@ pub(crate) struct InRunCompactionRequest {
     /// The last model turn ordinal the summary replaces. Turns after it stay
     /// verbatim in the live transcript and in replay.
     pub(crate) turn_cutoff: u32,
+
+    /// Replace the inherited session prefix, not turns of the active prompt.
+    pub(crate) inherited_prefix: bool,
     /// The run's system prompt (without a budget-final notice).
     pub(crate) system: Arc<str>,
     /// The run's declared tools. Calls are rejected, never run.
@@ -103,6 +196,7 @@ pub(crate) enum SummarizeStep {
         input_tokens: Option<u64>,
     },
     TurnCompleted {
+        model_work: crate::runtime::ModelWorkDisposition,
         ordinal: u32,
         message: Message,
         usage: Option<qq_protocol::TokenUsage>,
@@ -130,4 +224,37 @@ pub(crate) enum SummarizeError {
     /// a way a retry would repeat.
     #[error("{0}")]
     Rejected(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn splitting_a_continuation_keeps_the_user_instruction_instead_of_an_echo() {
+        fn text(message: &Message) -> &str {
+            match &message.content()[0] {
+                qq_provider::ContentBlock::Text { text } => text,
+                _ => panic!("expected inert text evidence"),
+            }
+        }
+        let evidence = "original evidence 多字节 ".repeat(1024);
+        let instruction = Message::user(crate::sessions::COMPACTION_INSTRUCTION);
+        let mut messages = vec![Message::user(evidence.clone()), instruction.clone()];
+        let mut fold = SummaryFold::new(messages.len() - 1);
+        messages.push(Message::assistant(format!(
+            "partial reply echoing {}",
+            crate::sessions::COMPACTION_INSTRUCTION
+        )));
+        messages.push(Message::user("continue the partial reply"));
+        assert!(fold.split(&mut messages));
+        assert_eq!(messages.last(), Some(&instruction));
+        let mut summary = "summary of the first portion".to_owned();
+        let next = fold.advance(&mut summary).unwrap();
+        assert_eq!(next.last(), Some(&instruction));
+        assert_eq!(
+            format!("{}{}", text(&messages[0]), text(&next[1])),
+            format!("\n[User]\n{evidence}\n")
+        );
+    }
 }

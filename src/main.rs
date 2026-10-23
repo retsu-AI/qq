@@ -579,7 +579,10 @@ async fn prepare_headless(
         session: args.session,
         model,
         profile,
-        context_window: model_metadata.and_then(qq_config::ModelMetadata::context_window),
+        context_window: snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| provider.model_context_window(snapshot.model().model())),
         pricing_provenance: model_metadata
             .and_then(qq_config::ModelMetadata::pricing)
             .map(|pricing| pricing.provenance.clone()),

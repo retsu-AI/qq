@@ -450,7 +450,7 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 ];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
-const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
+pub(crate) const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
 after it. A QQ compaction record at its end was copied exactly from the session store and wins \
 over the narrative above it; use search_history for anything else you need verbatim.";
@@ -471,7 +471,7 @@ store. The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
 /// run. The model writes only the narrative; QQ renders the exact record
 /// from stored rows when the summary commits (ADR-0056).
-const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
+pub(crate) const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
 transcript as model context. Do not call any tools. After your summary QQ appends an exact \
 record copied from the session store: every user message verbatim, the last assistant reply, \
 the files read and modified, and the failed tool calls. Do not restate any of it. Write at most \
