@@ -104,7 +104,8 @@ const helperBuild = spawnSync(path.join(compiler.binaries, 'cl.exe'), [
   '/nologo', '/EHsc', '/W4', '/WX', '/std:c++20', '/MT',
   fileURLToPath(new URL('./windows-restricted-child.cpp', import.meta.url)),
   `/Fe:${restrictedHelper}`, `/Fo:${path.join(workspace, 'restricted-child.obj')}`,
-], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 30000 });
+// Host fixture compilation is outside the sandbox timing measurements.
+], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 120_000 });
 assert.equal(helperBuild.status, 0, `token probe build: ${helperBuild.error ?? ''} ${helperBuild.stdout} ${helperBuild.stderr}`);
 
 const expected = Object.fromEntries(Object.entries(tools).map(([name, executable]) => {
