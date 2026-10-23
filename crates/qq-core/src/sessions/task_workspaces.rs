@@ -428,10 +428,14 @@ pub(super) async fn prepare(
         };
         let source_authority = TaskWorkspaceSource::from_plan(&source_plan)?;
         let mut policy = policy;
-        // A software-input root must never expose the current source checkout's
-        // protected configuration or Git trust files to its detached payload.
+        // Software inputs cannot expose source trust files or the private task
+        // control directory, including through an ancestor directory grant.
+        let control_path = &policy.directory.path;
         policy.read_only.retain(|root| {
-            !root.path.starts_with(&source_grant.path) && !source_grant.path.starts_with(&root.path)
+            !root.path.starts_with(&source_grant.path)
+                && !source_grant.path.starts_with(&root.path)
+                && !root.path.starts_with(control_path)
+                && !control_path.starts_with(&root.path)
         });
         let mut record: TaskRecord = match saved {
             Some(saved) => serde_json::from_str(&saved)?,

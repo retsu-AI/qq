@@ -502,10 +502,14 @@ async fn restored_goal_task_respects_tightened_publication_limits(bytes: bool) {
     );
     let external_tools = root.path().canonicalize().unwrap().join("installed-tools");
     std::fs::create_dir(&external_tools).unwrap();
+    let private_metadata = policy.directory.path.join("private-metadata");
+    std::fs::create_dir(&private_metadata).unwrap();
     policy.read_only = [
         root.path(),
         &source,
         &source.join("vendor"),
+        &policy.directory.path,
+        &private_metadata,
         &external_tools,
     ]
     .into_iter()
