@@ -191,11 +191,14 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
-      - name: Native platform Clippy
+      - name: Native core Clippy
+        if: ${{ !cancelled() }}
         shell: bash
-        run: |
-          cargo clippy --locked -p qq-core --all-targets -- -D warnings
-          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings
+      - name: Native client Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
       - name: macOS group quiescence
         if: runner.os == 'macOS'
         shell: bash
@@ -203,6 +206,7 @@ jobs:
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
       - name: Native ownership, cancellation and durable observations
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           cargo build --locked -p qq-core --example command_owner
