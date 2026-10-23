@@ -1420,10 +1420,14 @@ impl Runtime {
             }
             summary.push_str(&text);
             let Some(reason) = truncated else {
-                if let Some(next) = fold.advance(&mut summary) {
-                    messages = next;
-                    continuations = 0;
-                    continue;
+                match fold.advance(&mut summary) {
+                    Ok(Some(next)) => {
+                        messages = next;
+                        continuations = 0;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => { yield Err(error); return; }
                 }
                 yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
@@ -2672,6 +2676,74 @@ mod tests {
         assert!(rejected);
         assert!(!completed);
         assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn summary_fold_rejects_empty_intermediate_portions_before_more_provider_work() {
+        for partial in ["", " \n\t"] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                SummarizeScript {
+                    requests: requests.clone(),
+                    turns: Mutex::new(
+                        vec![
+                            vec![Err(ProviderError::ResponseFailed {
+                                kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                                message: "context length exceeded".to_owned(),
+                            })],
+                            vec![
+                                Ok(ProviderEvent::OutputTextDelta {
+                                    text: partial.to_owned(),
+                                }),
+                                Ok(ProviderEvent::Completed { usage: None }),
+                            ],
+                            vec![
+                                Ok(ProviderEvent::OutputTextDelta {
+                                    text: "final without earlier evidence".to_owned(),
+                                }),
+                                Ok(ProviderEvent::Completed { usage: None }),
+                            ],
+                        ]
+                        .into(),
+                    ),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let steps = runtime.summarize(
+                vec![
+                    Message::user("evidence ".repeat(2000)),
+                    Message::user(sessions::COMPACTION_INSTRUCTION),
+                ],
+                Arc::from("summarize"),
+                Arc::from([]),
+                256,
+                None,
+            );
+            tokio::pin!(steps);
+            let mut rejected = false;
+            while let Some(step) = steps.next().await {
+                match step {
+                    Err(runtime::SummarizeError::Rejected(message)) => {
+                        assert!(message.contains("empty summary"), "{message}");
+                        rejected = true;
+                    }
+                    Ok(runtime::SummarizeStep::Summary(text)) => {
+                        panic!("discarded earlier evidence: {text}")
+                    }
+                    other => {
+                        other.expect("summary work must persist before rejection");
+                    }
+                }
+            }
+            assert!(rejected);
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                2,
+                "never send the later portion after dropping its predecessor"
+            );
+        }
     }
 
     #[tokio::test]

@@ -92,8 +92,23 @@ impl SummaryFold {
 
     /// Consume a completed portion only when another portion is queued. The
     /// caller keeps the final response without cloning it to probe the fold.
-    pub(crate) fn advance(&mut self, summary: &mut String) -> Option<Vec<Message>> {
-        let mut next = self.pending.pop()?;
+    pub(crate) fn advance(
+        &mut self,
+        summary: &mut String,
+    ) -> Result<Option<Vec<Message>>, SummarizeError> {
+        if self.pending.is_empty() {
+            return Ok(None);
+        }
+        if summary.trim().is_empty() {
+            return Err(SummarizeError::Rejected(
+                "compaction produced an empty summary before all portions were incorporated"
+                    .to_owned(),
+            ));
+        }
+        let mut next = self
+            .pending
+            .pop()
+            .expect("a pending portion was just checked");
         let mut preceding = std::mem::take(summary);
         preceding.insert_str(
             0,
@@ -101,7 +116,7 @@ impl SummaryFold {
         );
         next.insert(0, Message::user(preceding));
         self.instruction_at = next.len() - 1;
-        Some(next)
+        Ok(Some(next))
     }
 }
 
@@ -249,8 +264,11 @@ mod tests {
         messages.push(Message::user("continue the partial reply"));
         assert!(fold.split(&mut messages));
         assert_eq!(messages.last(), Some(&instruction));
+        let mut empty = " \n\t".to_owned();
+        assert!(fold.advance(&mut empty).is_err());
+        assert_eq!(empty, " \n\t");
         let mut summary = "summary of the first portion".to_owned();
-        let next = fold.advance(&mut summary).unwrap();
+        let next = fold.advance(&mut summary).unwrap().unwrap();
         assert_eq!(next.last(), Some(&instruction));
         assert_eq!(
             format!("{}{}", text(&messages[0]), text(&next[1])),

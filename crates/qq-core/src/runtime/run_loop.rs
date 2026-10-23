@@ -1961,8 +1961,9 @@ impl RunState {
                                         && run.summary_fold.split(Arc::make_mut(messages))
                                     {
                                         run.summary_fold_text.clear();
-                                        // A split abandons this reply. Its truncation
+                                        // A split abandons this reply. Its recovery
                                         // streak must not limit the fresh smaller request.
+                                        recovery.turn_retries = 0;
                                         recovery.output_continuations = 0;
                                         recovery.reasoning_only_truncations = 0;
                                         recovery.empty_output_retries = 0;
@@ -2968,15 +2969,26 @@ impl RunState {
                         for steer in applied { yield TurnStep::Emit( RuntimeEvent::SteeringApplied { message_id: steer.message_id, turn_ordinal: turn_ordinal.saturating_add(1), attachments: steer.attachments }); }
                         yield TurnStep::NextTurn; return;
                     }
-                     if summarizer.is_some()
-                         && let Some(next) = run.summary_fold.advance(&mut run.summary_fold_text) {
-                             *messages = Arc::new(next);
-                             env.reducible_messages = messages.len().saturating_sub(1);
-                             env.inherited_effects.clear();
-                             window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
-                             window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
-                             window.compatible_request = None;
-                             yield TurnStep::NextTurn; return;
+                     if summarizer.is_some() {
+                         match run.summary_fold.advance(&mut run.summary_fold_text) {
+                             Ok(Some(next)) => {
+                                 *messages = Arc::new(next);
+                                 env.reducible_messages = messages.len().saturating_sub(1);
+                                 env.inherited_effects.clear();
+                                 window.reducible_message_bytes = measure_messages(&messages[..env.reducible_messages]);
+                                 window.irreducible_message_bytes = measure_messages(&messages[env.reducible_messages..]);
+                                 window.compatible_request = None;
+                                 yield TurnStep::NextTurn; return;
+                             }
+                             Ok(None) => {}
+                             Err(error) => {
+                                 yield TurnStep::Emit(RuntimeEvent::Failed {
+                                     kind: RunFailureKind::ProviderResponse,
+                                     message: error.to_string(),
+                                 });
+                                 yield TurnStep::Stop; return;
+                             }
+                         }
                      }
                     yield TurnStep::Emit( RuntimeEvent::Completed { final_output });
                     yield TurnStep::Stop; return;
