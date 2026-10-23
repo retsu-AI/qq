@@ -796,11 +796,10 @@ pub(super) async fn execute_run(
         finish_reserved_run(&inner, &claimed, RunOutcome::Cancelled).await;
         return;
     }
-    if let Some(run) = claimed.unresolved_tool_projection {
-        finish_reserved_run(
-            &inner,
-            &claimed,
-            RunOutcome::Failed {
+    if let Some(failure) = claimed.history_admission_failure {
+        let outcome = match failure {
+            HistoryAdmissionFailure::ContextTooLarge => context_budget_failure(),
+            HistoryAdmissionFailure::MissingToolProjection(run) => RunOutcome::Failed {
                 failure: RunFailure {
                     kind: RunFailureKind::Server,
                     message: SessionRuntimeError::ToolProjectionUnavailable {
@@ -809,8 +808,8 @@ pub(super) async fn execute_run(
                     .to_string(),
                 },
             },
-        )
-        .await;
+        };
+        finish_reserved_run(&inner, &claimed, outcome).await;
         return;
     }
     let load_progress = RuntimeLoadProgress::default();
@@ -1391,11 +1390,7 @@ async fn admit_with_summary_only_history(
     inner: &Arc<SessionRuntimeInner>,
     claimed: &mut ClaimedRun,
 ) -> bool {
-    let summary = match inner
-        .store
-        .latest_compaction_summary(claimed.identity.session_id)
-        .await
-    {
+    let summary = match inner.store.summary_only_history(claimed.identity).await {
         Ok(summary) => summary,
         Err(error) => {
             finish_reserved_run(
@@ -3929,10 +3924,8 @@ pub(super) fn persistence_failure(action: &str, error: &SessionRuntimeError) -> 
     }
 }
 
-/// The deliberate context-budget policy failure. Since auto-compaction, a
-/// prompt run reaches it only after one compaction attempt could not bring
-/// the assembly back under the budget (or mid-run, when model output alone
-/// pushes past it — never compacted mid-run).
+/// Automatic compaction cannot reduce irreducible inputs or exceed the
+/// storage bound. This is a normal policy failure, not a persistence fault.
 fn context_budget_failure() -> RunOutcome {
     RunOutcome::Failed {
         failure: RunFailure {

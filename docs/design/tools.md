@@ -603,38 +603,45 @@ until its first seam and stubs nothing.
 
 Compaction is the second. The summarizer writes a short narrative in five
 sections (Intent, Decisions and constraints, Work state, Open problems, Next
-step); QQ then appends a compaction record rendered from stored rows in the
-commit transaction (ADR-0056). The record carries every user message and
-applied steering verbatim (newest kept first; older prompts are listed by
-ordinal for `search_history` and older steering is counted), the last
-assistant reply, the files modified and read through the built-in
-`read_file`/`edit_file`/`write_file`, and the first line of each failed call.
-It is at most 64 KiB (`context::COMPACTION_RECORD_BYTES`), or an eighth of a
-declared window, and is rebuilt from rows at every compaction, so it stays
-exact across folds. An in-run record holds the steering, files and failures
-of the replaced turns only. A narrative must be non-empty, fit the 4 MiB
-context limit next to the largest record, carry the five section headings,
-and shrink the measured assembly above a 16 KiB floor. Between runs the
-record is a bounded cost added after that check, so an older six-section
-summary always folds into the new format; an in-run step counts the record
-too. Any failure settles the internal run as a `policy` failure and the
-prior compaction stays in force. A reply that echoes a record is cut at the record
-header. A heading is a line that is the section name, optionally numbered or
+step). QQ stores the narrative with a bounded record of the last assistant
+reply, files modified/read through built-ins, and failed calls. This metadata
+record is at most 64 KiB (`context::COMPACTION_RECORD_BYTES`), or an eighth of
+a declared window. Separately, context assembly projects original task
+inputs, applied steering, and answered `ask_user` results verbatim from their
+durable source rows, in conversation order. Later corrections take precedence.
+This also restores inputs covered by legacy summaries without another
+compaction. Generated goal continuation/check prompts are excluded; current
+goal state is rendered separately by the runtime. An in-run projection
+covers only inputs removed by its splice, including steering before its first
+kept visible turn. Queued steering and unanswered/denied questions do not
+become instructions.
+
+Exact inputs are never shortened to fit the metadata budget. They count in
+actual context size, shrinkage, and live reservation accounting. Compaction
+cannot remove irreducible inputs to satisfy a context limit; an oversized
+projection or a non-shrinking replacement fails normally and preserves the
+previous marker and source history. The projection is bounded by the existing
+4 MiB session context limit. A narrative must be non-empty, carry the five
+section headings, and shrink the actual assembly above a 16 KiB floor. A
+reply that echoes QQ's record or original-input section is cut at that header
+before fresh source data is projected. A heading is a line that is the section name, optionally numbered or
 marked up, followed by a colon or by nothing else — `1. Intent: …` and a
 markdown `## 1. Intent` line with its body beneath both count; a line that
 continues into prose does not. The summarizer requests the run's resolved
 output cap, held to an eighth of a declared window but never below 8 192; a
 reply the provider still cuts at that limit is continued like
 any turn, and its pieces are concatenated verbatim so a heading split at the
-cut survives. Three compactions are retained per session and `rollback_compaction` steps back
-through them. `search_history` makes aggressive compaction safe: it walks the
-full persisted transcript including replaced spans, excludes the calling run,
-and returns at most 20 excerpts of ~240 bytes with citations naming the user
-message ordinal, turn, and call. The walk runs newest prompt first and stops
-after 8 MiB of transcript so an absent or rare term costs bounded
-store-worker time however long the session is; a result that stopped short
-says so and tells the model to narrow the query rather than conclude the
-fact was never recorded.
+cut survives. QQ retains the newest three rollback markers plus the session
+baseline and scoped markers needed to replay those views.
+`rollback_compaction` restores the previous retained view.
+
+`search_history` walks the persisted transcript, including replaced spans
+and committed work from the active run. It excludes its own calls/results
+and returns at most 20 excerpts of approximately 240 bytes, with citations
+naming the prompt ordinal, turn, and call. Each page walks at most 1,024
+persisted units or 8 MiB, newest prompt first. An optional continuation
+cursor resumes the same session's search without skipping an oversized unit.
+A page with no matches and a continuation cursor is not an exhausted search.
 
 ## Built-In Tools
 

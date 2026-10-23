@@ -455,8 +455,8 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 /// conversation's opening message.
 pub(crate) const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
-after it. A QQ compaction record at its end was copied exactly from the session store and wins \
-over the narrative above it; use search_history for anything else you need verbatim.";
+after it. QQ original inputs and the compaction record were copied from the session store and \
+win over the narrative; later input corrections take precedence. Use search_history for other detail.";
 /// Opens a run whose prompt could not be admitted even after the fold was
 /// exhausted: the retained transcript is dropped from this request and only
 /// the latest summary stands in for it. The session keeps every row.
@@ -470,14 +470,15 @@ from the session; use search_history for verbatim detail.";
 pub(crate) const IN_RUN_COMPACTION_PREAMBLE: &str = "Your earlier work on this task was compacted into \
 the summary below. Treat it as authoritative: the tool results it describes were real and \
 their effects stand. A QQ compaction record at its end was copied exactly from the session \
-store. The verbatim conversation resumes after it; continue the task.";
+store. QQ original inputs preserve applied instructions and later corrections take precedence. \
+The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
 /// run. The model writes only the narrative; QQ renders the exact record
 /// from stored rows when the summary commits (ADR-0056).
 pub(crate) const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
 transcript as model context. Do not call any tools. After your summary QQ appends an exact \
-record copied from the session store: every user message verbatim, the last assistant reply, \
-the files read and modified, and the failed tool calls. Do not restate any of it. Write at most \
+input section copied from the session store, including applied user corrections and answers, \
+and a bounded record of the last assistant reply, files read and modified, and failed tool calls. Do not restate any of it. Write at most \
 about 1,200 words, in exactly these sections:\n\
 1. Intent: what the user is trying to accomplish and what done looks like, in their terms.\n\
 2. Decisions and constraints: each decision or constraint with its reason, using exact names, \

@@ -2193,7 +2193,7 @@ fn denial_capacity_fixture(
         model: ModelSelection::default(),
         messages: Vec::new(),
         message_effects: Vec::new(),
-        unresolved_tool_projection: None,
+        history_admission_failure: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2561,7 +2561,14 @@ mod reference_assembly {
         if let Some(compaction) = compaction {
             context.push(Message::user(format!(
                 "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
-                compaction.summary
+                with_exact_inputs(
+                    transaction,
+                    &session_id.to_string(),
+                    RecordScope::Session {
+                        cutoff_ordinal: compaction.cutoff_ordinal
+                    },
+                    compaction.summary
+                )?
             )));
         }
         for id in message_ids {
