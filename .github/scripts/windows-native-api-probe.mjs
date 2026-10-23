@@ -390,6 +390,7 @@ const fs = require('node:fs');
 const {spawnSync} = require('node:child_process');
 const environment = JSON.parse(fs.readFileSync('captured-environment.json', 'utf8'));
 if (process.env.OPENSSL_CONF) environment.OPENSSL_CONF = process.env.OPENSSL_CONF;
+if (process.env.NODE_OPTIONS) environment.NODE_OPTIONS = process.env.NODE_OPTIONS;
 const child = spawnSync(process.execPath, ['payload.cjs'], { env: environment, stdio: 'inherit', timeout: 45000 });
 if (child.error) console.error(child.error.message);
 process.exitCode = child.status ?? 1;
@@ -462,6 +463,12 @@ fs.writeFileSync(opensslConfig, '');
 cases.push({ name: 'deny-volume-root-private-openssl-config', payload: true,
   command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
   environment: { ...environment, OPENSSL_CONF: opensslConfig } });
+// Diagnostic compatibility control, not a proposed global Node setting: these
+// flags change module identity and must not silently change users' programs.
+cases.push({ name: 'deny-volume-root-preserved-node-paths', payload: true,
+  command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
+  environment: { ...environment, OPENSSL_CONF: opensslConfig,
+    NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main' } });
 cases.push({ name: 'restricted-host-recreated-native-file-access', payload: false, recreateToken: true, command: relayCommand });
 cases.push({ name: 'native-policy-file-control', payload: false, nativePolicy: true, nativePolicyControl: true, command: relayCommand });
 cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, nativePolicy: true, command: relayCommand });
