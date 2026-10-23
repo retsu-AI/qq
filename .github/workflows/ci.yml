@@ -294,6 +294,9 @@ jobs:
       - name: Native session recovery custody
         shell: bash
         run: |
+          if [[ "$RUNNER_OS" != "Windows" ]]; then
+            bash .github/scripts/test-exact.sh sessions::tests::shared_session_harnesses_accept_an_aliased_temporary_base
+          fi
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_reopen_observes_live_execution_and_wakes_on_completion
           bash .github/scripts/test-exact.sh sessions::tests::native_recovery::unavailable_or_replaced_native_workers_do_not_block_startup_or_replay_effects
