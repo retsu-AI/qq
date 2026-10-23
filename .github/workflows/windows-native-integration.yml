@@ -26,6 +26,28 @@ jobs:
           cargo build --locked -p qq-server --example command_owner_launcher
       - name: Default Auto runs installed tools and denies host access
         run: cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
+      - name: Default Auto works without administrator authority
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $messages = & cargo test --locked -p qq --no-default-features --bin qq --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $artifacts = @($messages | ForEach-Object { $_ | ConvertFrom-Json })
+          $matching = @($artifacts | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.profile.test -and
+            $_.target.name -eq 'qq' -and $_.target.kind -contains 'bin' -and $_.executable
+          })
+          if ($matching.Count -ne 1) { throw 'Expected exactly one compiled QQ test binary' }
+          Add-Type -Path .github/scripts/windows-basic-user-probe.cs
+          $log = Join-Path $env:RUNNER_TEMP 'qq-default-auto-basic-user.log'
+          $code = [BasicUserProbe]::Run($matching[0].executable, [string[]]@(
+            'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output',
+            '--exact', '--nocapture', '--color', 'never'
+          ), $log)
+          $output = Get-Content -Raw $log
+          Write-Output $output
+          if ($code -ne 0) { throw "Non-admin QQ Auto fixture failed: $code" }
+          if ($output -notmatch 'test result: ok\. 1 passed;') { throw 'The native Auto fixture did not run' }
       - name: Durable worker cancellation, recovery and resource containment
         if: ${{ !cancelled() }}
         run: |
