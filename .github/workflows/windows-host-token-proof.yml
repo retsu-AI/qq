@@ -1,0 +1,23 @@
+name: Windows host token proof
+on:
+  push:
+    branches: [test/windows-host-token-proof]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-token:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-host-token-proof
+      - name: Compile the safe API composition
+        run: cargo build --locked -p qq-core --example windows_host_token
+      - name: Run ordinary LPAC control then host restricted token composition
+        run: .\target\debug\examples\windows_host_token.exe
