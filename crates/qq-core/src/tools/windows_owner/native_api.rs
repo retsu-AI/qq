@@ -22,10 +22,7 @@ fn text(value: &OsStr) -> io::Result<String> {
 }
 
 fn request(packet: &Packet, image: &Path) -> io::Result<ContainerRequest> {
-    let crate::command_owner::NativeFilesystem::Restricted {
-        read_only,
-        read_write,
-    } = &packet.filesystem
+    let crate::command_owner::NativeFilesystem::Restricted { read_write, .. } = &packet.filesystem
     else {
         return Err(io::Error::other(
             "native Windows policy requires explicit file authority",
@@ -59,8 +56,9 @@ fn request(packet: &Packet, image: &Path) -> io::Result<ContainerRequest> {
     );
     request.inherit_default_environment = Some(false);
     request.filesystem = Some(FilesystemPolicy {
-        readonly_paths: read_only
-            .iter()
+        readonly_paths: packet
+            .filesystem
+            .read_only_inputs()
             .map(|root| text(root.path.as_os_str()))
             .chain(std::iter::once(text(image_directory.as_os_str())))
             .collect::<io::Result<_>>()?,

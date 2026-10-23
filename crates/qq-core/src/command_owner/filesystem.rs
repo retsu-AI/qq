@@ -122,6 +122,25 @@ pub enum NativeFilesystem {
 }
 
 impl NativeFilesystem {
+    /// Read-only inputs that are not already covered by explicit write authority.
+    #[cfg(any(windows, test))]
+    pub(crate) fn read_only_inputs(&self) -> impl Iterator<Item = &NativeDirectoryGrant> {
+        let (read_only, read_write) = match self {
+            Self::Restricted {
+                read_only,
+                read_write,
+            } => (read_only.as_slice(), read_write.as_slice()),
+            Self::Host => (&[][..], &[][..]),
+        };
+        // QQ grants are additive. Passing these redundant inputs to PSEC
+        // would instead make its more restrictive read-only intent win.
+        read_only.iter().filter(move |input| {
+            !read_write.iter().any(|writable| {
+                input.identity == writable.identity || input.path.starts_with(&writable.path)
+            })
+        })
+    }
+
     /// Metadata access needed to reach explicit roots, including the trusted
     /// launcher. This is separate from authority to read directory contents.
     #[cfg(any(windows, test))]
@@ -142,13 +161,13 @@ impl NativeFilesystem {
             .map(|grant| grant.path.as_path())
             .chain(std::iter::once(launcher_root))
             .collect::<std::collections::BTreeSet<_>>();
-        // PSEC resolves duplicate paths to their most restrictive intent.
-        // Enumerating a content root would therefore remove its read/write
-        // grant when another allowed root is nested underneath it.
+        // Content grants already include metadata access throughout their
+        // subtrees. A more specific metadata-only grant must not replace that
+        // authority, whether it names a content root or an intermediate path.
         explicit
             .iter()
             .flat_map(|root| root.ancestors().skip(1))
-            .filter(|ancestor| !explicit.contains(ancestor))
+            .filter(|ancestor| !explicit.iter().any(|root| ancestor.starts_with(root)))
             .collect()
     }
 
@@ -182,14 +201,44 @@ mod enumeration_tests {
     use super::*;
 
     #[test]
+    fn read_only_inputs_preserve_additive_writes_without_widening_other_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let software = root.join("software");
+        let task = root.join("task");
+        let nested_input = task.join("input");
+        let sibling = root.join("task-sibling");
+        let writable_child = software.join("writable-child");
+        for path in [&nested_input, &writable_child, &sibling] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let filesystem = NativeFilesystem::Restricted {
+            read_only: [&software, &task, &nested_input, &sibling]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+            read_write: [&task, &writable_child]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+        };
+        let remaining = filesystem
+            .read_only_inputs()
+            .map(|grant| &grant.path)
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, [&software, &sibling]);
+        assert_eq!(NativeFilesystem::Host.read_only_inputs().count(), 0);
+    }
+
+    #[test]
     fn metadata_ancestors_do_not_downgrade_explicit_content_authority() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let software = root.join("software");
-        let binaries = software.join("bin");
+        let binaries = software.join("toolchain").join("v1").join("bin");
         let task = root.join("task");
-        let home = task.join("home");
-        let launcher = software.join("helper");
+        let home = task.join("profiles").join("private").join("home");
+        let launcher = software.join("helpers").join("private");
         for path in [&binaries, &home, &launcher] {
             std::fs::create_dir_all(path).unwrap();
         }
@@ -209,6 +258,12 @@ mod enumeration_tests {
             assert!(
                 !ancestors.contains(explicit.as_path()),
                 "metadata-only access would downgrade explicit content authority: {explicit:?}"
+            );
+        }
+        for ancestor in ancestors {
+            assert!(
+                !ancestor.starts_with(&software) && !ancestor.starts_with(&task),
+                "metadata-only access would downgrade descendants of a content root: {ancestor:?}"
             );
         }
     }
