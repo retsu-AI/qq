@@ -124,7 +124,8 @@ lockfile remain independent of desktop dependencies.
 `tests/render.html?app` mounts the whole app (title bar, store, dialogs) over
 mocked IPC and events, combinable with `demo`, `changes` and `approval`. Add
 `welcome` (no project open), `empty` (a new session's starters), `signed-out`
-(no models) or `trust` (configuration awaiting trust), or
+(no models), `trust` (configuration awaiting trust) or `deny-links` (external
+links refused), or
 `open=palette|providers|worktree|goal|menu-file` to open that overlay.
 
 The development-only `tests/render.html?rows=2048&running&reject` fixture renders
