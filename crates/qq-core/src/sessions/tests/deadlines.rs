@@ -853,10 +853,12 @@ async fn duration_includes_loader_but_does_not_release_its_owned_preparation() {
     );
 }
 
+#[cfg(unix)]
 struct DeadlineLoader {
     requests: Arc<AtomicUsize>,
 }
 
+#[cfg(unix)]
 impl RuntimeLoader for DeadlineLoader {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let requests = Arc::clone(&self.requests);
@@ -871,10 +873,12 @@ impl RuntimeLoader for DeadlineLoader {
     }
 }
 
+#[cfg(unix)]
 struct DeadlineProvider {
     requests: Arc<AtomicUsize>,
 }
 
+#[cfg(unix)]
 impl Provider for DeadlineProvider {
     fn stream(&self, _request: ModelRequest) -> ProviderStream {
         use qq_provider::ProviderEvent;
