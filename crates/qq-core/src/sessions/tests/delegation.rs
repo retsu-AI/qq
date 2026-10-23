@@ -1908,7 +1908,7 @@ async fn shutdown_closes_child_admission_before_scanning_unfinished_runs() {
         },
         messages: Vec::new(),
         message_effects: Vec::new(),
-        unresolved_tool_projection: None,
+        history_admission_failure: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,

@@ -63,6 +63,12 @@ pub(super) struct RunIdentity {
     pub(super) child: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum HistoryAdmissionFailure {
+    MissingToolProjection(RunId),
+    ContextTooLarge,
+}
+
 #[derive(Clone)]
 pub(super) struct ClaimedRun {
     pub(super) identity: RunIdentity,
@@ -101,8 +107,8 @@ pub(super) struct ClaimedRun {
     /// The stored effect of each tool result in `messages`, in block order,
     /// so the run's live prune classifies them as assembly did.
     pub(super) message_effects: ResultEffects,
-    /// A known unresolved history blocks only this reservation, before loading.
-    pub(super) unresolved_tool_projection: Option<RunId>,
+    /// An unusable history blocks only this reservation, before loading.
+    pub(super) history_admission_failure: Option<HistoryAdmissionFailure>,
     /// Summarizer steps already spent admitting this prompt. Zero until the
     /// first automatic compaction starts.
     pub(super) context_compaction_attempted: u32,
@@ -181,7 +187,7 @@ impl ClaimedRun {
             model: self.model.clone(),
             messages: Vec::new(),
             message_effects: Vec::new(),
-            unresolved_tool_projection: None,
+            history_admission_failure: None,
             context_compaction_attempted: self.context_compaction_attempted,
             context_compaction_failed: self.context_compaction_failed,
             context_compaction_remaining: self.context_compaction_remaining,
@@ -701,7 +707,7 @@ pub(super) fn reserve_next_run_recoverable(
     if reserved != 1 {
         return Ok(None);
     }
-    let mut unresolved_tool_projection = None;
+    let mut history_admission_failure = None;
     let (messages, message_effects) = match kind {
         RunKind::GoalCheck => (Vec::new(), Vec::new()),
         RunKind::Prompt => {
@@ -722,7 +728,13 @@ pub(super) fn reserve_next_run_recoverable(
             ) {
                 Ok(context) => context,
                 Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
-                    unresolved_tool_projection = Some(parse_id(&run)?);
+                    history_admission_failure = Some(
+                        HistoryAdmissionFailure::MissingToolProjection(parse_id(&run)?),
+                    );
+                    (Vec::new(), Vec::new())
+                }
+                Err(SessionRuntimeError::ContextTooLarge) => {
+                    history_admission_failure = Some(HistoryAdmissionFailure::ContextTooLarge);
                     (Vec::new(), Vec::new())
                 }
                 Err(error) => return Err(error),
@@ -739,7 +751,13 @@ pub(super) fn reserve_next_run_recoverable(
                 match load_model_context_with_effects(&transaction, session_id, u64::MAX) {
                     Ok(context) => context,
                     Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
-                        unresolved_tool_projection = Some(parse_id(&run)?);
+                        history_admission_failure = Some(
+                            HistoryAdmissionFailure::MissingToolProjection(parse_id(&run)?),
+                        );
+                        (Vec::new(), Vec::new())
+                    }
+                    Err(SessionRuntimeError::ContextTooLarge) => {
+                        history_admission_failure = Some(HistoryAdmissionFailure::ContextTooLarge);
                         (Vec::new(), Vec::new())
                     }
                     Err(error) => return Err(error),
@@ -895,7 +913,7 @@ pub(super) fn reserve_next_run_recoverable(
         model,
         messages,
         message_effects,
-        unresolved_tool_projection,
+        history_admission_failure,
         context_compaction_attempted,
         context_compaction_failed,
         context_compaction_remaining,

@@ -639,7 +639,14 @@ fn assemble_model_context(
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
             "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
-            compaction.summary
+            with_exact_inputs(
+                transaction,
+                &session_id.to_string(),
+                RecordScope::Session {
+                    cutoff_ordinal: compaction.cutoff_ordinal,
+                },
+                compaction.summary
+            )?
         )));
     }
     for prompt in prompts {
@@ -1327,6 +1334,27 @@ pub(super) fn assembled_context_bytes(
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
 }
 
+/// Empty truncated/faulted attempts never joined the live transcript.
+/// Use the same predicate when choosing the first kept turn and replaying it.
+pub(super) fn turn_is_replayed(
+    content_json: &str,
+    truncated: bool,
+) -> Result<bool, SessionRuntimeError> {
+    if !truncated {
+        return Ok(true);
+    }
+    let content = match serde_json::from_str::<codec::PersistedTurn>(content_json)? {
+        codec::PersistedTurn::Legacy(content) | codec::PersistedTurn::Replay { content, .. } => {
+            content
+        }
+    };
+    Ok(Message::new(
+        Role::Assistant,
+        content.into_iter().map(ContentBlock::from).collect(),
+    )
+    .has_content())
+}
+
 /// One committed model turn as context assembly reads it.
 pub(super) struct StoredTurn {
     pub(super) strict_projection: bool,
@@ -1389,14 +1417,21 @@ pub(super) fn append_run_turns(
             // assistant message, which includes the steering and the runtime
             // notice that preceded that kept turn's request
             // (`in_run_compaction_boundary`). Drop them here too.
-            let first_kept = match turns.first_mut() {
-                Some(first) => {
-                    first.notice = None;
-                    first.goal_notices.clear();
-                    first.ordinal
+            let mut first_kept_index = None;
+            for (index, turn) in turns.iter().enumerate() {
+                if turn_is_replayed(&turn.content_json, turn.truncated)? {
+                    first_kept_index = Some(index);
+                    break;
                 }
-                None => marker.turn_cutoff,
-            };
+            }
+            let first_kept =
+                first_kept_index.map_or(marker.turn_cutoff, |index| turns[index].ordinal);
+            if let Some(index) = first_kept_index {
+                for turn in &mut turns[..=index] {
+                    turn.notice = None;
+                    turn.goal_notices.clear();
+                }
+            }
             while steering
                 .front()
                 .is_some_and(|(applied_before, _)| *applied_before <= first_kept)

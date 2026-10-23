@@ -2,7 +2,12 @@
 //! transaction that swaps a summary in for the transcript span, and the
 //! record QQ renders into it.
 
+mod inputs;
 mod record;
+
+#[cfg(test)]
+pub(super) use inputs::EXACT_INPUTS_HEADER;
+pub(super) use inputs::with_exact_inputs;
 
 pub(super) use record::{RecordScope, record_budget, render_compaction_record};
 
@@ -14,14 +19,11 @@ use super::*;
 pub(super) fn narrative_of(mut summary: String) -> String {
     // Only a header at the start of a line opens a record; prose that
     // mentions it does not.
-    let at = if summary.starts_with(COMPACTION_RECORD_HEADER) {
-        Some(0)
-    } else {
-        summary
-            .match_indices(COMPACTION_RECORD_HEADER)
-            .map(|(at, _)| at)
-            .find(|&at| summary[..at].ends_with('\n'))
-    };
+    let at = [COMPACTION_RECORD_HEADER, inputs::EXACT_INPUTS_HEADER]
+        .into_iter()
+        .flat_map(|header| summary.match_indices(header).map(|(at, _)| at))
+        .filter(|&at| at == 0 || summary[..at].ends_with('\n'))
+        .min();
     if let Some(at) = at {
         summary.truncate(at);
         let kept = summary.trim_end().len();
@@ -263,7 +265,7 @@ pub(super) fn start_auto_compaction(
             model: original.model.clone(),
             messages: Vec::new(),
             message_effects: Vec::new(),
-            unresolved_tool_projection: None,
+            history_admission_failure: None,
             context_compaction_attempted: original.context_compaction_attempted.saturating_add(1),
             context_compaction_failed: false,
             context_compaction_remaining: false,
@@ -412,12 +414,14 @@ pub(super) fn complete_compaction(
                 |row| row.get(0),
             )?,
         };
-        // Insert the candidate marker with the narrative alone, then measure
-        // the assembly it produces. A narrative that does not shrink the
-        // assembly is rejected and the row removed within this transaction,
-        // so the prior usable compaction stays authoritative. The record is
-        // added after this check: it is a bounded cost QQ chose, and judging
-        // it here would fail an old summary smaller than the new record.
+        // Measure the actual replacement, including protected source inputs.
+        let record = render_compaction_record(
+            &transaction,
+            claimed.identity.session_id,
+            RecordScope::Session { cutoff_ordinal },
+            record_budget,
+        )?;
+        let summary = with_record(summary, &record);
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
@@ -432,14 +436,21 @@ pub(super) fn complete_compaction(
                 now,
             ],
         )?;
-        let narrative_bytes = assembled_context_bytes(&transaction, claimed.identity.session_id)?;
+        let candidate_bytes =
+            match assembled_context_bytes(&transaction, claimed.identity.session_id) {
+                Ok(bytes) => Some(bytes),
+                Err(SessionRuntimeError::ContextTooLarge) => None,
+                Err(error) => return Err(error),
+            };
         // Shrinkage is the point of compaction. A short transcript is the one
         // exception: the structured summary's fixed framing can exceed it,
         // yet compacting it is still correct when the provider reported
         // overflow. Above that floor a narrative that fails to shrink the
         // assembly is rejected outright.
         let shrinkage_required = before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES;
-        if shrinkage_required && narrative_bytes >= before_bytes {
+        if candidate_bytes.is_none()
+            || (shrinkage_required && candidate_bytes.is_some_and(|bytes| bytes >= before_bytes))
+        {
             transaction.execute(
                 "DELETE FROM session_compactions WHERE session_id = ?1 AND run_id = ?2",
                 params![
@@ -450,11 +461,16 @@ pub(super) fn complete_compaction(
             let failed = RunOutcome::Failed {
                 failure: RunFailure {
                     kind: RunFailureKind::Policy,
-                    message: format!(
-                        "compaction summary did not shrink the assembled context \
-                         ({narrative_bytes} bytes after, {before_bytes} before); the prior \
-                         compaction, if any, remains in effect"
-                    ),
+                    message: match candidate_bytes {
+                        Some(bytes) => format!(
+                            "compaction summary did not shrink the assembled context \
+                             ({bytes} bytes after, {before_bytes} before); the prior \
+                             compaction remains in effect"
+                        ),
+                        None => "exact inputs and summary exceed the 4 MiB session context limit; \
+                                 the prior compaction remains in effect"
+                            .to_owned(),
+                    },
                 },
             };
             events.extend(expect_settled(settle_run(
@@ -477,27 +493,7 @@ pub(super) fn complete_compaction(
             transaction.commit()?;
             return Ok(events);
         }
-        let record = render_compaction_record(
-            &transaction,
-            claimed.identity.session_id,
-            RecordScope::Session { cutoff_ordinal },
-            record_budget,
-        )?;
-        let summary = with_record(summary, &record);
-        let after_bytes = if record.is_empty() {
-            narrative_bytes
-        } else {
-            transaction.execute(
-                "UPDATE session_compactions SET summary = ?3
-                     WHERE session_id = ?1 AND run_id = ?2",
-                params![
-                    claimed.identity.session_id.to_string(),
-                    claimed.identity.run_id.to_string(),
-                    summary,
-                ],
-            )?;
-            assembled_context_bytes(&transaction, claimed.identity.session_id)?
-        };
+        let after_bytes = candidate_bytes.expect("the rejected candidate returned above");
         transaction.execute(
             "UPDATE session_compactions SET after_bytes = ?3
                  WHERE session_id = ?1 AND run_id = ?2",
@@ -660,17 +656,25 @@ pub(super) fn in_run_compactions(
            AND c.rowid = (SELECT MAX(rowid) FROM session_compactions
                           WHERE scope_run_id = m.run_id)",
     )?;
-    let rows = statement.query_map(params![session, through_ordinal, cutoff_ordinal], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, u32>(2)?,
-            goals::read_notice_with_budget(row, 3, remaining_notice_bytes)?,
-        ))
-    })?;
+    let mut rows = statement.query(params![session, through_ordinal, cutoff_ordinal])?;
     let mut markers = HashMap::new();
-    for row in rows {
-        let (run_id, summary, turn_cutoff, goal_notice) = row?;
+    while let Some(row) = rows.next()? {
+        let run_id: String = row.get(0)?;
+        let summary: String = row.get(1)?;
+        let turn_cutoff: u32 = row.get(2)?;
+        let goal_notice = goals::read_notice_with_budget(row, 3, remaining_notice_bytes)?;
+        let summary = with_exact_inputs(
+            connection,
+            session,
+            RecordScope::Run {
+                run_id: run_id.parse().map_err(|_| SessionRuntimeError::CODEC)?,
+                turn_cutoff,
+            },
+            summary,
+        )?;
+        *remaining_notice_bytes = remaining_notice_bytes
+            .checked_sub(summary.len())
+            .ok_or(SessionRuntimeError::ContextTooLarge)?;
         markers.insert(
             run_id,
             InRunCompaction {
@@ -877,22 +881,40 @@ pub(super) fn complete_in_run_compaction(
         let now = now_ms();
         let session = claimed.identity.session_id;
         let before_bytes = assembled_context_bytes(&transaction, session)?;
-        // Unlike a between-run step, the record counts toward shrinkage
-        // here: the live run continues in this window, and a running prompt
-        // never holds a summary stored in an earlier format.
-        let record = render_compaction_record(
-            &transaction,
-            session,
-            match claimed.compaction_cutoff_ordinal {
-                Some(cutoff_ordinal) => RecordScope::Session { cutoff_ordinal },
-                None => RecordScope::Run {
-                    run_id: scope_run_id,
-                    turn_cutoff,
-                },
+        let scope = match claimed.compaction_cutoff_ordinal {
+            Some(cutoff_ordinal) => RecordScope::Session { cutoff_ordinal },
+            None => RecordScope::Run {
+                run_id: scope_run_id,
+                turn_cutoff,
             },
-            record_budget,
-        )?;
+        };
+        let record = render_compaction_record(&transaction, session, scope, record_budget)?;
         let summary = with_record(summary, &record);
+        let visible_summary =
+            match with_exact_inputs(&transaction, &session.to_string(), scope, summary.clone()) {
+                Ok(summary) => summary,
+                Err(SessionRuntimeError::ContextTooLarge) => {
+                    events.extend(expect_settled(settle_run(
+                    &transaction,
+                    store_id,
+                    claimed,
+                    RunOutcome::Failed {
+                        failure: RunFailure {
+                            kind: RunFailureKind::Policy,
+                            message:
+                                "exact inputs and summary exceed the 4 MiB session context limit; \
+                                      history remains intact"
+                                    .to_owned(),
+                        },
+                    },
+                    accounting,
+                    SettlementCause::Executor,
+                )?)?);
+                    transaction.commit()?;
+                    return Ok((events, None));
+                }
+                Err(error) => return Err(error),
+            };
         transaction.execute(
             "INSERT INTO session_compactions(
                      session_id, run_id, summary, cutoff_ordinal,
@@ -951,7 +973,7 @@ pub(super) fn complete_in_run_compaction(
             // with the new one (ADR-0048 § 1). The summary is framed exactly
             // as the live splice frames it.
             let framed_summary_bytes = crate::measure_message(&Message::user(format!(
-                "{}\n\n{summary}",
+                "{}\n\n{visible_summary}",
                 if claimed.compaction_cutoff_ordinal.is_some() {
                     COMPACTION_SUMMARY_PREAMBLE
                 } else {
@@ -997,7 +1019,7 @@ pub(super) fn complete_in_run_compaction(
                     after_bytes: u64::try_from(after_bytes).unwrap_or(u64::MAX),
                 },
             )?);
-            committed = Some(summary);
+            committed = Some(visible_summary);
         }
     }
     if committed.is_none() {

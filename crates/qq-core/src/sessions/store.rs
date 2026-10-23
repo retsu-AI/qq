@@ -1424,14 +1424,28 @@ impl Store {
         .await
     }
 
-    /// The newest between-run summary, for a prompt whose fold is exhausted
-    /// yet still over the window: the run starts from the summary alone.
-    pub(super) async fn latest_compaction_summary(
+    /// A reduced history for exhausted admission: narrative plus every
+    /// earlier task input, including inputs after the summary's cutoff.
+    pub(super) async fn summary_only_history(
         &self,
-        session_id: SessionId,
+        identity: RunIdentity,
     ) -> Result<Option<String>, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            Ok(latest_compaction(connection, session_id)?.map(|row| row.summary))
+            let cutoff_ordinal = connection.query_row(
+                "SELECT m.ordinal - 1 FROM messages m JOIN runs r ON r.user_message_id = m.id
+                 WHERE r.id = ?1 AND m.session_id = ?2",
+                params![identity.run_id.to_string(), identity.session_id.to_string()],
+                |row| row.get::<_, u64>(0),
+            )?;
+            let narrative = latest_compaction(connection, identity.session_id)?
+                .map_or_else(String::new, |row| row.summary);
+            let summary = with_exact_inputs(
+                connection,
+                &identity.session_id.to_string(),
+                RecordScope::Session { cutoff_ordinal },
+                narrative,
+            )?;
+            Ok((!summary.is_empty()).then_some(summary))
         })
         .await
     }

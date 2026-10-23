@@ -2482,6 +2482,17 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
+    // Additive projection index: assembling human answers must not revisit
+    // every historical shell/read call after each automatic compaction.
+    if has_tool_calls {
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS tool_calls_answered_inputs
+         ON tool_calls(run_id, turn_ordinal, call_ordinal)
+         WHERE name = 'ask_user' AND state = 'completed'
+           AND approval_resolution = 'answered' AND is_error = 0 AND result IS NOT NULL;",
+        )?;
+    }
+
     // 60: persisted native scopes are an execution boundary. Older runtimes
     // must refuse this store rather than ignore its authority metadata.
     if schema_version.as_deref() != Some("60") {

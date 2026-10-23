@@ -491,12 +491,22 @@ async fn compact_in_run(
             })
         }
         Ok((events, None)) => {
+            let reason = events
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::RunFinished {
+                        outcome: RunOutcome::Failed { failure },
+                        ..
+                    } => Some(failure.message.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    "the summary was rejected or did not shrink the context".to_owned()
+                });
             for event in events {
                 inner.notify(event.cursor);
             }
-            Err(Error::SummarizerFailed(
-                "the summary was rejected or did not shrink the context".to_owned(),
-            ))
+            Err(Error::SummarizerFailed(reason))
         }
         Err(error) => {
             inner.failed.send_replace(true);
