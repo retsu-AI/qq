@@ -8,7 +8,9 @@
 //! sends only the latest state over herdr's socket with a short timeout and
 //! ignores failures. Outside herdr nothing is spawned.
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::Duration;
 
 use qq_client::state::StoreActivity;
 use qq_protocol::SessionId;
@@ -20,10 +22,12 @@ const SOURCE: &str = "qq";
 /// The name herdr shows for the pane's agent.
 const AGENT: &str = "qq";
 /// Bound on one request: connect, write, and read the acknowledgement.
+#[cfg(unix)]
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 /// Bytes of acknowledgement read before giving up on a newline. The answer's
 /// content is ignored; this only bounds what a misbehaving peer can make us
 /// buffer.
+#[cfg(unix)]
 const MAX_ANSWER_BYTES: u64 = 4096;
 /// herdr caps `message` presentation text; longer text is cut client-side.
 const MAX_MESSAGE_CHARS: usize = 80;
@@ -223,10 +227,13 @@ fn report_request(pane_id: &str, report: &Report, seq: u64) -> Value {
 /// best-effort, and the type exists so tests can tell the outcomes apart.
 #[derive(Debug, thiserror::Error)]
 enum SendError {
+    #[cfg(unix)]
     #[error("herdr socket I/O failed")]
     Io(#[from] std::io::Error),
+    #[cfg(unix)]
     #[error("herdr did not answer within {REQUEST_TIMEOUT:?}")]
     Timeout,
+    #[cfg(unix)]
     #[error("herdr closed the connection without answering")]
     NoAnswer,
     #[cfg(not(unix))]
