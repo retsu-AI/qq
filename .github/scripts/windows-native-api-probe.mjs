@@ -180,7 +180,11 @@ const toolchainEntries = fs.readdirSync(toolchainDirectory);
 assert.ok(toolchainEntries.length <= 32, 'bounded installed toolchain inputs');
 const resolvedToolchains = toolchainEntries.map(name => path.join(toolchainDirectory, name))
   .filter(root => fs.existsSync(path.join(root, 'bin', 'rustc.exe')))
-  .map(root => fs.realpathSync.native(root));
+  .map(root => fs.realpathSync.native(root))
+  .filter(root => {
+    const relative = path.relative(rustup, root);
+    return path.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${path.sep}`);
+  });
 console.log(JSON.stringify({ resolvedToolchains }));
 const readonlyPaths = [...new Set([
   process.env.SystemRoot,
@@ -221,9 +225,9 @@ const cases = [
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
   { name: 'token-user-sid-control',
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} user`, payload: true },
-  ...['package', 'arap', 'package-arap', 'package-arap-registry', 'package-write', 'lpac-inherit', 'lpac-recreate'].map(mode => ({
+  ...['package', 'arap', 'package-arap', 'package-arap-registry', 'package-write', 'disable-marker', 'disable-marker-lpac', 'lpac-inherit', 'lpac-recreate'].map(mode => ({
     name: 'restricted-' + mode,
-    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(mode.startsWith('lpac-') ? relayPath : payload)} ${mode}`,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(mode.startsWith('lpac-') || mode === 'disable-marker-lpac' ? relayPath : payload)} ${mode}`,
     payload: true,
   })),
 ];
