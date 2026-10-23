@@ -22,13 +22,30 @@ jobs:
         with:
           key: windows-task-home-path-${{ matrix.os }}
           cache-on-failure: true
-      - name: Exercise canonical task profile paths and called batch
+      - name: Prove the original profile write regression
         shell: bash
         run: |
+          after=$(git rev-parse HEAD)
+          before=59043bbc140ba4d1ba14f35201b008d7c7be66c7
           selector=command_owner::environment::tests::windows_task_home_supports_shell_profile_paths_and_called_batches
+          git fetch --no-tags --depth=1 origin "$before"
+          git checkout --detach "$before"
           cargo test --locked -p qq-core "$selector" -- --list | tr -d '\r' | grep -Fx "$selector: test"
-          cargo test --locked -p qq-core "$selector" -- --exact --nocapture
+          set +e
+          cargo test --locked -p qq-core "$selector" -- --exact --nocapture > before.log 2>&1
+          result=$?
+          set -e
+          cat before.log
+          test "$result" -ne 0
+          grep -F 'canonical task home must support ordinary shell path suffixes and called batches' before.log
+          git checkout --detach "$after"
+      - name: Verify canonical task profile paths after the fix
+        shell: bash
+        run: cargo test --locked -p qq-core command_owner::environment::tests::windows_task_home_supports_shell_profile_paths_and_called_batches -- --exact --nocapture
       - name: Preserve names requiring verbatim path semantics
         if: always()
         shell: bash
         run: cargo test --locked -p qq-core command_owner::environment::tests::windows_task_home_preserves_extended_only_names -- --exact --nocapture
+      - name: Lint the native Windows source and regression
+        shell: bash
+        run: cargo clippy --locked -p qq-core --all-targets -- -D warnings

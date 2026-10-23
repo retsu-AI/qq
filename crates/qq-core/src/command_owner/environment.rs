@@ -111,6 +111,13 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
+            // Ordinary Windows tools append slash-separated names to these
+            // values. Keep verbatim syntax only when DOS paths change identity.
+            for (_, value) in &mut values {
+                *value = dunce::simplified(std::path::Path::new(value))
+                    .as_os_str()
+                    .to_owned();
+            }
             values
         };
         self.0.retain(|(name, _)| {
@@ -356,6 +363,16 @@ mod tests {
             assert_eq!(environment.get("HOME"), Some(home.into()));
             assert_eq!(environment.get("TMP"), Some(home.join("tmp").into()));
         }
+        // A child path can need verbatim semantics even when HOME does not.
+        let home = std::path::PathBuf::from(format!(r"\\?\C:\{}", "a".repeat(245)));
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_task_home(&home)
+            .unwrap();
+        assert_eq!(
+            environment.get("APPDATA"),
+            Some(home.join("AppData/Roaming").into()),
+        );
     }
 
     #[cfg(unix)]
