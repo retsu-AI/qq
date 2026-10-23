@@ -3299,6 +3299,7 @@ enum AutoCompactScript {
     /// calls `read_tool_result` with the `t:` handle found in that
     /// result's marker and the given JSON arguments, then streams the
     /// text. The handle is discovered the way a model would.
+    #[cfg(unix)]
     ShellThenRecall {
         command: String,
         recall: serde_json::Value,
@@ -3910,6 +3911,7 @@ impl Provider for AutoCompactProvider {
                     ]))
                 }
             }
+            #[cfg(unix)]
             AutoCompactScript::ShellThenRecall {
                 command,
                 recall,
