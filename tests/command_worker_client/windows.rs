@@ -355,10 +355,25 @@ async fn finish(
     worker: &client::CommandWorker,
     request: NativeCommand,
 ) -> qq_core::command_owner::CommandSnapshot {
+    let started = std::time::Instant::now();
     worker.submit(request.clone()).await.unwrap();
+    eprintln!(
+        "Windows native command {} admitted after {:?}",
+        request.id,
+        started.elapsed()
+    );
     let mut after = 0;
     loop {
         let state = worker.wait(request.id, after).await.unwrap();
+        eprintln!(
+            "Windows native command {} after {:?}: status={:?}, version={}, process={}, output_bytes={}",
+            request.id,
+            started.elapsed(),
+            state.status,
+            state.version,
+            state.process.is_some(),
+            state.output.len(),
+        );
         if matches!(state.status, CommandStatus::Finished | CommandStatus::Lost) {
             return state;
         }
@@ -497,7 +512,10 @@ async fn restricted_worker_probe(mode: &str) {
         args["stdin"] = serde_json::json!(stdin);
         command.arguments = args.to_string();
     }
-    let completed = tokio::time::timeout(Duration::from_secs(30), finish(&worker, command)).await;
+    // A cold worker may use the 120-second preparation budget. This is an
+    // observation watchdog, matching the recovery/cancellation startup fixtures;
+    // payload outcomes and the separate cancellation deadline remain asserted.
+    let completed = tokio::time::timeout(Duration::from_secs(150), finish(&worker, command)).await;
     worker.stop_spawned().await;
     let completed = completed.expect("native Windows boundary must finish");
     assert_eq!(completed.status, CommandStatus::Finished, "{completed:?}");
@@ -635,7 +653,7 @@ async fn linked_files_are_refused_before_the_payload_runs() {
         let grants = if writable { read_write } else { read_only };
         grants.push(qq_core::command_owner::NativeDirectoryGrant::capture(linked.path()).unwrap());
         let completed =
-            tokio::time::timeout(Duration::from_secs(30), finish(&worker, command)).await;
+            tokio::time::timeout(Duration::from_secs(150), finish(&worker, command)).await;
         worker.stop_spawned().await;
         let completed = completed.expect("invalid file authority must be refused");
         assert_eq!(completed.status, CommandStatus::Finished, "{completed:?}");
