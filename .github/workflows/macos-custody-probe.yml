@@ -1,0 +1,18 @@
+name: macOS native custody probe
+
+on:
+  push:
+    branches: [test/macos-native-custody]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seatbelt-prerequisites:
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check standalone and nested Seatbelt application
+        run: python3 -I .github/scripts/macos-custody-probe.py seatbelt-nesting

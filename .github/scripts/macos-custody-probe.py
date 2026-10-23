@@ -37,6 +37,35 @@ def layouts():
     assert struct.calcsize("P") == 8
 
 
+def seatbelt_nesting():
+    """Check a prerequisite for a protected, sandbox-local supervisor."""
+    assert sys.platform == "darwin"
+    with tempfile.TemporaryDirectory(prefix="qq-seatbelt-nesting-") as scratch:
+        outer = Path(scratch) / "outer.sb"
+        inner = Path(scratch) / "inner.sb"
+        outer.write_text("(version 1)\n(allow default)\n")
+        # Distinct policies ensure the nested control actually applies another
+        # policy, rather than reusing an identical profile.
+        inner.write_text(
+            '(version 1)\n(allow default)\n'
+            f'(deny file-read-data (literal "/qq-unused-{secrets.token_hex(16)}"))\n'
+        )
+        sandbox = "/usr/bin/sandbox-exec"
+        cases = {
+            "outer": [sandbox, "-f", str(outer), "/usr/bin/true"],
+            "inner": [sandbox, "-f", str(inner), "/usr/bin/true"],
+            "nested": [sandbox, "-f", str(outer), sandbox, "-f", str(inner), "/usr/bin/true"],
+        }
+        outcomes = {}
+        for name, command in cases.items():
+            result = subprocess.run(command, capture_output=True, timeout=10, check=False)
+            assert len(result.stdout) + len(result.stderr) <= 65536
+            outcomes[name] = {"exit": result.returncode, "stderr": result.stderr.decode(errors="replace")}
+        print(json.dumps({"seatbelt_nesting": outcomes, "not_a_containment_qualification": True}), flush=True)
+        assert outcomes["outer"]["exit"] == outcomes["inner"]["exit"] == 0, "standalone profile control failed"
+        assert outcomes["nested"]["exit"] == 0, "a second Seatbelt policy cannot be applied"
+
+
 class Kernel:
     def __init__(self):
         layouts()
@@ -367,7 +396,9 @@ def host():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["layout-check"]:
+    if sys.argv[1:] == ["seatbelt-nesting"]:
+        seatbelt_nesting()
+    elif sys.argv[1:] == ["layout-check"]:
         layouts()
         print("LP64 probe layouts checked")
     elif sys.argv[1:] == ["host"]:
