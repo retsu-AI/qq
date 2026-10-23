@@ -72,8 +72,11 @@ const path = require('node:path');
     const directory = process.env[name];
     const proof = path.join(directory, 'proof-' + name);
     const command = 'echo private-' + name + '>"' + proof + '"';
-    const output = spawnSync(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'), ['/d', '/s', '/c', command], { encoding: 'utf8', timeout: 5000 });
-    report.profiles[name] = { exists: fs.existsSync(directory), exit: output.status, stderr: output.stderr, written: fs.existsSync(proof) };
+    const profile = { directory, exists: fs.existsSync(directory) };
+    try { fs.writeFileSync(proof, 'node-private-profile'); profile.nodeWrite = true; }
+    catch (error) { profile.nodeError = { code: error.code, message: error.message }; }
+    const output = spawnSync(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'), ['/d', '/s', '/c', '"' + command + '"'], { windowsVerbatimArguments: true, encoding: 'utf8', timeout: 5000 });
+    report.profiles[name] = { ...profile, exit: output.status, stderr: output.stderr, written: fs.existsSync(proof) };
   }
   const rust = spawnSync('cargo', ['test', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], {
     env: { ...process.env, RUSTC_LOG: 'rustc_codegen_ssa::back::link=info' },
