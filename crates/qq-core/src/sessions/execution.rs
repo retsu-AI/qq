@@ -2571,13 +2571,15 @@ async fn execute_started_run(
                         accounting.record_review(None, None);
                     }
                     if calls.is_empty() {
+                        // A fresh response supersedes the previous portion,
+                        // even when the provider emits no text. Continuations
+                        // append every block verbatim to the visible prefix.
+                        if !summary_continues_truncated_turn {
+                            summary_text.clear();
+                        }
                         for block in message.content() {
                             if let ContentBlock::Text { text } = block {
-                                if !summary_text.is_empty() && !summary_continues_truncated_turn {
-                                    summary_text.push('\n');
-                                }
                                 summary_text.push_str(text);
-                                summary_continues_truncated_turn = false;
                             }
                         }
                         summary_continues_truncated_turn = truncated;
@@ -3149,6 +3151,12 @@ async fn execute_started_run(
             // is about to compact. The run continues; nothing to persist.
             RunInput::Event(Some(RuntimeEvent::ProviderOverflow { .. })) => {
                 current_occupancy_basis = None;
+                if internal {
+                    // A split restarts summarization, not the abandoned
+                    // truncated response's continuation.
+                    summary_text.clear();
+                    summary_continues_truncated_turn = false;
+                }
             }
             RunInput::Event(Some(RuntimeEvent::SteeringApplied {
                 message_id,
@@ -3241,6 +3249,9 @@ async fn execute_started_run(
                 message,
             })) => {
                 if internal {
+                    // A faulted response is resumed just like an output-cut
+                    // response. Keep its visible prefix when the retry arrives.
+                    summary_continues_truncated_turn = true;
                     continue;
                 }
                 match inner

@@ -4377,6 +4377,7 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
                 crate::runtime::InRunCompactionRequest {
                     transcript: vec![Message::user("summarize")],
                     turn_cutoff: 0,
+                    inherited_prefix: false,
                     system: Arc::from("system"),
                     tools: Arc::from([qq_provider::ToolSpec::new(
                         "read_file",

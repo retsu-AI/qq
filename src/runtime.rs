@@ -637,7 +637,10 @@ impl RuntimeFactory {
             name: metadata
                 .and_then(|metadata| metadata.name())
                 .map(str::to_owned),
-            context_window: metadata.and_then(|metadata| metadata.context_window()),
+            context_window: snapshot
+                .providers
+                .get(route.provider())
+                .and_then(|provider| provider.model_context_window(route.model())),
             reasoning_efforts: metadata
                 .map(|metadata| metadata.reasoning_efforts().to_vec())
                 .unwrap_or_default(),
@@ -738,7 +741,7 @@ impl RuntimeFactory {
                     provider: provider_id.clone(),
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
-                    context_window: metadata.context_window(),
+                    context_window: provider.model_context_window(model_id),
                     reasoning_efforts: discovered
                         .get(provider_id)
                         .and_then(|models| models.iter().find(|model| &model.id == model_id))
@@ -769,7 +772,7 @@ impl RuntimeFactory {
                         provider: provider_id.clone(),
                         model: model.id.clone(),
                         name: model.name.clone(),
-                        context_window: None,
+                        context_window: provider.model_context_window(&model.id),
                         reasoning_efforts: model.efforts.clone().unwrap_or_default(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
@@ -798,7 +801,7 @@ impl RuntimeFactory {
                 provider: route.provider().to_owned(),
                 model: route.model().to_owned(),
                 name: None,
-                context_window: metadata.and_then(|metadata| metadata.context_window()),
+                context_window: provider.model_context_window(route.model()),
                 reasoning_efforts: metadata
                     .map(|metadata| metadata.reasoning_efforts().to_vec())
                     .unwrap_or_default(),
@@ -1831,7 +1834,7 @@ impl RuntimeFactory {
             organization: snapshot.organization().map(str::to_owned),
             credential_profile,
             max_output_tokens,
-            context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
+            context_window: provider.model_context_window(snapshot.model().model()),
             pricing: metadata
                 .and_then(qq_config::ModelMetadata::pricing)
                 .cloned()
@@ -3390,7 +3393,10 @@ fn delegation_roster(
                     role: delegation_role(entry.role()),
                     note: entry.note().map(str::to_owned),
                     effort: entry.effort(),
-                    context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
+                    context_window: snapshot
+                        .providers()
+                        .get(entry.route().provider())
+                        .and_then(|provider| provider.model_context_window(entry.route().model())),
                     max_output_tokens: metadata
                         .and_then(qq_config::ModelMetadata::max_output_tokens),
                     relative_cost_permille: match (
@@ -5232,6 +5238,44 @@ mod tests {
     }
 
     #[test]
+    fn litellm_bedrock_alias_keeps_automatic_compaction_enabled() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        for (model, configured, expected) in [
+            ("us.anthropic.claude-opus-5-5", "", Some(1_000_000)),
+            (
+                "us.anthropic.claude-opus-5-5",
+                "context_window: 200000,",
+                Some(200_000),
+            ),
+            ("unknown-deployment", "", None),
+        ] {
+            let request = LoadRequest::new(fixture.path("work")).with_explicit_content(format!(
+                r#"(
+                        version: 1,
+                        model: "gateway/{model}",
+                        providers: {{
+                            "gateway": LiteLlm(
+                                connection: (
+                                    base_url: "http://127.0.0.1:1/v1",
+                                    api: OpenAiChatCompletions,
+                                    auth: NoAuth,
+                                ),
+                                models: {{"{model}": (name: "Gateway model", {configured})}},
+                            ),
+                        }},
+                    )"#
+            ));
+            let snapshot = factory.load(&request).unwrap();
+            let resolved = factory.resolved_model_for_snapshot(&snapshot).unwrap();
+            assert_eq!(resolved.context_window, expected, "{model}: {configured}");
+            assert_eq!(resolved.provider_model, model);
+            assert_eq!(resolved.max_output_tokens, 16_384);
+            assert!(resolved.pricing.is_none());
+        }
+    }
+
+    #[test]
     fn resolved_model_is_secret_free_and_carries_effective_metadata() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -5573,6 +5617,41 @@ mod tests {
         assert!(bedrock.prompt_cache.cache_read_usage);
         assert!(bedrock.prompt_cache.cache_write_usage);
         assert_eq!(bedrock.prompt_cache.control, CapabilitySupport::Native);
+    }
+
+    #[test]
+    fn delegation_roster_uses_effective_gateway_limits_without_inventing_other_metadata() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        for (model, configured, expected) in [
+            (
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "",
+                Some(200_000),
+            ),
+            (
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "context_window: 64000,",
+                Some(64_000),
+            ),
+            ("unknown-deployment", "", None),
+        ] {
+            let config = format!(
+                r#"(
+                version: 1, model: "custom/main",
+                delegation: (roster: [(route: "custom/{model}", role: balanced)]),
+                providers: {{"custom": Custom(
+                    connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                    models: {{"main": (name: "Main"), "{model}": (name: "Child", {configured})}},
+                )}},
+            )"#
+            );
+            let snapshot = factory.load(&fixture.request(&config)).unwrap();
+            let roster = delegation_roster(&snapshot, snapshot.model());
+            assert_eq!(roster.roster[0].context_window, expected, "{model}");
+            assert_eq!(roster.roster[0].max_output_tokens, None);
+            assert_eq!(roster.roster[0].relative_cost_permille, None);
+        }
     }
 
     #[test]

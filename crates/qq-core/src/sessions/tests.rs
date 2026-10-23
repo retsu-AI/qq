@@ -3205,6 +3205,8 @@ enum AutoCompactScript {
     /// Streams the text and stops at the output token limit, so the runtime
     /// continues the turn with the next scripted request.
     Truncated(String),
+    /// Streams visible text before a recoverable transport fault.
+    TextThenTransportFault(String),
     /// Reads `note.txt` on the first turn, then streams the text: seeds a
     /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
@@ -3468,6 +3470,12 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::Text(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ])),
+            AutoCompactScript::TextThenTransportFault(text) => Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                Err(qq_provider::ProviderError::Transport(
+                    "connection reset after visible summary text".to_owned(),
+                )),
             ])),
             AutoCompactScript::Truncated(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),

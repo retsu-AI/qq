@@ -11,7 +11,8 @@
 
 ## How to get to it (user POV)
 
-Run `/compact` on an idle session. A long run also compacts on its own.
+Long sessions compact automatically before prompts and during runs. `/compact`
+is available on an idle session when the user requests it.
 
 ## Driving it headlessly
 
@@ -28,9 +29,15 @@ Run `/compact` on an idle session. A long run also compacts on its own.
    The response outcome is `compaction_queued`. SSE then shows `run_started`,
    `run_finished`, and `session_compacted`, which carries `before_bytes` and
    `after_bytes`.
-4. For automatic compaction, give the model a tiny window:
-   `QQ_CONTEXT_WINDOW=2000 .qq/skills/verify-qq/qq-home.sh qq <name> run …`
-   (and the same variable for `serve`). Not yet verified.
+4. For automatic compaction, script enough tool turns to fill a declared window:
+   `QQ_CONTEXT_WINDOW=16384 .qq/skills/verify-qq/qq-home.sh qq <name> --max-output-tokens 1024 run …`
+   Return the structured summary when the
+   request ends with the summarizer instruction. The original task continues
+   after `session_compacted`, without a manual compaction command.
+5. To exercise reactive recovery, return a provider context-length error before
+   work, then answer the automatic summarizer. An oversized summarizer request
+   can be rejected too; QQ folds smaller portions and commits only the final
+   summary. Verify the task artifact and persisted tool-call count after restart.
 
 ## Gotchas
 

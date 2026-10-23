@@ -500,6 +500,139 @@ async fn goal_paid_admission_refuses_unknown_spend_before_pending_proof() {
     }
 }
 
+#[tokio::test]
+async fn goal_paid_summary_overflow_releases_admission_before_fold_retry() {
+    struct Model(AtomicUsize);
+    impl Provider for Model {
+        fn stream(&self, _: ModelRequest) -> ProviderStream {
+            let turn = self.0.fetch_add(1, Ordering::SeqCst);
+            if turn == 0 {
+                return Box::pin(stream::iter([Err(
+                    qq_provider::ProviderError::ResponseFailed {
+                        kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                        message: "scripted context overflow".to_owned(),
+                    },
+                )]));
+            }
+            Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta {
+                    text: valid_summary("folded"),
+                }),
+                Ok(qq_provider::ProviderEvent::Completed {
+                    usage: Some(provider_usage_of(usage(10, 5))),
+                }),
+            ]))
+        }
+    }
+    for cost in [false, true] {
+        let directory = TempDir::new().unwrap();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let held = runtime
+            .inner
+            .permits
+            .clone()
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session(&runtime, workspace, None).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        runtime.command(CommandId::generate().unwrap(), serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id, "objective":"recover a split summary",
+            "budget":{"max_goal_runs":1,"deadline_ms":now_ms()+60_000,
+                "max_total_tokens":if cost {None} else {Some(1_000_000)},
+                "max_cost_usd_nanos":if cost {Some(1_000_000)} else {None}}
+        })).unwrap()).await.unwrap();
+        runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("work")],
+                    limits: RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let claim = runtime
+            .inner
+            .store
+            .reserve_next_run(false)
+            .await
+            .unwrap()
+            .unwrap();
+        runtime
+            .inner
+            .store
+            .start_reserved_run(&claim, test_prepared_audit(&claim), None)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let loaded = loaded_runtime(
+            Runtime::new(Model(AtomicUsize::new(0)), "test-model", 1000).unwrap(),
+            directory.path().to_str().unwrap(),
+            Some(ModelPricing {
+                input_usd_nanos_per_token: 1,
+                output_usd_nanos_per_token: 1,
+                cache_read_usd_nanos_per_token: Some(1),
+                cache_write_usd_nanos_per_token: Some(1),
+                context_tier: None,
+                provenance: "fixture".to_owned(),
+            }),
+        );
+        let compactor = crate::sessions::in_run_compaction::SessionInRunCompactor::new(
+            Arc::clone(&runtime.inner),
+            &claim,
+            &loaded,
+        );
+        let result = crate::runtime::InRunCompactor::compact(
+            &compactor,
+            crate::runtime::InRunCompactionRequest {
+                transcript: vec![Message::user("evidence ".repeat(2000))],
+                turn_cutoff: 1,
+                inherited_prefix: false,
+                system: Arc::from(""),
+                tools: Arc::from([]),
+                retained_bytes: 0,
+                goal_notice: None,
+                budget: crate::runtime::ChildBudget::default(),
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "cost={cost}: {:?}", result.err());
+        let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+        let (rejected, pending): (u64, bool) = connection.query_row(
+            "SELECT (SELECT count(*) FROM model_turns WHERE run_id=r.id AND work_disposition='rejected_before_work'),goal_request_pending FROM runs r WHERE kind='compaction'", [], |row| Ok((row.get(0)?,row.get(1)?))
+        ).unwrap();
+        assert_eq!(rejected, 1);
+        assert!(!pending);
+        drop(connection);
+        runtime
+            .inner
+            .store
+            .finish_run(
+                &claim,
+                RunOutcome::Cancelled,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
+        drop(held);
+        runtime.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertainty() {
     struct Model(Arc<AtomicUsize>);
@@ -610,6 +743,7 @@ async fn in_run_summary_admission_interruption_preserves_durable_prefix_uncertai
             crate::runtime::InRunCompactionRequest {
                 transcript: vec![Message::user("work")],
                 turn_cutoff: 1,
+                inherited_prefix: false,
                 system: Arc::from(""),
                 tools: Arc::from([]),
                 retained_bytes: 0,

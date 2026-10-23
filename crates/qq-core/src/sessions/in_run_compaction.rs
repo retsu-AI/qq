@@ -97,9 +97,14 @@ async fn compact_in_run(
     let goal_notice = request.goal_notice;
     let started = inner
         .store
-        .start_in_run_compaction(prompt_run, resolved_model, turn_cutoff)
+        .start_in_run_compaction_target(
+            prompt_run,
+            resolved_model,
+            turn_cutoff,
+            request.inherited_prefix,
+        )
         .await;
-    let (compaction, started_event) = match started {
+    let (mut compaction, started_event) = match started {
         Ok(Some(started)) => started,
         Ok(None) => {
             return Err(Error::Unavailable(
@@ -107,6 +112,11 @@ async fn compact_in_run(
             ));
         }
         Err(error) => return Err(Error::Persistence(error.to_string())),
+    };
+    let mut messages = if request.inherited_prefix {
+        std::mem::take(&mut compaction.messages)
+    } else {
+        request.transcript
     };
     inner.notify(started_event.cursor);
     // Register for cancellation like any run, so a cancel of the prompt run
@@ -154,10 +164,11 @@ async fn compact_in_run(
     // One provider turn: the run's transcript through the cutoff, then the
     // instruction. The summarizer sees the prompt so it knows the task, and
     // is told the summary replaces the model's own work, not the user's.
-    let mut messages = request.transcript;
-    messages.push(Message::user(format!(
-        "{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}"
-    )));
+    messages.push(Message::user(if request.inherited_prefix {
+        COMPACTION_INSTRUCTION.to_owned()
+    } else {
+        format!("{IN_RUN_COMPACTION_INSTRUCTION_PREFIX}\n\n{COMPACTION_INSTRUCTION}")
+    }));
     let paid =
         super::GoalPaidInput::new(&inner.store, &compaction, resolved_model.pricing.as_ref());
     let ceiling = super::context::summarizer_output_tokens(
@@ -326,6 +337,7 @@ async fn compact_in_run(
                 }
             }
             Some(Ok(crate::runtime::SummarizeStep::TurnCompleted {
+                model_work,
                 ordinal,
                 message,
                 usage,
@@ -345,7 +357,7 @@ async fn compact_in_run(
                     .persist_in_run_summary_turn(
                         &compaction,
                         ModelTurnCommit {
-                            model_work: crate::runtime::ModelWorkDisposition::Committed,
+                            model_work,
                             goal_notices: Vec::new(),
                             reserved_goal_notices: 0,
                             turn_ordinal: ordinal,
