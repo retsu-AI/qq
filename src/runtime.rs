@@ -3068,7 +3068,7 @@ impl RuntimeHandler {
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
     ) -> Result<Self, RuntimeHandlerError> {
-        #[cfg(any(target_os = "linux", windows))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
             Some(Arc::new(crate::command_owner::client::CommandWorker::new(
                 factory
@@ -3080,7 +3080,7 @@ impl RuntimeHandler {
                 std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
                 crate::cli::BUILD_VERSION,
             )?));
-        #[cfg(not(any(target_os = "linux", windows)))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
         let commands = None;
         Self::open_with_commands(factory, approval_timeout, commands).await
     }
@@ -3113,8 +3113,8 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Native backends share task ownership and publication. Resource policy
-        // names the actual backend guarantee: kernel limits or sampled safeguards.
+        // Native backends share task ownership and publication; resource units
+        // retain each backend's kernel accounting semantics.
         #[cfg(any(target_os = "linux", windows))]
         if native_commands.is_some() {
             let directory = factory
@@ -3414,7 +3414,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
