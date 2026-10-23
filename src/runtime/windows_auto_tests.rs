@@ -17,7 +17,21 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
                 .output()
                 .unwrap_or_else(|error| panic!("host {program} must be installed: {error}"));
             assert!(output.status.success(), "host {program}: {output:?}");
-            (program, String::from_utf8(output.stdout).unwrap())
+            let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+            let resolved =
+                std::process::Command::new(PathBuf::from(system).join("System32/where.exe"))
+                    .arg(program)
+                    .output()
+                    .unwrap();
+            assert!(
+                resolved.status.success(),
+                "host executable lookup for {program}: {resolved:?}"
+            );
+            (
+                program,
+                String::from_utf8(output.stdout).unwrap(),
+                String::from_utf8(resolved.stdout).unwrap(),
+            )
         })
     })
     .await
@@ -41,8 +55,15 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     ] {
         script.push_str(&format!(" & echo private-{name}>\"%{name}%/proof-{name}\""));
     }
-    for (program, _) in &tool_versions {
-        script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
+    for (program, _, _) in &tool_versions {
+        fs::write(
+            source.join(format!("version-probe-{program}.cmd")),
+            format!(
+                "@echo off\r\nwhere.exe {program} >{program}-resolved.txt 2>{program}-resolve-stderr.txt\r\n>{program}-resolve-exit.txt echo %ERRORLEVEL%\r\n{program} --version >{program}-version.txt 2>{program}-stderr.txt\r\n>{program}-exit.txt echo %ERRORLEVEL%\r\nexit /b 0\r\n"
+            ),
+        )
+        .unwrap();
+        script.push_str(&format!(" & call version-probe-{program}.cmd"));
     }
     script.push_str(
         " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
@@ -191,7 +212,52 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
-    for (program, expected) in &tool_versions {
+    let connection = rusqlite::Connection::open(fixture.path("data/sessions.sqlite3")).unwrap();
+    let record: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key LIKE 'qq_task_workspace:%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let record: Value = serde_json::from_str(&record).unwrap();
+    let diagnostics = tool_versions
+        .iter()
+        .map(|(program, _, host_resolved)| {
+            let read = |suffix: &str| {
+                fs::read_to_string(source.join(format!("{program}-{suffix}.txt")))
+                    .unwrap_or_else(|error| format!("<missing diagnostic: {error}>"))
+            };
+            json!({
+                "program": program,
+                "host_resolved": host_resolved.trim(),
+                "payload_resolved": read("resolved"),
+                "resolve_exit": read("resolve-exit"),
+                "resolve_stderr": read("resolve-stderr"),
+                "exit": read("exit"),
+                "stdout": read("version"),
+                "stderr": read("stderr"),
+            })
+        })
+        .collect::<Vec<_>>();
+    let read_roots = record["scope"]["read_only"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|grant| grant["path"].clone())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "Windows Auto tool inputs: {}",
+        json!({"read_roots": read_roots, "tools": diagnostics})
+    );
+    for (program, expected, _) in &tool_versions {
+        assert_eq!(
+            fs::read_to_string(source.join(format!("{program}-exit.txt")))
+                .unwrap()
+                .trim(),
+            "0",
+            "Auto must execute installed {program} successfully: {diagnostics:#?}; read roots: {read_roots:?}",
+        );
         assert_eq!(
             fs::read_to_string(source.join(format!("{program}-version.txt")))
                 .unwrap()
@@ -204,15 +270,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         fs::read_to_string(source.join("node-output.txt")).unwrap(),
         "node task output"
     );
-    let connection = rusqlite::Connection::open(fixture.path("data/sessions.sqlite3")).unwrap();
-    let record: String = connection
-        .query_row(
-            "SELECT value FROM metadata WHERE key LIKE 'qq_task_workspace:%'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let record: Value = serde_json::from_str(&record).unwrap();
     assert_eq!(record["scope"]["network"], "isolated");
     assert_eq!(record["scope"]["resources"]["access"], "committed");
     assert_eq!(record["scope"]["resources"]["cpu_percent"], 90);
