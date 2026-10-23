@@ -47,6 +47,10 @@ let requests = 0;
 const server = http.createServer((_request, response) => { requests++; response.end('loopback-canary'); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const endpoint = `http://127.0.0.1:${server.address().port}`;
+const rustTask = path.join(workspace, 'rust-task');
+fs.mkdirSync(path.join(rustTask, 'src'), { recursive: true });
+fs.writeFileSync(path.join(rustTask, 'Cargo.toml'), '[package]\nname="qq_native_api_probe"\nversion="0.1.0"\nedition="2024"\n');
+fs.writeFileSync(path.join(rustTask, 'src', 'main.rs'), 'fn main() { println!("private rust artifact"); }\n');
 const payload = path.join(workspace, 'payload.cjs');
 fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, endpoint }));
 fs.writeFileSync(payload, `
@@ -59,6 +63,8 @@ const { spawnSync } = require('node:child_process');
     const output = spawnSync(name, ['--version'], { encoding: 'utf8', timeout: 5000 });
     report.tools[name] = { exit: output.status, stdout: output.stdout, stderr: output.stderr, error: output.error?.message };
   }
+  const rust = spawnSync('cargo', ['check', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], { encoding: 'utf8', timeout: 10000 });
+  report.rustCheck = { exit: rust.status, stdout: rust.stdout, stderr: rust.stderr, error: rust.error?.message };
   try { fs.readFileSync(input.secret); report.secretRead = true; } catch { report.secretRead = false; }
   try { fs.writeFileSync(input.secret, 'changed'); report.secretWrite = true; } catch { report.secretWrite = false; }
   try { await fetch(input.endpoint, { signal: AbortSignal.timeout(2500) }); report.loopback = true; } catch { report.loopback = false; }
@@ -74,6 +80,16 @@ const readonlyPaths = [...new Set([
   path.dirname(path.dirname(tools.git)),
   rustup,
 ])];
+const ancestorPaths = new Set();
+for (const granted of [...readonlyPaths, workspace]) {
+  let current = granted;
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    ancestorPaths.add(parent);
+    current = parent;
+  }
+}
 const quote = value => { assert.ok(!/["\r\n]/.test(value)); return `"${value}"`; };
 const copiedNode = path.join(workspace, 'node-control.exe');
 fs.copyFileSync(tools.node, copiedNode);
@@ -84,17 +100,22 @@ const cases = [
   { name: 'node-default-ui', command: payloadCommand(tools.node), payload: true },
   { name: 'node-base-ui', command: payloadCommand(tools.node), payload: true, ui: baseUi },
   { name: 'copied-node-default-ui', command: payloadCommand(copiedNode), payload: true },
+  { name: 'node-base-ui-ancestor-metadata', command: payloadCommand(tools.node), payload: true, ui: baseUi, ancestorMetadata: true },
   { name: 'copied-node-base-ui', command: payloadCommand(copiedNode), payload: true, ui: baseUi },
 ];
 const outcomes = [];
 try {
   for (const test of cases) {
     for (const name of ['report.json', 'artifact.txt']) fs.rmSync(path.join(workspace, name), { force: true });
+    fs.rmSync(path.join(rustTask, 'target'), { recursive: true, force: true });
     const started = performance.now();
     let output;
     try {
       output = await run({
-        containment: { type: 'processcontainer', config: { capabilities: ['registryRead'] } },
+        containment: { type: 'processcontainer', config: {
+          capabilities: ['registryRead'],
+          ...(test.ancestorMetadata ? { filesystem: { enumeratePaths: [...ancestorPaths] } } : {}),
+        } },
         command: test.command,
         workingDirectory: workspace,
         inheritDefaultEnvironment: false,
@@ -118,6 +139,7 @@ try {
       outcome.report = report;
       outcome.qualified = output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
+        && report.rustCheck.exit === 0
         && report.secretRead === false && report.secretWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
