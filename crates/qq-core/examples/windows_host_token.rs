@@ -75,10 +75,36 @@ mod proof {
             }
             for mode in ["control", "filtered"] {
                 let script = format!(
-                    "@echo off\r\necho task-written>task-{mode}.txt\r\nif errorlevel 1 exit /b 21\r\ntype nul >nul\r\nif errorlevel 1 exit /b 22\r\ncopy /b \"%SystemRoot%\\System32\\cmd.exe\" os-{mode}.bin >nul\r\nif errorlevel 1 exit /b 23\r\ntype \"{}\" >public-{mode}.txt\r\nif errorlevel 1 exit /b 24\r\n(echo outside-written)>\"{}\"\r\nif errorlevel 1 (echo denied>outside-{mode}.txt) else (echo allowed>outside-{mode}.txt)\r\nexit /b 0\r\n",
+                    r#"@echo off
+ echo begin
+ >stage-{mode}.txt echo begin
+ echo task-written>task-{mode}.txt
+ set code=%errorlevel%
+ >>stage-{mode}.txt echo task:%code%
+ if not "%code%"=="0" exit /b 21
+ type nul >nul
+ set code=%errorlevel%
+ >>stage-{mode}.txt echo nul:%code%
+ if not "%code%"=="0" exit /b 22
+ copy /b "%SystemRoot%\System32\cmd.exe" os-{mode}.bin >nul
+ set code=%errorlevel%
+ >>stage-{mode}.txt echo os-read:%code%
+ if not "%code%"=="0" exit /b 23
+ type "{}" >public-{mode}.txt
+ set code=%errorlevel%
+ >>stage-{mode}.txt echo public-read:%code%
+ if not "%code%"=="0" exit /b 24
+ (echo outside-written)>"{}"
+ set code=%errorlevel%
+ >>stage-{mode}.txt echo outside-write:%code%
+ if not "%code%"=="0" (echo denied>outside-{mode}.txt) else (echo allowed>outside-{mode}.txt)
+ >>stage-{mode}.txt echo completed
+ exit /b 0
+"#,
                     public.display(),
                     outside.display(),
-                );
+                )
+                .replace('\n', "\r\n");
                 fs::write(workspace.join(format!("{mode}.cmd")), script)?;
                 set_acl(
                     &workspace.join(format!("{mode}.cmd")),
@@ -175,7 +201,7 @@ mod proof {
                 ("LANG".into(), "C".into()),
                 ("TERM".into(), "dumb".into()),
             ])),
-            stdio: rappct::StdioConfig::Null,
+            stdio: rappct::StdioConfig::Pipe,
             join_job: Some(rappct::JobLimits {
                 kill_on_job_close: true,
                 ..Default::default()
@@ -183,28 +209,93 @@ mod proof {
             startup_timeout: None,
             ..Default::default()
         };
-        let mut child = rappct::launch_in_container(&capabilities, &options).map_err(|error| {
-            err(format!(
-                "{mode}: LPAC preparation (including NUL stdio): {error:?}"
-            ))
-        })?;
-        let result = child.wait(Some(Duration::from_secs(20)));
-        match result {
-            Ok(0) => Ok(()),
-            Ok(code) => Err(err(format!("{mode}: LPAC cmd exited {code:#x}"))),
+        let mut child = rappct::launch_in_container_with_io(&capabilities, &options)
+            .map_err(|error| err(format!("{mode}: LPAC preparation with pipes: {error:?}")))?;
+        drop(child.stdin.take());
+        let stdout = capture(child.stdout.take(), "stdout")?;
+        let stderr = capture(child.stderr.take(), "stderr")?;
+        let result = match child.wait(Some(Duration::from_secs(20))) {
+            Ok(code) => Ok(code),
             Err(error) => {
                 child.terminate(125).map_err(err)?;
-                Err(err(format!("{mode}: LPAC wait failed: {error}")))
+                Err(err(format!("{mode}: LPAC wait failed: {error:?}")))
             }
+        };
+        // Close the owned command job before joining pipe readers, so a
+        // descendant cannot retain a writer after the command has finished.
+        drop(child.job_guard.take());
+        let stdout = stdout.join().map_err(|_| err("stdout reader panicked"))??;
+        let stderr = stderr.join().map_err(|_| err("stderr reader panicked"))??;
+        fs::write(root.join(format!("task/stdout-{mode}.txt")), &stdout)?;
+        fs::write(root.join(format!("task/stderr-{mode}.txt")), &stderr)?;
+        let code = result?;
+        let diagnostic = format!(
+            "exit={code:#x}; stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        if mode == "control" {
+            println!("control child: {diagnostic}");
         }
+        if code != 0 {
+            return Err(err(format!("{mode}: LPAC command failed: {diagnostic}")));
+        }
+        Ok(())
+    }
+
+    fn capture(
+        pipe: Option<fs::File>,
+        name: &'static str,
+    ) -> io::Result<std::thread::JoinHandle<io::Result<Vec<u8>>>> {
+        let mut pipe = pipe.ok_or_else(|| err(format!("missing prepared {name} pipe")))?;
+        std::thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(move || {
+                use io::Read as _;
+                const LIMIT: usize = 16 * 1024;
+                let mut retained = Vec::with_capacity(LIMIT);
+                let mut buffer = [0; 4096];
+                loop {
+                    let count = match pipe.read(&mut buffer) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        result => result?,
+                    };
+                    if count == 0 {
+                        return Ok(retained);
+                    }
+                    let keep = count.min(LIMIT.saturating_sub(retained.len()));
+                    retained.extend_from_slice(&buffer[..keep]);
+                }
+            })
     }
 
     fn assert_results(root: &Path, mode: &str, expected: &str) -> io::Result<()> {
         let task = root.join("task");
-        if fs::read_to_string(task.join(format!("task-{mode}.txt")))?.trim() != "task-written"
-            || fs::read_to_string(task.join(format!("public-{mode}.txt")))?.trim() != "public-input"
-            || fs::read(task.join(format!("os-{mode}.bin")))?.is_empty()
-            || fs::read_to_string(task.join(format!("outside-{mode}.txt")))?.trim() != expected
+        for name in [
+            "stage", "task", "public", "os", "outside", "stdout", "stderr",
+        ] {
+            let extension = if name == "os" { "bin" } else { "txt" };
+            let file = format!("{name}-{mode}.{extension}");
+            match fs::metadata(task.join(&file)) {
+                Ok(metadata) => println!("artifact {file}: {} bytes", metadata.len()),
+                Err(error) => println!("artifact {file}: {error}"),
+            }
+        }
+        let read = |name: &str| {
+            let file = format!("{name}-{mode}.txt");
+            fs::read_to_string(task.join(&file))
+                .map_err(|error| err(format!("artifact {file}: {error}")))
+        };
+        let stage = read("stage")?;
+        println!("{mode} stages: {stage:?}");
+        let image = format!("os-{mode}.bin");
+        if read("task")?.trim() != "task-written"
+            || read("public")?.trim() != "public-input"
+            || fs::read(task.join(&image))
+                .map_err(|error| err(format!("artifact {image}: {error}")))?
+                .is_empty()
+            || read("outside")?.trim() != expected
+            || !stage.lines().any(|line| line.trim() == "completed")
         {
             return Err(err(format!("{mode}: fixture result mismatch")));
         }
