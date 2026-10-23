@@ -179,12 +179,12 @@ async function runWithRecreatedToken(request) {
   }
 }
 
-async function runWithNativePolicy(request) {
+async function runWithNativePolicy(request, inheritParent = false, control = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
         QQ_NATIVE_TASK_WORKSPACE: workspace } });
@@ -392,7 +392,9 @@ cases.push({ name: 'deny-volume-root-private-openssl-config', payload: true,
   command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
   environment: { ...environment, OPENSSL_CONF: opensslConfig } });
 cases.push({ name: 'restricted-host-recreated-native-file-access', payload: false, recreateToken: true, command: relayCommand });
+cases.push({ name: 'native-policy-file-control', payload: false, nativePolicy: true, nativePolicyControl: true, command: relayCommand });
 cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, nativePolicy: true, command: relayCommand });
+cases.push({ name: 'restricted-recreated-token-inherited-native-policy', payload: false, nativePolicy: true, nativePolicyParent: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -418,7 +420,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? runWithNativePolicy : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

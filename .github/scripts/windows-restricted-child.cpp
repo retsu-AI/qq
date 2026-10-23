@@ -194,7 +194,7 @@ static int hold_environment() {
     return 0;
 }
 
-static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_package = nullptr, HANDLE security_environment = nullptr) {
+static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_package = nullptr, HANDLE security_environment = nullptr, bool inherit_parent = false) {
     Handle host, source, source_token, token;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &host.value), "recreate host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -202,7 +202,7 @@ static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_packag
     wchar_t* end = nullptr;
     const unsigned long pid = wcstoul(pid_text, &end, 10);
     if (!pid || !end || *end) throw std::runtime_error("invalid source PID");
-    source.value = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    source.value = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | (inherit_parent ? PROCESS_CREATE_PROCESS | PROCESS_DUP_HANDLE : 0), FALSE, pid);
     require(source.value != nullptr, "recreate source process");
     require(OpenProcessToken(source.value, TOKEN_QUERY, &source_token.value), "recreate source token");
     contained(source_token.value);
@@ -255,8 +255,10 @@ static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_packag
     std::vector<BYTE> storage(size);
     auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
     require(InitializeProcThreadAttributeList(attributes, attribute_count, 0, &size), "recreated attributes");
-    if (security_environment && !UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000,
-        &security_environment, sizeof(security_environment), nullptr, nullptr)) {
+    HANDLE inherited_policy = inherit_parent ? source.value : security_environment;
+    const DWORD_PTR policy_attribute = inherit_parent ? PROC_THREAD_ATTRIBUTE_PARENT_PROCESS : (35 | 0x00020000);
+    if (security_environment && !UpdateProcThreadAttribute(attributes, 0, policy_attribute,
+        &inherited_policy, sizeof(inherited_policy), nullptr, nullptr)) {
         const DWORD code = GetLastError();
         DeleteProcThreadAttributeList(attributes);
         SetLastError(code);
@@ -280,6 +282,19 @@ static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_packag
     startup.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
     startup.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
     startup.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    if (inherit_parent) {
+        // A designated parent supplies inherited handles too. Duplicate only
+        // stdio into the suspended, immutable source; its termination closes
+        // these remote handles. Their values must never be closed in the host.
+        for (HANDLE* endpoint : { &startup.StartupInfo.hStdInput, &startup.StartupInfo.hStdOutput, &startup.StartupInfo.hStdError }) {
+            HANDLE remote = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), *endpoint, source.value, &remote, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+                const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
+                require(FALSE, "designated parent stdio");
+            }
+            *endpoint = remote;
+        }
+    }
     wchar_t workspace[32768]{};
     const DWORD length = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", workspace, 32768);
     if (!length || length >= 32768) throw std::runtime_error("missing task workspace");
@@ -336,7 +351,7 @@ static void grant_private_desktop(PSID package) {
     require(SetUserObjectSecurity(desktop.value, &requested, &replacement), "owned desktop package access");
 }
 
-static int host_create_policy(const wchar_t* policy_path) {
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -397,10 +412,14 @@ static int host_create_policy(const wchar_t* policy_path) {
     STARTUPINFOEXW startup{};
     startup.StartupInfo.cb = static_cast<DWORD>(sizeof(startup));
     startup.lpAttributeList = attributes;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION source{};
-    // The source is never resumed and cannot touch task files. Its primary
-    // token gives the exact identity of this newly created native policy.
-    const BOOL launched = CreateProcessW(image, mutable_command.data(), nullptr, nullptr, FALSE,
+    // Outside the explicit control case, the source is never resumed. Its
+    // primary token gives the exact identity of this newly created policy.
+    const BOOL launched = CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
         CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, workspace, &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
     DeleteProcThreadAttributeList(attributes);
@@ -418,8 +437,15 @@ static int host_create_policy(const wchar_t* policy_path) {
     require(ConvertSidToStringSidW(sid, &package_text), "native policy package SID");
     auto local_free = [](void* value) { LocalFree(value); };
     std::unique_ptr<void, decltype(local_free)> owned_package(package_text, local_free);
+    if (control) {
+        if (ResumeThread(thread.value) == static_cast<DWORD>(-1)) throw std::runtime_error("native policy control resume failed");
+        if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("native policy control wait failed");
+        DWORD result = 0;
+        require(GetExitCodeProcess(process.value, &result), "native policy control exit");
+        return static_cast<int>(result);
+    }
     const auto pid = std::to_wstring(source.dwProcessId);
-    const int result = host_recreate(pid.c_str(), package_text, environment.value);
+    const int result = host_recreate(pid.c_str(), package_text, environment.value, inherit_parent);
     require(TerminateProcess(process.value, 0), "suspended source termination");
     if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("suspended source wait failed");
     return result;
@@ -427,6 +453,8 @@ static int host_create_policy(const wchar_t* policy_path) {
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-control") return host_create_policy(argv[2], false, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"host-create-policy-parent") return host_create_policy(argv[2], true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-create-policy") return host_create_policy(argv[2]);
         if (argc == 3 && std::wstring(argv[1]) == L"host-recreate") return host_recreate(argv[2]);
         if (argc == 2 && std::wstring(argv[1]) == L"hold") return hold_environment();
