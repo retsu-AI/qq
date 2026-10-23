@@ -183,6 +183,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
+          # Retain compiled dependencies when a native regression fails.
+          cache-on-failure: true
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
