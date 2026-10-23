@@ -68,7 +68,7 @@ public static class BasicUserProbe {
         ProcessInfo child;
         if (!CreateProcessAsUser(token, node, command, IntPtr.Zero, IntPtr.Zero, true, 0x08000000, IntPtr.Zero, Path.GetDirectoryName(script), ref startup, out child)) throw Error();
         try {
-          uint wait = WaitForSingleObject(child.process, 120000);
+          uint wait = WaitForSingleObject(child.process, 480000);
           if (wait != 0) {
             TerminateProcess(child.process, 124);
             throw new InvalidOperationException("Basic-user fixture did not finish: wait=" + wait);

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { run } from '@microsoft/mxc-sdk/v1';
 
 assert.equal(process.platform, 'win32');
@@ -92,6 +93,14 @@ environment.LIB = [path.join(compiler.toolset, 'lib', architecture),
 environment.INCLUDE = [path.join(compiler.toolset, 'include'),
   ...['ucrt', 'um', 'shared'].map(name => path.join(sdk.root, 'Include', sdk.version, name))].join(path.delimiter);
 console.log(JSON.stringify({ compiler: compiler.binaries, sdk: path.join(sdk.root, sdk.version) }));
+const restrictedHelper = path.join(workspace, 'restricted-child.exe');
+const helperBuild = spawnSync(path.join(compiler.binaries, 'cl.exe'), [
+  '/nologo', '/EHsc', '/W4', '/WX', '/std:c++20', '/MT',
+  fileURLToPath(new URL('./windows-restricted-child.cpp', import.meta.url)),
+  `/Fe:${restrictedHelper}`, `/Fo:${path.join(workspace, 'restricted-child.obj')}`,
+], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 30000 });
+assert.equal(helperBuild.status, 0, `token probe build: ${helperBuild.error ?? ''} ${helperBuild.stdout} ${helperBuild.stderr}`);
+
 const expected = Object.fromEntries(Object.entries(tools).map(([name, executable]) => {
   const output = spawnSync(executable, ['--version'], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 10_000 });
   assert.equal(output.status, 0, `host ${name}: ${output.error ?? output.stderr}`);
@@ -135,7 +144,7 @@ const path = require('node:path');
     report.tools[name] = { exit: output.status, stdout: output.stdout, stderr: output.stderr, error: output.error?.message };
   }
   report.profiles = {};
-  for (const name of ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {
+  for (const name of ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {
     const directory = process.env[name];
     const proof = path.join(directory, 'proof-' + name);
     const command = 'echo private-' + name + '>"' + proof + '"';
@@ -176,12 +185,6 @@ for (const granted of [...readonlyPaths, workspace]) {
   }
 }
 const quote = value => { assert.ok(!/["\r\n]/.test(value)); return `"${value}"`; };
-const copiedNode = path.join(workspace, 'node-control.exe');
-fs.copyFileSync(tools.node, copiedNode);
-const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
-// Inline input separates root-metadata startup failures from deny inheritance.
-const inlinePayload = `eval(Buffer.from('${fs.readFileSync(payload).toString('base64')}','base64').toString())`;
-const inlineCommand = `${quote(tools.node)} -e ${quote(inlinePayload)}`;
 fs.writeFileSync(path.join(workspace, 'captured-environment.json'), JSON.stringify(environment));
 const relay = `
 const fs = require('node:fs');
@@ -193,22 +196,18 @@ process.exitCode = child.status ?? 1;
 `;
 const relayCommand = `${quote(tools.node)} -e ${quote(`eval(Buffer.from('${Buffer.from(relay).toString('base64')}','base64').toString())`)}`;
 
-const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
-const volumeRoots = [...new Set([...readonlyPaths, workspace].map(value => path.parse(value).root))];
 const cases = [
-  { name: 'public-read-baseline', command: payloadCommand(tools.node), payload: true },
-  { name: 'deny-volume-roots-with-ancestor-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots },
-  { name: 'deny-volume-roots-without-root-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots,
-    enumeratePaths: [...ancestorPaths].filter(value => !volumeRoots.includes(value)) },
-  { name: 'deny-volume-root-inline-payload', command: inlineCommand, payload: true, deniedPaths: volumeRoots },
-  { name: 'deny-volume-children-star', command: payloadCommand(tools.node), payload: true,
-    deniedPaths: volumeRoots.map(root => `${root}*`) },
-  { name: 'deny-volume-children-double-star', command: payloadCommand(tools.node), payload: true,
-    deniedPaths: volumeRoots.map(root => `${root}**`) },
-  { name: 'deny-canary-explicitly', command: payloadCommand(tools.node), payload: true, deniedPaths: [secret] },
-  { name: 'relay-public-read-baseline', command: relayCommand, payload: true },
-  { name: 'relay-deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret] },
+  { name: 'public-read-baseline', command: relayCommand, payload: true },
+  { name: 'deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret] },
+  { name: 'token-creation-control',
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} control`, payload: true },
+  ...['package', 'package-arap', 'package-arap-registry'].map(mode => ({
+    name: 'restricted-' + mode,
+    command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(payload)} ${mode}`,
+    payload: true,
+  })),
 ];
+const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
   for (const test of cases) {
@@ -252,7 +251,12 @@ try {
         && report.tools.node.exit === 0 && report.secretRead === false
         && report.secretWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'));
-      outcome.qualified = output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
+      outcome.frozenProfiles = ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA'].every(name => {
+        const profile = report.profiles[name];
+        return profile.directory === environment[name] && profile.nodeWrite === true
+          && profile.exit === 0 && profile.written === true;
+      });
+      outcome.qualified = outcome.frozenProfiles && output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
         && report.secretRead === false && report.secretWrite === false && report.loopback === false
@@ -267,8 +271,8 @@ try {
   assertHostState();
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.secretRead, true,
     'the public-read control must demonstrate the outside read before evaluating deny policies');
-  assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-') && outcome.fileBoundary),
-    'No volume-deny candidate both ran real tools and denied the public outside canary');
+  assert.ok(outcomes.some(outcome => outcome.name.startsWith('restricted-') && outcome.qualified),
+    'No additional token restriction both ran real tools and denied the public outside canary');
 } finally {
   server.closeAllConnections();
   await new Promise(resolve => server.close(resolve));
