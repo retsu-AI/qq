@@ -59,6 +59,7 @@ fs.writeFileSync(path.join(workspace, 'input.json'), JSON.stringify({ secret, en
 fs.writeFileSync(payload, `
 const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
+const path = require('node:path');
 (async () => {
   const input = JSON.parse(fs.readFileSync('input.json', 'utf8'));
   const report = { tools: {} };
@@ -66,7 +67,18 @@ const { spawnSync } = require('node:child_process');
     const output = spawnSync(name, ['--version'], { encoding: 'utf8', timeout: 5000 });
     report.tools[name] = { exit: output.status, stdout: output.stdout, stderr: output.stderr, error: output.error?.message };
   }
-  const rust = spawnSync('cargo', ['check', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], { encoding: 'utf8', timeout: 30000 });
+  report.profiles = {};
+  for (const name of ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {
+    const directory = process.env[name];
+    const proof = path.join(directory, 'proof-' + name);
+    const command = 'echo private-' + name + '>"' + proof + '"';
+    const output = spawnSync(path.join(process.env.SystemRoot, 'System32', 'cmd.exe'), ['/d', '/s', '/c', command], { encoding: 'utf8', timeout: 5000 });
+    report.profiles[name] = { exists: fs.existsSync(directory), exit: output.status, stderr: output.stderr, written: fs.existsSync(proof) };
+  }
+  const rust = spawnSync('cargo', ['test', '--offline', '--manifest-path', 'rust-task/Cargo.toml'], {
+    env: { ...process.env, RUSTC_LOG: 'rustc_codegen_ssa::back::link=info' },
+    encoding: 'utf8', timeout: 30000,
+  });
   report.rustCheck = { exit: rust.status, stdout: rust.stdout, stderr: rust.stderr, error: rust.error?.message };
   try { fs.readFileSync(input.secret); report.secretRead = true; } catch { report.secretRead = false; }
   try { fs.writeFileSync(input.secret, 'changed'); report.secretWrite = true; } catch { report.secretWrite = false; }
