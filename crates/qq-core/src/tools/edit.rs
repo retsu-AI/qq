@@ -171,11 +171,11 @@ struct Change {
     added: usize,
     via: Strategy,
     count: usize,
-    /// The edit's index in the batch, and the span it wrote in the text as
+    /// The edit's index in the batch, and every span it wrote in the text as
     /// it stood after it applied — so a later edit whose match falls inside
     /// text this one produced is a conflict, not a coincidence.
     index: usize,
-    wrote: std::ops::Range<usize>,
+    wrote: Vec<std::ops::Range<usize>>,
 }
 
 pub(super) fn edit_file(
@@ -292,14 +292,7 @@ pub(super) fn edit_file(
         // `before_hash`, so a writer that lands after planning still fails.
         let unique_exact = || match form {
             Form::Replace { old, .. } => {
-                // Overlapping occurrences count: `aa` occurs twice in `aaa`,
-                // which `match_indices` (non-overlapping) would report once.
-                let once = |text: &str| {
-                    text.find(old).is_some_and(|first| {
-                        let next = first + text[first..].chars().next().map_or(1, char::len_utf8);
-                        !text[next..].contains(old)
-                    })
-                };
+                let once = |text: &str| matching::exact_starts(text, old).take(2).count() == 1;
                 // After earlier edits, the current match must also be a span
                 // the model saw: unique in the plan-time bytes, and not
                 // touching any earlier edit's written span. A deletion
@@ -309,16 +302,19 @@ pub(super) fn edit_file(
                 let untouched = |text: &str| {
                     text.find(old).is_some_and(|start| {
                         let end = start + old.len();
-                        file.changes.iter().all(|change| {
-                            if change.wrote.is_empty() {
-                                // A deletion point joins bytes only when it
-                                // lies strictly inside the match.
-                                !(start < change.wrote.start && change.wrote.start < end)
-                            } else {
-                                // Written text: ordinary half-open overlap.
-                                end <= change.wrote.start || change.wrote.end <= start
-                            }
-                        })
+                        file.changes
+                            .iter()
+                            .flat_map(|change| &change.wrote)
+                            .all(|wrote| {
+                                if wrote.is_empty() {
+                                    // A deletion point joins bytes only when it
+                                    // lies strictly inside the match.
+                                    !(start < wrote.start && wrote.start < end)
+                                } else {
+                                    // Written text: ordinary half-open overlap.
+                                    end <= wrote.start || wrote.end <= start
+                                }
+                            })
                     })
                 };
                 once(&file.text)
@@ -529,17 +525,46 @@ fn apply_one(
     let text = &file.text;
     match form {
         Form::Replace { old, new } if replace_all => {
-            let count = text.matches(old).count();
-            if count == 0 {
+            let starts: Vec<_> = text.match_indices(old).map(|(at, _)| at).collect();
+            let Some(&first) = starts.first() else {
                 return Err(not_found(text, old));
+            };
+            let count = starts.len();
+            let size = count
+                .checked_mul(new.len())
+                .and_then(|added| (text.len() - count * old.len()).checked_add(added));
+            if size.is_none_or(|size| size as u64 > MAX_EDIT_FILE_BYTES) {
+                return Err(format!(
+                    "too_large: the edited {} exceeds the {} MiB file size limit",
+                    file.key,
+                    MAX_EDIT_FILE_BYTES / (1024 * 1024)
+                ));
             }
-            let first = text.find(old).expect("counted above");
-            conflict_check(file, index, first..first + old.len())?;
+            for &at in &starts {
+                conflict_check(file, index, at..at + old.len())?;
+            }
             let line = line_of(text, first);
             let removed = old.lines().count().max(1);
             let added = new.lines().count();
+            // Map every prior span once. Repeated shifting per occurrence
+            // would become quadratic for large replace_all batches.
+            for change in &mut file.changes {
+                for wrote in &mut change.wrote {
+                    for offset in [&mut wrote.start, &mut wrote.end] {
+                        let before = starts.partition_point(|at| at + old.len() <= *offset);
+                        *offset = *offset - before * old.len() + before * new.len();
+                    }
+                }
+            }
+            let wrote = starts
+                .iter()
+                .enumerate()
+                .map(|(before, at)| {
+                    let start = at - before * old.len() + before * new.len();
+                    start..start + new.len()
+                })
+                .collect();
             file.text = text.replace(old, new);
-            shift_written(&mut file.changes, first, old.len(), new.len());
             file.changes.push(Change {
                 line,
                 removed,
@@ -547,7 +572,7 @@ fn apply_one(
                 via: Strategy::Exact,
                 count,
                 index,
-                wrote: first..first + new.len(),
+                wrote,
             });
             Ok(())
         }
@@ -577,7 +602,7 @@ fn apply_one(
                 via: found.via,
                 count: 1,
                 index,
-                wrote: found.start..found.start + wrote_len,
+                wrote: std::iter::once(found.start..found.start + wrote_len).collect(),
             });
             Ok(())
         }
@@ -619,7 +644,7 @@ fn apply_one(
                 via: found.via,
                 count: 1,
                 index,
-                wrote: at..at + wrote_len,
+                wrote: std::iter::once(at..at + wrote_len).collect(),
             });
             Ok(())
         }
@@ -632,11 +657,15 @@ fn conflict_check(
     span: std::ops::Range<usize>,
 ) -> Result<(), String> {
     for change in &file.changes {
-        // Overlap: this edit's match reaches into text a prior edit wrote.
-        // Touching at an edge (an insert right after a replacement) is fine.
-        if !change.wrote.is_empty()
-            && span.start < change.wrote.end
-            && change.wrote.start < span.end
+        // Touching at an edge is fine; replacing any previously written
+        // occurrence is a conflict, including later replace_all matches.
+        let next = change
+            .wrote
+            .partition_point(|wrote| wrote.end <= span.start);
+        if change
+            .wrote
+            .get(next)
+            .is_some_and(|wrote| !wrote.is_empty() && wrote.start < span.end)
         {
             return Err(format!(
                 "conflicting_edits: a={} b={index}; edit {index} matches inside text edit {} wrote (L{}); merge them into one edit",
@@ -651,9 +680,14 @@ fn conflict_check(
 /// later edit replaced `removed` bytes at `at` with `added` bytes.
 fn shift_written(changes: &mut [Change], at: usize, removed: usize, added: usize) {
     for change in changes {
-        if change.wrote.start >= at + removed {
-            change.wrote.start = change.wrote.start + added - removed;
-            change.wrote.end = change.wrote.end + added - removed;
+        for wrote in &mut change.wrote {
+            if wrote.start >= at + removed {
+                wrote.start = wrote.start + added - removed;
+                wrote.end = wrote.end + added - removed;
+            } else if removed == 0 && at < wrote.end {
+                // Inserting within earlier output moves its tail too.
+                wrote.end += added;
+            }
         }
     }
 }
@@ -686,7 +720,12 @@ fn describe(error: MatchError, _text: &str) -> String {
             closest.excerpt.trim_end()
         ),
         MatchError::Ambiguous { via, count, lines } => format!(
-            "ambiguous: {count} matches via {} at lines {}; extend old until it is unique, or set replace_all for an exact match",
+            "ambiguous: {}{count} matches via {} at lines {}; extend old until it is unique, or set replace_all for an exact match",
+            if via == Strategy::Exact && count == 3 {
+                "at least "
+            } else {
+                ""
+            },
             via.name(),
             lines
                 .iter()
@@ -898,6 +937,137 @@ mod tests {
             "{}",
             refused.model_text
         );
+    }
+
+    #[test]
+    fn edit_batch_tracks_every_written_span() {
+        for (original, edits, expected) in [
+            (
+                "item\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"item", "new":"alpha\nbeta"},
+                    {"path":"a.txt", "insert_before":"beta", "new":"inserted middle line\n"},
+                    {"path":"a.txt", "old":"beta", "new":"clobbered"}
+                ]),
+                None,
+            ),
+            (
+                "item\nmarker\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"marker", "new":"item"},
+                    {"path":"a.txt", "old":"item", "new":"entry", "replace_all":true}
+                ]),
+                None,
+            ),
+            (
+                "item\nitem\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"item", "new":"entry", "replace_all":true},
+                    {"path":"a.txt", "old":"entry\n", "new":"tail", "replace_all":true}
+                ]),
+                None,
+            ),
+            (
+                "item\nitem\nlast\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"item", "new":"entry", "replace_all":true},
+                    {"path":"a.txt", "old":"entry\nlast", "new":"tail"}
+                ]),
+                None,
+            ),
+            (
+                "item\nitem\nlast\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"item", "new":"longer entry", "replace_all":true},
+                    {"path":"a.txt", "old":"last", "new":"end"}
+                ]),
+                Some("longer entry\nlonger entry\nend\n"),
+            ),
+            (
+                "item\nitem\nlast\n",
+                serde_json::json!([
+                    {"path":"a.txt", "old":"last", "new":"end"},
+                    {"path":"a.txt", "old":"item", "new":"i", "replace_all":true},
+                    {"path":"a.txt", "old":"end", "new":"finish"}
+                ]),
+                None,
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join("a.txt"), original).unwrap();
+            fs::write(directory.path().join("b.txt"), "keep\n").unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+            let mut edits = edits.as_array().unwrap().clone();
+            edits.insert(
+                0,
+                serde_json::json!({"path":"b.txt", "old":"keep", "new":"changed"}),
+            );
+            let result = run(
+                &workspace,
+                &state,
+                "edit_file",
+                &serde_json::json!({"edits":edits}).to_string(),
+            );
+            if let Some(expected) = expected {
+                assert!(!result.is_error, "{}", result.model_text);
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+                    expected
+                );
+            } else {
+                assert!(result.is_error, "{}", result.model_text);
+                assert!(
+                    result.model_text.contains("conflicting_edits"),
+                    "{}",
+                    result.model_text
+                );
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+                    original
+                );
+                assert_eq!(
+                    fs::read_to_string(directory.path().join("b.txt")).unwrap(),
+                    "keep\n"
+                );
+                assert_eq!(
+                    state.recorded("a.txt"),
+                    Some(content_hash(original.as_bytes()))
+                );
+                assert!(result.file_states.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn edit_rejects_overlapping_exact_matches_after_a_read() {
+        for (original, old, message) in [
+            ("aaa", "aa", "ambiguous: 2 matches via exact"),
+            ("ééé", "éé", "ambiguous: 2 matches via exact"),
+            ("aaaaa", "aa", "ambiguous: at least 3 matches via exact"),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            fs::write(directory.path().join("a.txt"), original).unwrap();
+            let workspace = Workspace::open(directory.path()).unwrap();
+            let state = FileState::default();
+            run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+            let result = run(
+                &workspace,
+                &state,
+                "edit_file",
+                &serde_json::json!({
+                    "edits":[{"path":"a.txt", "old":old, "new":"replacement"}]
+                })
+                .to_string(),
+            );
+            assert!(result.is_error, "{}", result.model_text);
+            assert!(result.model_text.contains(message), "{}", result.model_text);
+            assert_eq!(
+                fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+                original
+            );
+        }
     }
 
     /// (a) The traced shape: the model reads a file, rewrites it itself

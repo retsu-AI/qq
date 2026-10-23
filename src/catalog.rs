@@ -4,6 +4,7 @@ use std::{
     collections::VecDeque,
     io::Read,
     net::IpAddr,
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
@@ -43,8 +44,22 @@ pub(crate) struct ModelDiscovery {
     cache_key: [u8; 32],
 }
 
+// A cache-only probe must not reopen the keyring. Configuration, credential
+// revision and environment identify the discovery snapshot; requests still
+// resolve and validate their credentials independently.
+#[derive(PartialEq, Eq)]
+struct CacheProbe {
+    provider_id: String,
+    kind: ProviderKind,
+    access: HttpAccess,
+    credential_index: PathBuf,
+    credential_epoch: qq_protocol::CredentialEpoch,
+    environment: [u8; 32],
+}
+
 struct CacheEntry {
     key: [u8; 32],
+    probe: Option<CacheProbe>,
     expires_at: Instant,
     models: Option<Vec<DiscoveredModel>>,
 }
@@ -89,7 +104,16 @@ impl ModelDiscovery {
             qq_config::ProviderAccess::AmazonBedrock { .. }
             | qq_config::ProviderAccess::AmazonBedrockMantle { .. } => return None,
         };
+        if let Some(models) = self.cached(provider_id, provider, credentials) {
+            return Some(models);
+        }
         let _fetch = self.fetch_gate.lock().ok()?;
+        if let Some(models) = self.cached(provider_id, provider, credentials) {
+            return Some(models);
+        }
+        // Capture before resolving: a concurrent credential rotation must
+        // invalidate this snapshot, rather than attach it to the new epoch.
+        let probe = self.cache_probe(provider_id, provider.kind(), access, credentials);
         let auth = resolve_auth(access, credentials)?;
         let Some(key) = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)
         else {
@@ -99,7 +123,8 @@ impl ModelDiscovery {
         if let Ok(mut cache) = self.cache.lock() {
             cache.retain(|entry| entry.expires_at > now);
             if let Some(position) = cache.iter().position(|entry| entry.key == key) {
-                let entry = cache.remove(position)?;
+                let mut entry = cache.remove(position)?;
+                entry.probe = probe;
                 let models = entry.models.clone();
                 cache.push_back(entry);
                 return models;
@@ -110,6 +135,7 @@ impl ModelDiscovery {
         if let Ok(mut cache) = self.cache.lock() {
             cache.push_back(CacheEntry {
                 key,
+                probe,
                 expires_at: now
                     + if models.is_some() {
                         CACHE_TTL
@@ -135,7 +161,30 @@ impl ModelDiscovery {
             return None;
         };
         if cache_probe_requires_secure_store(access.auth()) {
-            return None;
+            // Cold plan compilation must not reread the credential index
+            // for every provider merely to find an empty or unrelated cache.
+            if !self.cache.lock().ok()?.iter().any(|entry| {
+                entry.expires_at > Instant::now()
+                    && entry.probe.as_ref().is_some_and(|probe| {
+                        probe.provider_id == provider_id
+                            && probe.kind == provider.kind()
+                            && probe.access == *access
+                    })
+            }) {
+                return None;
+            }
+
+            let probe = self.cache_probe(provider_id, provider.kind(), access, credentials)?;
+            return self
+                .cache
+                .lock()
+                .ok()?
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.probe.as_ref() == Some(&probe) && entry.expires_at > Instant::now()
+                })
+                .and_then(|entry| entry.models.clone());
         }
         let auth = resolve_auth(access, credentials)?;
         let key = cache_key(&self.cache_key, provider_id, provider.kind(), access, &auth)?;
@@ -145,6 +194,50 @@ impl ModelDiscovery {
             .iter()
             .find(|entry| entry.key == key && entry.expires_at > Instant::now())
             .and_then(|entry| entry.models.clone())
+    }
+
+    fn cache_probe(
+        &self,
+        provider_id: &str,
+        kind: ProviderKind,
+        access: &HttpAccess,
+        credentials: &CredentialStore,
+    ) -> Option<CacheProbe> {
+        if !cache_probe_requires_secure_store(access.auth()) {
+            return None;
+        }
+        let mut environment = Hmac::<Sha256>::new_from_slice(&self.cache_key).ok()?;
+        let mut variable = |name: &str| {
+            update_digest(&mut environment, name.as_bytes());
+            match std::env::var_os(name) {
+                Some(value) => {
+                    environment.update(&[1]);
+                    update_digest(&mut environment, value.as_encoded_bytes());
+                }
+                None => environment.update(&[0]),
+            }
+        };
+        match access.auth() {
+            HttpCredential::Builtin {
+                provider, api_key, ..
+            } => {
+                for name in provider.variables {
+                    variable(name);
+                }
+                if let Some(SecretRef::Env(name)) = api_key {
+                    variable(name);
+                }
+            }
+            HttpCredential::Configured(_) => {}
+        }
+        Some(CacheProbe {
+            provider_id: provider_id.to_owned(),
+            kind,
+            access: access.clone(),
+            credential_index: credentials.paths().index_file().to_owned(),
+            credential_epoch: credentials.epoch().ok()?,
+            environment: environment.finalize().into_bytes().into(),
+        })
     }
 
     fn fetch(
@@ -603,7 +696,7 @@ mod tests {
         net::TcpListener,
         sync::{
             Arc,
-            atomic::{AtomicU64, AtomicUsize, Ordering},
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
     };
@@ -611,8 +704,6 @@ mod tests {
     use super::*;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
     use qq_config::{ProviderAccess, SecretRef, UsageType};
-
-    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct ReadCountingKeyring {
@@ -817,31 +908,85 @@ mod tests {
             )
             .unwrap();
         });
-        let reference: SecretRef = ron::from_str(r#"Value("test-token")"#).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let keyring = Arc::new(ReadCountingKeyring::default());
+        let credentials =
+            CredentialStore::with_backend(CredentialPaths::new(directory.path()), keyring.clone());
+        credentials
+            .set("custom/stored", "test-token", false)
+            .unwrap();
+        let reference = SecretRef::Stored("custom/stored".to_owned());
         let provider = ProviderConfig::new(
             ProviderKind::Custom,
             Some(ProviderAccess::Http(HttpAccess::new(
                 format!("http://{address}/v1/responses"),
                 EndpointMode::Exact,
                 ProviderApi::OpenAiResponses,
-                HttpCredential::Configured(ProviderAuth::Bearer(reference)),
+                HttpCredential::Configured(ProviderAuth::Bearer(reference.clone())),
                 BTreeMap::new(),
             ))),
             qq_config::UsageType::Unknown,
             BTreeMap::new(),
         );
-        let path = std::env::temp_dir().join(format!(
-            "qq-catalog-test-{}-{}",
-            std::process::id(),
-            TEST_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let credentials = CredentialStore::with_paths(CredentialPaths::new(path));
         let discovery = ModelDiscovery::new().unwrap();
 
         let first = discovery
             .discover("custom", &provider, &credentials)
             .unwrap();
         server.join().unwrap();
+
+        let reads = keyring.reads();
+        assert_eq!(
+            discovery.cached("custom", &provider, &credentials),
+            Some(first.clone())
+        );
+        assert_eq!(
+            keyring.reads(),
+            reads,
+            "a warm cache probe read the keyring"
+        );
+        let other_directory = tempfile::tempdir().unwrap();
+        let other_credentials = CredentialStore::with_backend(
+            CredentialPaths::new(other_directory.path()),
+            keyring.clone(),
+        );
+        other_credentials
+            .set("custom/stored", "test-token", false)
+            .unwrap();
+        assert_eq!(
+            discovery.cached("custom", &provider, &other_credentials),
+            None
+        );
+        assert_eq!(
+            discovery.cached("another-provider", &provider, &credentials),
+            None
+        );
+        let changed_endpoint = test_provider(
+            ProviderKind::Custom,
+            format!("http://{address}/different/responses"),
+            HttpCredential::Configured(ProviderAuth::Bearer(reference)),
+        );
+        assert_eq!(
+            discovery.cached("custom", &changed_endpoint, &credentials),
+            None
+        );
+        {
+            let mut cache = discovery.cache.lock().unwrap();
+            cache.back_mut().unwrap().expires_at = Instant::now() - Duration::from_secs(1);
+        }
+        assert_eq!(discovery.cached("custom", &provider, &credentials), None);
+        discovery
+            .cache
+            .lock()
+            .unwrap()
+            .back_mut()
+            .unwrap()
+            .expires_at = Instant::now() + CACHE_TTL;
+        credentials
+            .set("custom/stored", "rotated-token", false)
+            .unwrap();
+        assert_eq!(discovery.cached("custom", &provider, &credentials), None);
+        assert_eq!(keyring.reads(), reads, "invalidation read the keyring");
 
         assert_eq!(
             first,
@@ -968,6 +1113,7 @@ mod tests {
         .unwrap();
         discovery.cache.lock().unwrap().push_back(CacheEntry {
             key: safe_key,
+            probe: None,
             expires_at: Instant::now() + CACHE_TTL,
             models: Some(vec![DiscoveredModel {
                 id: "safe-model".to_owned(),
@@ -1056,6 +1202,7 @@ mod tests {
         }];
         discovery.cache.lock().unwrap().push_back(CacheEntry {
             key: safe_key,
+            probe: None,
             expires_at: Instant::now() + CACHE_TTL,
             models: Some(safe_models.clone()),
         });
@@ -1078,6 +1225,7 @@ mod tests {
         }];
         discovery.cache.lock().unwrap().push_back(CacheEntry {
             key: value_key,
+            probe: None,
             expires_at: Instant::now() + CACHE_TTL,
             models: Some(value_models.clone()),
         });

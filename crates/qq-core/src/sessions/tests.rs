@@ -4803,7 +4803,9 @@ impl RuntimeLoader for ValidatingLoader {
         &self,
         _workspace: String,
         selection: ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
+        assert_eq!(advertised.as_ref(), ["test/child", "test/model"]);
         self.validations.lock().unwrap().push(selection);
         let result = match &self.rejection {
             Some(error) => Err(error.clone()),
@@ -4821,7 +4823,16 @@ impl RuntimeLoader for ValidatingLoader {
         };
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_spawn_model_routes(vec![
+                            "test/child".to_owned(),
+                            "test/model".to_owned(),
+                        ]),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
@@ -5787,6 +5798,21 @@ struct AuditLoader {
 }
 
 impl RuntimeLoader for AuditLoader {
+    fn validate_spawn_model(
+        &self,
+        _workspace: String,
+        selection: ModelSelection,
+        advertised: Arc<[String]>,
+    ) -> SpawnModelValidationFuture {
+        assert!(
+            advertised
+                .iter()
+                .any(|route| Some(route) == selection.model.as_ref()),
+            "the auditor's roster route was not retained: {advertised:?}"
+        );
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let provider = self.inner.next_provider(&request);
         let mode = self.mode;

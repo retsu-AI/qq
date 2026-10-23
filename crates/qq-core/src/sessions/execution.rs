@@ -8,6 +8,7 @@ use super::{
     },
 };
 use crate::runtime::RunDeadline;
+use crate::tools;
 
 /// Denies every tool call. Compaction runs summarize existing context; a
 /// call the instruction forbade costs one denied round trip and persists
@@ -420,6 +421,13 @@ async fn prepare_execution(
                     Arc::clone(inner),
                     claimed.clone(),
                     Arc::clone(&resources.children),
+                    tools::spawn_model_routes(
+                        &loaded.plan.descriptor().tools.spawn_model_routes,
+                        delegation,
+                    )
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
                 )
                 .with_write_children(delegation.write_children && claimed.depth == 0),
             ) as Arc<dyn SubagentSpawner>)

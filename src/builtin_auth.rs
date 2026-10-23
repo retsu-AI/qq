@@ -58,8 +58,7 @@ impl BuiltinAuth {
         }
     }
 
-    /// Whether a cached discovery result for this provider can be found only
-    /// by reading the secure store.
+    /// Whether resolving discovery credentials reads the secure store.
     pub(crate) const fn cache_probe_reads_store(self, api_key: Option<&SecretRef>) -> bool {
         match self {
             Self::ApiKey { .. } => matches!(api_key, None | Some(SecretRef::Stored(_))),

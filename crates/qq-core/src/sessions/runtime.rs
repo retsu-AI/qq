@@ -155,9 +155,12 @@ pub trait RuntimeLoader: Send + Sync + 'static {
 
     /// Confirms a resolved child route is spawnable right now: the route
     /// parses, its provider is configured, policy-allowed, and authenticated
-    /// at this moment, and the model id appears in the provider's served
-    /// model list. Every spawn resolution source — the explicit tool
-    /// argument, the configured worker route, and the parent-selection
+    /// at this moment. `advertised` is the immutable model catalog from the
+    /// parent's compiled plan, not model-supplied input. Membership in that
+    /// snapshot survives later discovery refreshes; fresh availability and
+    /// authentication failures remain recoverable tool errors. Every spawn
+    /// resolution source — the explicit tool argument, configured worker,
+    /// and parent-selection
     /// fallback — passes through this check before any durable child state
     /// is created. Core stays ignorant of provider-auth details; the loader
     /// answers "is this route spawnable" the same way it answers "load this
@@ -167,8 +170,9 @@ pub trait RuntimeLoader: Send + Sync + 'static {
         &self,
         workspace: String,
         selection: ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
-        let _ = (workspace, selection);
+        let _ = (workspace, selection, advertised);
         Box::pin(std::future::ready(Ok(())))
     }
 }
