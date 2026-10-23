@@ -201,6 +201,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
       - name: Native ownership, cancellation and durable observations
