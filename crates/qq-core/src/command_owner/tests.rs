@@ -1980,6 +1980,13 @@ async fn captured_environment_controls_execution_without_persisting_values_in_th
             .to_string();
     owner.submit(request.clone()).await.unwrap();
     let finished = wait_finished(&owner, id, 0).await;
+    let mut task_settings = request.clone();
+    let task_id = ToolCallId::generate().unwrap();
+    task_settings.id = task_id;
+    task_settings.arguments =
+        serde_json::json!({"command": format!("printf '%s' \"${{{name}-missing}}\"")}).to_string();
+    owner.submit(task_settings).await.unwrap();
+    let task_result = wait_finished(&owner, task_id, 0).await.result.unwrap();
     owner.submit(request.clone()).await.unwrap();
     request.environment = NativeEnvironment::from_values([(name, "changed".into())]).unwrap();
     assert!(matches!(
@@ -1987,6 +1994,11 @@ async fn captured_environment_controls_execution_without_persisting_values_in_th
         Err(CommandOwnerError::Conflict)
     ));
     owner.shutdown().await.unwrap();
+    assert!(
+        task_result.text().contains(&value),
+        "host task settings were dropped: {}",
+        task_result.text()
+    );
     let result = finished.result.unwrap();
     assert!(result.text().contains(&value));
     assert!(result.text().contains("HOME=missing"));

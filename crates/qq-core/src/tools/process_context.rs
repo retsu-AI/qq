@@ -443,12 +443,25 @@ pub(super) fn prepare(
     let mut bytes = 0_usize;
     let mut base_env_present = 0;
     let mut locale = Locale::Unset;
+    #[cfg(target_os = "linux")]
+    let mut extra_environment = false;
     for name in BASE_ENV
         .iter()
         .copied()
         .chain(requested.iter().map(String::as_str))
+        // The host may add task-owned tool settings to the frozen snapshot.
+        // Reconstructing only argument-selected names silently discards them.
+        .chain(captured.into_iter().flat_map(|snapshot| snapshot.names()))
     {
-        if environment.iter().any(|(saved, _)| saved == name) {
+        if environment.iter().any(|(saved, _)| {
+            if cfg!(windows) {
+                saved
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(name.as_bytes())
+            } else {
+                saved == name
+            }
+        }) {
             continue;
         }
         if let Some(value) = match captured {
@@ -461,10 +474,22 @@ pub(super) fn prepare(
             if bytes > MAX_ENV_BYTES {
                 return Err(PreparationError::EnvironmentBound);
             }
-            if let Some(index) = BASE_ENV.iter().position(|base| *base == name) {
+            let base = BASE_ENV.iter().position(|base| {
+                if cfg!(windows) {
+                    base.eq_ignore_ascii_case(name)
+                } else {
+                    *base == name
+                }
+            });
+            if let Some(index) = base {
                 base_env_present |= 1 << index;
+            } else {
+                #[cfg(target_os = "linux")]
+                {
+                    extra_environment = true;
+                }
             }
-            if name == "LANG" {
+            if base.is_some_and(|index| BASE_ENV[index] == "LANG") {
                 locale = match value.to_str() {
                     Some("C") => Locale::C,
                     Some("POSIX") => Locale::Posix,
@@ -522,7 +547,7 @@ pub(super) fn prepare(
                 &approvals,
                 &environment,
                 &cwd_path,
-                !requested.is_empty(),
+                !requested.is_empty() || extra_environment,
                 locale,
                 cancelled,
                 deadline,
@@ -877,6 +902,42 @@ mod tests {
         let arguments = serde_json::json!({"program":program,"args":["x","f"]}).to_string();
         let workspace = Workspace::open(&root).unwrap();
         let cancelled = ToolCancellation::new(RunCancellation::new());
+        let task_environment = crate::command_owner::NativeEnvironment::from_values([
+            ("LANG".to_owned(), "C".into()),
+            (
+                "QQ_HOST_TOOL_INPUT".to_owned(),
+                "captured-tool-settings".into(),
+            ),
+        ])
+        .unwrap();
+        let task_settings = prepare(
+            Some(&task_environment),
+            workspace.clone(),
+            OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
+            approved.clone(),
+            Arc::default(),
+            None,
+            &cancelled,
+            Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            task_settings.receipt.facts().verdict,
+            ExecutionVerdict::Work {
+                reason: UnverifiedReason::RequestedEnvironment
+            }
+        );
+        assert_eq!(
+            task_settings
+                .command
+                .as_ref()
+                .unwrap()
+                .as_std()
+                .get_envs()
+                .find(|(name, _)| *name == "QQ_HOST_TOOL_INPUT")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("captured-tool-settings"))
+        );
         let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
         requested.env.push("PATH".to_owned());
         let unsupported = prepare(

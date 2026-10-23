@@ -694,7 +694,7 @@ async fn linked_files_are_refused_before_the_payload_runs() {
     let aap = tokio::task::spawn_blocking(appcontainer_only_fixture)
         .await
         .unwrap();
-    for writable in [false, true] {
+    for (writable, trusted_software) in [(false, false), (true, false), (true, true)] {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let linked = tempfile::tempdir().unwrap();
@@ -712,7 +712,10 @@ async fn linked_files_are_refused_before_the_payload_runs() {
             unreachable!();
         };
         let grants = if writable { read_write } else { read_only };
-        grants.push(qq_core::command_owner::NativeDirectoryGrant::capture(linked.path()).unwrap());
+        let mut grant =
+            qq_core::command_owner::NativeDirectoryGrant::capture(linked.path()).unwrap();
+        grant.trusted_software = trusted_software;
+        grants.push(grant);
         let completed =
             tokio::time::timeout(Duration::from_secs(150), finish(&worker, command)).await;
         worker.stop_spawned().await;

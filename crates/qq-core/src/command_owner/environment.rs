@@ -170,6 +170,10 @@ impl NativeEnvironment {
         Ok(())
     }
 
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(name, _)| name.as_str())
+    }
+
     pub(crate) fn get(&self, name: &str) -> Option<OsString> {
         let (_, value) = self.0.iter().find(|(saved, _)| same_name(saved, name))?;
         match value {
