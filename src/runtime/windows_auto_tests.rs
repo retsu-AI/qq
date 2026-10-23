@@ -10,9 +10,13 @@ use std::{fs, time::Duration};
 
 #[tokio::test]
 async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
-    let tool_versions = tokio::task::spawn_blocking(|| {
+    let fixture = super::tests::RuntimeFixture::new();
+    let source = fixture.path("work");
+    let host_source = source.clone();
+    let tool_versions = tokio::task::spawn_blocking(move || {
         ["git", "node", "cargo"].map(|program| {
             let output = std::process::Command::new(program)
+                .current_dir(&host_source)
                 .arg("--version")
                 .output()
                 .unwrap_or_else(|error| panic!("host {program} must be installed: {error}"));
@@ -22,8 +26,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     })
     .await
     .unwrap();
-    let fixture = super::tests::RuntimeFixture::new();
-    let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
     let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();

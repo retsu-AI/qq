@@ -118,6 +118,14 @@ async fn native_scope_survives_restart_and_applies_to_child_sessions() {
     let service = Recording::default();
     let mut initial = options(&database);
     let mut captured = scope(&workspace);
+    let software = path.join("installed-tools");
+    let ordinary = path.join("ordinary-inputs");
+    std::fs::create_dir(&software).unwrap();
+    std::fs::create_dir(&ordinary).unwrap();
+    captured.read_only = vec![
+        NativeDirectoryGrant::capture_software(&software).unwrap(),
+        NativeDirectoryGrant::capture(&ordinary).unwrap(),
+    ];
     captured.environment = Some(
         crate::command_owner::NativeEnvironment::from_values([(
             "QQ_CAPTURED_TOOL_INPUT".to_owned(),
@@ -170,7 +178,11 @@ async fn native_scope_survives_restart_and_applies_to_child_sessions() {
         else {
             panic!("command escaped to host filesystem")
         };
-        assert!(read_only.is_empty());
+        assert_eq!(read_only.len(), 2);
+        assert_eq!(read_only[0].path, software);
+        assert!(read_only[0].trusted_software);
+        assert_eq!(read_only[1].path, ordinary);
+        assert!(!read_only[1].trusted_software);
         assert_eq!(read_write.len(), 1);
         assert_eq!(read_write[0].path, workspace);
     }
