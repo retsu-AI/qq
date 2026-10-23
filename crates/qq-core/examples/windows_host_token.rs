@@ -778,30 +778,33 @@ mod proof {
         Ok(())
     }
 
+    fn read_captured(mut pipe: impl io::Read) -> io::Result<Vec<u8>> {
+        let mut retained = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let count = match pipe.read(&mut buffer) {
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // Anonymous Windows pipes signal normal writer closure with error 109.
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(retained),
+                result => result?,
+            };
+            if count == 0 {
+                return Ok(retained);
+            }
+            let keep = count.min((16 * 1024_usize).saturating_sub(retained.len()));
+            retained.extend_from_slice(&buffer[..keep]);
+        }
+    }
+
     fn capture_bounded(
-        mut pipe: impl io::Read + Send + 'static,
+        pipe: impl io::Read + Send + 'static,
         name: &str,
     ) -> io::Result<std::sync::mpsc::Receiver<io::Result<Vec<u8>>>> {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name(name.to_owned())
             .spawn(move || {
-                let result = (|| {
-                    let mut retained = Vec::new();
-                    let mut buffer = [0; 4096];
-                    loop {
-                        let count = match pipe.read(&mut buffer) {
-                            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                            result => result?,
-                        };
-                        if count == 0 {
-                            return Ok(retained);
-                        }
-                        let keep = count.min((16 * 1024_usize).saturating_sub(retained.len()));
-                        retained.extend_from_slice(&buffer[..keep]);
-                    }
-                })();
-                let _ = sender.send(result);
+                let _ = sender.send(read_captured(pipe));
             })?;
         Ok(receiver)
     }
@@ -960,19 +963,22 @@ mod proof {
         drop(job);
         let output = captured_stdout
             .recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(err)??;
+            .map_err(err)
+            .and_then(|result| result);
         let errors = captured_stderr
             .recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(err)??;
-        println!(
-            "ordinary broker stdout: {}",
-            String::from_utf8_lossy(&output)
-        );
-        println!(
-            "ordinary broker stderr: {}",
-            String::from_utf8_lossy(&errors)
-        );
-        result
+            .map_err(err)
+            .and_then(|result| result);
+        for (name, captured) in [("stdout", &output), ("stderr", &errors)] {
+            match captured {
+                Ok(bytes) => println!("ordinary broker {name}: {}", String::from_utf8_lossy(bytes)),
+                Err(error) => println!("ordinary broker {name} capture failed: {error}"),
+            }
+        }
+        result?;
+        output?;
+        errors?;
+        Ok(())
     }
 
     fn admission_error(operation: &'static str, source: impl Into<io::Error>) -> io::Error {
@@ -1069,5 +1075,60 @@ mod proof {
         }
         verify_ordinary_broker("immediately before CreateProcessAsUserW")?;
         launch_lpac_as(root, "filtered", Some((filtered.as_handle(), desktop_path)))
+    }
+    #[cfg(test)]
+    mod capture_tests {
+        use super::*;
+
+        struct TerminalError {
+            bytes: io::Cursor<Vec<u8>>,
+            kind: io::ErrorKind,
+        }
+
+        impl io::Read for TerminalError {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                let count = self.bytes.read(buffer)?;
+                if count != 0 {
+                    return Ok(count);
+                }
+                Err(io::Error::from(self.kind))
+            }
+        }
+
+        #[test]
+        fn anonymous_pipe_closure_retains_actual_bytes() {
+            #[cfg(windows)]
+            assert_eq!(
+                io::Error::from_raw_os_error(109).kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            let reader = TerminalError {
+                bytes: io::Cursor::new(b"actual child witness".to_vec()),
+                kind: io::ErrorKind::BrokenPipe,
+            };
+            assert_eq!(read_captured(reader).unwrap(), b"actual child witness");
+        }
+
+        #[test]
+        fn other_read_errors_remain_errors() {
+            let reader = TerminalError {
+                bytes: io::Cursor::new(b"partial".to_vec()),
+                kind: io::ErrorKind::PermissionDenied,
+            };
+            assert_eq!(
+                read_captured(reader).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+        }
+
+        #[test]
+        fn capture_drains_beyond_retention_limit() {
+            let mut reader = TerminalError {
+                bytes: io::Cursor::new(vec![b'x'; 32 * 1024]),
+                kind: io::ErrorKind::BrokenPipe,
+            };
+            assert_eq!(read_captured(&mut reader).unwrap(), vec![b'x'; 16 * 1024]);
+            assert_eq!(reader.bytes.position(), 32 * 1024);
+        }
     }
 }
