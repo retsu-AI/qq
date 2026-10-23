@@ -132,6 +132,14 @@ jobs:
           }
           Set-Acl -LiteralPath $probeDirectory -AclObject $directoryAcl
           Set-Acl -LiteralPath $writableCanary -AclObject $writableAcl
+          $credentialCanary = Join-Path $probeDirectory 'private-credential.txt'
+          [System.IO.File]::WriteAllText($credentialCanary, 'private-credential')
+          $credentialAcl = Get-Acl -LiteralPath $credentialCanary
+          $credentialAcl.SetAccessRuleProtection($true, $false)
+          $credentialAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'Allow'))
+          Set-Acl -LiteralPath $credentialCanary -AclObject $credentialAcl
+          $env:QQ_NATIVE_PRIVATE_CREDENTIAL = $credentialCanary
           $env:QQ_NATIVE_PUBLIC_WRITABLE = $writableCanary
           $futureDirectory = Join-Path $probeDirectory 'future-public-files'
           New-Item -ItemType Directory -Force $futureDirectory | Out-Null

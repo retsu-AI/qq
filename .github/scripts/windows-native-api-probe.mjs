@@ -227,7 +227,7 @@ async function projectionRoot(request) {
   return projection;
 }
 
-async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false) {
+async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false, afterReady = false, taskAcl = false, lowLabel = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
   const volume = await volumeMetadata();
   const projection = projected ? await projectionRoot(request) : undefined;
@@ -240,13 +240,15 @@ async function runWithNativePolicy(request, inheritParent = false, control = fal
       filesystem: { enumeratePaths: [] },
     } },
   };
+  if (taskAcl) request = { ...request, filesystem: { ...request.filesystem, readwritePaths: [] } };
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, taskAcl ? (lowLabel ? 'host-policy-task-acl-low' : 'host-policy-task-acl') : projected ? (afterReady ? 'host-policy-projected-after-ready' : 'host-policy-projected') : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
         QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid,
+        QQ_NATIVE_PRIVATE_CREDENTIAL: process.env.QQ_NATIVE_PRIVATE_CREDENTIAL,
         QQ_NATIVE_SOFTWARE_FILE: softwareFile,
         QQ_NATIVE_PUBLIC_WRITABLE_GUID: volume.guid + publicWritable.slice(3),
         QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT: '\\\\?\\GLOBALROOT' + volume.device + publicWritable.slice(2),
@@ -483,6 +485,8 @@ cases.push({ name: 'native-policy-projected-after-startup-control', payload: fal
   nativePolicy: true, nativePolicyProjected: true, nativePolicyAfterReady: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-projected-after-startup', payload: false,
   nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, nativePolicyAfterReady: true, command: relayCommand });
+cases.push({ name: 'restricted-task-package-acl', payload: false, nativePolicy: true, taskAcl: true, command: relayCommand });
+cases.push({ name: 'restricted-task-package-acl-low', payload: false, nativePolicy: true, taskAcl: true, lowLabel: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -494,6 +498,7 @@ try {
     }
     fs.rmSync(futureSecret, { force: true });
     fs.writeFileSync(publicWritable, 'public-input');
+    fs.writeFileSync(path.join(workspace, 'acl-write-proof.txt'), 'before');
     let futureCreated = false;
     let creationError;
     const creationObserver = fs.watch(workspace, () => {
@@ -508,7 +513,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume, test.nativePolicyAfterReady, test.taskAcl, test.lowLabel) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },
@@ -557,6 +562,10 @@ try {
         && report.secretRead === false && report.secretWrite === false && report.markerRead === false && report.markerWrite === false && report.futureRead === false && report.futureWrite === false && report.publicWrite === false && report.loopback === false
         && fs.existsSync(path.join(workspace, 'artifact.txt'))
         && fs.readFileSync(path.join(workspace, 'artifact.txt'), 'utf8') === 'native-api-output';
+    }
+    if (test.taskAcl) {
+      outcome.taskWriteProof = fs.readFileSync(path.join(workspace, 'acl-write-proof.txt'), 'utf8');
+      outcome.privateCredentialUnchanged = fs.readFileSync(process.env.QQ_NATIVE_PRIVATE_CREDENTIAL, 'utf8') === 'private-credential';
     }
     outcomes.push(outcome);
     console.log(JSON.stringify(outcome));

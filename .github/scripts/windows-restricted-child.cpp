@@ -127,14 +127,34 @@ static int inspect_files() {
         if (read != 1 || release != 1) throw std::runtime_error("invalid view release frame");
     }
     inspect();
+    wchar_t acl_mode[8]{};
+    const bool task_acl = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_ACL", acl_mode, 8) != 0;
+    if (task_acl) {
+        wchar_t task[32768]{};
+        require(GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", task, 32768) != 0, "task ACL workspace");
+        const BOOL entered = SetCurrentDirectoryW(task);
+        std::cout << "task-cwd-error=" << (entered ? 0 : GetLastError()) << std::endl;
+        Handle proof;
+        const std::wstring proof_path = std::wstring(task) + L"\\acl-write-proof.txt";
+        proof.value = CreateFileW(proof_path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        std::cout << "task-write-open-error=" << (proof.value == INVALID_HANDLE_VALUE ? GetLastError() : 0) << std::endl;
+        if (proof.value != INVALID_HANDLE_VALUE) {
+        const char bytes[] = "contained-write";
+        DWORD count = 0;
+        require(WriteFile(proof.value, bytes, sizeof(bytes) - 1, &count, nullptr), "task write proof");
+        if (count != sizeof(bytes) - 1) throw std::runtime_error("short task write proof");
+        require(SetEndOfFile(proof.value), "truncate task proof");
+        std::cout << "task-write-proof=written" << std::endl;
+        }
+    }
     wchar_t current[32768]{};
     require(GetCurrentDirectoryW(32768, current) != 0, "GetCurrentDirectoryW");
     const std::wstring workspace(current);
     wchar_t outside[32768]{};
     require(GetEnvironmentVariableW(L"QQ_NATIVE_PUBLIC_WRITABLE", outside, 32768) != 0,
         "public writable path");
-    std::vector<std::wstring> paths{workspace, workspace + L"\\payload.cjs", outside, L"C:\\"};
-    for (const auto variable : {L"QQ_NATIVE_PUBLIC_WRITABLE_GUID", L"QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT", L"QQ_NATIVE_SOFTWARE_FILE"}) {
+    std::vector<std::wstring> paths{workspace, workspace + L"\\payload.cjs", outside, L"C:\\", L"NUL"};
+    for (const auto variable : {L"QQ_NATIVE_PUBLIC_WRITABLE_GUID", L"QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT", L"QQ_NATIVE_SOFTWARE_FILE", L"QQ_NATIVE_PRIVATE_CREDENTIAL"}) {
         wchar_t raw[32768]{};
         const DWORD size = GetEnvironmentVariableW(variable, raw, 32768);
         if (size >= 32768) throw std::runtime_error("raw fixture path exceeds bound");
@@ -481,7 +501,45 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
     std::cerr << "private device map installed; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false) {
+// Modify only this diagnostic task directory. Never grant a public capability
+// access to task contents or change an installed tool's security descriptor.
+static void grant_task_directory(PSID package, const wchar_t* directory, bool low_label) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    PACL current = nullptr, updated = nullptr;
+    DWORD code = GetNamedSecurityInfoW(directory, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, &current, nullptr, &descriptor);
+    if (code != ERROR_SUCCESS) { SetLastError(code); require(FALSE, "task directory DACL"); }
+    auto free_local = [](void* value) { LocalFree(value); };
+    std::unique_ptr<void, decltype(free_local)> owned_descriptor(descriptor, free_local);
+    EXPLICIT_ACCESSW grant{};
+    grant.grfAccessPermissions = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE;
+    grant.grfAccessMode = GRANT_ACCESS;
+    grant.grfInheritance = SUB_CONTAINERS_AND_OBJECTS_INHERIT;
+    grant.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    grant.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    grant.Trustee.ptstrName = static_cast<LPWSTR>(package);
+    code = SetEntriesInAclW(1, &grant, current, &updated);
+    if (code != ERROR_SUCCESS) { SetLastError(code); require(FALSE, "exact task package ACE"); }
+    std::unique_ptr<void, decltype(free_local)> owned_acl(updated, free_local);
+    code = SetNamedSecurityInfoW(const_cast<LPWSTR>(directory), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION, nullptr, nullptr, updated, nullptr);
+    if (code != ERROR_SUCCESS) { SetLastError(code); require(FALSE, "apply exact task package ACE"); }
+    if (low_label) {
+        PSECURITY_DESCRIPTOR label = nullptr;
+        require(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"S:(ML;OICI;NW;;;LW)",
+            SDDL_REVISION_1, &label, nullptr), "owned task low label");
+        std::unique_ptr<void, decltype(free_local)> owned_label(label, free_local);
+        PACL sacl = nullptr;
+        BOOL present = FALSE, defaulted = FALSE;
+        require(GetSecurityDescriptorSacl(label, &present, &sacl, &defaulted), "owned task label SACL");
+        if (!present) throw std::runtime_error("missing owned task label");
+        code = SetNamedSecurityInfoW(const_cast<LPWSTR>(directory), SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION, nullptr, nullptr, nullptr, sacl);
+        if (code != ERROR_SUCCESS) { SetLastError(code); require(FALSE, "apply owned task low label"); }
+    }
+}
+
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false, bool after_ready = false, bool task_acl = false, bool low_label = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -592,13 +650,19 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
         const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
         require(FALSE, "native source stdio allowlist");
     }
+    if (task_acl) additions[L"QQ_NATIVE_TASK_ACL"] = L"1";
     auto source_environment = ::environment(additions);
+    std::wstring initial_directory(workspace);
+    if (task_acl) {
+        const std::wstring source_image(image);
+        initial_directory = source_image.substr(0, source_image.find_last_of(L"\\"));
+    }
     const DWORD flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT;
     const BOOL launched = restrict_host
         ? CreateProcessAsUserW(restricted_host.value, image, mutable_command.data(), nullptr, nullptr, TRUE,
-            flags, source_environment.data(), workspace, &startup.StartupInfo, &source)
+            flags, source_environment.data(), initial_directory.c_str(), &startup.StartupInfo, &source)
         : CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
-            flags, source_environment.data(), workspace, &startup.StartupInfo, &source);
+            flags, source_environment.data(), initial_directory.c_str(), &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
     if (child_input.value) { CloseHandle(child_input.value); child_input.value = nullptr; }
     if (child_output.value) { CloseHandle(child_output.value); child_output.value = nullptr; }
@@ -621,6 +685,7 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     const auto package = information(token.value, TokenAppContainerSid);
     const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     grant_private_desktop(sid);
+    if (task_acl) grant_task_directory(sid, workspace, low_label);
     PrivateDeviceMap device_map;
     if (projected && !after_ready) install_device_map(process.value, sid, device_map);
     LPWSTR package_text = nullptr;
@@ -673,6 +738,8 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl") return host_create_policy(argv[2], false, true, true, false, false, false, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-task-acl-low") return host_create_policy(argv[2], false, true, true, false, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected-after-ready") return host_create_policy(argv[2], false, true, false, false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected") return host_create_policy(argv[2], false, true, false, false, true);
         if (argc == 3 && std::wstring(argv[1]) == L"volume-name") {
