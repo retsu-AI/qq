@@ -53,6 +53,8 @@ mod proof {
         fs::write(&public, b"public-input")?;
         let private = root.join("private.txt");
         fs::write(&private, b"private-canary")?;
+        let aap = root.join("aap-only.txt");
+        fs::write(&aap, b"ordinary-appcontainer-input")?;
         let name = format!("qq.host-token-proof.{}", std::process::id());
         let profile =
             rappct::AppContainerProfile::ensure(&name, &name, Some("QQ owned host token proof"))
@@ -62,7 +64,7 @@ mod proof {
             // All ACL changes are confined to these freshly created objects.
             set_acl(
                 root,
-                &format!("D:P(A;OICI;FA;;;{user})(A;OICI;FRFX;;;S-1-15-2-2)"),
+                &format!("D:P(A;OICI;FA;;;{user})(A;OICI;FRFX;;;S-1-15-2-2)(A;;FRFX;;;S-1-15-2-1)"),
             )?;
             set_acl(
                 &workspace,
@@ -79,12 +81,27 @@ mod proof {
                 fs::create_dir_all(workspace.join(relative))?;
             }
             set_acl(&private, &format!("D:P(A;;FA;;;{user})"))?;
+            set_acl(&aap, &format!("D:P(A;;FA;;;{user})(A;;FR;;;S-1-15-2-1)"))?;
             let payload = workspace.join("owned-payload.exe");
             fs::copy(std::env::current_exe()?, &payload)?;
             set_acl(
                 &payload,
                 &format!("D:P(A;;FA;;;{user})(A;;FRFX;;;{})", profile.sid),
             )?;
+            // Match the established native fixture: ordinary AppContainer must
+            // read this exact AAP-only input before LPAC denial is meaningful.
+            launch_lpac(root, &name, "ordinary")?;
+            if fs::read(workspace.join("aap-ordinary.bin"))? != fs::read(&aap)? {
+                return Err(err(
+                    "ordinary AppContainer did not read the AAP-only canary",
+                ));
+            }
+            let ordinary: serde_json::Value =
+                serde_json::from_slice(&fs::read(workspace.join("token-ordinary.json"))?)?;
+            if ordinary["is_appcontainer"] != true || ordinary["package_matches"] != true {
+                return Err(err("ordinary AppContainer token identity mismatch"));
+            }
+            println!("ordinary AppContainer: exact AAP-only bytes readable");
             // Establish that ordinary LPAC really can perform the canary write.
             launch_lpac(root, &name, "control")?;
             assert_results(root, "control", "allowed")?;
@@ -147,7 +164,7 @@ mod proof {
         let package = rappct::derive_sid_from_name(name).map_err(err)?;
         let capabilities = rappct::SecurityCapabilitiesBuilder::new(&package)
             .with_named(&["registryRead"])
-            .lpac(true)
+            .lpac(mode != "ordinary")
             .build()
             .map_err(err)?;
         let windows = std::env::var_os("SystemRoot").ok_or_else(|| err("missing SystemRoot"))?;
@@ -280,6 +297,15 @@ mod proof {
         });
         println!("{mode} payload token: {witness}");
         fs::write(task.join(format!("token-{mode}.json")), witness.to_string())?;
+        let aap = fs::read(root.join("aap-only.txt"));
+        println!("{mode} AAP-only read: {aap:?}");
+        if mode == "ordinary" {
+            fs::write(task.join("aap-ordinary.bin"), aap?)?;
+            return Ok(());
+        }
+        let aap_denied = aap
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied);
         fs::write(task.join(format!("task-{mode}.txt")), b"task-written")?;
         let public = fs::read(root.join("public.txt"))?;
         fs::write(task.join(format!("public-{mode}.txt")), public)?;
@@ -307,6 +333,7 @@ mod proof {
             .is_err_and(|error| error.kind() == io::ErrorKind::PermissionDenied);
         println!("{mode} outside write: {outside:?}");
         let result = serde_json::json!({
+            "aap_read_denied": aap_denied,
             "private_read_denied": private_denied,
             "outside_write_allowed": outside.is_ok(),
             "outside_write_denied": outside_denied,
@@ -335,12 +362,15 @@ mod proof {
             println!("{mode} {name}: {data:?}");
         }
         if witness["is_appcontainer"] != true
-            || witness["is_lpac"] != true
             || witness["package_matches"] != true
             || (mode == "filtered" && witness["task_sid_present"] != true)
             || fs::read(task.join(format!("task-{mode}.txt")))? != b"task-written"
             || fs::read(task.join(format!("public-{mode}.txt")))? != b"public-input"
             || image? != source
+            // TokenIsLessPrivilegedAppContainer is reserved; the pinned SDK
+            // maps an unsupported query to false. Enforce its defining AAP-only
+            // denial with the ordinary-AppContainer positive control above.
+            || result["aap_read_denied"] != true
             || result["private_read_denied"] != true
             || result["copy_status_success"] != true
             || result[if expected == "allowed" {
