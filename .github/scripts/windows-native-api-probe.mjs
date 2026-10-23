@@ -115,6 +115,17 @@ const payloadCommand = executable => `${quote(executable)} ${quote(payload)}`;
 // Inline input separates root-metadata startup failures from deny inheritance.
 const inlinePayload = `eval(Buffer.from('${fs.readFileSync(payload).toString('base64')}','base64').toString())`;
 const inlineCommand = `${quote(tools.node)} -e ${quote(inlinePayload)}`;
+fs.writeFileSync(path.join(workspace, 'captured-environment.json'), JSON.stringify(environment));
+const relay = `
+const fs = require('node:fs');
+const {spawnSync} = require('node:child_process');
+const environment = JSON.parse(fs.readFileSync('captured-environment.json', 'utf8'));
+const child = spawnSync(process.execPath, ['payload.cjs'], { env: environment, stdio: 'inherit', timeout: 45000 });
+if (child.error) console.error(child.error.message);
+process.exitCode = child.status ?? 1;
+`;
+const relayCommand = `${quote(tools.node)} -e ${quote(`eval(Buffer.from('${Buffer.from(relay).toString('base64')}','base64').toString())`)}`;
+
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const volumeRoots = [...new Set([...readonlyPaths, workspace].map(value => path.parse(value).root))];
 const cases = [
@@ -128,6 +139,8 @@ const cases = [
   { name: 'deny-volume-children-double-star', command: payloadCommand(tools.node), payload: true,
     deniedPaths: volumeRoots.map(root => `${root}**`) },
   { name: 'deny-canary-explicitly', command: payloadCommand(tools.node), payload: true, deniedPaths: [secret] },
+  { name: 'relay-public-read-baseline', command: relayCommand, payload: true },
+  { name: 'relay-deny-canary-explicitly', command: relayCommand, payload: true, deniedPaths: [secret] },
 ];
 const outcomes = [];
 try {
