@@ -299,9 +299,13 @@ static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_packag
     const DWORD length = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", workspace, 32768);
     if (!length || length >= 32768) throw std::runtime_error("missing task workspace");
     PROCESS_INFORMATION process{};
+    LPWCH inherited_environment = GetEnvironmentStringsW();
+    require(inherited_environment != nullptr, "recreated environment");
     const BOOL created = CreateProcessAsUserW(token.value, image, mutable_command.data(), nullptr, nullptr, TRUE,
-        EXTENDED_STARTUPINFO_PRESENT, nullptr, workspace, &startup.StartupInfo, &process);
+        CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | (inherit_parent ? CREATE_NO_WINDOW : 0),
+        inherited_environment, workspace, &startup.StartupInfo, &process);
     const DWORD code = created ? 0 : GetLastError();
+    FreeEnvironmentStringsW(inherited_environment);
     DeleteProcThreadAttributeList(attributes);
     SetLastError(code);
     require(created, "recreated inspector launch");
@@ -419,9 +423,13 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     PROCESS_INFORMATION source{};
     // Outside the explicit control case, the source is never resumed. Its
     // primary token gives the exact identity of this newly created policy.
+    LPWCH inherited_environment = GetEnvironmentStringsW();
+    require(inherited_environment != nullptr, "native policy environment");
     const BOOL launched = CreateProcessW(image, mutable_command.data(), nullptr, nullptr, TRUE,
-        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, workspace, &startup.StartupInfo, &source);
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+        inherited_environment, workspace, &startup.StartupInfo, &source);
     const DWORD launch_error = launched ? 0 : GetLastError();
+    FreeEnvironmentStringsW(inherited_environment);
     DeleteProcThreadAttributeList(attributes);
     SetLastError(launch_error);
     require(launched, "suspended native policy source");
