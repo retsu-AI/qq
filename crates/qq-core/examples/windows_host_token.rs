@@ -68,6 +68,11 @@ mod proof {
                 &format!("D:P(A;;FA;;;{user})(A;;FRFW;;;S-1-15-2-2)"),
             )?;
             set_acl(&public, &format!("D:P(A;;FA;;;{user})(A;;FR;;;S-1-15-2-2)"))?;
+            // Create profile/scratch inputs after installing the task's
+            // inheritable package ACL, matching the production task home.
+            for relative in ["home/tmp", "home/AppData/Local", "home/AppData/Roaming"] {
+                fs::create_dir_all(workspace.join(relative))?;
+            }
             for mode in ["control", "filtered"] {
                 let script = format!(
                     "@echo off\r\necho task-written>task-{mode}.txt\r\nif errorlevel 1 exit /b 21\r\ntype nul >nul\r\nif errorlevel 1 exit /b 22\r\ncopy /b \"%SystemRoot%\\System32\\cmd.exe\" os-{mode}.bin >nul\r\nif errorlevel 1 exit /b 23\r\ntype \"{}\" >public-{mode}.txt\r\nif errorlevel 1 exit /b 24\r\n(echo outside-written)>\"{}\"\r\nif errorlevel 1 (echo denied>outside-{mode}.txt) else (echo allowed>outside-{mode}.txt)\r\nexit /b 0\r\n",
@@ -142,19 +147,34 @@ mod proof {
             .build()
             .map_err(err)?;
         let windows = std::env::var_os("SystemRoot").ok_or_else(|| err("missing SystemRoot"))?;
+        let home = root.join("task/home");
+        let temporary = home.join("tmp");
         let options = rappct::LaunchOptions {
             exe: Path::new(&windows).join("System32/cmd.exe"),
             cmdline: Some(format!("cmd.exe /d /c {mode}.cmd")),
             cwd: Some(root.join("task")),
-            env: Some(vec![
+            env: Some(rappct::merge_parent_env(vec![
                 ("SystemRoot".into(), windows.clone()),
                 (
                     "PATH".into(),
                     Path::new(&windows).join("System32").into_os_string(),
                 ),
-                ("TEMP".into(), root.join("task").into_os_string()),
-                ("TMP".into(), root.join("task").into_os_string()),
-            ]),
+                ("HOME".into(), home.clone().into_os_string()),
+                ("USERPROFILE".into(), home.clone().into_os_string()),
+                (
+                    "LOCALAPPDATA".into(),
+                    home.join("AppData/Local").into_os_string(),
+                ),
+                (
+                    "APPDATA".into(),
+                    home.join("AppData/Roaming").into_os_string(),
+                ),
+                ("TMPDIR".into(), temporary.clone().into_os_string()),
+                ("TEMP".into(), temporary.clone().into_os_string()),
+                ("TMP".into(), temporary.into_os_string()),
+                ("LANG".into(), "C".into()),
+                ("TERM".into(), "dumb".into()),
+            ])),
             stdio: rappct::StdioConfig::Null,
             join_job: Some(rappct::JobLimits {
                 kill_on_job_close: true,
