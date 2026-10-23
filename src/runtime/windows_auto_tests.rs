@@ -10,6 +10,18 @@ use std::{fs, time::Duration};
 
 #[tokio::test]
 async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
+    let tool_versions = tokio::task::spawn_blocking(|| {
+        ["git", "node", "cargo"].map(|program| {
+            let output = std::process::Command::new(program)
+                .arg("--version")
+                .output()
+                .unwrap_or_else(|error| panic!("host {program} must be installed: {error}"));
+            assert!(output.status.success(), "host {program}: {output:?}");
+            (program, String::from_utf8(output.stdout).unwrap())
+        })
+    })
+    .await
+    .unwrap();
     let fixture = super::tests::RuntimeFixture::new();
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
@@ -29,6 +41,12 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     ] {
         script.push_str(&format!(" & echo private-{name}>\"%{name}%/proof-{name}\""));
     }
+    for (program, _) in &tool_versions {
+        script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
+    }
+    script.push_str(
+        " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
+    );
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
@@ -173,6 +191,19 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
+    for (program, expected) in &tool_versions {
+        assert_eq!(
+            fs::read_to_string(source.join(format!("{program}-version.txt")))
+                .unwrap()
+                .trim(),
+            expected.trim(),
+            "Auto must run the host's installed {program} with a private task home",
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(source.join("node-output.txt")).unwrap(),
+        "node task output"
+    );
     let connection = rusqlite::Connection::open(fixture.path("data/sessions.sqlite3")).unwrap();
     let record: String = connection
         .query_row(
