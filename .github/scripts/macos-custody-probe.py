@@ -220,6 +220,12 @@ def child(address, nonce, role, root_policy=None):
                 except OSError as error:
                     result = error.errno
                 send_json(connection, {"signal_errno": result})
+            elif command == b"broker\n":
+                label = f"ai.retsu.qq.custody-probe.{nonce}.broker"
+                marker = str(Path(address).parent / "broker-output")
+                code, output = launch(["/bin/launchctl", "submit", "-l", label,
+                                       "--", "/usr/bin/touch", marker], nonce)
+                send_json(connection, {"broker_exit": code, "output": output[:1024]})
             elif command == b"spawn\n":
                 arguments = [sys.executable, "-I", str(Path(__file__).resolve()), "child", address, nonce, "escaped"]
                 pid = os.posix_spawn(sys.executable, arguments, {}, setpgroup=0)
@@ -286,6 +292,7 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
     fixtures = {}
     launched = []
     services = []
+    broker_labels = []
     exits = ExitWatch()
     with tempfile.TemporaryDirectory(prefix="qq-coal-", dir="/tmp") as temporary:
         address = str(Path(temporary).resolve() / "control")
@@ -405,6 +412,34 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
                 assert result == {"signal_errno": errno.EPERM}, result
                 ping("guardian" if use_guardian else "sentinel")
                 print(json.dumps({"seatbelt_signal_boundary": "enforced"}), flush=True)
+                # First prove this host can use the same launchd interface to
+                # write an owned fixture outside the payload's coalition.
+                label = f"ai.retsu.qq.custody-probe.{nonce}.broker"
+                control_label = label + ".control"
+                broker_labels.extend([control_label, label])
+                marker = Path(temporary) / "broker-control"
+                with select.kqueue() as changes:
+                    directory = os.open(temporary, os.O_RDONLY)
+                    try:
+                        changes.control([select.kevent(directory,
+                            filter=select.KQ_FILTER_VNODE,
+                            flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                            fflags=select.KQ_NOTE_WRITE)], 0, 0)
+                        code, output = launch(["/bin/launchctl", "submit", "-l", control_label,
+                                               "--", "/usr/bin/touch", str(marker)], nonce)
+                        assert code == 0, f"launchd positive control failed: {code}: {output}"
+                        deadline = time.monotonic() + 10
+                        while not marker.exists():
+                            remaining = deadline - time.monotonic()
+                            assert remaining > 0, "launchd positive control did not execute"
+                            changes.control([], 1, remaining)
+                    finally:
+                        os.close(directory)
+                connection.sendall(b"broker\n")
+                result = read_json(reader)
+                assert result.get("broker_exit", 0) != 0, f"sandbox submitted an external job: {result}"
+                assert not (Path(temporary) / "broker-output").exists(), "sandbox escaped through launchd"
+                print(json.dumps({"launchd_broker_boundary": "enforced", "attempt": result}), flush=True)
             connection.sendall(b"spawn\n")
             spawned = read_json(reader)["spawned"]
             escaped = accept("escaped")
@@ -460,6 +495,13 @@ def host(use_launchservices=False, use_seatbelt=False, use_guardian=False):
                         code, output = launch(["/bin/launchctl", "bootout", service], nonce)
                         if code not in (0, 3):
                             removal_errors.append(f"{code}: {output[:4096].replace(nonce, '<fixture nonce>')}")
+                    except Exception as error:
+                        removal_errors.append(str(error))
+                for label in broker_labels:
+                    try:
+                        code, output = launch(["/bin/launchctl", "remove", label], nonce)
+                        if code not in (0, 3):
+                            removal_errors.append(f"broker {code}: {output[:4096]}")
                     except Exception as error:
                         removal_errors.append(str(error))
                 assert not removal_errors, f"fixture service removal failed: {removal_errors}"
