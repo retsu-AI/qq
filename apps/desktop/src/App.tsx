@@ -376,7 +376,7 @@ export function App() {
         )}
         <main className="relative flex min-w-0 flex-1 flex-col">
           {app.error && (
-            <div className="absolute inset-x-0 top-0 z-20 flex items-center gap-3 border-b border-line bg-danger-soft px-4 py-2 text-[13px] text-danger">
+            <div className="flex shrink-0 items-center gap-3 border-b border-line bg-danger-soft px-4 py-2 text-[13px] text-danger">
               <span className="flex-1 truncate">{app.error}</span>
               <button
                 className="text-muted hover:text-fg"
