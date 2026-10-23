@@ -139,20 +139,6 @@ async fn spawn_prepared(
                 .unwrap_or_else(|error| error.into_inner())
                 .assign(&child.inner)?;
             before_resume(&mut deadline);
-            // CreateProcess and job setup may outlive the admission checked
-            // above. The payload is still suspended: reject it before resume.
-            if cancelled.is_cancelled() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "command startup was cancelled",
-                ));
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "command startup timed out",
-                ));
-            }
             // The live child handle pins this PID until resume completes.
             subc_jobobject::resume_main_thread(pid)
         })();
