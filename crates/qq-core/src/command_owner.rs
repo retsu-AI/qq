@@ -736,6 +736,8 @@ impl CommandOwner {
             .unwrap_or_else(|error| error.into_inner())
             .get(&id)
             .map(|job| job.changed.subscribe());
+        #[cfg(test)]
+        wait_at_async_hook(&WAIT_SUBSCRIPTION_HOOKS, id).await;
         loop {
             if *failed.borrow() {
                 return Err(CommandOwnerError::Unavailable);
@@ -750,7 +752,20 @@ impl CommandOwner {
                 return Ok(snapshot);
             }
             let Some(changed) = &mut changed else {
-                return Err(CommandOwnerError::Unavailable);
+                // Admission can register its watcher while the snapshot is
+                // being read. Subscribe, then read again so that transition
+                // cannot leave a live command without an observer.
+                changed = self
+                    .0
+                    .jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(&id)
+                    .map(|job| job.changed.subscribe());
+                if changed.is_none() {
+                    return Err(CommandOwnerError::Unavailable);
+                }
+                continue;
             };
             tokio::select! {
                 result = changed.changed() => if result.is_err() { return Err(CommandOwnerError::Unavailable); },
@@ -1029,6 +1044,8 @@ fn wait_at_commit(hooks: &Mutex<Vec<AdmissionHook>>, id: ToolCallId) {
 
 #[cfg(test)]
 static OUTPUT_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
+#[cfg(test)]
+static WAIT_SUBSCRIPTION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 #[cfg(test)]
 static SUBMISSION_HOOKS: Mutex<Vec<AdmissionHook>> = Mutex::new(Vec::new());
 #[cfg(test)]

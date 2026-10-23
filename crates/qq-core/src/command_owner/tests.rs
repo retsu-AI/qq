@@ -2647,3 +2647,50 @@ async fn native_restrictions_never_fall_back_to_an_unrestricted_platform_launche
     }
     owner.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn observer_started_during_admission_keeps_tracking_the_command() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let (subscribed, subscription) = tokio::sync::oneshot::channel();
+    let (observe, observation) = tokio::sync::oneshot::channel();
+    WAIT_SUBSCRIPTION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered: subscribed,
+        release: observation,
+    });
+    let mut observer = Box::pin(owner.wait(id, u64::MAX));
+    assert!(futures_util::poll!(observer.as_mut()).is_pending());
+    subscription.await.unwrap();
+    let (preparing, preparation) = tokio::sync::oneshot::channel();
+    let (execute, execution) = tokio::sync::oneshot::channel();
+    PREPARATION_HOOKS.lock().unwrap().push(AdmissionHook {
+        id,
+        entered: preparing,
+        release: execution,
+    });
+    owner
+        .submit(command(workspace.path(), id, "echo admission-observed"))
+        .await
+        .unwrap();
+    preparation.await.unwrap();
+    observe.send(()).unwrap();
+    // Poll through the released hook to queue the first snapshot. The following
+    // snapshot queues behind it on the journal's FIFO permit, proving that the
+    // observer has read the live state before execution can finish.
+    assert!(futures_util::poll!(observer.as_mut()).is_pending());
+    assert_eq!(
+        owner.snapshot(id).await.unwrap().status,
+        CommandStatus::Queued
+    );
+    execute.send(()).unwrap();
+    let result = observer.await;
+    owner.shutdown().await.unwrap();
+    let result = result.expect("a live admission must retain its observer");
+    assert_eq!(result.status, CommandStatus::Finished);
+    assert!(result.result.unwrap().text().contains("admission-observed"));
+}
