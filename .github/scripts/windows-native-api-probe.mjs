@@ -104,6 +104,10 @@ const cases = [
   { name: 'deny-volume-roots-with-ancestor-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots },
   { name: 'deny-volume-roots-without-root-metadata', command: payloadCommand(tools.node), payload: true, deniedPaths: volumeRoots,
     enumeratePaths: [...ancestorPaths].filter(value => !volumeRoots.includes(value)) },
+  { name: 'deny-volume-children-star', command: payloadCommand(tools.node), payload: true,
+    deniedPaths: volumeRoots.map(root => `${root}*`) },
+  { name: 'deny-volume-children-double-star', command: payloadCommand(tools.node), payload: true,
+    deniedPaths: volumeRoots.map(root => `${root}**`) },
   { name: 'deny-canary-explicitly', command: payloadCommand(tools.node), payload: true, deniedPaths: [secret] },
 ];
 const outcomes = [];
@@ -144,6 +148,12 @@ try {
     if (test.payload && fs.existsSync(reportPath)) {
       const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
       outcome.report = report;
+      // This probe isolates public-file containment. Rust compilation has its
+      // own reported result and remains required by QQ's production fixture.
+      outcome.fileBoundary = output.exitCode === 0 && !output.timedOut
+        && report.tools.node.exit === 0 && report.secretRead === false
+        && report.secretWrite === false && report.loopback === false
+        && fs.existsSync(path.join(workspace, 'artifact.txt'));
       outcome.qualified = output.exitCode === 0 && !output.timedOut && ['git', 'node', 'cargo'].every(name =>
         report.tools[name].exit === 0 && report.tools[name].stdout.trim() === expected[name])
         && report.rustCheck.exit === 0
@@ -161,7 +171,7 @@ try {
   assert.equal(fs.readFileSync(secret, 'utf8'), 'outside-canary');
   assert.equal(outcomes.find(outcome => outcome.name === 'public-read-baseline')?.report?.secretRead, true,
     'the public-read control must demonstrate the outside read before evaluating deny policies');
-  assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-roots') && outcome.qualified),
+  assert.ok(outcomes.some(outcome => outcome.name.startsWith('deny-volume-') && outcome.fileBoundary),
     'No volume-deny candidate both ran real tools and denied the public outside canary');
 } finally {
   server.closeAllConnections();
