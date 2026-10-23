@@ -4,6 +4,7 @@
 #define _UNICODE
 #include <windows.h>
 #include <sddl.h>
+#include <userenv.h>
 #include <aclapi.h>
 #include <iostream>
 #include <cwchar>
@@ -16,6 +17,7 @@
 #include <string>
 #include <vector>
 #pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "user32.lib")
 
 struct Handle {
     HANDLE value = nullptr;
@@ -192,7 +194,7 @@ static int hold_environment() {
     return 0;
 }
 
-static int host_recreate(const wchar_t* pid_text) {
+static int host_recreate(const wchar_t* pid_text, const wchar_t* supplied_package = nullptr, HANDLE security_environment = nullptr) {
     Handle host, source, source_token, token;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &host.value), "recreate host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -207,7 +209,12 @@ static int host_recreate(const wchar_t* pid_text) {
     auto package = information(source_token.value, TokenAppContainerSid);
     const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     wchar_t expected[256]{};
-    require(GetEnvironmentVariableW(L"QQ_NATIVE_PACKAGE_SID", expected, 256) != 0, "expected source package");
+    if (supplied_package) {
+        if (wcslen(supplied_package) >= 256) throw std::runtime_error("invalid supplied package size");
+        std::copy(supplied_package, supplied_package + wcslen(supplied_package) + 1, expected);
+    } else {
+        require(GetEnvironmentVariableW(L"QQ_NATIVE_PACKAGE_SID", expected, 256) != 0, "expected source package");
+    }
     PSID expected_sid = nullptr, registry_sid = nullptr;
     require(ConvertStringSidToSidW(expected, &expected_sid), "expected package SID");
     auto local_free = [](void* value) { LocalFree(value); };
@@ -242,11 +249,19 @@ static int host_recreate(const wchar_t* pid_text) {
     std::vector<wchar_t> mutable_command(command.begin(), command.end());
     mutable_command.push_back(0);
     SIZE_T size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    const DWORD attribute_count = security_environment ? 2 : 1;
+    InitializeProcThreadAttributeList(nullptr, attribute_count, 0, &size);
     if (!size || size > 65536) throw std::runtime_error("invalid recreated attribute size");
     std::vector<BYTE> storage(size);
     auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
-    require(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "recreated attributes");
+    require(InitializeProcThreadAttributeList(attributes, attribute_count, 0, &size), "recreated attributes");
+    if (security_environment && !UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000,
+        &security_environment, sizeof(security_environment), nullptr, nullptr)) {
+        const DWORD code = GetLastError();
+        DeleteProcThreadAttributeList(attributes);
+        SetLastError(code);
+        require(FALSE, "recreated security environment attribute");
+    }
     DWORD policy = 1;
     const BOOL updated = UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
         &policy, sizeof(policy), nullptr, nullptr);
@@ -284,8 +299,135 @@ static int host_recreate(const wchar_t* pid_text) {
     return static_cast<int>(result);
 }
 
+static void grant_private_desktop(PSID package) {
+    wchar_t name[256]{};
+    DWORD size = 0;
+    require(GetUserObjectInformationW(GetThreadDesktop(GetCurrentThreadId()), UOI_NAME, name, sizeof(name), &size), "owned desktop name");
+    if (!std::wstring(name).starts_with(L"QQProbe-{")) throw std::runtime_error("not a disposable probe desktop");
+    struct Desktop {
+        HDESK value = nullptr;
+        ~Desktop() { if (value) CloseDesktop(value); }
+    } desktop;
+    desktop.value = OpenDesktopW(name, 0, FALSE, READ_CONTROL | WRITE_DAC);
+    require(desktop.value != nullptr, "owned desktop ACL handle");
+    SECURITY_INFORMATION requested = DACL_SECURITY_INFORMATION;
+    GetUserObjectSecurity(desktop.value, &requested, nullptr, 0, &size);
+    if (!size || size > 65536) throw std::runtime_error("invalid owned desktop descriptor size");
+    std::vector<BYTE> descriptor(size);
+    require(GetUserObjectSecurity(desktop.value, &requested, descriptor.data(), size, &size), "owned desktop descriptor");
+    PACL original = nullptr;
+    BOOL present = FALSE, defaulted = FALSE;
+    require(GetSecurityDescriptorDacl(descriptor.data(), &present, &original, &defaulted), "owned desktop DACL");
+    if (!present || !original) throw std::runtime_error("owned desktop has no protected DACL");
+    EXPLICIT_ACCESS_W entry{};
+    entry.grfAccessPermissions = GENERIC_ALL;
+    entry.grfAccessMode = GRANT_ACCESS;
+    entry.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    entry.Trustee.TrusteeType = TRUSTEE_IS_UNKNOWN;
+    entry.Trustee.ptstrName = reinterpret_cast<LPWSTR>(package);
+    PACL expanded = nullptr;
+    const DWORD code = SetEntriesInAclW(1, &entry, original, &expanded);
+    if (code != ERROR_SUCCESS) { SetLastError(code); require(FALSE, "owned desktop package grant"); }
+    auto local_free = [](void* value) { LocalFree(value); };
+    std::unique_ptr<void, decltype(local_free)> owned(expanded, local_free);
+    SECURITY_DESCRIPTOR replacement{};
+    require(InitializeSecurityDescriptor(&replacement, SECURITY_DESCRIPTOR_REVISION), "owned desktop replacement");
+    require(SetSecurityDescriptorDacl(&replacement, TRUE, expanded, FALSE), "owned desktop replacement DACL");
+    require(SetUserObjectSecurity(desktop.value, &requested, &replacement), "owned desktop package access");
+}
+
+static int host_create_policy(const wchar_t* policy_path) {
+    Handle host;
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &host.value), "policy host token");
+    const auto host_kind = information(host.value, TokenIsAppContainer);
+    if (*reinterpret_cast<const DWORD*>(host_kind.data())) throw std::runtime_error("policy controller requires a normal host token");
+    Handle policy_file;
+    policy_file.value = CreateFileW(policy_path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    require(policy_file.value != INVALID_HANDLE_VALUE, "policy input");
+    LARGE_INTEGER length{};
+    require(GetFileSizeEx(policy_file.value, &length), "policy input size");
+    if (length.QuadPart <= 0 || length.QuadPart > 1024 * 1024) throw std::runtime_error("invalid policy input size");
+    std::vector<BYTE> policy(static_cast<size_t>(length.QuadPart));
+    DWORD read = 0;
+    require(ReadFile(policy_file.value, policy.data(), static_cast<DWORD>(policy.size()), &read, nullptr), "policy input read");
+    if (read != policy.size()) throw std::runtime_error("short policy input");
+    struct Module {
+        HMODULE value = nullptr;
+        ~Module() { if (value) FreeLibrary(value); }
+    } module;
+    module.value = LoadLibraryExW(L"processmodel.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    require(module.value != nullptr, "processmodel library");
+    using CreateEnvironment = HRESULT(WINAPI*)(LPCVOID, DWORD, DWORD, HANDLE*);
+    using CloseEnvironment = void(WINAPI*)(HANDLE);
+    const FARPROC create_address = GetProcAddress(module.value, "CreateProcessSecurityEnvironment");
+    const FARPROC close_address = GetProcAddress(module.value, "CloseProcessSecurityEnvironment");
+    if (!create_address || !close_address) throw std::runtime_error("native security environment API unavailable");
+    CreateEnvironment create = nullptr;
+    CloseEnvironment close = nullptr;
+    static_assert(sizeof(create) == sizeof(create_address));
+    static_assert(sizeof(close) == sizeof(close_address));
+    std::memcpy(&create, &create_address, sizeof(create));
+    std::memcpy(&close, &close_address, sizeof(close));
+    struct Environment {
+        HANDLE value = nullptr;
+        CloseEnvironment close = nullptr;
+        ~Environment() { if (value) close(value); }
+    } environment;
+    environment.close = close;
+    const HRESULT created = create(policy.data(), static_cast<DWORD>(policy.size()), 0, &environment.value);
+    if (FAILED(created)) throw std::runtime_error("create native policy HRESULT: " + std::to_string(static_cast<unsigned long>(created)));
+    if (!environment.value) throw std::runtime_error("native policy returned no handle");
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    if (!size || size > 65536) throw std::runtime_error("invalid policy attribute size");
+    std::vector<BYTE> storage(size);
+    auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+    require(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "policy attributes");
+    if (!UpdateProcThreadAttribute(attributes, 0, 35 | 0x00020000, &environment.value, sizeof(environment.value), nullptr, nullptr)) {
+        const DWORD code = GetLastError(); DeleteProcThreadAttributeList(attributes); SetLastError(code);
+        require(FALSE, "source native policy attribute");
+    }
+    wchar_t image[32768]{}, workspace[32768]{};
+    require(GetModuleFileNameW(nullptr, image, 32768) != 0, "policy source image");
+    const DWORD workspace_size = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", workspace, 32768);
+    if (!workspace_size || workspace_size >= 32768) throw std::runtime_error("missing policy task workspace");
+    const auto command = L"\"" + std::wstring(image) + L"\" inspect-files";
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(0);
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = static_cast<DWORD>(sizeof(startup));
+    startup.lpAttributeList = attributes;
+    PROCESS_INFORMATION source{};
+    // The source is never resumed and cannot touch task files. Its primary
+    // token gives the exact identity of this newly created native policy.
+    const BOOL launched = CreateProcessW(image, mutable_command.data(), nullptr, nullptr, FALSE,
+        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, workspace, &startup.StartupInfo, &source);
+    const DWORD launch_error = launched ? 0 : GetLastError();
+    DeleteProcThreadAttributeList(attributes);
+    SetLastError(launch_error);
+    require(launched, "suspended native policy source");
+    Handle process, thread, token;
+    process.value = source.hProcess;
+    thread.value = source.hThread;
+    require(OpenProcessToken(process.value, TOKEN_QUERY, &token.value), "native policy source token");
+    contained(token.value);
+    const auto package = information(token.value, TokenAppContainerSid);
+    const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
+    grant_private_desktop(sid);
+    LPWSTR package_text = nullptr;
+    require(ConvertSidToStringSidW(sid, &package_text), "native policy package SID");
+    auto local_free = [](void* value) { LocalFree(value); };
+    std::unique_ptr<void, decltype(local_free)> owned_package(package_text, local_free);
+    const auto pid = std::to_wstring(source.dwProcessId);
+    const int result = host_recreate(pid.c_str(), package_text, environment.value);
+    require(TerminateProcess(process.value, 0), "suspended source termination");
+    if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("suspended source wait failed");
+    return result;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-create-policy") return host_create_policy(argv[2]);
         if (argc == 3 && std::wstring(argv[1]) == L"host-recreate") return host_recreate(argv[2]);
         if (argc == 2 && std::wstring(argv[1]) == L"hold") return hold_environment();
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();

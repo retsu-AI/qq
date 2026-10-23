@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from '@microsoft/mxc-sdk/v1';
+import { encodeNativePolicy } from './windows-native-policy-probe.mjs';
 
 assert.equal(process.platform, 'win32');
 // The C# launcher verifies the exact primary token before creating this process.
@@ -175,6 +176,22 @@ async function runWithRecreatedToken(request) {
     fs.writeFileSync(stopPath, 'stop');
     const source = await sourceRun;
     assert.equal(source.exitCode, 0, 'source policy must settle after recreation');
+  }
+}
+
+async function runWithNativePolicy(request) {
+  const policyPath = path.join(softwareRoot, 'native-policy.bin');
+  fs.writeFileSync(policyPath, encodeNativePolicy(request));
+  try {
+    const { stdout, stderr } = await execFileAsync(desktopHelper, [
+      restrictedHelper, 'host-create-policy', policyPath, writeSid,
+    ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
+      env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
+        QQ_NATIVE_TASK_WORKSPACE: workspace } });
+    return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
+  } catch (error) {
+    return { stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message),
+      exitCode: Number.isInteger(error.code) ? error.code : -1, timedOut: error.killed === true, warnings: [] };
   }
 }
 
@@ -375,6 +392,7 @@ cases.push({ name: 'deny-volume-root-private-openssl-config', payload: true,
   command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
   environment: { ...environment, OPENSSL_CONF: opensslConfig } });
 cases.push({ name: 'restricted-host-recreated-native-file-access', payload: false, recreateToken: true, command: relayCommand });
+cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, nativePolicy: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -400,7 +418,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? runWithNativePolicy : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

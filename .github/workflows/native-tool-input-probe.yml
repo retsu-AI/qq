@@ -83,7 +83,7 @@ jobs:
         run: |
           $probeDirectory = Join-Path $env:TEMP 'qq-mxc-api-probe'
           New-Item -ItemType Directory -Force $probeDirectory | Out-Null
-          npm install --prefix $probeDirectory --ignore-scripts --no-audit --no-fund @microsoft/mxc-sdk@1.0.1
+          npm install --prefix $probeDirectory --ignore-scripts --no-audit --no-fund @microsoft/mxc-sdk@1.0.1 flatbuffers@25.9.23
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Only this disposable task tree receives the ordinary restricting
           # SID. Installed tools, OS roots, and the outside canaries do not.
@@ -101,6 +101,7 @@ jobs:
           $env:QQ_NATIVE_WRITE_SCOPE = $writeScope
           $env:QQ_NATIVE_WRITE_SID = $writeSid
           Copy-Item .github/scripts/windows-native-api-probe.mjs $probeDirectory
+          Copy-Item .github/scripts/windows-native-policy-probe.mjs $probeDirectory
           Copy-Item .github/scripts/windows-restricted-child.cpp $probeDirectory
           Copy-Item .github/scripts/windows-private-desktop.cpp $probeDirectory
           Copy-Item .github/scripts/windows-native-api-probe-host.mjs $probeDirectory
