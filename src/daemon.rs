@@ -94,12 +94,12 @@ pub async fn command(
             }
         },
         cli::DaemonCommand::Stop => match stop(&paths).await? {
-            Some(pid) => println!("qq daemon stopped (pid {pid})"),
-            None => println!("qq daemon is not running"),
+            Stopped::Host(pid) => print_stopped(pid),
+            Stopped::NotRunning => println!("qq daemon is not running"),
         },
         cli::DaemonCommand::Restart(listen) => {
-            if let Some(pid) = stop(&paths).await? {
-                println!("qq daemon stopped (pid {pid})");
+            if let Stopped::Host(pid) = stop(&paths).await? {
+                print_stopped(pid);
             }
             match start_detached(&paths, &Listen::from(listen), overrides).await? {
                 Started::New(connection) | Started::Existing(connection) => println!(
@@ -137,6 +137,13 @@ impl Host {
     }
 }
 
+fn print_stopped(pid: Option<u32>) {
+    match pid {
+        Some(pid) => println!("qq daemon stopped (pid {pid})"),
+        None => println!("qq daemon stopped"),
+    }
+}
+
 /// Serves the user-scoped server from this process until it is asked to stop
 /// or receives SIGTERM, SIGINT or Ctrl-C.
 pub async fn host(
@@ -153,9 +160,14 @@ pub async fn host(
         .with_version(cli::BUILD_VERSION)
         .with_allowed_origins(server::AllowedOrigins::new(&listen.allow_origins)?)
         .with_stop_route();
-    // A previous host may have released the listener but still be closing
-    // its store; wait for it rather than failing with a busy store.
-    let host_lock = server::acquire_host_lock(paths, HANDOFF_TIMEOUT).await?;
+    let host_lock = match take_host_lock(paths).await? {
+        HostLock::Taken(lock) => lock,
+        HostLock::Running(connection) => {
+            reject_read_approvals_for_existing_server(&overrides.approved_read_images)?;
+            kind.already_running(&connection);
+            return Ok(());
+        }
+    };
     let reservation = match server::reserve(options).await? {
         server::ReserveOutcome::Existing(connection) => {
             reject_read_approvals_for_existing_server(&overrides.approved_read_images)?;
@@ -194,6 +206,34 @@ pub async fn host(
     stopped?;
     shutdown?;
     Ok(())
+}
+
+enum HostLock {
+    Taken(server::HostLock),
+    Running(server::ServerConnection),
+}
+
+/// Takes the host lock, or finds the healthy server that holds it. A host
+/// keeps the lock for its whole life, so a busy lock alone does not mean the
+/// previous host is closing: one that still answers discovery is running and
+/// is reported at once. One that does not is closing its store, and is
+/// waited for rather than failing with a busy store.
+async fn take_host_lock(paths: &server::ServerPaths) -> Result<HostLock, Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + HANDOFF_TIMEOUT;
+    loop {
+        match server::acquire_host_lock(paths, Duration::ZERO).await {
+            Ok(lock) => return Ok(HostLock::Taken(lock)),
+            Err(server::ServerError::HostStillStopping) => {}
+            Err(error) => return Err(error.into()),
+        }
+        if let Some(connection) = server::discover_at(paths).await? {
+            return Ok(HostLock::Running(connection));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(server::ServerError::HostStillStopping.into());
+        }
+        tokio::time::sleep(START_POLL).await;
+    }
 }
 
 /// The approval wait comes from global and managed configuration only. A
@@ -313,12 +353,46 @@ fn daemon_arguments(listen: &Listen, overrides: &CliOverrides) -> Vec<String> {
     arguments
 }
 
-/// Asks the running daemon to stop and waits until it has closed its store.
-/// Returns its pid, or `None` when no daemon was running.
-async fn stop(paths: &server::ServerPaths) -> Result<Option<u32>, Box<dyn Error>> {
-    let Some(connection) = server::discover_at(paths).await? else {
-        return Ok(None);
-    };
+enum Stopped {
+    /// No host was running or closing.
+    NotRunning,
+    /// A host stopped; its pid is known when this call asked it to stop,
+    /// not when it was already closing.
+    Host(Option<u32>),
+}
+
+/// Asks the running daemon to stop and returns once it has closed its store.
+/// A host that is already closing (it stopped listening but still holds the
+/// store) is waited for too, so the store is free whenever this succeeds.
+async fn stop(paths: &server::ServerPaths) -> Result<Stopped, Box<dyn Error>> {
+    let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
+    let mut closing = false;
+    loop {
+        if let Some(connection) = server::discover_at(paths).await? {
+            return stop_serving(paths, connection).await;
+        }
+        match server::acquire_host_lock(paths, Duration::ZERO).await {
+            // Dropped at once: holding it would block the next host.
+            Ok(_free) if closing => return Ok(Stopped::Host(None)),
+            Ok(_free) => return Ok(Stopped::NotRunning),
+            Err(server::ServerError::HostStillStopping) => closing = true,
+            Err(error) => return Err(error.into()),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "qq daemon did not stop within {}s",
+                STOP_TIMEOUT.as_secs()
+            ))
+            .into());
+        }
+        tokio::time::sleep(START_POLL).await;
+    }
+}
+
+async fn stop_serving(
+    paths: &server::ServerPaths,
+    connection: server::ServerConnection,
+) -> Result<Stopped, Box<dyn Error>> {
     let stopping = qq_client::SessionClient::new(connection)?
         .request_stop()
         .await
@@ -336,7 +410,7 @@ async fn stop(paths: &server::ServerPaths) -> Result<Option<u32>, Box<dyn Error>
         ))
         .into());
     }
-    Ok(Some(stopping.pid))
+    Ok(Stopped::Host(Some(stopping.pid)))
 }
 
 fn log_path(paths: &server::ServerPaths) -> PathBuf {

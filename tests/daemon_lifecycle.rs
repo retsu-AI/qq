@@ -268,3 +268,57 @@ async fn an_interactive_server_refuses_to_be_stopped_by_the_daemon_commands() {
     );
     embedded.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_second_foreground_host_reports_the_running_daemon_at_once() {
+    let home = Home::new();
+    let pid = pid_in(stdout(&home.run(&["daemon", "run", "--detach"]).await).trim_end());
+    let connection = qq_server::discover_at(&home.server_paths())
+        .await
+        .unwrap()
+        .unwrap();
+    for (args, expected) in [
+        (
+            &["daemon", "run"][..],
+            format!("qq daemon already running at {}\n", connection.address()),
+        ),
+        (
+            &["serve"][..],
+            format!("qq server already running at {}\n", connection.address()),
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let output = tokio::time::timeout(Duration::from_secs(10), home.command(args).output())
+            .await
+            .unwrap_or_else(|_| panic!("`qq {}` waited on the running daemon", args.join(" ")))
+            .unwrap();
+        assert_eq!(stdout(&output), expected);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+    assert!(alive(pid));
+    stdout(&home.run(&["daemon", "stop"]).await);
+}
+
+#[tokio::test]
+async fn stop_waits_for_a_host_that_is_already_closing() {
+    // A host that stopped listening but still holds its runtime: discovery
+    // finds nothing, yet the store is not free until the host lock drops.
+    let home = Home::new();
+    let paths = home.server_paths();
+    let closing = qq_server::acquire_host_lock(&paths, Duration::ZERO)
+        .await
+        .unwrap();
+    let mut stop = home.command(&["daemon", "stop"]).spawn().unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), stop.wait())
+            .await
+            .is_err(),
+        "`qq daemon stop` returned while a host was still closing"
+    );
+    drop(closing);
+    let output = tokio::time::timeout(COMMAND_TIMEOUT, stop.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stdout(&output), "qq daemon stopped\n");
+}
