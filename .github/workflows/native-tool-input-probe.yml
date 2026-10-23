@@ -73,3 +73,13 @@ jobs:
           '@
           [System.Environment]::OSVersion.VersionString
           [NullSecurityProbe]::Read()
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Exercise desktop Auto with installed and copied tool controls
+        shell: pwsh
+        run: |
+          cargo build --locked -p qq-core --example command_owner
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --no-default-features -p qq --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
+          exit $LASTEXITCODE

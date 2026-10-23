@@ -33,6 +33,28 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
+    // Independent image-copy controls distinguish host ACL denial from loader
+    // and private-home requirements. These copies grant no host-directory access.
+    let tools = tool_versions.clone();
+    let control_source = source.clone();
+    tokio::task::spawn_blocking(move || {
+        for (program, path, _) in &tools {
+            if *program == "node" {
+                fs::copy(path, control_source.join("node-control.exe")).unwrap();
+            }
+            if *program == "cargo" {
+                let resolved = std::process::Command::new("rustup")
+                    .args(["which", "cargo"])
+                    .output()
+                    .unwrap();
+                assert!(resolved.status.success(), "{resolved:?}");
+                let executable = String::from_utf8(resolved.stdout).unwrap();
+                fs::copy(executable.trim(), control_source.join("cargo-control.exe")).unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
     fs::copy(
         std::env::current_exe().unwrap(),
         source.join("tool-probe.exe"),
@@ -354,6 +376,33 @@ fn installed_tool_probe() {
         }
         reports.push(report);
     }
+    let mut copied_tools = Vec::new();
+    for program in ["node", "cargo"] {
+        let path = std::env::current_dir()
+            .unwrap()
+            .join(format!("{program}-control.exe"));
+        let mut report = json!({
+            "program": program,
+            "version": tool_probe_output(
+                std::process::Command::new(&path)
+                    .stdin(std::process::Stdio::piped())
+                    .arg("--version")
+                    .output(),
+            ),
+        });
+        if program == "node" {
+            report["write_artifact"] = tool_probe_output(
+                std::process::Command::new(&path)
+                    .stdin(std::process::Stdio::piped())
+                    .args([
+                        "-e",
+                        "require('fs').writeFileSync('node-control-output.txt','node task output')",
+                    ])
+                    .output(),
+            );
+        }
+        copied_tools.push(report);
+    }
     let secret = input["secret"].as_str().unwrap();
     let null_device = match fs::OpenOptions::new().read(true).write(true).open("NUL") {
         Ok(_) => json!({"opened": true}),
@@ -363,6 +412,7 @@ fn installed_tool_probe() {
         "tool-probe-report.json",
         serde_json::to_vec_pretty(&json!({
             "tools": reports,
+            "copied_tools": copied_tools,
             "host_secret_readable": fs::File::open(secret).is_ok(),
             "null_device": null_device,
         }))
