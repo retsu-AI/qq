@@ -347,8 +347,8 @@ const MAX_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const CONTEXT_PRUNE_KEEP_TURNS: usize = 4;
 /// Longest argument excerpt embedded in a pruned-result stub.
 const CONTEXT_PRUNE_STUB_ARGUMENT_BYTES: usize = 256;
-/// Compaction summaries retained per session, newest first. History is kept
-/// (not deleted eagerly) so a bad compaction can be rolled back later.
+/// Recent rollback checkpoints, in addition to the session prefix and run
+/// markers required to replay their baseline.
 const COMPACTION_HISTORY_ROWS: u32 = 3;
 /// Assemblies at or below this size are compacted without a shrinkage check:
 /// the structured summary's fixed framing can legitimately exceed a tiny

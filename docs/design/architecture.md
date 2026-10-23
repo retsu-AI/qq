@@ -1559,11 +1559,13 @@ read to; an unbounded one covers everything settled; an in-run marker names
 the run and the turn ordinal it covers, and assembly renders that run as
 prompt, summary, then its later turns verbatim). A between-run marker
 supersedes any in-run markers behind its cutoff; rollback pops the newest
-marker of either kind. Three compactions are retained per session for
-`RollbackCompaction`, and a summary that is empty, missing a required section,
-or fails to shrink the measured assembly settles as a policy failure while the
-prior compaction stays in force. `search_history` is the recall path that makes
-aggressive compaction safe: session runs may search the complete durable
+marker of either kind. The three newest checkpoints are retained along with
+the session prefix and per-run markers needed to replay their baseline, so
+compacting one run cannot evict another run's live summary. Superseded versions
+and runs covered by that baseline prefix are reclaimed. A summary that is empty,
+missing a required section, or fails to shrink the measured assembly settles as
+a policy failure while the prior compaction stays in force. `search_history`
+is the recall path that makes aggressive compaction safe: session runs may search the complete durable
 transcript, including spans compaction replaced, for bounded cited excerpts.
 Direct runs have no durable transcript and do not see the tool.
 
