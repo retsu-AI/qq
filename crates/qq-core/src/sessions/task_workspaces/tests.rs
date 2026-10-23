@@ -231,6 +231,229 @@ async fn restored_goal_task_respects_tightened_publication_byte_limit() {
 }
 
 #[tokio::test]
+async fn goal_check_imports_published_ignored_outputs_from_current_source() {
+    let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+        .await
+        .unwrap();
+    let private = task.scope.workspace.path.clone();
+    std::fs::write(private.join(".gitignore"), "*.local\n").unwrap();
+    std::fs::write(private.join("requested.local"), "published output").unwrap();
+    std::fs::write(private.join("removed.local"), "published then removed").unwrap();
+    std::fs::remove_file(private.join("vendor/policy.md")).unwrap();
+    let loader: Arc<dyn RuntimeLoader> = Arc::new(PublicationLoader {
+        protect_pack: false,
+    });
+    let (runtime, session) = open_session(root.path(), &source, loader).await;
+    publish_fixture(task.clone(), &runtime, session)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(source.join("requested.local")).unwrap(),
+        "published output"
+    );
+    assert!(!source.join("vendor/policy.md").exists());
+    let goal = qq_protocol::GoalId::generate().unwrap();
+    save(
+        &runtime.inner.store,
+        format!("{GOAL_PREFIX}{goal}"),
+        task.owner.to_string(),
+    )
+    .await
+    .unwrap();
+    // Verification must import source bytes, never revive the goal's private
+    // tree or its unpublished recreation of a successfully deleted input.
+    std::fs::write(private.join("requested.local"), "private stale").unwrap();
+    std::fs::write(private.join("vendor/policy.md"), "private recreation").unwrap();
+    std::fs::write(source.join("requested.local"), "current source").unwrap();
+    std::fs::remove_file(source.join("removed.local")).unwrap();
+    let workspace = runtime
+        .inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            session_workspace(connection, session)
+        })
+        .await
+        .unwrap();
+    let mut claim = super::super::settlement::recovery_claim(RunIdentity {
+        workspace_id: workspace,
+        session_id: session,
+        run_id: RunId::generate().unwrap(),
+        command_id: CommandId::generate().unwrap(),
+        kind: RunKind::GoalCheck,
+        child: false,
+    });
+    claim.workspace = source.to_string_lossy().into_owned();
+    claim.approval_mode = ApprovalMode::Auto;
+    claim.origin = Some(qq_protocol::RunOrigin::GoalCheck {
+        goal_id: goal,
+        revision: 1,
+    });
+    let mut resources = super::super::execution::RunResources::default();
+    prepare_check(
+        &runtime.inner,
+        &claim,
+        &RunCancellation::new(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        &mut resources,
+    )
+    .await
+    .unwrap();
+    let checked = resources.task_scope().expect("check has a private scope");
+    assert_ne!(checked.workspace.path, private);
+    assert_eq!(
+        std::fs::read_to_string(checked.workspace.path.join("requested.local")).unwrap(),
+        "current source"
+    );
+    assert!(!checked.workspace.path.join("vendor/policy.md").exists());
+    assert!(!checked.workspace.path.join("removed.local").exists());
+    assert_eq!(
+        std::fs::read_to_string(private.join("requested.local")).unwrap(),
+        "private stale"
+    );
+    assert_eq!(
+        read(&runtime.inner.store, format!("{GOAL_PREFIX}{goal}"))
+            .await
+            .unwrap(),
+        Some(task.owner.to_string()),
+        "verification must not replace the goal's private-tree owner"
+    );
+    std::fs::remove_dir_all(&private).unwrap();
+    claim.identity.run_id = RunId::generate().unwrap();
+    let mut next_resources = super::super::execution::RunResources::default();
+    prepare_check(
+        &runtime.inner,
+        &claim,
+        &RunCancellation::new(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        &mut next_resources,
+    )
+    .await
+    .expect("published source verification does not require the old private tree");
+    let next = next_resources.task_scope().unwrap();
+    assert_ne!(next.workspace.path, checked.workspace.path);
+    assert_eq!(
+        std::fs::read_to_string(next.workspace.path.join("requested.local")).unwrap(),
+        "current source"
+    );
+    assert_eq!(
+        read(&runtime.inner.store, format!("{GOAL_PREFIX}{goal}"))
+            .await
+            .unwrap(),
+        Some(task.owner.to_string())
+    );
+    runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn goal_check_filters_current_pack_protections_and_refuses_invalid_publication_provenance() {
+    for scenario in ["protected", "outer-source", "embedded-source", "scope"] {
+        let (root, source, task) = tokio::task::spawn_blocking(publication_fixture)
+            .await
+            .unwrap();
+        std::fs::write(task.scope.workspace.path.join(".gitignore"), "*.local\n").unwrap();
+        std::fs::write(
+            task.scope.workspace.path.join("vendor/extra.local"),
+            "published pack input",
+        )
+        .unwrap();
+        let loader: Arc<dyn RuntimeLoader> = Arc::new(PublicationLoader {
+            protect_pack: false,
+        });
+        let (runtime, session) = open_session(root.path(), &source, loader).await;
+        publish_fixture(task.clone(), &runtime, session)
+            .await
+            .unwrap();
+        let goal = qq_protocol::GoalId::generate().unwrap();
+        save(
+            &runtime.inner.store,
+            format!("{GOAL_PREFIX}{goal}"),
+            task.owner.to_string(),
+        )
+        .await
+        .unwrap();
+        let key = format!("{RECORD_PREFIX}{}", task.owner);
+        let saved = read(&runtime.inner.store, key.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut record: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        match scenario {
+            "outer-source" => {
+                record["source"]["path"] = serde_json::json!(source.join("different"))
+            }
+            "embedded-source" => {
+                record["workspace"]["source"]["path"] = serde_json::json!(source.join("different"))
+            }
+            "scope" => record["scope"]["workspace"]["path"] = serde_json::json!(source),
+            "protected" => {}
+            _ => unreachable!(),
+        }
+        save(&runtime.inner.store, key, record.to_string())
+            .await
+            .unwrap();
+        let workspace = runtime
+            .inner
+            .store
+            .call(Priority::AwaitControl, move |connection| {
+                session_workspace(connection, session)
+            })
+            .await
+            .unwrap();
+        let mut claim = super::super::settlement::recovery_claim(RunIdentity {
+            workspace_id: workspace,
+            session_id: session,
+            run_id: RunId::generate().unwrap(),
+            command_id: CommandId::generate().unwrap(),
+            kind: RunKind::GoalCheck,
+            child: false,
+        });
+        claim.workspace = source.to_string_lossy().into_owned();
+        claim.approval_mode = ApprovalMode::Auto;
+        claim.origin = Some(qq_protocol::RunOrigin::GoalCheck {
+            goal_id: goal,
+            revision: 1,
+        });
+        let plan = PublicationLoader {
+            protect_pack: scenario == "protected",
+        }
+        .load(task.source_request.clone())
+        .await
+        .unwrap()
+        .plan;
+        let prepared = prepare(&runtime.inner, &claim, plan, &RunCancellation::new(), None).await;
+        runtime.shutdown().await.unwrap();
+        if scenario == "protected" {
+            let checked = prepared.unwrap().unwrap();
+            assert!(
+                !checked
+                    .scope
+                    .workspace
+                    .path
+                    .join("vendor/extra.local")
+                    .exists()
+            );
+            assert!(
+                !checked
+                    .scope
+                    .workspace
+                    .path
+                    .join("vendor/policy.md")
+                    .exists()
+            );
+            assert_eq!(
+                std::fs::read_to_string(source.join("vendor/extra.local")).unwrap(),
+                "published pack input"
+            );
+        } else {
+            assert!(
+                prepared.is_err(),
+                "{scenario}: invalid published authority was accepted"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn restored_goal_task_respects_tightened_publication_entry_limit() {
     restored_goal_task_respects_tightened_publication_limits(false).await;
 }
@@ -400,7 +623,7 @@ fn task_selection_stops_inside_a_directory_listing() {
     for index in 0..128 {
         std::fs::write(root.path().join(format!("file-{index}")), "input").unwrap();
     }
-    let workspace = Workspace::open(root.path()).unwrap();
+    let workspace = Workspace::open(&root.path().canonicalize().unwrap()).unwrap();
     let checks = Cell::new(0usize);
     let stopped = || {
         checks.set(checks.get() + 1);

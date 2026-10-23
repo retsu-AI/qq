@@ -641,7 +641,7 @@ fn read_file(
     }))
 }
 
-fn validate_path(path: &Path) -> Result<(), TaskWorkspaceError> {
+pub(crate) fn validate_path(path: &Path) -> Result<(), TaskWorkspaceError> {
     if path.as_os_str().is_empty()
         || path.as_os_str().len() > 4096
         || path

@@ -305,6 +305,8 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::task_selection_stops_inside_a_directory_listing
           bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_byte_limit
           bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::restored_goal_task_respects_tightened_publication_entry_limit
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_imports_published_ignored_outputs_from_current_source
+          bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::goal_check_filters_current_pack_protections_and_refuses_invalid_publication_provenance
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_rejects_escaping_paths_trust_inputs_and_replaced_roots
           bash .github/scripts/test-exact.sh task_workspace::tests::detached_task_workspace_is_shared_by_builtin_tools_and_native_commands
           bash .github/scripts/test-exact.sh task_workspace::tests::publication_preserves_other_source_edits_and_can_resume_from_a_saved_record

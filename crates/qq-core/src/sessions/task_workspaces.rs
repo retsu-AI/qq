@@ -268,6 +268,24 @@ pub(super) fn publication_authorized(
 }
 
 impl TaskRecord {
+    fn validate_source(
+        &mut self,
+        source: &NativeDirectoryGrant,
+        protections: &TaskWorkspaceSource,
+    ) -> Result<(), TaskExecutionError> {
+        if self.source.path != source.path
+            || self.source.identity != source.identity
+            || self.workspace.path() != self.scope.workspace.path
+            || self.workspace.directory_grant().identity != self.scope.workspace.identity
+        {
+            return Err(TaskExecutionError::Invalid(
+                "task record does not match this project",
+            ));
+        }
+        self.workspace.protect_source(protections)?;
+        Ok(())
+    }
+
     fn workspace_limits(&self) -> TaskWorkspaceLimits {
         self.workspace.limits()
     }
@@ -322,6 +340,29 @@ pub(super) async fn prepare(
             "existing task record is missing",
         ));
     }
+    // A verifier gets fresh source bytes, including ignored outputs recorded
+    // by the goal's last publication. It never resumes that private tree or
+    // replaces the goal's owner with the verifier's own fresh task owner.
+    let published = match claimed.origin.as_ref() {
+        Some(qq_protocol::RunOrigin::GoalCheck { goal_id, .. }) if publisher => {
+            match read(&inner.store, format!("{GOAL_PREFIX}{goal_id}")).await? {
+                Some(owner) => {
+                    let owner: RunId = owner.parse().map_err(|_| {
+                        TaskExecutionError::Invalid("invalid goal publication owner")
+                    })?;
+                    Some(
+                        read(&inner.store, format!("{RECORD_PREFIX}{owner}"))
+                            .await?
+                            .ok_or(TaskExecutionError::Invalid(
+                                "goal publication record is missing",
+                            ))?,
+                    )
+                }
+                None => None,
+            }
+        }
+        _ => None,
+    };
     let source_request = RuntimeLoadRequest {
         execution_workspace: None,
         workspace: claimed.workspace.clone(),
@@ -383,6 +424,7 @@ pub(super) async fn prepare(
             path: source.path().to_owned(),
             identity: NativeWorkspaceIdentity::held(source.root())?,
         };
+        let source_authority = TaskWorkspaceSource::from_plan(&source_plan)?;
         let mut record: TaskRecord = match saved {
             Some(saved) => serde_json::from_str(&saved)?,
             None => {
@@ -399,6 +441,32 @@ pub(super) async fn prepare(
                     files_until(&source, policy.limits, true, &is_stopped)?
                         .into_iter()
                         .collect();
+                if let Some(published) = published {
+                    let mut published: TaskRecord = serde_json::from_str(&published)?;
+                    published.validate_source(&source_grant, &source_authority)?;
+                    for path in published.workspace.input_paths() {
+                        if is_stopped() {
+                            return Err(TaskExecutionError::Stopped);
+                        }
+                        crate::task_workspace::validate_path(path)?;
+                        if source
+                            .check_write_path(&path.to_string_lossy(), path)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        match source.root().symlink_metadata(path) {
+                            Ok(_) => {
+                                inputs.insert(path.clone());
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                            Err(error) => return Err(error.into()),
+                        }
+                        if inputs.len() > policy.limits.max_entries {
+                            return Err(TaskWorkspaceError::LimitExceeded.into());
+                        }
+                    }
+                }
                 // Explicit human inputs override ignore rules. Editable files
                 // get private copies and publication baselines; protected
                 // configuration remains source authority and is only attached.
@@ -414,7 +482,7 @@ pub(super) async fn prepare(
                     }
                 }
                 let workspace = TaskWorkspace::import_until(
-                    &TaskWorkspaceSource::from_plan(&source_plan)?,
+                    &source_authority,
                     &policy.directory.path.join(owner.to_string()),
                     &inputs.into_iter().collect::<Vec<_>>(),
                     policy.limits,
@@ -433,24 +501,13 @@ pub(super) async fn prepare(
                 }
             }
         };
-        if record.source.path != source_grant.path
-            || record.source.identity != source_grant.identity
-            || record.workspace.path() != record.scope.workspace.path
-            || record.workspace.directory_grant().identity != record.scope.workspace.identity
-        {
-            return Err(TaskExecutionError::Invalid(
-                "task record does not match this project",
-            ));
-        }
+        record.validate_source(&source_grant, &source_authority)?;
         // A persisted tree retains work, not a permanent grant. Reapply the
         // trusted host's current limits and readable roots on each admission.
         record.scope.read_only = policy.read_only;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
         record.workspace.apply_limits(policy.limits)?;
-        record
-            .workspace
-            .protect_source(&TaskWorkspaceSource::from_plan(&source_plan)?)?;
         let held = Workspace::open(record.workspace.path())?;
         record
             .scope

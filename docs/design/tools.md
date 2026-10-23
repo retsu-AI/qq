@@ -135,7 +135,10 @@ cancelled. File installation remains atomic per file; an I/O failure can report
 partially applied outputs. A coordinator restart during publication does not
 attest task completion. Failed work retains the private task tree.
 Completion checks acquire the source workspace exclusion before importing
-the published artifact and execute through the same durable worker; their file
+the published artifact, including ignored paths from the validated publication
+record. They copy current source bytes, preserve source deletions and current
+protections, and do not require or reuse the old private tree. They execute
+through the same durable worker; their file
 changes are not published. Successive goal-origin runs reuse the same persisted
 private tree, retaining caches and unpublished files; ordinary prompts do not
 revive that goal tree. Compaction does not create task copies. Full retains host
