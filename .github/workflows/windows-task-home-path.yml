@@ -1,0 +1,34 @@
+name: Windows task home path regression
+on:
+  push:
+    branches: [fix/windows-task-home-path]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  profile-paths:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-task-home-path-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Exercise canonical task profile paths and called batch
+        shell: bash
+        run: |
+          selector=command_owner::environment::tests::windows_task_home_supports_shell_profile_paths_and_called_batches
+          cargo test --locked -p qq-core "$selector" -- --list | tr -d '\r' | grep -Fx "$selector: test"
+          cargo test --locked -p qq-core "$selector" -- --exact --nocapture
+      - name: Preserve names requiring verbatim path semantics
+        if: always()
+        shell: bash
+        run: cargo test --locked -p qq-core command_owner::environment::tests::windows_task_home_preserves_extended_only_names -- --exact --nocapture

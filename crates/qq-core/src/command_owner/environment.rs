@@ -262,6 +262,102 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_supports_shell_profile_paths_and_called_batches() {
+        use std::{fs, os::windows::process::CommandExt as _, process::Command};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("task space 日本語");
+        let home = workspace.join("profile space 日本語");
+        for directory in ["tmp", "AppData/Local", "AppData/Roaming"] {
+            fs::create_dir_all(home.join(directory)).unwrap();
+        }
+        let canonical = home.canonicalize().unwrap();
+        assert!(matches!(
+            canonical.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+        ));
+        let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+        let environment = NativeEnvironment::from_values([
+            ("SYSTEMROOT".to_owned(), system.clone()),
+            (
+                "PATH".to_owned(),
+                std::path::Path::new(&system)
+                    .join("System32")
+                    .into_os_string(),
+            ),
+        ])
+        .unwrap()
+        .with_task_home(&canonical)
+        .unwrap();
+        let variables = [
+            ("HOME", ""),
+            ("USERPROFILE", ""),
+            ("TMPDIR", "tmp"),
+            ("TEMP", "tmp"),
+            ("TMP", "tmp"),
+            ("APPDATA", "AppData/Roaming"),
+            ("LOCALAPPDATA", "AppData/Local"),
+        ];
+        let mut script = String::new();
+        for (name, _) in variables {
+            script.push_str(&format!(
+                ">\"%{name}%/proof-{name}\" echo private-{name} & "
+            ));
+        }
+        fs::write(
+            workspace.join("owned child.cmd"),
+            "@echo off\r\n>called.txt echo called-batch\r\nexit /b 0\r\n",
+        )
+        .unwrap();
+        script.push_str("call \"owned child.cmd\"");
+        let mut command = Command::new(std::path::Path::new(&system).join("System32/cmd.exe"));
+        command
+            .env_clear()
+            .current_dir(&workspace)
+            .raw_arg(format!("/D /S /C \"{script}\""));
+        for (name, _) in &environment.0 {
+            command.env(name, environment.get(name).unwrap());
+        }
+        let output = command.output().unwrap();
+        let proofs = variables.map(|(name, directory)| {
+            let content = fs::read_to_string(home.join(directory).join(format!("proof-{name}")))
+                .map(|content| content.trim().to_owned());
+            (name, content)
+        });
+        let called = fs::read_to_string(workspace.join("called.txt"));
+        eprintln!("profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}");
+        assert!(
+            output.status.success()
+                && proofs.iter().all(|(name, result)| {
+                    result
+                        .as_deref()
+                        .is_ok_and(|value| value == format!("private-{name}"))
+                })
+                && called
+                    .as_deref()
+                    .is_ok_and(|value| value.trim() == "called-batch"),
+            "canonical task home must support ordinary shell path suffixes and called batches",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_preserves_extended_only_names() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        for path in [r"\\?\C:\task.", r"\\?\C:\task ", r"\\?\C:\NUL\task", &long] {
+            let home = std::path::Path::new(path);
+            let environment = NativeEnvironment::from_values([])
+                .unwrap()
+                .with_task_home(home)
+                .unwrap();
+            assert_eq!(environment.get("HOME"), Some(home.into()));
+            assert_eq!(environment.get("TMP"), Some(home.join("tmp").into()));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_values_round_trip_without_utf8_conversion() {
