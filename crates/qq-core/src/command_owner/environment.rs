@@ -111,13 +111,6 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
-            // Ordinary Windows tools append slash-separated names to these
-            // values. Keep verbatim syntax only when DOS paths change identity.
-            for (_, value) in &mut values {
-                *value = dunce::simplified(std::path::Path::new(value))
-                    .as_os_str()
-                    .to_owned();
-            }
             values
         };
         self.0.retain(|(name, _)| {
@@ -272,7 +265,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_task_home_supports_shell_profile_paths_and_called_batches() {
-        use std::{fs, os::windows::process::CommandExt as _, process::Command};
+        use std::{fs, os::windows::process::CommandExt as _, path::Path, process::Command};
 
         let fixture = tempfile::tempdir().unwrap();
         let workspace = fixture.path().join("task space 日本語");
@@ -286,19 +279,11 @@ mod tests {
             Some(std::path::Component::Prefix(prefix))
                 if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
         ));
-        let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
-        let environment = NativeEnvironment::from_values([
-            ("SYSTEMROOT".to_owned(), system.clone()),
-            (
-                "PATH".to_owned(),
-                std::path::Path::new(&system)
-                    .join("System32")
-                    .into_os_string(),
-            ),
-        ])
-        .unwrap()
-        .with_task_home(&canonical)
-        .unwrap();
+        assert!(matches!(
+            home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        ));
         let variables = [
             ("HOME", ""),
             ("USERPROFILE", ""),
@@ -308,35 +293,48 @@ mod tests {
             ("APPDATA", "AppData/Roaming"),
             ("LOCALAPPDATA", "AppData/Local"),
         ];
-        let mut script = String::new();
-        for (name, _) in variables {
-            script.push_str(&format!(
-                ">\"%{name}%/proof-{name}\" echo private-{name} & "
-            ));
-        }
-        fs::write(
-            workspace.join("owned child.cmd"),
-            "@echo off\r\n>called.txt echo called-batch\r\nexit /b 0\r\n",
-        )
-        .unwrap();
-        script.push_str("call \"owned child.cmd\"");
-        let mut command = Command::new(std::path::Path::new(&system).join("System32/cmd.exe"));
-        command
-            .env_clear()
-            .current_dir(&workspace)
-            .raw_arg(format!("/D /S /C \"{script}\""));
-        for (name, _) in &environment.0 {
-            command.env(name, environment.get(name).unwrap());
-        }
-        let output = command.output().unwrap();
-        let proofs = variables.map(|(name, directory)| {
-            let content = fs::read_to_string(home.join(directory).join(format!("proof-{name}")))
-                .map(|content| content.trim().to_owned());
-            (name, content)
-        });
-        let called = fs::read_to_string(workspace.join("called.txt"));
-        eprintln!("profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}");
-        assert!(
+        let exercise = |label: &str, task_home: &Path, prefix: &str| {
+            let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+            let environment = NativeEnvironment::from_values([
+                ("SYSTEMROOT".to_owned(), system.clone()),
+                (
+                    "PATH".to_owned(),
+                    Path::new(&system).join("System32").into_os_string(),
+                ),
+            ])
+            .unwrap()
+            .with_task_home(task_home)
+            .unwrap();
+            let mut script = prefix.to_owned();
+            for (name, _) in variables {
+                script.push_str(&format!(
+                    ">\"%{name}%/proof-{name}-{label}\" echo private-{name} & "
+                ));
+            }
+            fs::write(
+                workspace.join(format!("owned {label}.cmd")),
+                format!("@echo off\r\n>called-{label}.txt echo called-batch\r\nexit /b 0\r\n"),
+            )
+            .unwrap();
+            script.push_str(&format!("call \"owned {label}.cmd\""));
+            let raw = format!("/D /S /C \"{script}\"");
+            eprintln!("{label} raw cmd arguments: {raw:?}");
+            let mut command = Command::new(Path::new(&system).join("System32/cmd.exe"));
+            command.env_clear().current_dir(&workspace).raw_arg(raw);
+            for (name, _) in &environment.0 {
+                command.env(name, environment.get(name).unwrap());
+            }
+            let output = command.output().unwrap();
+            let proofs = variables.map(|(name, directory)| {
+                let content =
+                    fs::read_to_string(home.join(directory).join(format!("proof-{name}-{label}")))
+                        .map(|content| content.trim().to_owned());
+                (name, content)
+            });
+            let called = fs::read_to_string(workspace.join(format!("called-{label}.txt")));
+            eprintln!(
+                "{label} profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}"
+            );
             output.status.success()
                 && proofs.iter().all(|(name, result)| {
                     result
@@ -345,7 +343,19 @@ mod tests {
                 })
                 && called
                     .as_deref()
-                    .is_ok_and(|value| value.trim() == "called-batch"),
+                    .is_ok_and(|value| value.trim() == "called-batch")
+        };
+        // Diagnose cmd's leading-redirection parser independently of canonical
+        // paths and of the production transformation. The real Auto script
+        // starts with echo; use that same command shape for the regression.
+        let leading = exercise("dos-leading", &home, "");
+        eprintln!("ordinary DOS home with leading redirection succeeded: {leading}");
+        assert!(
+            exercise("dos-echo", &home, "echo fixture-control & "),
+            "ordinary DOS task home must validate the echo-first shell fixture",
+        );
+        assert!(
+            exercise("canonical", &canonical, "echo fixture-regression & "),
             "canonical task home must support ordinary shell path suffixes and called batches",
         );
     }
