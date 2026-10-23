@@ -148,6 +148,55 @@ fn payload_probe() {
                 "job committed-memory limit must reject an allocation larger than the whole job budget"
             );
         }
+        "aggregate-memory" => {
+            // This allocation fits in the job when no descendant holds memory.
+            let mut bytes = Vec::<u8>::new();
+            bytes.try_reserve_exact(160 * 1024 * 1024).unwrap();
+            drop(bytes);
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "windows::payload_probe",
+                    "--nocapture",
+                    "--skip",
+                    "qq-windows-probe:memory-child",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+            loop {
+                let mut line = String::new();
+                assert_ne!(
+                    std::io::BufRead::read_line(&mut output, &mut line).unwrap(),
+                    0,
+                    "descendant exited before holding its allocation"
+                );
+                if line.trim_end().ends_with("descendant-memory-held") {
+                    break;
+                }
+            }
+            let mut bytes = Vec::<u8>::new();
+            let allocation = bytes.try_reserve_exact(160 * 1024 * 1024);
+            child.stdin.take().unwrap().write_all(&[1]).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert!(
+                allocation.is_err(),
+                "individually permitted allocations must share the aggregate job budget"
+            );
+        }
+        "memory-child" => {
+            let mut bytes = Vec::<u8>::new();
+            bytes.try_reserve_exact(112 * 1024 * 1024).unwrap();
+            bytes.resize(112 * 1024 * 1024, 1);
+            println!("descendant-memory-held");
+            std::io::stdout().flush().unwrap();
+            let mut release = [0];
+            std::io::stdin().read_exact(&mut release).unwrap();
+            assert_eq!(release, [1]);
+            std::hint::black_box(bytes);
+        }
         "processes" => {
             let mut children = Vec::new();
             let mut refusal = None;
@@ -368,6 +417,11 @@ async fn committed_memory_limit_is_enforced_by_the_real_worker() {
 }
 
 #[tokio::test]
+async fn committed_memory_budget_is_shared_with_descendants() {
+    restricted_worker_probe("aggregate-memory").await;
+}
+
+#[tokio::test]
 async fn process_limit_is_enforced_by_the_real_worker() {
     restricted_worker_probe("processes").await;
 }
@@ -416,9 +470,9 @@ async fn restricted_worker_probe(mode: &str) {
         read_only
             .push(qq_core::command_owner::NativeDirectoryGrant::capture(workspace.path()).unwrap());
     }
-    if matches!(mode, "memory" | "processes") {
+    if matches!(mode, "memory" | "aggregate-memory" | "processes") {
         command.resources = qq_core::command_owner::NativeResources::Committed {
-            memory_bytes: 128 * 1024 * 1024,
+            memory_bytes: if mode == "aggregate-memory" { 256 } else { 128 } * 1024 * 1024,
             max_processes: 4,
             cpu_percent: 50,
         };

@@ -17,7 +17,9 @@ pub struct NativeResourceLimits {
 #[serde(tag = "access", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeResources {
     Host,
-    Limited { limits: NativeResourceLimits },
+    Limited {
+        limits: NativeResourceLimits,
+    },
     /// Windows kernel job limits. Memory is aggregate committed private memory,
     /// not Linux charged memory or file cache. Process count includes the trusted
     /// helper but not threads. CPU is a percentage of all logical processors,
@@ -85,5 +87,4 @@ mod tests {
             );
         }
     }
-
 }
