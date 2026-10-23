@@ -215,22 +215,36 @@ fs.writeFileSync('exec-stdin.bin', input);
         )
         .await
         .unwrap();
+    let mut observed = Vec::new();
     let finished = tokio::time::timeout(Duration::from_secs(60), async {
-        let mut observed = Vec::new();
         while let Some(event) = events.next().await {
             let event = event.unwrap();
             let done = matches!(event.event, SessionEvent::RunFinished { .. });
             observed.push(event);
             if done {
-                return observed;
+                return;
             }
         }
         panic!("event stream closed before terminal outcome");
     })
     .await;
+    if finished.is_err() {
+        // Keep the committed progress when the observer times out. These are
+        // isolated fake-provider events and commands, with no real credentials.
+        for event in &observed {
+            eprintln!("native Auto incomplete event: {event:?}");
+            if let SessionEvent::ToolCallStarted { tool_call } = &event.event {
+                let snapshot =
+                    tokio::time::timeout(Duration::from_secs(5), owner.snapshot(tool_call.id))
+                        .await;
+                eprintln!("native Auto incomplete command: {snapshot:?}");
+            }
+        }
+    }
     handler.shutdown().await.unwrap();
     owner.shutdown().await.unwrap();
-    let events = finished.expect("default Auto must finish the native editing task");
+    finished.expect("default Auto must finish the native editing task");
+    let events = observed;
     for event in &events {
         if let SessionEvent::ToolCallFinished { tool_call, .. } = &event.event {
             eprintln!(
