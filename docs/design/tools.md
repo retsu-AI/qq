@@ -1385,7 +1385,8 @@ variables are refused before helper startup. macOS does not create Linux-style
 mount or PID namespaces, and aggregate resource limits remain unavailable;
 requesting those limits fails closed.
 
-The Windows adapter launches restricted requests in zero-capability LPAC inside
+The Windows adapter launches restricted requests in LPAC with only the
+`registryRead` capability required for ordinary child-process creation, inside
 QQ's existing owned command job. Its trusted helper obtains the user's local
 application-data directory from Windows for its startup environment. The payload
 keeps its frozen environment, including Windows' required `SYSTEMROOT` and
