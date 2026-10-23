@@ -463,6 +463,22 @@ cases.push({ name: 'restricted-native-policy-host-write-token', payload: false, 
 cases.push({ name: 'restricted-native-policy-host-write-token-lpac', payload: false, nativePolicy: true, nativePolicyWrite: true, nativePolicyLpac: true, command: relayCommand });
 cases.push({ name: 'native-policy-projected-file-control', payload: false, nativePolicy: true, nativePolicyProjected: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-projected-drive', payload: false, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, command: relayCommand });
+// The SDK removes same-path enumerate+deny pairs. Probe the native contract
+// directly before assuming that its root metadata and content rules coincide.
+const contentRoots = [...readonlyPaths, workspace].map(value => fs.realpathSync.native(value));
+const metadataOnlyAncestors = [...ancestorPaths].filter(value => {
+  const canonical = fs.realpathSync.native(value);
+  return !contentRoots.some(root => {
+    const relative = path.relative(root, canonical);
+    return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
+  });
+});
+cases.push({ name: 'restricted-native-root-deny-with-root-enumeration', payload: false,
+  nativePolicy: true, nativePolicyControl: true, command: relayCommand,
+  deniedPaths: [path.parse(workspace).root], enumeratePaths: [path.parse(workspace).root] });
+cases.push({ name: 'restricted-native-root-deny-with-ancestor-enumeration', payload: false,
+  nativePolicy: true, nativePolicyControl: true, command: relayCommand,
+  deniedPaths: [path.parse(workspace).root], enumeratePaths: metadataOnlyAncestors });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
