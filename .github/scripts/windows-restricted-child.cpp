@@ -109,9 +109,46 @@ static int inspect() {
     return 0;
 }
 
+// Do not infer permission failure from Node's path loader. Probe each Win32
+// access mask directly, without changing any file or existing security object.
+static int inspect_files() {
+    inspect();
+    wchar_t current[32768]{};
+    require(GetCurrentDirectoryW(32768, current) != 0, "GetCurrentDirectoryW");
+    const std::wstring workspace(current);
+    wchar_t outside[32768]{};
+    require(GetEnvironmentVariableW(L"QQ_NATIVE_PUBLIC_WRITABLE", outside, 32768) != 0,
+        "public writable path");
+    for (const auto& name : std::vector<std::wstring>{workspace, workspace + L"\\payload.cjs", outside}) {
+        wchar_t canonical[32768]{};
+        const DWORD length = GetLongPathNameW(name.c_str(), canonical, 32768);
+        std::wcout << L"long-path=" << name << L"; result=" << (length ? canonical : L"<unavailable>")
+            << L"; error=" << (length ? 0 : GetLastError()) << std::endl;
+        for (const auto& candidate : std::vector<std::wstring>{name, L"\\\\?\\" + name}) {
+            for (const DWORD access : {DWORD(0), DWORD(FILE_READ_DATA), DWORD(GENERIC_READ), DWORD(FILE_WRITE_DATA)}) {
+                Handle file;
+                file.value = CreateFileW(candidate.c_str(), access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                const DWORD code = file.value == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+                std::wcout << L"file-access=" << candidate << L"; mask=" << access << L"; error=" << code;
+                if (code == 0) {
+                    wchar_t resolved[32768]{};
+                    const DWORD count = GetFinalPathNameByHandleW(file.value, resolved, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+                    std::wcout << L"; final-path=" << (count ? resolved : L"<unavailable>")
+                        << L"; final-error=" << (count ? 0 : GetLastError());
+                }
+                std::wcout << std::endl;
+            }
+        }
+    }
+    return 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
+        if (argc == 2 && std::wstring(argv[1]) == L"inspect-files") return inspect_files();
         if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
         const std::wstring mode(argv[3]);
         const bool inline_node = mode == L"write-sid-inline" || mode == L"write-sid-default-dacl-inline";

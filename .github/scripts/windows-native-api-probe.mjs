@@ -257,6 +257,7 @@ const relay = `
 const fs = require('node:fs');
 const {spawnSync} = require('node:child_process');
 const environment = JSON.parse(fs.readFileSync('captured-environment.json', 'utf8'));
+if (process.env.OPENSSL_CONF) environment.OPENSSL_CONF = process.env.OPENSSL_CONF;
 const child = spawnSync(process.execPath, ['payload.cjs'], { env: environment, stdio: 'inherit', timeout: 45000 });
 if (child.error) console.error(child.error.message);
 process.exitCode = child.status ?? 1;
@@ -317,6 +318,16 @@ for (const mode of ['write-sid-inline', 'write-sid-default-dacl-inline']) {
   cases.push({ name: 'restricted-private-desktop-' + mode, payload: true, privateDesktop: true,
     command: `${quote(restrictedHelper)} ${quote(tools.node)} ${quote(inlineExpression)} ${mode} ${quote(writeSid)}` });
 }
+cases.push({ name: 'restricted-private-desktop-native-file-access', payload: false, privateDesktop: true,
+  environment: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable },
+  command: `${quote(restrictedHelper)} ${quote(restrictedHelper)} inspect-files write-sid-native ${quote(writeSid)}` });
+// Keep the root deny intact. Explicitly point OpenSSL at a task-owned empty
+// config so an ungranted optional host config cannot abort Node before JS.
+const opensslConfig = path.join(workspace, 'openssl.cnf');
+fs.writeFileSync(opensslConfig, '');
+cases.push({ name: 'deny-volume-root-private-openssl-config', payload: true,
+  command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
+  environment: { ...environment, OPENSSL_CONF: opensslConfig } });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
