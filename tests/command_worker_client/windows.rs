@@ -29,22 +29,27 @@ fn payload_probe() {
     if mode == "ordinary" {
         let expected =
             rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
-                .with_named(&["registryRead"])
+                .with_named(&["registryRead", "AgenticAppContainer"])
                 .build()
                 .unwrap();
-        assert_eq!(
-            token.capability_sids,
-            expected
-                .caps
-                .iter()
-                .map(|cap| cap.sid_sddl.clone())
-                .collect::<Vec<_>>()
-        );
+        let mut expected_sids = expected
+            .caps
+            .iter()
+            .map(|cap| cap.sid_sddl.clone())
+            .collect::<Vec<_>>();
+        let mut actual_sids = token.capability_sids;
+        expected_sids.sort();
+        actual_sids.sort();
+        assert_eq!(actual_sids, expected_sids);
         assert_eq!(
             std::fs::read_to_string(&arguments[index + 1]).unwrap(),
             "aap-visible"
         );
-        println!("ordinary-appcontainer-can-read-aap");
+        assert_eq!(
+            std::fs::read_to_string(&arguments[index + 2]).unwrap(),
+            "agentic-visible"
+        );
+        println!("ordinary-appcontainer-can-read-aap-and-agentic");
         return;
     }
     let expected = rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
@@ -57,10 +62,26 @@ fn payload_probe() {
         .iter()
         .map(|cap| cap.sid_sddl.clone())
         .collect::<Vec<_>>();
-    match std::fs::read("expected-read-capabilities") {
-        Ok(bytes) => expected_sids.extend(serde_json::from_slice::<Vec<String>>(&bytes).unwrap()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("read expected token authority: {error}"),
+    let native_marker = rappct::capability::derive_named_capability_sids(&["AgenticAppContainer"])
+        .unwrap()
+        .into_iter()
+        .map(|cap| cap.sid_sddl)
+        .collect::<Vec<_>>();
+    if native_marker
+        .iter()
+        .any(|sid| token.capability_sids.contains(sid))
+    {
+        // The process-security environment adds this exact OS capability. Its
+        // filesystem policy replaces the legacy ACL-bound read capabilities.
+        expected_sids.extend(native_marker);
+    } else {
+        match std::fs::read("expected-read-capabilities") {
+            Ok(bytes) => {
+                expected_sids.extend(serde_json::from_slice::<Vec<String>>(&bytes).unwrap())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("read expected token authority: {error}"),
+        }
     }
     expected_sids.sort();
     let mut actual_sids = token.capability_sids;
@@ -74,6 +95,12 @@ fn payload_probe() {
     assert_eq!(
         std::fs::read(&aap).unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied
+    );
+    let agentic = std::fs::read_to_string("agentic-only-path").unwrap();
+    assert_eq!(
+        std::fs::read(&agentic).unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied,
+        "the OS marker capability must not expose files outside the declared scope"
     );
     if mode != "blocked" {
         registry::assert_host_secret_denied();
@@ -326,6 +353,11 @@ fn request(workspace: &Path, mode: &str, aap: &Path) -> NativeCommand {
     let workspace = workspace.canonicalize().unwrap();
 
     std::fs::write(workspace.join("aap-only-path"), aap.to_str().unwrap()).unwrap();
+    std::fs::write(
+        workspace.join("agentic-only-path"),
+        aap.with_file_name("agentic-only").to_str().unwrap(),
+    )
+    .unwrap();
     let allowed = [
         winsafe::LookupPrivilegeValue(None, winsafe::co::SE_PRIV::CHANGE_NOTIFY_NAME).unwrap(),
         winsafe::LookupPrivilegeValue(None, winsafe::co::SE_PRIV::INC_WORKING_SET_NAME).unwrap(),
@@ -742,6 +774,16 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
     let path = root.path().canonicalize().unwrap();
     let marker = path.join("aap-only");
     std::fs::write(&marker, "aap-visible").unwrap();
+    let agentic = path.join("agentic-only");
+    std::fs::write(&agentic, "agentic-visible").unwrap();
+    let agentic_sid =
+        rappct::capability::derive_named_capability_sids(&["AgenticAppContainer"]).unwrap();
+    rappct::acl::grant_to_capability(
+        rappct::acl::ResourcePath::File(agentic.clone()),
+        &agentic_sid[0].sid_sddl,
+        rappct::acl::AccessMask(0x0012_00a9),
+    )
+    .unwrap();
     let image = path.join("probe.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
     for target in [
@@ -763,10 +805,10 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
         Some("QQ ordinary AppContainer access control"),
     )
     .unwrap();
-    // Match the restricted payload's capability. AAP membership is the
-    // difference being tested, rather than an unrelated registry capability.
+    // Prove ordinary AAP and marker-capability access to these same canaries;
+    // the restricted payload must still deny both outside its declared roots.
     let capabilities = rappct::SecurityCapabilitiesBuilder::new(&profile.sid)
-        .with_named(&["registryRead"])
+        .with_named(&["registryRead", "AgenticAppContainer"])
         .build()
         .unwrap();
     let args = [
@@ -778,7 +820,10 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
     ]
     .map(std::ffi::OsString::from)
     .into_iter()
-    .chain([marker.as_os_str().to_owned()])
+    .chain([
+        marker.as_os_str().to_owned(),
+        agentic.as_os_str().to_owned(),
+    ])
     .collect::<Vec<_>>();
     let options = rappct::LaunchOptions {
         exe: image.clone(),
@@ -810,7 +855,8 @@ fn appcontainer_only_fixture() -> tempfile::TempDir {
     );
     assert_eq!(result.unwrap(), 0, "{diagnostic}");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("ordinary-appcontainer-can-read-aap"),
+        String::from_utf8_lossy(&output.stdout)
+            .contains("ordinary-appcontainer-can-read-aap-and-agentic"),
         "{output:?}"
     );
     root
