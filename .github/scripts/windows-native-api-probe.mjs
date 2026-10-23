@@ -132,6 +132,52 @@ async function runOnPrivateDesktop(request) {
   return { ...envelope.result, desktopController: stderr.trim() };
 }
 
+// Keep the PSEC policy alive while the normal host creates a token for that
+// exact package with only registryRead. No untrusted command runs in the host.
+async function runWithRecreatedToken(request) {
+  const readyPath = path.join(workspace, 'source-ready.json');
+  const stopPath = path.join(workspace, 'source-stop.txt');
+  fs.rmSync(readyPath, { force: true });
+  fs.rmSync(stopPath, { force: true });
+  let observer, timer;
+  const ready = new Promise((resolve, reject) => {
+    const check = () => {
+      if (!fs.existsSync(readyPath)) return;
+      try {
+        const source = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
+        assert.ok(Number.isSafeInteger(source.pid) && source.pid > 0);
+        assert.match(source.package, /^S-1-15-2-(?:[0-9]+-){6}[0-9]+$/);
+        resolve(source);
+      } catch (error) { if (!(error instanceof SyntaxError)) reject(error); }
+    };
+    observer = fs.watch(workspace, check);
+    observer.on('error', reject);
+    timer = setTimeout(() => reject(new Error('source token notification timed out')), 15_000);
+    check();
+  });
+  const sourceRun = run({ ...request, command: `${quote(restrictedHelper)} hold` });
+  try {
+    const source = await Promise.race([ready, sourceRun.then(result => {
+      throw new Error('source exited before recreation: ' + JSON.stringify(result));
+    })]);
+    const { stdout, stderr } = await execFileAsync(desktopHelper, [
+      restrictedHelper, 'host-recreate', String(source.pid), writeSid,
+    ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
+      env: { ...environment, QQ_NATIVE_PACKAGE_SID: source.package,
+        QQ_NATIVE_PUBLIC_WRITABLE: publicWritable, QQ_NATIVE_TASK_WORKSPACE: workspace } });
+    return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
+  } catch (error) {
+    return { stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message),
+      exitCode: Number.isInteger(error.code) ? error.code : -1, timedOut: error.killed === true, warnings: [] };
+  } finally {
+    clearTimeout(timer);
+    observer.close();
+    fs.writeFileSync(stopPath, 'stop');
+    const source = await sourceRun;
+    assert.equal(source.exitCode, 0, 'source policy must settle after recreation');
+  }
+}
+
 const expected = Object.fromEntries(Object.entries(tools).map(([name, executable]) => {
   const output = spawnSync(executable, ['--version'], { cwd: workspace, env: environment, encoding: 'utf8', timeout: 10_000 });
   assert.equal(output.status, 0, `host ${name}: ${output.error ?? output.stderr}`);
@@ -328,6 +374,7 @@ fs.writeFileSync(opensslConfig, '');
 cases.push({ name: 'deny-volume-root-private-openssl-config', payload: true,
   command: relayCommand, deniedPaths: [path.parse(workspace).root], enumeratePaths: [],
   environment: { ...environment, OPENSSL_CONF: opensslConfig } });
+cases.push({ name: 'restricted-host-recreated-native-file-access', payload: false, recreateToken: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -353,7 +400,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

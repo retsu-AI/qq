@@ -78,7 +78,18 @@ int wmain(int argc, wchar_t** argv) {
         std::unique_ptr<void, decltype(local_free)> task_sid(task, local_free);
         // Only a fresh desktop gets this descriptor. No existing UI or file
         // object's ACL is changed. Low integrity permits the AppContainer UI.
-        const std::wstring descriptor = L"D:P(A;;GA;;;" + std::wstring(encoded) +
+        std::wstring package_grant;
+        wchar_t package[256]{};
+        const DWORD package_length = GetEnvironmentVariableW(L"QQ_NATIVE_PACKAGE_SID", package, 256);
+        if (package_length) {
+            if (package_length >= 256) throw std::runtime_error("invalid desktop package SID size");
+            PSID package_sid = nullptr;
+            require(ConvertStringSidToSidW(package, &package_sid), "desktop package SID");
+            std::unique_ptr<void, decltype(local_free)> owned_package(package_sid, local_free);
+            if (!IsValidSid(package_sid)) throw std::runtime_error("invalid desktop package SID");
+            package_grant = L"(A;;GA;;;" + std::wstring(package) + L")";
+        }
+        const std::wstring descriptor = L"D:P" + package_grant + L"(A;;GA;;;" + std::wstring(encoded) +
             L")(A;;GA;;;SY)(A;;GA;;;" + std::wstring(argv[4]) +
             L")(A;;GA;;;S-1-15-3-1024-530591407-3118584226-222893001-1659895842-537460181-133087082-1363364250-4100990745)S:(ML;;NW;;;LW)";
         PSECURITY_DESCRIPTOR security = nullptr;

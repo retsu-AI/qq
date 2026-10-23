@@ -145,8 +145,149 @@ static int inspect_files() {
     return 0;
 }
 
+static int hold_environment() {
+    Handle directory, changed;
+    directory.value = CreateFileW(L".", FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+    require(directory.value != INVALID_HANDLE_VALUE, "hold directory");
+    changed.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    require(changed.value != nullptr, "hold notification event");
+    BYTE notifications[4096]{};
+    OVERLAPPED pending{};
+    pending.hEvent = changed.value;
+    auto arm = [&] {
+        ResetEvent(changed.value);
+        require(ReadDirectoryChangesW(directory.value, notifications, sizeof(notifications), FALSE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE, nullptr, &pending, nullptr), "hold notification");
+    };
+    arm();
+    Handle token;
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value), "hold token");
+    contained(token.value);
+    const auto package = information(token.value, TokenAppContainerSid);
+    const auto sid = sid_text(reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer);
+    const auto ready = std::string("{\"pid\":") + std::to_string(GetCurrentProcessId()) + ",\"package\":\"" + sid + "\"}";
+    Handle output;
+    output.value = CreateFileW(L"source-ready.json", GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    require(output.value != INVALID_HANDLE_VALUE, "hold ready file");
+    DWORD written = 0;
+    require(WriteFile(output.value, ready.data(), static_cast<DWORD>(ready.size()), &written, nullptr), "hold ready write");
+    if (written != ready.size()) throw std::runtime_error("short ready write");
+    CloseHandle(output.value);
+    output.value = nullptr;
+    for (;;) {
+        if (GetFileAttributesW(L"source-stop.txt") != INVALID_FILE_ATTRIBUTES) break;
+        if (WaitForSingleObject(changed.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("hold notification wait failed");
+        DWORD bytes = 0;
+        require(GetOverlappedResult(directory.value, &pending, &bytes, FALSE), "hold notification result");
+        arm();
+    }
+    if (!CancelIoEx(directory.value, &pending) && GetLastError() != ERROR_NOT_FOUND) {
+        require(FALSE, "hold notification cancel");
+    }
+    DWORD bytes = 0;
+    if (!GetOverlappedResult(directory.value, &pending, &bytes, TRUE) && GetLastError() != ERROR_OPERATION_ABORTED) {
+        require(FALSE, "hold notification settlement");
+    }
+    return 0;
+}
+
+static int host_recreate(const wchar_t* pid_text) {
+    Handle host, source, source_token, token;
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &host.value), "recreate host token");
+    const auto host_kind = information(host.value, TokenIsAppContainer);
+    if (*reinterpret_cast<const DWORD*>(host_kind.data())) throw std::runtime_error("recreation requires a normal host token");
+    wchar_t* end = nullptr;
+    const unsigned long pid = wcstoul(pid_text, &end, 10);
+    if (!pid || !end || *end) throw std::runtime_error("invalid source PID");
+    source.value = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    require(source.value != nullptr, "recreate source process");
+    require(OpenProcessToken(source.value, TOKEN_QUERY, &source_token.value), "recreate source token");
+    contained(source_token.value);
+    auto package = information(source_token.value, TokenAppContainerSid);
+    const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
+    wchar_t expected[256]{};
+    require(GetEnvironmentVariableW(L"QQ_NATIVE_PACKAGE_SID", expected, 256) != 0, "expected source package");
+    PSID expected_sid = nullptr, registry_sid = nullptr;
+    require(ConvertStringSidToSidW(expected, &expected_sid), "expected package SID");
+    auto local_free = [](void* value) { LocalFree(value); };
+    std::unique_ptr<void, decltype(local_free)> owned_expected(expected_sid, local_free);
+    if (!EqualSid(sid, expected_sid)) throw std::runtime_error("source package changed");
+    require(ConvertStringSidToSidW(L"S-1-15-3-1024-1065365936-1281604716-3511738428-1654721687-432734479-3232135806-4053264122-3456934681", &registry_sid), "recreate registry SID");
+    std::unique_ptr<void, decltype(local_free)> owned_registry(registry_sid, local_free);
+    using CreateToken = BOOL(WINAPI*)(HANDLE, PSECURITY_CAPABILITIES, PHANDLE);
+    const auto module = GetModuleHandleW(L"kernelbase.dll");
+    if (!module) throw std::runtime_error("kernelbase.dll is unavailable");
+    const FARPROC address = GetProcAddress(module, "CreateAppContainerToken");
+    if (!address) throw std::runtime_error("CreateAppContainerToken is unavailable");
+    CreateToken create = nullptr;
+    static_assert(sizeof(create) == sizeof(address));
+    std::memcpy(&create, &address, sizeof(create));
+    SID_AND_ATTRIBUTES capability{ registry_sid, SE_GROUP_ENABLED };
+    SECURITY_CAPABILITIES capabilities{};
+    capabilities.AppContainerSid = sid;
+    capabilities.Capabilities = &capability;
+    capabilities.CapabilityCount = 1;
+    require(create(host.value, &capabilities, &token.value), "host CreateAppContainerToken");
+    contained(token.value);
+    const auto remaining = information(token.value, TokenCapabilities);
+    const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(remaining.data());
+    if (groups->GroupCount != 1 || !EqualSid(groups->Groups[0].Sid, registry_sid)) {
+        throw std::runtime_error("recreated token retained unexpected capabilities");
+    }
+    // This probe launches only the immutable inspector, never a host fallback.
+    wchar_t image[32768]{};
+    require(GetModuleFileNameW(nullptr, image, 32768) != 0, "inspector image");
+    auto command = L"\"" + std::wstring(image) + L"\" inspect-files";
+    std::vector<wchar_t> mutable_command(command.begin(), command.end());
+    mutable_command.push_back(0);
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    if (!size || size > 65536) throw std::runtime_error("invalid recreated attribute size");
+    std::vector<BYTE> storage(size);
+    auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+    require(InitializeProcThreadAttributeList(attributes, 1, 0, &size), "recreated attributes");
+    DWORD policy = 1;
+    const BOOL updated = UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+        &policy, sizeof(policy), nullptr, nullptr);
+    if (!updated) {
+        const DWORD code = GetLastError();
+        DeleteProcThreadAttributeList(attributes);
+        SetLastError(code);
+        require(FALSE, "recreated LPAC attribute");
+    }
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.lpAttributeList = attributes;
+    // The inspector inherits only handles the normal-host desktop controller
+    // explicitly duplicated for this child. Source/token handles are private.
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startup.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    wchar_t workspace[32768]{};
+    const DWORD length = GetEnvironmentVariableW(L"QQ_NATIVE_TASK_WORKSPACE", workspace, 32768);
+    if (!length || length >= 32768) throw std::runtime_error("missing task workspace");
+    PROCESS_INFORMATION process{};
+    const BOOL created = CreateProcessAsUserW(token.value, image, mutable_command.data(), nullptr, nullptr, TRUE,
+        EXTENDED_STARTUPINFO_PRESENT, nullptr, workspace, &startup.StartupInfo, &process);
+    const DWORD code = created ? 0 : GetLastError();
+    DeleteProcThreadAttributeList(attributes);
+    SetLastError(code);
+    require(created, "recreated inspector launch");
+    Handle child, thread;
+    child.value = process.hProcess;
+    thread.value = process.hThread;
+    if (WaitForSingleObject(child.value, INFINITE) != WAIT_OBJECT_0) throw std::runtime_error("recreated inspector wait failed");
+    DWORD result = 0;
+    require(GetExitCodeProcess(child.value, &result), "recreated inspector exit");
+    return static_cast<int>(result);
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-recreate") return host_recreate(argv[2]);
+        if (argc == 2 && std::wstring(argv[1]) == L"hold") return hold_environment();
         if (argc == 2 && std::wstring(argv[1]) == L"inspect") return inspect();
         if (argc == 2 && std::wstring(argv[1]) == L"inspect-files") return inspect_files();
         if (argc < 4 || argc > 5) throw std::runtime_error("expected node path, payload path, restriction mode and optional write SID");
