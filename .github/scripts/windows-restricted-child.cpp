@@ -445,13 +445,16 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
     link(objects.drive, L"C:", target);
     link(objects.global_root, L"GLOBALROOT", L"\\");
     link(objects.null_device, L"NUL", L"\\Device\\Null");
-    wchar_t volume_guid[128]{}, volume_target[32768]{};
+    wchar_t volume_guid[128]{};
     require(GetVolumeNameForVolumeMountPointW(L"C:\\", volume_guid, 128), "projection volume GUID");
     std::wstring volume_name(volume_guid);
     if (!volume_name.starts_with(L"\\\\?\\Volume{") || !volume_name.ends_with(L"\\")) throw std::runtime_error("invalid projection volume GUID");
     volume_name = volume_name.substr(4, volume_name.size() - 5);
-    require(QueryDosDeviceW(volume_name.c_str(), volume_target, 32768) != 0, "projection volume device");
-    link(objects.volume, volume_name, volume_target);
+    const std::wstring physical_root(target);
+    const auto separator = physical_root.find(L'\\', 8);
+    if (!physical_root.starts_with(L"\\Device\\") || separator == std::wstring::npos) throw std::runtime_error("invalid projection device path");
+    const auto device = physical_root.substr(0, separator);
+    link(objects.volume, volume_name, device);
     union DeviceMap {
         HANDLE directory;
         struct { ULONG drives; BYTE types[32]; } query;
@@ -615,9 +618,15 @@ int wmain(int argc, wchar_t** argv) {
             require(GetVolumeNameForVolumeMountPointW(argv[2], volume, 128), "volume metadata");
             std::wstring name(volume);
             if (!name.starts_with(L"\\\\?\\Volume{") || !name.ends_with(L"\\")) throw std::runtime_error("invalid volume metadata");
-            name = name.substr(4, name.size() - 5);
-            require(QueryDosDeviceW(name.c_str(), target, 32768) != 0, "volume device metadata");
-            std::wcout << volume << std::endl << target << std::endl;
+            Handle root;
+            root.value = CreateFileW(argv[2], 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            require(root.value != INVALID_HANDLE_VALUE, "volume root metadata handle");
+            const DWORD size = GetFinalPathNameByHandleW(root.value, target, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+            if (!size || size >= 32768) throw std::runtime_error("volume NT path unavailable");
+            std::wstring device(target);
+            if (device.ends_with(L"\\")) device.pop_back();
+            std::wcout << volume << std::endl << device << std::endl;
             return 0;
         }
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-write-restricted") return host_create_policy(argv[2], false, true, true);
