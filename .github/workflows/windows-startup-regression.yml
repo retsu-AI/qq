@@ -46,6 +46,8 @@ jobs:
       - name: Verify accepted commands and fleet lifecycle
         shell: bash
         run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo build --locked -p qq-server --example command_owner_launcher
           status=0
           for selector in \
             tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs \
