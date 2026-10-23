@@ -846,6 +846,45 @@ mod proof {
                 None,
             ))
             .map_err(err)?;
+        let token_user = token.user().map_err(err)?;
+        let user_sid = fh::convert_sid_to_string_sid_a(&token_user.user().sid)
+            .ok_or_else(|| err("ordinary broker token user SID was null"))?
+            .to_string();
+        let old_default = token.default_dacl().map_err(err)?;
+        let old_acl = old_default.default_dacl();
+        let original_count = old_acl.ace_count();
+        println!(
+            "ordinary broker original new-object default DACL: {:?}",
+            old_acl.aces().collect::<Vec<_>>()
+        );
+        let mut acl = fh::acl::Builder::new(fh::acl::REVISION_DS);
+        acl.add_acl(fh::acl::REVISION_DS, 0, old_acl).map_err(err)?;
+        acl.add_access_allowed_ace(
+            fh::acl::REVISION_DS,
+            fh::access::GENERIC_ALL.into(),
+            token_user.user().sid,
+        )
+        .map_err(err)?;
+        acl.finish().map_err(err)?;
+        token.set_default_dacl(&mut acl).map_err(err)?;
+        let readback = token.default_dacl().map_err(err)?;
+        if readback.default_dacl().ace_count() != original_count + 1 {
+            return Err(err(
+                "ordinary broker new-object default DACL count mismatch",
+            ));
+        }
+        println!(
+            "ordinary broker new-object default DACL: preserved {original_count} ACEs; appended actual user GENERIC_ALL: {:?}",
+            readback.default_dacl().aces().last()
+        );
+        // All constructor roles use the same actual user SID: no package/task
+        // identity receives rights on this outer broker's fresh private UI.
+        // This corrects unmeasured startup preconditions; it does not identify
+        // which original hosted-runner object caused STATUS_DLL_INIT_FAILED.
+        let ui_name = format!("qq.ordinary-broker.{}", std::process::id());
+        let ordinary_ui = std::mem::ManuallyDrop::new(PrivateUi::create(
+            &ui_name, &user_sid, &user_sid, &user_sid,
+        )?);
         let job = fh::create_job_object_w(None, ()).map_err(err)?;
         fh::set_information_job_object(
             &job,
@@ -879,10 +918,13 @@ mod proof {
         attributes
             .update(process::ThreadAttributeRef::handle_list(&handles))
             .map_err(err)?;
+        let desktop: Vec<u16> = ordinary_ui.path.encode_utf16().chain(Some(0)).collect();
         let mut startup = process::StartupInfoExW {
             attribute_list: Some(attributes),
             ..Default::default()
         };
+        startup.startup_info.desktop =
+            Some(fh::abistr::CStrNonNull::from_units_with_nul(&desktop).map_err(err)?);
         startup.startup_info.flags = 0x100; // STARTF_USESTDHANDLES
         startup.startup_info.std_input = Some((&stdin).into());
         startup.startup_info.std_output = Some((&stdout).into());
@@ -961,6 +1003,11 @@ mod proof {
             }
         }
         drop(job);
+        if result.is_ok() {
+            // Success above includes the entire outer job's zero-active witness.
+            drop(std::mem::ManuallyDrop::into_inner(ordinary_ui));
+        }
+        // Any uncertainty retains private UI until this bounded diagnostic exits.
         let output = captured_stdout
             .recv_timeout(std::time::Duration::from_secs(5))
             .map_err(err)
