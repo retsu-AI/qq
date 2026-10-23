@@ -179,15 +179,79 @@ async function runWithRecreatedToken(request) {
   }
 }
 
-async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false) {
+let nativeVolume;
+async function volumeMetadata() {
+  if (nativeVolume) return nativeVolume;
+  const drive = path.parse(workspace).root;
+  assert.equal(drive.toUpperCase(), 'C:\\', 'finite projection fixture requires C:');
+  const { stdout } = await execFileAsync(restrictedHelper, ['volume-name', drive], {
+    cwd: softwareRoot, encoding: 'utf8', timeout: 10_000, maxBuffer: 65536,
+  });
+  const [guid, device, ...extra] = stdout.trim().split(/\r?\n/);
+  assert.match(guid, /^\\\\\?\\Volume\{[0-9a-f-]+\}\\$/i);
+  assert.match(device, /^\\Device\\HarddiskVolume[0-9]+$/);
+  assert.equal(extra.length, 0);
+  nativeVolume = { guid, device };
+  return nativeVolume;
+}
+let nativeProjection;
+async function projectionRoot(request) {
+  if (nativeProjection) return nativeProjection;
+  const { guid } = await volumeMetadata();
+  const projection = fs.mkdtempSync(path.join(root, 'private-drive-'));
+  // Only owned directories and junctions are created. The targets stay at
+  // their original locations, under their original native read/write policy.
+  const roots = [...new Set([...request.filesystem.readonlyPaths, ...request.filesystem.readwritePaths]
+    .flatMap(value => [value, fs.realpathSync.native(value)]))].sort((a, b) => a.length - b.length);
+  for (const source of roots) {
+    assert.equal(path.parse(source).root.toUpperCase(), 'C:\\');
+    const canonical = fs.realpathSync.native(source);
+    const destination = path.join(projection, source.slice(3));
+    if (fs.existsSync(destination)) {
+      assert.equal(fs.realpathSync.native(destination).toLowerCase(), canonical.toLowerCase(),
+        'a projection alias must resolve to the same approved input');
+      continue;
+    }
+    // Never create a directory through an earlier junction into host inputs.
+    let current = projection;
+    for (const component of path.relative(projection, path.dirname(destination)).split(path.sep)) {
+      if (!component) continue;
+      current = path.join(current, component);
+      if (fs.existsSync(current)) assert.equal(fs.lstatSync(current).isSymbolicLink(), false,
+        'projection preparation must not write through a host junction');
+      else fs.mkdirSync(current);
+    }
+    fs.symlinkSync(guid + canonical.slice(3), destination, 'junction');
+  }
+  nativeProjection = projection;
+  return projection;
+}
+
+async function runWithNativePolicy(request, inheritParent = false, control = false, writeRestricted = false, lpac = false, projected = false, denyVolume = false) {
   const policyPath = path.join(softwareRoot, 'native-policy.bin');
+  const volume = await volumeMetadata();
+  const projection = projected ? await projectionRoot(request) : undefined;
+  if (projected) request = { ...request,
+    filesystem: { ...request.filesystem,
+      readonlyPaths: [...request.filesystem.readonlyPaths, projection],
+      deniedPaths: denyVolume ? [path.parse(workspace).root] : [],
+    },
+    containment: { ...request.containment, config: { ...request.containment.config,
+      filesystem: { enumeratePaths: [] },
+    } },
+  };
   fs.writeFileSync(policyPath, encodeNativePolicy(request));
   try {
     const { stdout, stderr } = await execFileAsync(desktopHelper, [
-      restrictedHelper, writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
+      restrictedHelper, projected ? 'host-policy-projected' : writeRestricted ? (lpac ? 'host-policy-write-restricted-lpac' : 'host-policy-write-restricted') : control ? 'host-policy-control' : inheritParent ? 'host-create-policy-parent' : 'host-create-policy', policyPath, writeSid,
     ], { cwd: softwareRoot, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024,
       env: { ...environment, QQ_NATIVE_PUBLIC_WRITABLE: publicWritable,
-        QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid } });
+        QQ_NATIVE_TASK_WORKSPACE: workspace, QQ_NATIVE_WRITE_SID: writeSid,
+        QQ_NATIVE_SOFTWARE_FILE: softwareFile,
+        QQ_NATIVE_PUBLIC_WRITABLE_GUID: volume.guid + publicWritable.slice(3),
+        QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT: '\\\\?\\GLOBALROOT' + volume.device + publicWritable.slice(2),
+        ...(projection ? { QQ_NATIVE_PROJECTION_ROOT: projection } : {}),
+      } });
     return { stdout, stderr, exitCode: 0, timedOut: false, warnings: [] };
   } catch (error) {
     return { stdout: error.stdout ?? '', stderr: String(error.stderr ?? error.message),
@@ -397,6 +461,8 @@ cases.push({ name: 'restricted-recreated-token-native-policy', payload: false, n
 cases.push({ name: 'restricted-recreated-token-inherited-native-policy', payload: false, nativePolicy: true, nativePolicyParent: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-host-write-token', payload: false, nativePolicy: true, nativePolicyWrite: true, command: relayCommand });
 cases.push({ name: 'restricted-native-policy-host-write-token-lpac', payload: false, nativePolicy: true, nativePolicyWrite: true, nativePolicyLpac: true, command: relayCommand });
+cases.push({ name: 'native-policy-projected-file-control', payload: false, nativePolicy: true, nativePolicyProjected: true, command: relayCommand });
+cases.push({ name: 'restricted-native-policy-projected-drive', payload: false, nativePolicy: true, nativePolicyProjected: true, nativePolicyDenyVolume: true, command: relayCommand });
 const baseUi = { disable: false, clipboard: 'none', allowInputInjection: false };
 const outcomes = [];
 try {
@@ -422,7 +488,7 @@ try {
     const started = performance.now();
     let output;
     try {
-      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
+      output = await (test.nativePolicy ? request => runWithNativePolicy(request, test.nativePolicyParent, test.nativePolicyControl, test.nativePolicyWrite, test.nativePolicyLpac, test.nativePolicyProjected, test.nativePolicyDenyVolume) : test.recreateToken ? runWithRecreatedToken : test.privateDesktop ? runOnPrivateDesktop : run)({
         containment: { type: 'processcontainer', config: {
           capabilities: ['registryRead'],
           filesystem: { enumeratePaths: test.enumeratePaths ?? [...ancestorPaths] },

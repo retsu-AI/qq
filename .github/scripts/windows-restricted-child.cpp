@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include <userenv.h>
+#include <winternl.h>
 #include <aclapi.h>
 #include <iostream>
 #include <cwchar>
@@ -121,12 +122,21 @@ static int inspect_files() {
     wchar_t outside[32768]{};
     require(GetEnvironmentVariableW(L"QQ_NATIVE_PUBLIC_WRITABLE", outside, 32768) != 0,
         "public writable path");
-    for (const auto& name : std::vector<std::wstring>{workspace, workspace + L"\\payload.cjs", outside}) {
+    std::vector<std::wstring> paths{workspace, workspace + L"\\payload.cjs", outside, L"C:\\"};
+    for (const auto variable : {L"QQ_NATIVE_PUBLIC_WRITABLE_GUID", L"QQ_NATIVE_PUBLIC_WRITABLE_GLOBALROOT", L"QQ_NATIVE_SOFTWARE_FILE"}) {
+        wchar_t raw[32768]{};
+        const DWORD size = GetEnvironmentVariableW(variable, raw, 32768);
+        if (size >= 32768) throw std::runtime_error("raw fixture path exceeds bound");
+        if (size) paths.emplace_back(raw);
+    }
+    for (const auto& name : paths) {
         wchar_t canonical[32768]{};
         const DWORD length = GetLongPathNameW(name.c_str(), canonical, 32768);
         std::wcout << L"long-path=" << name << L"; result=" << (length ? canonical : L"<unavailable>")
             << L"; error=" << (length ? 0 : GetLastError()) << std::endl;
-        for (const auto& candidate : std::vector<std::wstring>{name, L"\\\\?\\" + name}) {
+        std::vector<std::wstring> candidates{name};
+        if (name.size() > 2 && name[1] == L':') candidates.push_back(L"\\\\?\\" + name);
+        for (const auto& candidate : candidates) {
             for (const DWORD access : {DWORD(0), DWORD(FILE_READ_DATA), DWORD(GENERIC_READ), DWORD(FILE_WRITE_DATA)}) {
                 Handle file;
                 file.value = CreateFileW(candidate.c_str(), access,
@@ -355,7 +365,109 @@ static void grant_private_desktop(PSID package) {
     require(SetUserObjectSecurity(desktop.value, &requested, &replacement), "owned desktop package access");
 }
 
-static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false) {
+struct PrivateDeviceMap {
+    Handle directory, drive, global_root, null_device, volume;
+};
+
+// Diagnostic only. Change one suspended child's device map, never the host's
+// logon-session drive links. The directory and all links are unnamed/private
+// host-owned objects, held until the child has exited.
+static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& objects) {
+    const auto module = GetModuleHandleW(L"ntdll.dll");
+    if (!module) throw std::runtime_error("ntdll.dll unavailable");
+    using CreateDirectory = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
+    using CreateLink = NTSTATUS(NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PUNICODE_STRING);
+    using SetProcess = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG);
+    const FARPROC directory_address = GetProcAddress(module, "NtCreateDirectoryObject");
+    const FARPROC link_address = GetProcAddress(module, "NtCreateSymbolicLinkObject");
+    const FARPROC set_address = GetProcAddress(module, "NtSetInformationProcess");
+    if (!directory_address || !link_address || !set_address) throw std::runtime_error("private device-map APIs unavailable");
+    CreateDirectory create_directory = nullptr;
+    CreateLink create_link = nullptr;
+    SetProcess set_process = nullptr;
+    static_assert(sizeof(create_directory) == sizeof(directory_address));
+    static_assert(sizeof(create_link) == sizeof(link_address));
+    static_assert(sizeof(set_process) == sizeof(set_address));
+    std::memcpy(&create_directory, &directory_address, sizeof(create_directory));
+    std::memcpy(&create_link, &link_address, sizeof(create_link));
+    std::memcpy(&set_process, &set_address, sizeof(set_process));
+    auto check = [](NTSTATUS status, const char* phase) {
+        if (status < 0) throw std::runtime_error(std::string(phase) + " NTSTATUS: " + std::to_string(static_cast<unsigned long>(status)));
+    };
+    auto unicode = [](const std::wstring& text) {
+        if (text.size() > 32766) throw std::runtime_error("device-map name exceeds bound");
+        UNICODE_STRING value{};
+        value.Length = static_cast<USHORT>(text.size() * sizeof(wchar_t));
+        value.MaximumLength = value.Length;
+        value.Buffer = const_cast<PWSTR>(text.data());
+        return value;
+    };
+    LPWSTR package_text = nullptr;
+    require(ConvertSidToStringSidW(package, &package_text), "device-map package SID");
+    auto local_free = [](void* value) { LocalFree(value); };
+    std::unique_ptr<void, decltype(local_free)> owned_package(package_text, local_free);
+    Handle host_token;
+    require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &host_token.value), "device-map host token");
+    const auto user = information(host_token.value, TokenUser);
+    LPWSTR user_text = nullptr;
+    require(ConvertSidToStringSidW(reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid, &user_text), "device-map owner SID");
+    std::unique_ptr<void, decltype(local_free)> owned_user(user_text, local_free);
+    const std::wstring descriptor = L"D:P(A;;GA;;;" + std::wstring(user_text) + L")(A;;GA;;;SY)(A;;GR;;;" + std::wstring(package_text) + L")";
+    PSECURITY_DESCRIPTOR security = nullptr;
+    require(ConvertStringSecurityDescriptorToSecurityDescriptorW(descriptor.c_str(), SDDL_REVISION_1, &security, nullptr), "private device-map descriptor");
+    std::unique_ptr<void, decltype(local_free)> owned_security(security, local_free);
+    OBJECT_ATTRIBUTES attributes{};
+    attributes.Length = sizeof(attributes);
+    attributes.SecurityDescriptor = security;
+    check(create_directory(&objects.directory.value, STANDARD_RIGHTS_REQUIRED | 0xF, &attributes), "create private device-map directory");
+    const auto link = [&](Handle& handle, const std::wstring& name, const std::wstring& target) {
+        auto encoded_name = unicode(name), encoded_target = unicode(target);
+        OBJECT_ATTRIBUTES location{};
+        location.Length = sizeof(location);
+        location.RootDirectory = objects.directory.value;
+        location.ObjectName = &encoded_name;
+        location.Attributes = OBJ_CASE_INSENSITIVE;
+        location.SecurityDescriptor = security;
+        check(create_link(&handle.value, STANDARD_RIGHTS_REQUIRED | 1, &location, &encoded_target), "create private device-map link");
+    };
+    wchar_t projection[32768]{};
+    const DWORD size = GetEnvironmentVariableW(L"QQ_NATIVE_PROJECTION_ROOT", projection, 32768);
+    if (!size || size >= 32768) throw std::runtime_error("missing projection root");
+    Handle root;
+    root.value = CreateFileW(projection, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    require(root.value != INVALID_HANDLE_VALUE, "projection root handle");
+    wchar_t target[32768]{};
+    const DWORD target_size = GetFinalPathNameByHandleW(root.value, target, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+    if (!target_size || target_size >= 32768) throw std::runtime_error("projection root NT path unavailable");
+    // The current finite fixture uses C:. Fail explicitly on any other drive.
+    if (projection[0] != L'C' || projection[1] != L':') throw std::runtime_error("projection fixture requires C:");
+    link(objects.drive, L"C:", target);
+    link(objects.global_root, L"GLOBALROOT", L"\\");
+    link(objects.null_device, L"NUL", L"\\Device\\Null");
+    wchar_t volume_guid[128]{}, volume_target[32768]{};
+    require(GetVolumeNameForVolumeMountPointW(L"C:\\", volume_guid, 128), "projection volume GUID");
+    std::wstring volume_name(volume_guid);
+    if (!volume_name.starts_with(L"\\\\?\\Volume{") || !volume_name.ends_with(L"\\")) throw std::runtime_error("invalid projection volume GUID");
+    volume_name = volume_name.substr(4, volume_name.size() - 5);
+    require(QueryDosDeviceW(volume_name.c_str(), volume_target, 32768) != 0, "projection volume device");
+    link(objects.volume, volume_name, volume_target);
+    union DeviceMap {
+        HANDLE directory;
+        struct { ULONG drives; BYTE types[32]; } query;
+    } map{};
+    map.directory = objects.directory.value;
+    ULONG used_size = sizeof(HANDLE);
+    NTSTATUS status = set_process(process, 23, &map, used_size);
+    if (static_cast<ULONG>(status) == 0xC0000004) { // explicit ABI length mismatch only
+        used_size = sizeof(map);
+        status = set_process(process, 23, &map, used_size);
+    }
+    check(status, "set suspended child's private device map");
+    std::cerr << "private device map installed; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
+}
+
+static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = false, bool control = false, bool restrict_host = false, bool lpac = false, bool projected = false) {
     Handle host;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | (restrict_host ? TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY : 0), &host.value), "policy host token");
     const auto host_kind = information(host.value, TokenIsAppContainer);
@@ -475,6 +587,8 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
     const auto package = information(token.value, TokenAppContainerSid);
     const auto sid = reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer;
     grant_private_desktop(sid);
+    PrivateDeviceMap device_map;
+    if (projected) install_device_map(process.value, sid, device_map);
     LPWSTR package_text = nullptr;
     require(ConvertSidToStringSidW(sid, &package_text), "native policy package SID");
     auto local_free = [](void* value) { LocalFree(value); };
@@ -495,6 +609,17 @@ static int host_create_policy(const wchar_t* policy_path, bool inherit_parent = 
 
 int wmain(int argc, wchar_t** argv) {
     try {
+        if (argc == 3 && std::wstring(argv[1]) == L"host-policy-projected") return host_create_policy(argv[2], false, true, false, false, true);
+        if (argc == 3 && std::wstring(argv[1]) == L"volume-name") {
+            wchar_t volume[128]{}, target[32768]{};
+            require(GetVolumeNameForVolumeMountPointW(argv[2], volume, 128), "volume metadata");
+            std::wstring name(volume);
+            if (!name.starts_with(L"\\\\?\\Volume{") || !name.ends_with(L"\\")) throw std::runtime_error("invalid volume metadata");
+            name = name.substr(4, name.size() - 5);
+            require(QueryDosDeviceW(name.c_str(), target, 32768) != 0, "volume device metadata");
+            std::wcout << volume << std::endl << target << std::endl;
+            return 0;
+        }
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-write-restricted") return host_create_policy(argv[2], false, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-write-restricted-lpac") return host_create_policy(argv[2], false, true, true, true);
         if (argc == 3 && std::wstring(argv[1]) == L"host-policy-control") return host_create_policy(argv[2], false, true);
