@@ -415,7 +415,15 @@ impl Startup {
             ));
         }
         rustix::io::write(&self.gate, &monitor.to_le_bytes())?;
-        match read_pipe(&acknowledgement, 1).await?.as_slice() {
+        // Identity is now pinned, so cancellation can safely interrupt setup.
+        let ready = tokio::select! {
+            result = read_pipe(&acknowledgement, 1) => result?,
+            () = cancelled.cancelled() => return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "command startup was cancelled after release",
+            )),
+        };
+        match ready.as_slice() {
             b"g" => {}
             kind @ (b"r" | b"l" | b"k") => {
                 let context = if kind == b"r" {
@@ -585,9 +593,12 @@ pub(super) async fn spawn(
         reported_status: None,
         lease: Some(lease),
     };
+    // Cancellation cannot abandon identity capture after the monitor starts:
+    // without PID 1's handle, reaping the monitor cannot prove namespace death.
+    // authorize checks cancellation before releasing the payload. Keep the
+    // startup deadline so a broken helper still fails closed within its bound.
     let authorized = tokio::select! {
         result = startup.authorize(&mut child, cancelled, deadline) => result,
-        _ = cancelled.cancelled() => Err(io::Error::new(io::ErrorKind::Interrupted, "command startup was cancelled")),
         _ = tokio::time::sleep_until(deadline.into()) => Err(io::Error::new(io::ErrorKind::TimedOut, "command startup timed out")),
     };
     if let Err(error) = authorized {
@@ -732,6 +743,58 @@ mod tests {
             tasks.drain().await,
             Err(super::super::dispatch::ToolDrainError::UnconfirmedProcessExit)
         ));
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_namespace_identity_still_confirms_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let cwd =
+            cap_std::fs::Dir::open_ambient_dir(root.path(), cap_std::ambient_authority()).unwrap();
+        let mut payload = tokio::process::Command::new("/bin/sh");
+        payload
+            .env_clear()
+            .args(["-c", "printf executed > forbidden"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (command, mut startup) = LinuxOwner::discover(crate::command_owner::tests::launcher())
+            .unwrap()
+            .wrap(payload, &cwd, None, None)
+            .unwrap();
+        // Hold the real identity at the parent's read boundary. The namespace
+        // exists, but cancellation reaches spawn before its identity does.
+        let (read, write) = rustix::pipe::pipe_with(
+            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+        )
+        .unwrap();
+        let original = std::mem::replace(&mut startup.acknowledgement, File::from(read));
+        let original = tokio::io::unix::AsyncFd::new(original).unwrap();
+        let tasks = super::super::ToolTasks::default();
+        let process = tasks.enter();
+        let run = crate::RunCancellation::new();
+        let cancelled = super::super::dispatch::ToolCancellation::new(run.clone());
+        let mut launch = Box::pin(spawn(
+            command,
+            startup,
+            &process,
+            &cancelled,
+            std::time::Instant::now() + std::time::Duration::from_secs(15),
+        ));
+        assert!(futures_util::poll!(launch.as_mut()).is_pending());
+        let identity =
+            tokio::time::timeout(std::time::Duration::from_secs(15), read_pipe(&original, 4))
+                .await
+                .unwrap()
+                .unwrap();
+        run.cancel();
+        assert!(futures_util::poll!(launch.as_mut()).is_pending());
+        assert_eq!(rustix::io::write(&write, &identity).unwrap(), 4);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(15), launch)
+            .await
+            .unwrap();
+        drop(process);
+        tasks.drain().await.unwrap();
+        assert_eq!(result.err().unwrap().kind(), io::ErrorKind::Interrupted);
+        assert!(!root.path().join("forbidden").exists());
     }
 
     #[tokio::test]

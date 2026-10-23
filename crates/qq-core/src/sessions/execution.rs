@@ -815,6 +815,7 @@ pub(super) async fn execute_run(
     let load_progress = RuntimeLoadProgress::default();
     let mut load = inner.loader.load_with_progress(
         RuntimeLoadRequest {
+            execution_workspace: None,
             reasoning_effort: claimed.reasoning_effort,
             workspace: claimed.workspace.clone(),
             model: claimed.model.clone(),

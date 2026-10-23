@@ -925,6 +925,7 @@ pub(super) fn admit_side_question(
         .optional()?
         .ok_or(SessionRuntimeError::SessionNotFound)?;
     let request = RuntimeLoadRequest {
+        execution_workspace: None,
         workspace: row.0,
         model: ModelSelection {
             model: row.1,
