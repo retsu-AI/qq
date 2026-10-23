@@ -87,12 +87,36 @@ fn writes_verified_artifact() {
         script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
     }
     script.push_str(" & node verify.js & cargo test --offline >cargo-test-output.txt 2>&1");
+    let stdin = "native stdin after the launch packet\0雪\r\n";
+    let argv = ["a quoted value", r#"quote"and\trailing\"#, ""];
+    let exec = json!({
+        "program": "node",
+        "args": [
+            "-e",
+            format!(r#"
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+const input = fs.readFileSync(0);
+assert.deepEqual(input, Buffer.from({stdin}));
+assert.deepEqual(process.argv.slice(1), {argv});
+for (const name of ['HOME', 'USERPROFILE', 'TMPDIR', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA']) {{
+  fs.writeFileSync(path.join(process.env[name], 'exec-proof-' + name), input);
+}}
+fs.writeFileSync('exec-stdin.bin', input);
+"#, stdin = serde_json::to_string(stdin).unwrap(), argv = serde_json::to_string(&argv).unwrap()),
+            argv[0], argv[1], argv[2],
+        ],
+        "stdin": stdin,
+    });
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
             response(vec![
                 json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":""}}),
                 json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"shell","arguments":json!({"command":script}).to_string()}}),
+                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":""}}),
+                json!({"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":exec.to_string()}}),
                 complete.clone(),
             ]),
             response(vec![
@@ -242,6 +266,10 @@ fn writes_verified_artifact() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
+    assert_eq!(
+        fs::read(source.join("exec-stdin.bin")).unwrap(),
+        stdin.as_bytes()
+    );
     for (program, expected) in &tool_versions {
         assert_eq!(
             fs::read_to_string(source.join(format!("{program}-version.txt")))
@@ -304,6 +332,11 @@ fn writes_verified_artifact() {
                 .trim_end(),
             format!("private-{name}"),
             "{name} must resolve to private task storage",
+        );
+        assert_eq!(
+            fs::read(profile.join(format!("exec-proof-{name}"))).unwrap(),
+            stdin.as_bytes(),
+            "exec must retain stdin and the frozen {name} value",
         );
     }
     let calls = tokio::task::spawn_blocking(move || provider.capture_all())
