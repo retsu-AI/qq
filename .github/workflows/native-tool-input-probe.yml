@@ -95,6 +95,9 @@ jobs:
           $markerCanary = Join-Path $probeDirectory 'outside-marker.txt'
           [System.IO.File]::WriteAllText($canary, 'outside-canary')
           [System.IO.File]::WriteAllText($markerCanary, 'outside-marker')
+          $writableCanary = Join-Path $probeDirectory 'public-writable.txt'
+          [System.IO.File]::WriteAllText($writableCanary, 'public-input')
+          $writableAcl = Get-Acl -LiteralPath $writableCanary
           $directoryAcl = Get-Acl -LiteralPath $probeDirectory
           $fixtures = @(
             @{ Path = $canary; Sid = 'S-1-15-2-1' },
@@ -106,8 +109,11 @@ jobs:
             $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
             Set-Acl -LiteralPath $fixture.Path -AclObject $acl
             $directoryAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadAndExecute', 'Allow'))
+            $writableAcl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'ReadWrite', 'Allow'))
           }
           Set-Acl -LiteralPath $probeDirectory -AclObject $directoryAcl
+          Set-Acl -LiteralPath $writableCanary -AclObject $writableAcl
+          $env:QQ_NATIVE_PUBLIC_WRITABLE = $writableCanary
           $futureDirectory = Join-Path $probeDirectory 'future-public-files'
           New-Item -ItemType Directory -Force $futureDirectory | Out-Null
           $futureAcl = Get-Acl -LiteralPath $futureDirectory
