@@ -2536,7 +2536,7 @@ async fn an_owned_build_uses_its_frozen_task_deadline_without_a_two_minute_cap()
     let workspace = tempfile::tempdir().unwrap();
     let fifo = workspace.path().join("release");
     crate::tools::create_test_fifo(&fifo).await;
-    let mut gate = std::fs::OpenOptions::new()
+    let gate = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(fifo)
@@ -2573,10 +2573,12 @@ async fn an_owned_build_uses_its_frozen_task_deadline_without_a_two_minute_cap()
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(121)).await;
     tokio::time::resume();
-    tokio::task::spawn_blocking(move || gate.write_all(b"continue\n").unwrap())
+    let mut writer = gate.try_clone().unwrap();
+    tokio::task::spawn_blocking(move || writer.write_all(b"continue\n").unwrap())
         .await
         .unwrap();
     let finished = wait_finished(&owner, id, 0).await;
+    drop(gate);
     owner.shutdown().await.unwrap();
     let result = finished.result.unwrap();
     assert!(!result.is_error(), "{}", result.text());
