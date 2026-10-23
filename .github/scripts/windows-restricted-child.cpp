@@ -235,6 +235,9 @@ static int inspect_files() {
                     const DWORD count = GetFinalPathNameByHandleW(file.value, resolved, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
                     std::wcout << L"; final-path=" << (count ? resolved : L"<unavailable>")
                         << L"; final-error=" << (count ? 0 : GetLastError());
+                    const DWORD nt_count = GetFinalPathNameByHandleW(file.value, resolved, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+                    std::wcout << L"; nt-path=" << (nt_count ? resolved : L"<unavailable>")
+                        << L"; nt-error=" << (nt_count ? 0 : GetLastError());
                 }
                 std::wcout << std::endl;
             }
@@ -528,9 +531,6 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
     if (!target_size || target_size >= 32768) throw std::runtime_error("projection root NT path unavailable");
     // The current finite fixture uses C:. Fail explicitly on any other drive.
     if (projection[0] != L'C' || projection[1] != L':') throw std::runtime_error("projection fixture requires C:");
-    link(objects.drive, L"C:", target);
-    link(objects.global_root, L"GLOBALROOT", L"\\");
-    link(objects.null_device, L"NUL", L"\\Device\\Null");
     wchar_t volume_guid[128]{};
     require(GetVolumeNameForVolumeMountPointW(L"C:\\", volume_guid, 128), "projection volume GUID");
     std::wstring volume_name(volume_guid);
@@ -540,7 +540,6 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
     const auto separator = physical_root.find(L'\\', 8);
     if (!physical_root.starts_with(L"\\Device\\") || separator == std::wstring::npos) throw std::runtime_error("invalid projection device path");
     const auto device = physical_root.substr(0, separator);
-    link(objects.volume, volume_name, device);
     union DeviceMap {
         HANDLE directory;
         struct { ULONG drives; BYTE types[32]; } query;
@@ -553,6 +552,13 @@ static void install_device_map(HANDLE process, PSID package, PrivateDeviceMap& o
         status = set_process(process, 23, &map, used_size);
     }
     check(status, "set suspended child's private device map");
+    // Test whether binding the directory before creating its links changes
+    // DOS path resolution. The child remains suspended or blocked on the
+    // readiness pipe throughout installation.
+    link(objects.drive, L"C:", target);
+    link(objects.global_root, L"GLOBALROOT", L"\\");
+    link(objects.null_device, L"NUL", L"\\Device\\Null");
+    link(objects.volume, volume_name, device);
     std::cerr << "private device map setter status=" << static_cast<ULONG>(status) << "; ABI bytes=" << used_size << "; host drive map unchanged" << std::endl;
 }
 
