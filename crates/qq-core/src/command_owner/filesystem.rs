@@ -94,7 +94,9 @@ impl NativeDirectoryGrant {
 /// its loader baseline also permits listing the root directory itself.
 /// It does not create a private mount tree. Windows uses the process-security
 /// environment API when version 1.1 is available, with explicit paths and no host
-/// ACL augmentation. That path inspects ordinary inputs for aliases; only
+/// ACL augmentation. That path still exposes the OS public-AppContainer read
+/// baseline outside those roots and has not qualified for strict isolation.
+/// It inspects ordinary inputs for aliases; only
 /// explicitly trusted read-only software trees avoid recursive inspection. Otherwise it uses LPAC with the
 /// registryRead and identity-bound read-only root capabilities. Writable grants
 /// use task-specific package SIDs. It requires isolated networking and accepts

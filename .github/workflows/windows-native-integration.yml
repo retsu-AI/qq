@@ -34,6 +34,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p qq-core command_owner::environment::tests:: -- --nocapture
+          cargo test --locked -p qq-core tools::windows_owner::payload::tests:: -- --nocapture
           cargo test --locked -p qq-core sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions -- --exact
           cargo test --locked -p qq-core sessions::tests::goal_check::scoped_goal_check_uses_durable_service_and_typed_success -- --exact
       - name: Native Clippy

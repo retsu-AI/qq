@@ -1403,9 +1403,18 @@ host tool ACLs. Only explicitly host-approved, read-only software installation
 trees skip recursive inspection; writable grants never receive that exception.
 The payload does not exist until the worker releases authorization. Memory,
 process and CPU jobs include the helper and descendants; the enclosing command
-job owns cancellation and cleanup. This path has not yet passed QQ's native
-integration tests on Windows 11, and the API is absent on the tested Windows
-Server 2025 image.
+job owns cancellation and cleanup. Windows replaces some profile environment
+values during AppContainer creation. A contained entry verifies its token, reads
+the bounded launch packet, and starts the actual command with the frozen
+environment. Its immutable helper directory is an additional read-only runtime
+input; writable task directories never participate in that entry's DLL lookup.
+The entry and command inherit the same security environment and owned jobs.
+
+This path has not yet passed QQ's native integration tests on Windows 11. In
+particular, files granted to all AppContainers remain readable outside explicit
+roots; denying a volume root does not deny those descendant reads. It does not
+currently enforce QQ's strict readable-root contract. The API is absent on the
+tested Windows Server 2025 image.
 
 When that API is unavailable, the Windows adapter launches restricted requests
 in LPAC with `registryRead`

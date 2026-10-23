@@ -24,6 +24,7 @@ mod access;
 mod arguments;
 mod directory;
 mod native_api;
+mod payload;
 mod resources;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
@@ -64,6 +65,7 @@ pub(super) struct Startup {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Packet {
+    launcher_arguments: Vec<OsString>,
     program: PathBuf,
     arguments: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
@@ -184,6 +186,7 @@ impl WindowsOwner {
         }
         let original = command.as_std();
         let packet = Packet {
+            launcher_arguments: self.0.launcher.arguments.clone(),
             program: resolve_program(original)?,
             arguments: original.get_args().map(OsString::from).collect(),
             environment: original
@@ -341,10 +344,25 @@ fn unix_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+fn read_packet(input: &mut File) -> io::Result<Packet> {
+    let mut length = [0; 8];
+    input.read_exact(&mut length)?;
+    let length = usize::try_from(u64::from_le_bytes(length)).map_err(io::Error::other)?;
+    if length > MAX_PACKET {
+        return Err(io::Error::other("native launch packet exceeds its bound"));
+    }
+    let mut body = vec![0; length];
+    input.read_exact(&mut body)?;
+    serde_json::from_slice(&body).map_err(io::Error::other)
+}
+
 /// Dedicated pre-runtime entry. Success exits this helper with the payload's
 /// full Windows exit code; returning an error never starts a host fallback.
 pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     use std::os::windows::io::AsHandle as _;
+    if encoded == "qq-windows-payload:1" {
+        return payload::execute();
+    }
     if encoded != "qq-windows-launch:1" {
         return Err(io::Error::other("invalid native launch descriptor"));
     }
@@ -365,15 +383,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     // authorization byte. Keep the protocol reads unbuffered: the payload
     // inherits the same pipe after this exact prefix has been consumed.
     let mut input = File::from(std::io::stdin().as_handle().try_clone_to_owned()?);
-    let mut length = [0; 8];
-    input.read_exact(&mut length)?;
-    let length = usize::try_from(u64::from_le_bytes(length)).map_err(io::Error::other)?;
-    if length > MAX_PACKET {
-        return Err(io::Error::other("native launch packet exceeds its bound"));
-    }
-    let mut body = vec![0; length];
-    input.read_exact(&mut body)?;
-    let packet: Packet = serde_json::from_slice(&body).map_err(io::Error::other)?;
+    let packet = read_packet(&mut input)?;
     let cwd = crate::workspace::Workspace::open(&packet.cwd)?;
     if NativeWorkspaceIdentity::held(cwd.root())? != packet.cwd_identity {
         return Err(io::Error::other("native working directory changed"));

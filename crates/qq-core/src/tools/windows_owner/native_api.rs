@@ -1,5 +1,5 @@
 //! Windows' process-security environment; no tool-tree ACL mutation.
-use super::{Packet, READY, access, arguments, directory, resources, unix_ms};
+use super::{Packet, READY, access, arguments, resources, unix_ms};
 use mxc_sdk::v1::{
     self, ClipboardPolicy, ContainerRequest, Containment, FilesystemPolicy, NetworkAction,
     NetworkEgressPolicy, NetworkIngressPolicy, NetworkPolicy, UiPolicy,
@@ -7,9 +7,10 @@ use mxc_sdk::v1::{
 };
 use std::{
     collections::BTreeSet,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{self, Read as _, Write as _},
+    path::Path,
 };
 
 fn text(value: &OsStr) -> io::Result<String> {
@@ -21,7 +22,7 @@ fn text(value: &OsStr) -> io::Result<String> {
     })
 }
 
-fn request(packet: &Packet) -> io::Result<ContainerRequest> {
+fn request(packet: &Packet, image: &Path) -> io::Result<ContainerRequest> {
     let crate::command_owner::NativeFilesystem::Restricted {
         read_only,
         read_write,
@@ -37,17 +38,23 @@ fn request(packet: &Packet) -> io::Result<ContainerRequest> {
             ancestors.insert(text(ancestor.as_os_str())?);
         }
     }
+    let image_directory = image
+        .parent()
+        .ok_or_else(|| io::Error::other("native helper image has no directory"))?;
+    for ancestor in image_directory.ancestors().skip(1) {
+        ancestors.insert(text(ancestor.as_os_str())?);
+    }
     let mut filesystem = ProcessContainerFilesystem::default();
     filesystem.enumerate_paths = ancestors.into_iter().collect();
     let mut config = ProcessContainerConfig::default();
     config.capabilities = vec!["registryRead".to_owned()];
     config.filesystem = Some(filesystem);
-    let mut request =
-        ContainerRequest::new(arguments::command_line(&packet.program, &packet.arguments)?);
+    let mut launcher_arguments = packet.launcher_arguments.clone();
+    launcher_arguments.push(OsString::from("qq-windows-payload:1"));
+    let mut request = ContainerRequest::new(arguments::command_line(image, &launcher_arguments)?);
     request.containment = Containment::ProcessContainer(config);
-    request.working_directory = Some(text(
-        directory::working_directory(&packet.program, &packet.cwd)?.as_os_str(),
-    )?);
+    // Keep the trusted entry's DLL lookup out of writable task directories.
+    request.working_directory = Some(text(image_directory.as_os_str())?);
     request.environment = Some(
         packet
             .environment
@@ -60,6 +67,7 @@ fn request(packet: &Packet) -> io::Result<ContainerRequest> {
         readonly_paths: read_only
             .iter()
             .map(|root| text(root.path.as_os_str()))
+            .chain(std::iter::once(text(image_directory.as_os_str())))
             .collect::<io::Result<_>>()?,
         readwrite_paths: read_write
             .iter()
@@ -98,7 +106,8 @@ pub(super) fn available() -> bool {
 
 pub(super) fn execute(packet: Packet, mut input: File) -> io::Result<u8> {
     let _roots = access::hold(&packet.filesystem, packet.not_after_ms)?;
-    let request = request(&packet)?;
+    let image = std::env::current_exe()?;
+    let request = request(&packet, &image)?;
     let probe = v1::probe(Some(&request)).map_err(io::Error::other)?;
     if probe.tier != Some("base-container")
         || probe.needs_dacl_augmentation != Some(false)
@@ -137,6 +146,12 @@ pub(super) fn execute(packet: Packet, mut input: File) -> io::Result<u8> {
     let mut stderr = child
         .take_stderr()
         .ok_or_else(|| io::Error::other("native stderr is missing"))?;
+    // Windows rewrites profile variables while creating the AppContainer. The
+    // contained entry restores the frozen environment only for its child; it
+    // never mutates this helper's environment or grants additional file access.
+    let encoded = serde_json::to_vec(&packet).map_err(io::Error::other)?;
+    stdin.write_all(&(encoded.len() as u64).to_le_bytes())?;
+    stdin.write_all(&encoded)?;
     // The helper exits the process after the output is drained. Its stdin pump
     // may still be blocked on the worker's pipe; it must not delay settlement.
     drop(
