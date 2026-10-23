@@ -9,6 +9,7 @@
 #include <aclapi.h>
 #include <iostream>
 #include <cwchar>
+#include <cstdint>
 #include <cstring>
 #include <cwctype>
 #include <utility>
@@ -88,6 +89,63 @@ static std::string sid_text(PSID sid) {
     return text;
 }
 
+// Native token-attribute layout used by Chromium's AccessToken wrapper.
+// Print names and metadata only: attribute values may contain credentials.
+struct ProbeTokenAttribute {
+    UNICODE_STRING name;
+    USHORT type;
+    USHORT reserved;
+    ULONG flags;
+    ULONG count;
+    void* values;
+};
+struct ProbeTokenAttributes {
+    USHORT version;
+    USHORT reserved;
+    ULONG count;
+    ProbeTokenAttribute* attributes;
+};
+
+static void inspect_security_attributes(HANDLE token, const char* phase) {
+    DWORD size = 0;
+    const BOOL queried = GetTokenInformation(token, TokenSecurityAttributes, nullptr, 0, &size);
+    const DWORD first_error = queried ? ERROR_SUCCESS : GetLastError();
+    if (!size) {
+        std::cout << "security-attributes=" << phase << "; query-error=" << first_error << std::endl;
+        return;
+    }
+    if (first_error != ERROR_INSUFFICIENT_BUFFER || size < sizeof(ProbeTokenAttributes) || size > 65536) {
+        throw std::runtime_error("invalid token security attribute size");
+    }
+    std::vector<BYTE> bytes(size);
+    require(GetTokenInformation(token, TokenSecurityAttributes, bytes.data(), size, &size), "security attributes");
+    if (size > bytes.size() || size < sizeof(ProbeTokenAttributes)) throw std::runtime_error("invalid returned attribute size");
+    const auto within = [&](const void* pointer, size_t length) {
+        const auto base = reinterpret_cast<std::uintptr_t>(bytes.data());
+        const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+        return address >= base && address - base <= size && length <= size - (address - base);
+    };
+    const auto* header = reinterpret_cast<const ProbeTokenAttributes*>(bytes.data());
+    if (header->version != 1 || header->count > 128 ||
+        (header->count && (!within(header->attributes, header->count * sizeof(ProbeTokenAttribute)) ||
+         reinterpret_cast<std::uintptr_t>(header->attributes) % alignof(ProbeTokenAttribute)))) {
+        throw std::runtime_error("invalid token security attribute header");
+    }
+    std::cout << "security-attributes=" << phase << "; count=" << header->count << std::endl;
+    for (ULONG index = 0; index < header->count; ++index) {
+        const auto& attribute = header->attributes[index];
+        if (attribute.name.Length > 1024 || attribute.name.Length % sizeof(wchar_t) ||
+            !within(attribute.name.Buffer, attribute.name.Length) ||
+            reinterpret_cast<std::uintptr_t>(attribute.name.Buffer) % alignof(wchar_t)) {
+            throw std::runtime_error("invalid token attribute name");
+        }
+        const std::wstring name(attribute.name.Buffer, attribute.name.Length / sizeof(wchar_t));
+        if (name.find_first_of(L"\r\n") != std::wstring::npos) throw std::runtime_error("invalid attribute name controls");
+        std::wcout << L"security-attribute-name=" << name << L"; type=" << attribute.type
+            << L"; flags=" << attribute.flags << L"; values=" << attribute.count << std::endl;
+    }
+}
+
 static int inspect() {
     Handle token;
     require(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value), "inspect token");
@@ -99,6 +157,7 @@ static int inspect() {
         return 0;
     }
     contained(token.value);
+    inspect_security_attributes(token.value, "payload");
     auto package = information(token.value, TokenAppContainerSid);
     std::cout << "appcontainer=1; package=" << sid_text(reinterpret_cast<const TOKEN_APPCONTAINER_INFORMATION*>(package.data())->TokenAppContainer) << std::endl;
     auto capabilities = information(token.value, TokenCapabilities);
@@ -989,6 +1048,8 @@ int wmain(int argc, wchar_t** argv) {
             }
 
         }
+        inspect_security_attributes(current.value, "before-restriction");
+        if (restricted.value) inspect_security_attributes(restricted.value, "after-restriction");
         auto block = environment();
         const std::wstring command = L"\"" + std::wstring(argv[1]) + L"\" " +
             (inline_node ? L"-e " : L"") + L"\"" + std::wstring(argv[2]) + L"\"";
