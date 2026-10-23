@@ -1,5 +1,7 @@
 name: Windows worker ambient write baseline
 on:
+  push:
+    branches: [test/windows-worker-write-regression]
   workflow_dispatch:
 permissions:
   contents: read
