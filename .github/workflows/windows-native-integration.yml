@@ -55,6 +55,7 @@ jobs:
       - name: Captured environment, restart and completion checks
         if: ${{ !cancelled() }}
         run: |
+          cargo test --locked -p qq-core command_owner::filesystem::enumeration_tests:: -- --nocapture
           cargo test --locked -p qq-core command_owner::environment::tests:: -- --nocapture
           cargo test --locked -p qq-core tools::windows_owner::payload::tests:: -- --nocapture
           cargo test --locked -p qq-core sessions::tests::native_scope::native_scope_survives_restart_and_applies_to_child_sessions -- --exact

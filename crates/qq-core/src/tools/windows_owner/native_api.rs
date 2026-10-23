@@ -6,7 +6,6 @@ use mxc_sdk::v1::{
     configs::{ProcessContainerConfig, ProcessContainerFilesystem},
 };
 use std::{
-    collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs::File,
     io::{self, Read as _, Write as _},
@@ -32,20 +31,16 @@ fn request(packet: &Packet, image: &Path) -> io::Result<ContainerRequest> {
             "native Windows policy requires explicit file authority",
         ));
     };
-    let mut ancestors = BTreeSet::new();
-    for root in read_only.iter().chain(read_write) {
-        for ancestor in root.path.ancestors().skip(1) {
-            ancestors.insert(text(ancestor.as_os_str())?);
-        }
-    }
     let image_directory = image
         .parent()
         .ok_or_else(|| io::Error::other("native helper image has no directory"))?;
-    for ancestor in image_directory.ancestors().skip(1) {
-        ancestors.insert(text(ancestor.as_os_str())?);
-    }
     let mut filesystem = ProcessContainerFilesystem::default();
-    filesystem.enumerate_paths = ancestors.into_iter().collect();
+    filesystem.enumerate_paths = packet
+        .filesystem
+        .enumeration_ancestors(image_directory)
+        .into_iter()
+        .map(|path| text(path.as_os_str()))
+        .collect::<io::Result<_>>()?;
     let mut config = ProcessContainerConfig::default();
     config.capabilities = vec!["registryRead".to_owned()];
     config.filesystem = Some(filesystem);

@@ -122,6 +122,36 @@ pub enum NativeFilesystem {
 }
 
 impl NativeFilesystem {
+    /// Metadata access needed to reach explicit roots, including the trusted
+    /// launcher. This is separate from authority to read directory contents.
+    #[cfg(any(windows, test))]
+    pub(crate) fn enumeration_ancestors<'a>(
+        &'a self,
+        launcher_root: &'a Path,
+    ) -> std::collections::BTreeSet<&'a Path> {
+        let Self::Restricted {
+            read_only,
+            read_write,
+        } = self
+        else {
+            return Default::default();
+        };
+        let explicit = read_only
+            .iter()
+            .chain(read_write)
+            .map(|grant| grant.path.as_path())
+            .chain(std::iter::once(launcher_root))
+            .collect::<std::collections::BTreeSet<_>>();
+        // PSEC resolves duplicate paths to their most restrictive intent.
+        // Enumerating a content root would therefore remove its read/write
+        // grant when another allowed root is nested underneath it.
+        explicit
+            .iter()
+            .flat_map(|root| root.ancestors().skip(1))
+            .filter(|ancestor| !explicit.contains(ancestor))
+            .collect()
+    }
+
     pub(crate) fn is_restricted(&self) -> bool {
         matches!(self, Self::Restricted { .. })
     }
@@ -144,6 +174,43 @@ impl NativeFilesystem {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod enumeration_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_ancestors_do_not_downgrade_explicit_content_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let software = root.join("software");
+        let binaries = software.join("bin");
+        let task = root.join("task");
+        let home = task.join("home");
+        let launcher = software.join("helper");
+        for path in [&binaries, &home, &launcher] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let filesystem = NativeFilesystem::Restricted {
+            read_only: [&software, &binaries]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+            read_write: [&task, &home]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+        };
+        let ancestors = filesystem.enumeration_ancestors(&launcher);
+        assert!(ancestors.contains(root.as_path()));
+        for explicit in [&software, &binaries, &task, &home, &launcher] {
+            assert!(
+                !ancestors.contains(explicit.as_path()),
+                "metadata-only access would downgrade explicit content authority: {explicit:?}"
+            );
+        }
     }
 }
 
