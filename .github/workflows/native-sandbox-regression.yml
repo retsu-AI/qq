@@ -26,18 +26,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: native-anchors-${{ matrix.os }}
-      - name: Prove writable-root replacement before the fix
+      - name: Prove writable-ancestor replacement before the fix
         shell: bash
         run: |
-          git checkout 6a3c8b6a7464a5582d44e8bd117bc65a12180f7f
+          git checkout d64fef25
           set +e
           cargo test --locked -p qq-core tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts -- --exact --nocapture > "$RUNNER_TEMP/anchors-before.log" 2>&1
           result=$?
           set -e
           cat "$RUNNER_TEMP/anchors-before.log"
           test "$result" -ne 0
-          # Exit 91 means the forbidden root rename actually succeeded.
-          grep -F 'unix_wait_status(23296)' "$RUNNER_TEMP/anchors-before.log"
+          # Require the precise relocation assertion, not a compile/setup error.
+          grep -F 'an intermediate directory carrying a grant root was relocated' "$RUNNER_TEMP/anchors-before.log"
       - name: Verify protected roots and writable contents after the fix
         shell: bash
         run: |
