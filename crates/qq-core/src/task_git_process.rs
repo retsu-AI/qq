@@ -16,6 +16,46 @@ impl TaskGit {
         operation: &Operation,
         limit: usize,
     ) -> Result<Vec<u8>, TaskGitError> {
+        self.run_configured(
+            directory,
+            arguments,
+            input,
+            object_directory,
+            operation,
+            limit,
+            None,
+        )
+    }
+
+    pub(super) fn run_transport(
+        &self,
+        arguments: &[&str],
+        url: &str,
+        token: &qq_provider::SecretLiteral,
+        operation: &Operation,
+    ) -> Result<Vec<u8>, TaskGitError> {
+        self.run_configured(
+            &self.repository.path,
+            arguments,
+            Vec::new(),
+            None,
+            operation,
+            16 * 1024,
+            Some((url, token)),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_configured(
+        &self,
+        directory: &Path,
+        arguments: &[&str],
+        input: Vec<u8>,
+        object_directory: Option<&NativeDirectoryGrant>,
+        operation: &Operation,
+        limit: usize,
+        transport: Option<(&str, &qq_provider::SecretLiteral)>,
+    ) -> Result<Vec<u8>, TaskGitError> {
         operation.check()?;
         held(&self.repository)?;
         held(&self.source)?;
@@ -61,6 +101,9 @@ impl TaskGit {
             "pack.window=0",
         ] {
             command.args(["-c", option]);
+        }
+        if let Some((url, token)) = transport {
+            configure_transport(&mut command, url, token)?;
         }
         command
             .args(arguments)
@@ -215,4 +258,46 @@ fn bounded_read(reader: &mut impl Read, limit: usize) -> io::Result<Vec<u8>> {
         return Err(io::Error::other("Git output limit exceeded"));
     }
     Ok(output)
+}
+
+fn configure_transport(
+    command: &mut Command,
+    url: &str,
+    token: &qq_provider::SecretLiteral,
+) -> Result<(), TaskGitError> {
+    use base64::Engine as _;
+    if !url.starts_with("https://github.com/") {
+        #[cfg(not(test))]
+        return Err(TaskGitError::Invalid("invalid task Git transport origin"));
+        #[cfg(test)]
+        if !url.starts_with("http://127.0.0.1:") {
+            return Err(TaskGitError::Invalid("invalid test Git transport origin"));
+        }
+    }
+    command.args([
+        "-c",
+        "protocol.https.allow=always",
+        "-c",
+        "http.followRedirects=false",
+        "-c",
+        "http.sslVerify=true",
+        "-c",
+        "http.proxy=",
+        "-c",
+        "credential.interactive=false",
+    ]);
+    #[cfg(test)]
+    if url.starts_with("http://127.0.0.1:") {
+        command.args(["-c", "protocol.http.allow=always"]);
+    }
+    let header = format!(
+        "Authorization: Basic {}",
+        base64::engine::general_purpose::STANDARD
+            .encode(format!("x-access-token:{}", token.expose_secret()))
+    );
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", format!("http.{url}.extraHeader"))
+        .env("GIT_CONFIG_VALUE_0", header);
+    Ok(())
 }
