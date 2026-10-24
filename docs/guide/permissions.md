@@ -112,7 +112,7 @@ Every session runs under one mode. Set the default in a profile
 | --- | --- | --- | --- | --- | --- |
 | `read_only` | run | denied | denied | denied | denied |
 | `ask` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
-| `auto` **(default)** | run | run | classifier `allow` or a grant → run; `prompt` → ask; `forbidden` → refused | run | granted hosts run; others ask |
+| `auto` **(default)** | run | run | task-contained, classifier `allow`, or a grant → run; otherwise denied | run | granted hosts run; others denied |
 | `full` | run | run | run except `forbidden` | run | run |
 
 Write sub-agents require internal review for each non-read action. `full`
@@ -127,19 +127,19 @@ mode apply once and never create session or workspace grants.
 
 ## Who decides a held call
 
-The mode says what is held. `approval_delegate` says who settles it when a
-delegate is configured; without one, every held call is yours. The delegate
-is `reviewer_model`; when it abstains or is unavailable, you are asked.
+Auto never requests permission from a human. Actions outside its configured
+workspace, task, and grants are denied before review. Allowed write-child
+actions retain internal supervision through `reviewer_model`.
 
-| Profile | Set | What happens |
+| Setting | Auto child supervision | Ask |
 | --- | --- | --- |
-| default | nothing | `auto` holds go to the reviewer first; `ask` always comes to you |
-| reviewer enabled | `approval_delegate: on` | reviewer decides `auto` holds; it cannot approve an `ask` call |
-| human-only holds | `approval_delegate: off` | every held call comes to you |
+| absent or `approval_delegate: on` | reviewer approves or denies | human approves each call |
+| `approval_delegate: off` | supervised actions denied | human approves each call |
 
-A reviewer denial is final: the model gets the reason as a tool error.
-An escalation, timeout, or outage asks the human. `ask` never consults a
-reviewer. Questions and policy-forbidden actions never go to the reviewer.
+A reviewer denial, escalation, timeout, or outage denies the Auto call and
+returns a tool error so the agent can pursue an allowed alternative. A
+missing reviewer also denies actions requiring supervision. Questions and
+policy-forbidden actions never go to the reviewer.
 
 Set it at the top level, in a profile
 (`Profile(approval_mode: auto, approval_delegate: on)`), or for one process
@@ -150,8 +150,8 @@ any other sensitive key.
 
 If a delegate is approving things you would rather see, `/delegate` in the
 TUI (or `set_approval_delegate` on the wire) changes who settles the focused
-session's held calls for the rest of that session: `off` brings every held
-call to you, `on` or `by_mode` widen or restore delegation, and `configured`
+session's held calls for the rest of that session: `off` denies Auto calls
+requiring supervision; `on` or `by_mode` restore delegation, and `configured`
 clears the override. It takes effect at the session's next held call — a
 running session included — and rewrites nothing: your `.qq/config.ron` and
 the next session are unchanged. Children the session spawns afterwards start
@@ -166,8 +166,8 @@ delegate's denial shows as `denied by reviewer` on the
 row; your own decisions read `approved for session`, `denied by you`, or
 nothing for a plain once-approval. In `qq run --format text` the log line is
 `[tool] NAME approved by reviewer`; in JSONL the `tool_approval_resolved`
-event carries `"delegate": "reviewer"`. When a delegate abstains and
-the prompt reaches you, the prompt's reason line says why.
+event carries `"delegate": "reviewer"`. When an Auto delegate abstains, the
+denial includes its reason.
 
 ## What the shell classifier decides
 
@@ -177,12 +177,13 @@ grades it, strictest verdict across every simple command in the pipeline:
 | Verdict | Examples | Under `auto` | Under `full` |
 | --- | --- | --- | --- |
 | `allow` | `cargo test`, `git status`, `ls src`, `rg TODO`, `cat README.md` — literal words, listed read/build programs, operands inside the workspace | runs | runs |
-| `prompt` | anything with `$VAR`, globs, `$(…)`, redirects that write, `rm`, `git commit`, `git push`, `sed -i`, `npm install`, `curl`, `docker`, operands outside the workspace, unknown programs | asks | runs |
+| `prompt` | anything with `$VAR`, globs, `$(…)`, redirects that write, `rm`, `git commit`, `git push`, `sed -i`, `npm install`, `curl`, `docker`, operands outside the workspace, unknown programs | runs inside the native task boundary or with a grant; otherwise denied | runs |
 | `forbidden` | `rm -rf /` or `~`, `sudo`, `mkfs`, `dd of=/dev/…`, `git push --force`, `curl … \| sh`, `eval "$x"`, writes to `~/.ssh` or `/etc`, fork bombs, `LD_PRELOAD=` | refused | refused |
 
 Wrappers (`env`, `nice`, `timeout`, `xargs`, `sh -c "…"`) are peeled so the
-inner command is graded too. The approval prompt shows the verdict and the
-rule ids behind it.
+inner command is graded too. In Ask, the approval prompt shows the verdict
+and the rule ids behind it. Auto never turns a classifier verdict into a
+human prompt.
 
 ## The approval prompt
 
@@ -233,10 +234,9 @@ you are away: the hold ends when you answer, when the run's own deadline
 you want a bound anyway — a shared server, an unattended supervisor — set
 `approval_timeout_seconds` in configuration and the call is denied
 `denied_timeout` after that many seconds, counted from when you were
-actually asked (after the delegate answered or was cut off, not from when
-the delegate was consulted). `qq run` has nobody to ask and never waits on
-you: an `auto` hold is denied immediately, or after the delegate has had its
-20 s when one is configured.
+actually asked. Auto never enters this human wait: internal supervision
+times out to a denial. Headless `qq run --approval ask` denies immediately
+because no human is available.
 
 ## Grants in configuration
 

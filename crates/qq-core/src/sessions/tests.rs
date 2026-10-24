@@ -1556,6 +1556,181 @@ async fn approval_harness_with_clocks(
     }
 }
 
+/// A real write child: the Full parent supplies authority, while the child
+/// retains Auto and must pass internal supervision for every allowed mutation.
+struct SupervisedApprovalLoader {
+    child: Arc<dyn RuntimeLoader>,
+    parent: Arc<dyn Provider>,
+}
+
+impl RuntimeLoader for SupervisedApprovalLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        if request.model.model.as_deref() == Some("test/reviewer-child") {
+            return self.child.load(request);
+        }
+        let parent = Arc::clone(&self.parent);
+        Box::pin(async move {
+            Runtime::with_provider(parent, "test-model", 256)
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime
+                            .with_spawn_model_routes(vec!["test/reviewer-child".to_owned()])
+                            .with_delegation(qq_protocol::DelegationRoster {
+                                roster: Vec::new(),
+                                default_role: qq_protocol::DelegationRole::Balanced,
+                                max_depth: 1,
+                                write_children: true,
+                            }),
+                        &request.workspace,
+                        None,
+                    )
+                })
+                .map_err(|error| RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    message: error.to_string(),
+                })
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn supervised_approval_harness(
+    tool: &'static str,
+    arguments: &'static str,
+    tool_turns: usize,
+    approval_timeout: Option<Duration>,
+    delegate_timeout: Duration,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    reviewer: Arc<dyn ApprovalReviewer>,
+    delegate: approval::ApprovalDelegate,
+) -> ApprovalHarness {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let child = Arc::new(ApprovalLoader {
+        requests: Arc::clone(&requests),
+        tool,
+        arguments,
+        tool_turns,
+        delegate,
+    });
+    supervised_approval_fixture(
+        child,
+        requests,
+        approval_timeout,
+        delegate_timeout,
+        grant_authority,
+        reviewer,
+    )
+    .await
+}
+
+async fn supervised_scripted_approval_harness(
+    script: Vec<(&'static str, String)>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    reviewer: Arc<dyn ApprovalReviewer>,
+) -> ApprovalHarness {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::clone(&requests),
+        script,
+        turn: StdMutex::new(0),
+    });
+    let child = Arc::new(QueueLoader {
+        routed: vec![("test/reviewer-child", provider)],
+        queue: StdMutex::new(Vec::new()),
+    });
+    supervised_approval_fixture(
+        child,
+        requests,
+        DEFAULT_APPROVAL_TIMEOUT,
+        DEFAULT_DELEGATE_TIMEOUT,
+        grant_authority,
+        reviewer,
+    )
+    .await
+}
+
+async fn supervised_approval_fixture(
+    child: Arc<dyn RuntimeLoader>,
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    approval_timeout: Option<Duration>,
+    delegate_timeout: Duration,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    reviewer: Arc<dyn ApprovalReviewer>,
+) -> ApprovalHarness {
+    let directory = test_directory();
+    let parent: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        script: vec![(
+            "spawn_agent",
+            r#"{"task":"exercise internal tool supervision","model":"test/reviewer-child","authority":"write"}"#.to_owned(),
+        )],
+        turn: StdMutex::new(0),
+    });
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = 2;
+    options.approval_timeout = approval_timeout;
+    options.delegate_timeout = delegate_timeout;
+    options.grant_authority = grant_authority;
+    options.approval_reviewer = Some(reviewer);
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(SupervisedApprovalLoader { parent, child }),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Full).await;
+    let CommandOutcome::SessionCreated {
+        session_id: parent_id,
+    } = created.outcome
+    else {
+        panic!("unexpected parent session receipt")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: created.committed_through,
+        })
+        .unwrap();
+    submit_prompt_to(&runtime, parent_id, "delegate the tool test").await;
+    let (session_id, run_id) = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut child = None;
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            match event.event {
+                SessionEvent::SessionCreated { session }
+                    if session.parent_id == Some(parent_id) =>
+                {
+                    assert_eq!(session.approval_mode, ApprovalMode::Auto);
+                    child = Some(session.id);
+                }
+                SessionEvent::RunStarted { run_id, .. } if child == Some(event.session_id) => {
+                    break (event.session_id, run_id);
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // Parent completion and other workspace events cannot settle a child test.
+    let events = Box::pin(events.filter(move |event| {
+        std::future::ready(match event {
+            Ok(event) => event.session_id == session_id,
+            Err(_) => true,
+        })
+    }));
+    ApprovalHarness {
+        _directory: directory,
+        runtime,
+        requests,
+        workspace_id,
+        session_id,
+        run_id,
+        events,
+    }
+}
+
 async fn collect_until_approval_requested(
     events: &mut SessionEventStream,
 ) -> (Vec<SessionEventEnvelope>, ToolCallSnapshot) {
@@ -2356,6 +2531,69 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (directory, store, claimed)
+}
+
+/// Exercises persisted approval transactions without making Auto's live gate
+/// manufacture a human hold. Admission and execution are tested separately.
+async fn stored_approval_fixture(
+    tool: &str,
+    arguments: &str,
+) -> (TempDir, Store, ClaimedRun, ToolCallId) {
+    let (directory, store, claimed) = claimed_store_fixture().await;
+    let runtime = Runtime::new(StaticTextProvider, "test-model", 256).unwrap();
+    let loaded = loaded_runtime(runtime, directory.path().to_str().unwrap(), None);
+    let effect = loaded
+        .plan
+        .catalog
+        .lookup(tool)
+        .map(|entry| entry.effect)
+        .or_else(|| crate::tools::test_tool_effect(tool))
+        .expect("known fixture tool");
+    let id = ToolCallId::generate().unwrap();
+    let call = RuntimeToolCall {
+        id,
+        turn_ordinal: 1,
+        call_ordinal: 1,
+        provider_call_id: "stored-approval".to_owned(),
+        name: tool.to_owned(),
+        effect,
+        arguments: arguments.to_owned(),
+        rejection: None,
+    };
+    store
+        .persist_model_turn(
+            &claimed,
+            ModelTurnCommit {
+                model_work: crate::runtime::ModelWorkDisposition::Committed,
+                goal_notices: Vec::new(),
+                reserved_goal_notices: 0,
+                turn_ordinal: 1,
+                message: Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::tool_call(
+                        call.provider_call_id.clone(),
+                        call.name.clone(),
+                        &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
+                    )],
+                ),
+                calls: vec![call],
+                turn_message: None,
+                context_tokens: None,
+                occupancy_basis: None,
+                usage: None,
+                estimated_cost_usd_nanos: None,
+                accounting: None,
+                truncated: false,
+                notice: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .request_tool_approval(&claimed, id, ApprovalPreviews::default())
+        .await
+        .unwrap();
+    (directory, store, claimed, id)
 }
 
 async fn streaming_transaction_state(store: &Store, run_id: RunId) -> (u64, u64, u64, u64, u64) {

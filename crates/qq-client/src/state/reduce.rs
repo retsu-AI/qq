@@ -348,7 +348,10 @@ impl SessionStore {
                     if tool_call.state == ToolCallState::AwaitingApproval && *delegated {
                         session.live.with_delegate.insert(tool_call.id);
                     }
-                    if tool_call.state == ToolCallState::AwaitingApproval && !context.attentive {
+                    if tool_call.state == ToolCallState::AwaitingApproval
+                        && !*delegated
+                        && !context.attentive
+                    {
                         effects.push(StateEffect::Attention(Attention::ApprovalRequested {
                             session_title: session.summary.title.clone(),
                         }));
