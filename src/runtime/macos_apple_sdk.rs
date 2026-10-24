@@ -27,31 +27,33 @@ pub(super) fn discover(control: &Path) -> io::Result<super::macos_sdk::Inputs> {
     else {
         return Ok(Default::default());
     };
-    let developer = validate_developer(
+    selected_inputs(
         &path(&selected)?,
         Path::new("/Applications"),
         Path::new("/Library/Developer/CommandLineTools"),
         control,
-    )?;
-    let Some(clang) = super::unix_sdk::query_until(
-        command("/usr/bin/xcrun", &["--find", "clang"], Some(&developer)),
-        deadline,
-    )?
-    else {
-        return Ok(Default::default());
-    };
-    let Some(sdk) = super::unix_sdk::query_until(
-        command(
-            "/usr/bin/xcrun",
-            &["--sdk", "macosx", "--show-sdk-path"],
-            Some(&developer),
-        ),
-        deadline,
-    )?
-    else {
-        return Ok(Default::default());
-    };
-    roots(&developer, &path(&clang)?, &path(&sdk)?, control)
+        |developer| {
+            let Some(clang) = super::unix_sdk::query_until(
+                command("/usr/bin/xcrun", &["--find", "clang"], Some(developer)),
+                deadline,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(sdk) = super::unix_sdk::query_until(
+                command(
+                    "/usr/bin/xcrun",
+                    &["--sdk", "macosx", "--show-sdk-path"],
+                    Some(developer),
+                ),
+                deadline,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(Some((path(&clang)?, path(&sdk)?)))
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -61,6 +63,20 @@ fn path(bytes: &[u8]) -> io::Result<PathBuf> {
         return Err(denied());
     }
     Ok(PathBuf::from(text))
+}
+
+fn selected_inputs(
+    selected: &Path,
+    applications: &Path,
+    command_line_tools: &Path,
+    control: &Path,
+    query: impl FnOnce(&Path) -> io::Result<Option<(PathBuf, PathBuf)>>,
+) -> io::Result<super::macos_sdk::Inputs> {
+    let developer = validate_developer(selected, applications, command_line_tools, control)?;
+    let Some((clang, sdk)) = query(&developer)? else {
+        return Ok(Default::default());
+    };
+    roots(&developer, &clang, &sdk, control)
 }
 
 fn denied() -> io::Error {
@@ -160,6 +176,26 @@ fn roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_apple_selection_skips_metadata_without_blocking_startup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let control = base.join("control");
+        let selected = base.join("Volumes/Custom/Xcode.app/Contents/Developer");
+        std::fs::create_dir(&control).unwrap();
+        std::fs::create_dir_all(&selected).unwrap();
+        let inputs = selected_inputs(
+            &selected,
+            &base.join("Applications"),
+            &base.join("CommandLineTools"),
+            &control,
+            |_| panic!("unsupported selection must not query xcrun"),
+        )
+        .unwrap();
+        assert!(inputs.read_only.is_empty());
+        assert!(inputs.executable_directories.is_empty());
+    }
+
     #[test]
     fn selected_command_line_tools_do_not_admit_their_parent() {
         let fixture = tempfile::tempdir().unwrap();
