@@ -2,6 +2,8 @@ name: Unix SDK native qualification
 
 on:
   workflow_dispatch:
+  push:
+    branches: [fix/unix-sdk-macos]
 
 permissions:
   contents: read
