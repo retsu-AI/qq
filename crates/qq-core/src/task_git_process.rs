@@ -70,7 +70,9 @@ impl TaskGit {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
-            command.process_group(0);
+            if !operation.worker_owned {
+                command.process_group(0);
+            }
         }
         #[cfg(windows)]
         let job = {
@@ -88,7 +90,8 @@ impl TaskGit {
             Ok::<_, TaskGitError>(())
         })();
         #[cfg(unix)]
-        let mut guard = crate::tools::ProcessGroupGuard::new(Some(child.id()));
+        let mut guard =
+            crate::tools::ProcessGroupGuard::new((!operation.worker_owned).then_some(child.id()));
         let (send, receive) = mpsc::sync_channel(3);
         // Retain a sender so EOF before process exit still parks on the bounded poll.
         let _keepalive = send.clone();

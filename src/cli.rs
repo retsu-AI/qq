@@ -1298,3 +1298,15 @@ mod foreground_goal_cli_tests {
         }
     }
 }
+
+/// Private durable-worker entry, parsed before logging or application startup.
+pub fn task_git_request() -> Option<Result<PathBuf, &'static str>> {
+    let mut arguments = std::env::args_os().skip(1);
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("_task-git")) {
+        return None;
+    }
+    Some(match (arguments.next(), arguments.next()) {
+        (Some(path), None) => Ok(PathBuf::from(path)),
+        _ => Err("expected one protected task Git request path"),
+    })
+}
