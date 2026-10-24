@@ -30,7 +30,15 @@ fn payload_probe() {
         let outside = &arguments[index + 1];
         assert_eq!(std::fs::read(outside).unwrap(), b"ambient original");
         std::fs::write(outside, b"ordinary LPAC wrote outside").unwrap();
-        println!("ordinary-lpac-can-write-arap-file");
+        for (name, right) in [("WRITE_DAC", 0x0004_0000), ("WRITE_OWNER", 0x0008_0000)] {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            let handle = std::fs::OpenOptions::new().access_mode(right).open(outside);
+            assert!(
+                handle.is_ok(),
+                "ordinary LPAC must obtain ambient {name}: {handle:?}"
+            );
+        }
+        println!("ordinary-lpac-can-write-arap-file-and-security");
         return;
     }
     if mode == "ordinary" {
@@ -84,6 +92,16 @@ fn payload_probe() {
                     matches!(&write, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied),
                     "task write boundary must deny an ambient ARAP write: {write:?}"
                 );
+                for (name, right) in [("WRITE_DAC", 0x0004_0000), ("WRITE_OWNER", 0x0008_0000)] {
+                    use std::os::windows::fs::OpenOptionsExt as _;
+                    let handle = std::fs::OpenOptions::new()
+                        .access_mode(right)
+                        .open(&ambient);
+                    assert!(
+                        matches!(&handle, Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied),
+                        "task write boundary must deny ambient {name}: {handle:?}"
+                    );
+                }
                 let primary = winsafe::HPROCESS::GetCurrentProcess()
                     .OpenProcessToken(winsafe::co::TOKEN::QUERY)
                     .unwrap();
@@ -844,7 +862,9 @@ fn ambient_write_fixture(root: &Path) -> std::path::PathBuf {
     rappct::acl::grant_to_capability(
         rappct::acl::ResourcePath::File(outside.clone()),
         "S-1-15-2-2",
-        rappct::acl::AccessMask(0x0012_019f),
+        // Only this owned outside canary is deliberately writable through
+        // ARAP, including metadata authority that could otherwise grant access.
+        rappct::acl::AccessMask(0x0012_019f | 0x0004_0000 | 0x0008_0000),
     )
     .unwrap();
     let name = format!("qq-ambient-control-{}", ToolCallId::generate().unwrap());
