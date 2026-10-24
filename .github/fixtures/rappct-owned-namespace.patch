@@ -87,16 +87,21 @@ index 7c6d6a2..37f83a6 100644
 +    win32_status(status.0, "SetSecurityInfo(AppContainer directory)")
 +}
 diff --git a/src/lib.rs b/src/lib.rs
-index dd50f82..031e441 100755
+index dd50f82..a0032e4 100755
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -80,3 +80,6 @@ pub use launch::{LaunchedIo, launch_in_container_with_io};
+@@ -80,3 +80,11 @@ pub use launch::{LaunchedIo, launch_in_container_with_io};
  pub use lpac::supports_lpac;
  pub use profile::{AppContainerProfile, derive_sid_from_name};
  pub use sid::AppContainerSid;
 +
 +#[cfg(any(windows, test))]
 +mod object_directory;
++
++#[cfg(windows)]
++mod process_objects;
++#[cfg(windows)]
++pub use process_objects::diagnose_current_process_objects;
 diff --git a/src/object_directory.rs b/src/object_directory.rs
 new file mode 100644
 index 0000000..2445450
@@ -198,6 +203,115 @@ index 0000000..2445450
 +            assert!(namespace_path(&bad, sid, 3).is_err(), "{bad}");
 +        }
 +    }
++}
+diff --git a/src/process_objects.rs b/src/process_objects.rs
+new file mode 100644
+index 0000000..4f5445b
+--- /dev/null
++++ b/src/process_objects.rs
+@@ -0,0 +1,103 @@
++//! Read-only diagnostic for the current process and current thread only.
++use crate::ffi::handles::Handle;
++use crate::ffi::mem::LocalAllocGuard;
++use crate::{AcError, Result};
++use windows::Win32::Foundation::HANDLE;
++use windows::Win32::Security::Authorization::{
++    ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
++};
++use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
++use windows::Win32::System::Threading::*;
++use windows::core::PWSTR;
++
++/// Observe self-object descriptors and check access without modifying either object.
++pub fn diagnose_current_process_objects() -> Vec<String> {
++    // SAFETY: Pseudo handles and IDs identify only the calling process/thread.
++    let (process, thread, pid, tid) = unsafe {
++        (
++            GetCurrentProcess(),
++            GetCurrentThread(),
++            GetCurrentProcessId(),
++            GetCurrentThreadId(),
++        )
++    };
++    let mut rows = vec![
++        format!("self-process DACL={:?}", descriptor(process)),
++        format!("self-thread DACL={:?}", descriptor(thread)),
++    ];
++    for (name, rights) in [
++        ("SET_INFORMATION", PROCESS_SET_INFORMATION),
++        ("ALL_ACCESS", PROCESS_ALL_ACCESS),
++    ] {
++        // SAFETY: Only checks access to the current PID; any real handle is guarded.
++        let result = unsafe { OpenProcess(rights, false, pid) };
++        rows.push(format!(
++            "self-process open={name} result={:?}",
++            close_opened(result)
++        ));
++    }
++    for (name, rights) in [
++        ("SET_INFORMATION", THREAD_SET_INFORMATION),
++        ("ALL_ACCESS", THREAD_ALL_ACCESS),
++    ] {
++        // SAFETY: Only checks access to the current TID; no thread state is modified.
++        let result = unsafe { OpenThread(rights, false, tid) };
++        rows.push(format!(
++            "self-thread open={name} result={:?}",
++            close_opened(result)
++        ));
++    }
++    rows
++}
++
++fn close_opened(result: windows::core::Result<HANDLE>) -> Result<()> {
++    let handle = result.map_err(|error| AcError::Win32(error.to_string()))?;
++    // SAFETY: OpenProcess/OpenThread returned this uniquely owned real handle.
++    let _owned = unsafe { Handle::from_raw(handle.0) }?;
++    Ok(())
++}
++
++fn descriptor(handle: HANDLE) -> Result<String> {
++    let mut sd = PSECURITY_DESCRIPTOR::default();
++    // SAFETY: Pseudo handle is live; output descriptor is immediately guarded.
++    let status = unsafe {
++        GetSecurityInfo(
++            handle,
++            SE_KERNEL_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            None,
++            None,
++            None,
++            None,
++            Some(&mut sd),
++        )
++    };
++    if status.0 != 0 {
++        return Err(AcError::Win32(format!("GetSecurityInfo: {status:?}")));
++    }
++    // SAFETY: GetSecurityInfo returns a LocalFree-compatible allocation.
++    let _sd = unsafe { LocalAllocGuard::from_raw(sd.0) };
++    let mut text = PWSTR::null();
++    let mut length = 0;
++    // SAFETY: Descriptor remains live; the returned SDDL allocation is owned.
++    unsafe {
++        ConvertSecurityDescriptorToStringSecurityDescriptorW(
++            sd,
++            1,
++            DACL_SECURITY_INFORMATION,
++            &mut text,
++            Some(&mut length),
++        )
++    }
++    .map_err(|error| AcError::Win32(error.to_string()))?;
++    // SAFETY: Successful conversion returns a LocalFree-compatible UTF16 string.
++    let _text = unsafe { LocalAllocGuard::from_raw(text.0) };
++    if length == 0 || length > 65536 || text.is_null() {
++        return Err(AcError::Win32(
++            "invalid or oversized object descriptor".into(),
++        ));
++    }
++    // SAFETY: Win32 returned length UTF16 units including the terminating NUL.
++    let units = unsafe { std::slice::from_raw_parts(text.0, length as usize - 1) };
++    Ok(String::from_utf16_lossy(units))
 +}
 diff --git a/src/profile.rs b/src/profile.rs
 index 9c9686d..5dc3b51 100755

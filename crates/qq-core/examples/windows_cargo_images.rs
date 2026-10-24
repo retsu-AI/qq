@@ -176,6 +176,9 @@ mod probe {
             return Err(invalid());
         }
         let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+        for row in rappct::diagnose_current_process_objects() {
+            println!("{row}");
+        }
         let state = rappct::token::query_current_process_token().map_err(io::Error::other)?;
         let token = firehazard::open_process_token(
             firehazard::get_current_process(),

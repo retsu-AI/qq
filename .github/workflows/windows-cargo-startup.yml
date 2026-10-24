@@ -80,4 +80,5 @@ jobs:
           path: |
             ${{ runner.temp }}/qq-cargo-startup.log
             ${{ runner.temp }}/qq-cargo-access-denials.json
+            ${{ runner.temp }}/qq-cargo-trace-status.json
           if-no-files-found: warn

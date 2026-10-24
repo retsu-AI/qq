@@ -17,6 +17,7 @@ $selected = Join-Path $env:RUNNER_TEMP 'qq-cargo-access-denials.json'
 $capture = $null
 $traceReady = $false
 $windowExpired = $false
+$traceInfo = [ordered]@{ ready = $false; ready_file_exists = $false; ready_file_bytes = $null; capture_exit = $null; elapsed_seconds = $null; backing_files = @(); error = $null }
 try {
     $zip = Join-Path $root 'procmon.zip'
     Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/ProcessMonitor.zip' -OutFile $zip -TimeoutSec 30
@@ -30,7 +31,11 @@ try {
     $captureClock = [Diagnostics.Stopwatch]::StartNew()
     $capture = Start-Process -FilePath $procmon -ArgumentList @('/AcceptEula', '/Quiet', '/Minimized', '/NoFilter', '/Runtime', '30', '/BackingFile', "`"$pml`"") -PassThru
     Invoke-TraceCommand @('/AcceptEula', '/WaitForIdle') 10000
-    $traceReady = $true
+    $traceInfo.ready = $true
+    $traceInfo.ready_file_exists = Test-Path -LiteralPath $pml
+    if ($traceInfo.ready_file_exists) { $traceInfo.ready_file_bytes = (Get-Item -LiteralPath $pml).Length }
+    $traceReady = $traceInfo.ready_file_exists
+    if (!$traceReady) { Write-Host 'Recorder ready but expected backing file is absent before test' }
 } catch {
     Write-Host "Selected access trace setup incomplete: $($_.Exception.Message)"
 }
@@ -45,13 +50,16 @@ try {
         try { Invoke-TraceCommand @('/AcceptEula', '/Terminate', '/Quiet') 10000 }
         catch { $traceReady = $false; Write-Host "Selected access trace stop incomplete: $($_.Exception.Message)" }
         if (!$capture.WaitForExit(10000)) { $capture.Kill($true); $traceReady = $false; Write-Host 'Trace shutdown unconfirmed' }
+        else { $traceInfo.capture_exit = $capture.ExitCode }
+        $traceInfo.elapsed_seconds = $captureClock.Elapsed.TotalSeconds
     }
 }
+$traceInfo.backing_files = @(Get-ChildItem -LiteralPath $root -File | Where-Object Name -Like 'private-trace*' | Select-Object -First 16 Name, Length)
 try {
     if (!$traceReady) { throw 'Trace was not ready and confirmed stopped' }
-    if (!(Test-Path -LiteralPath $pml) -or (Get-Item -LiteralPath $pml).Length -gt 134217728) {
-        throw 'Trace missing or exceeds 128 MiB export bound'
-    }
+    if (!(Test-Path -LiteralPath $pml)) { throw 'Expected backing file is missing after confirmed recorder exit' }
+    $pmlBytes = (Get-Item -LiteralPath $pml).Length
+    if ($pmlBytes -gt 134217728) { throw "Trace is $pmlBytes bytes, exceeding 128 MiB export bound" }
     Invoke-TraceCommand @('/AcceptEula', '/Quiet', '/OpenLog', "`"$pml`"", '/SaveAs', "`"$csv`"") 30000
     $rows = @(Import-Csv -LiteralPath $csv | Where-Object {
         $_.'Process Name' -in @('cargo.exe', 'windows_cargo_images.exe') -and $_.Result -eq 'ACCESS DENIED'
@@ -60,11 +68,13 @@ try {
     })
     [pscustomobject]@{ incomplete = ($windowExpired -or $rows.Count -gt 128); capture_window_expired = $windowExpired; denials = @($rows | Select-Object -First 128) } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $selected -Encoding utf8NoBOM
-    Get-Content -LiteralPath $selected
 } catch {
     # Trace failure must not hide the real worker/Cargo result.
+    $traceInfo.error = $_.Exception.Message
     Write-Host "Selected access trace incomplete: $($_.Exception.Message)"
 } finally {
+    [pscustomobject]$traceInfo | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'qq-cargo-trace-status.json') -Encoding utf8NoBOM
+    Get-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'qq-cargo-trace-status.json')
     Remove-Item -LiteralPath $pml, $csv -Force -ErrorAction SilentlyContinue
 }
 exit $testExit
