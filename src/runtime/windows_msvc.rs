@@ -61,11 +61,31 @@ pub(crate) fn metadata_main() -> io::Result<()> {
     if release != *b"G" {
         return Err(denied());
     }
-    let Some(tool) = find_msvc_tools::find_tool_with_env(
+    let tool = find_msvc_tools::find_tool_with_env(
         std::env::consts::ARCH,
         "link.exe",
         &ConventionalEnvironment,
-    ) else {
+    );
+    #[cfg(test)]
+    if tool.is_none() {
+        // Keep stage attribution in the already bounded, job-owned helper.
+        // These public discovery queries add no paths to the selected inputs.
+        let msbuild = find_msvc_tools::find_tool_with_env(
+            std::env::consts::ARCH,
+            "msbuild.exe",
+            &ConventionalEnvironment,
+        );
+        let sdk = find_msvc_tools::find_windows_sdk(std::env::consts::ARCH);
+        println!(
+            "\nQQ_MSVC_DIAGNOSTICS:arch={} linker=false msbuild={:?} ucrt={} sdk={} sdk_version={:?}",
+            std::env::consts::ARCH,
+            msbuild.as_ref().map(find_msvc_tools::Tool::path),
+            find_msvc_tools::get_ucrt_dir().is_some(),
+            sdk.is_some(),
+            sdk.as_ref().map(find_msvc_tools::Sdk::sdk_version),
+        );
+    }
+    let Some(tool) = tool else {
         println!("\nQQ_MSVC_METADATA:null");
         return Ok(());
     };
@@ -187,6 +207,15 @@ pub(super) fn discover(control: &Path) -> io::Result<Option<Inputs>> {
     let Some(bytes) = result? else {
         return Err(io::Error::other("compiler metadata helper failed"));
     };
+    #[cfg(test)]
+    for line in bytes.split(|byte| *byte == b'\n') {
+        if let Some(diagnostic) = line.strip_prefix(b"QQ_MSVC_DIAGNOSTICS:") {
+            eprintln!(
+                "MSVC helper stages: {}",
+                String::from_utf8_lossy(diagnostic)
+            );
+        }
+    }
     let metadata: Option<Metadata> = serde_json::from_slice(
         bytes
             .split(|byte| *byte == b'\n')
@@ -195,9 +224,16 @@ pub(super) fn discover(control: &Path) -> io::Result<Option<Inputs>> {
     )
     .map_err(io::Error::other)?;
     let Some(metadata) = metadata else {
+        #[cfg(test)]
+        eprintln!("MSVC discovery: helper returned no linker");
         return Ok(None);
     };
     if !conventional_selection(&metadata.linker, &program_files, control)? {
+        #[cfg(test)]
+        eprintln!(
+            "MSVC discovery: unsupported selected linker {}",
+            metadata.linker.display()
+        );
         return Ok(None);
     }
     validate(metadata, &program_files, control).map(Some)
