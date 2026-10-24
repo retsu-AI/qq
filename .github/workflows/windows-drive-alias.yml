@@ -32,4 +32,28 @@ jobs:
       - name: Lint native fixture
         run: cargo clippy --locked -p qq-core --example windows_drive_alias -- -D warnings
       - name: Compare host and AppContainer tools through owned alias
-        run: .\target\debug\examples\windows_drive_alias.exe
+        run: |
+          $cargo = (& rustup which cargo).Trim()
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $cargo -PathType Leaf)) {
+            throw 'Repository-selected installed Cargo unavailable'
+          }
+          $bin = Split-Path -Parent $cargo
+          $rustc = Join-Path $bin 'rustc.exe'
+          $selectedRustc = (& rustup which rustc).Trim()
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $rustc -PathType Leaf) -or $rustc -ine $selectedRustc) {
+            throw 'Cargo and rustc must belong to the same repository-selected toolchain'
+          }
+          $toolchain = Split-Path -Parent $bin
+          $toolchains = Split-Path -Parent $toolchain
+          $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
+          if ((Split-Path -Leaf $bin) -ine 'bin' -or $toolchains -ine (Join-Path $rustupHome 'toolchains')) {
+            throw 'Selected toolchain must be an installed direct Rust toolchain'
+          }
+          Write-Host "Selected Cargo: $cargo"
+          Write-Host "Selected rustc: $rustc"
+          & $cargo --version
+          if ($LASTEXITCODE -ne 0) { throw 'Selected Cargo version query failed' }
+          & $rustc --version
+          if ($LASTEXITCODE -ne 0) { throw 'Selected rustc version query failed' }
+          $env:PATH = "$bin;$env:PATH"
+          .\target\debug\examples\windows_drive_alias.exe
