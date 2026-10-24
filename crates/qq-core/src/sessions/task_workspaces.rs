@@ -104,6 +104,103 @@ impl TaskExecution {
         self.scope.workspace.path.join(PRIVATE_HOME)
     }
 
+    /// Freeze the host-derived commit manifest. Model input supplies only the
+    /// message; source identities, protections, paths and limits remain host input.
+    pub(super) async fn git_job(
+        self: Arc<Self>,
+        inner: &SessionRuntimeInner,
+        call: ToolCallId,
+        git_program: PathBuf,
+        message: String,
+        not_after_ms: u64,
+        cancellation: RunCancellation,
+    ) -> Result<crate::task_git_job::TaskGitJob, TaskExecutionError> {
+        if !self.publisher {
+            return Err(TaskExecutionError::Invalid("only the root task may commit"));
+        }
+        let control = inner
+            .task_workspaces
+            .as_ref()
+            .ok_or(TaskExecutionError::Invalid("task control is unavailable"))?
+            .directory
+            .clone();
+        let remaining = not_after_ms
+            .checked_sub(now_ms())
+            .filter(|remaining| *remaining != 0)
+            .ok_or(TaskExecutionError::Stopped)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(remaining);
+        let loaded = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(TaskExecutionError::Stopped),
+            () = tokio::time::sleep_until(deadline) => return Err(TaskExecutionError::Stopped),
+            loaded = inner.loader.load(self.source_request.clone()) => loaded?,
+        };
+        let permit = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(TaskExecutionError::Stopped),
+            () = tokio::time::sleep_until(deadline) => return Err(TaskExecutionError::Stopped),
+            permit = crate::workspace::blocking_permits().acquire_owned() => {
+                permit.map_err(|_| TaskExecutionError::Invalid("filesystem workers unavailable"))?
+            }
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let stopped = || cancellation.is_cancelled() || now_ms() >= not_after_ms;
+            if stopped() {
+                return Err(TaskExecutionError::Stopped);
+            }
+            let mut record = self
+                .record
+                .lock()
+                .map_err(|_| TaskExecutionError::Invalid("task record poisoned"))?;
+            record
+                .workspace
+                .protect_source(&TaskWorkspaceSource::from_plan(&loaded.plan)?)?;
+            let protected_paths = record.workspace.protected_pack_roots().to_vec();
+            let absolute = protected_paths
+                .iter()
+                .map(|path| self.scope.workspace.path.join(path))
+                .collect::<Vec<_>>();
+            let root = Workspace::open(&self.scope.workspace.path)?
+                .with_protected_pack_roots(&absolute)?;
+            if NativeWorkspaceIdentity::held(root.root())? != self.scope.workspace.identity {
+                return Err(TaskExecutionError::Invalid("task commit root changed"));
+            }
+            let limits = record.workspace_limits();
+            let mut paths: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
+            paths.extend(files_until(&root, limits, false, &stopped)?);
+            // A preserved input can be protected against mutation.
+            // Never turn its presence in the import manifest into commit authority.
+            paths.retain(|path| root.check_write_path(&path.to_string_lossy(), path).is_ok());
+            if paths.len() > limits.max_entries {
+                return Err(TaskExecutionError::Invalid("too many task commit paths"));
+            }
+            let max_bytes = usize::try_from(limits.max_bytes)
+                .map_err(|_| TaskExecutionError::Invalid("task commit byte limit is too large"))?;
+            if stopped() {
+                return Err(TaskExecutionError::Stopped);
+            }
+            Ok(crate::task_git_job::TaskGitJob {
+                call,
+                task: self.owner,
+                git_program,
+                source: record.source.clone(),
+                control,
+                snapshot: self.scope.workspace.clone(),
+                limits: crate::task_git_job::TaskGitLimits {
+                    max_entries: limits.max_entries,
+                    max_bytes,
+                    max_pack_bytes: max_bytes.min(128 * 1024 * 1024),
+                },
+                paths: paths.into_iter().collect(),
+                protected_paths,
+                message,
+                not_after_ms,
+            })
+        })
+        .await?
+    }
+
     /// Called only with the session's teardown proof, after descendants drain.
     pub(super) async fn publish(
         self: Arc<Self>,

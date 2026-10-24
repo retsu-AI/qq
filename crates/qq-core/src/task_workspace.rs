@@ -318,6 +318,10 @@ impl TaskWorkspace {
         self.baseline.keys()
     }
 
+    pub(crate) fn protected_pack_roots(&self) -> &[PathBuf] {
+        &self.protected_pack_roots
+    }
+
     /// Re-admission may tighten protections, but never forgets the protections
     /// under which these files were imported. The source identity cannot move.
     pub(crate) fn protect_source(
