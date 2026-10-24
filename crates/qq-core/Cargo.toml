@@ -43,6 +43,7 @@ url.workspace = true
 rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+sysctl.workspace = true
 command-fds.workspace = true
 libproc.workspace = true
 nix.workspace = true
