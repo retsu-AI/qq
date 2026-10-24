@@ -51,6 +51,7 @@ struct Fixture {
     source: PathBuf,
     snapshot: PathBuf,
     control: PathBuf,
+    base: String,
 }
 impl Fixture {
     fn new() -> Self {
@@ -70,7 +71,9 @@ impl Fixture {
             &["-c", "commit.gpgSign=false", "commit", "-m", "baseline"],
         );
         std::fs::write(snapshot.join("file.txt"), "task change\n").unwrap();
+        let base = git(&source, &["rev-parse", "HEAD"]);
         Self {
+            base,
             _root: root,
             source,
             snapshot,
@@ -86,6 +89,7 @@ impl Fixture {
                 task: NativeDirectoryGrant::capture(&self.snapshot).unwrap(),
             },
             qq_protocol::RunId::generate().unwrap(),
+            self.base.clone(),
             limits(),
             operation(),
         )
@@ -404,6 +408,7 @@ async fn task_git_accepts_linked_worktrees_without_changing_shared_refs() {
             task: NativeDirectoryGrant::capture(&fixture.snapshot).unwrap(),
         },
         qq_protocol::RunId::generate().unwrap(),
+        fixture.base.clone(),
         limits(),
         operation(),
     )
@@ -432,6 +437,7 @@ async fn resume(fixture: &Fixture, broker: &TaskGit) -> Result<TaskGit, TaskGitE
             task: NativeDirectoryGrant::capture(&fixture.snapshot).unwrap(),
         },
         broker.branch.rsplit('/').next().unwrap().parse().unwrap(),
+        broker.base.clone(),
         limits(),
         operation(),
     )
@@ -713,6 +719,7 @@ async fn task_git_subdirectory_edits_never_overwrite_repository_siblings() {
             task: NativeDirectoryGrant::capture(&fixture.snapshot).unwrap(),
         },
         qq_protocol::RunId::generate().unwrap(),
+        git(&fixture.source, &["rev-parse", "HEAD"]),
         limits(),
         operation(),
     )
@@ -855,6 +862,7 @@ async fn task_git_refuses_source_object_alternates_without_importing() {
             task: NativeDirectoryGrant::capture(&fixture.snapshot).unwrap(),
         },
         qq_protocol::RunId::generate().unwrap(),
+        fixture.base.clone(),
         limits(),
         operation(),
     )
@@ -907,4 +915,180 @@ fn task_git_refuses_object_aliases_and_even_empty_alternates() {
     std::fs::remove_file(objects.join("ab/object")).unwrap();
     std::fs::hard_link(&private, objects.join("ab/object")).unwrap();
     assert!(objects::validate(&grant, 100, &operation()).is_err());
+}
+
+#[tokio::test]
+async fn task_git_uses_import_base_and_only_cumulative_agent_changes() {
+    use crate::task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource};
+    let fixture = Fixture::new();
+    std::fs::write(fixture.source.join("user.txt"), "committed user bytes").unwrap();
+    git(&fixture.source, &["add", "user.txt"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-m",
+            "user baseline",
+        ],
+    );
+    std::fs::write(
+        fixture.source.join("user.txt"),
+        "unrelated dirty user bytes",
+    )
+    .unwrap();
+    let captured = TaskGit::capture_base(
+        &git_program(),
+        &NativeDirectoryGrant::capture(&fixture.source).unwrap(),
+        &NativeDirectoryGrant::capture(&fixture.control).unwrap(),
+        &operation(),
+    )
+    .unwrap()
+    .unwrap();
+    std::fs::remove_dir_all(&fixture.snapshot).unwrap();
+    let runtime = crate::Runtime::new(
+        qq_provider::test_support::ScriptedProvider::new(vec![]),
+        "demo",
+        256,
+    )
+    .unwrap();
+    let plan = crate::plan::CompiledAgentPlan::compile_blocking(
+        crate::plan::AgentProfile::embedded(&runtime, fixture.source.clone()),
+    )
+    .unwrap();
+    let candidates = ["file.txt", "delete.txt", "user.txt"].map(PathBuf::from);
+    let mut workspace = TaskWorkspace::import(
+        &TaskWorkspaceSource::from_plan(&plan).unwrap(),
+        &fixture.snapshot,
+        &candidates,
+        TaskWorkspaceLimits {
+            max_entries: 20,
+            max_bytes: 1024 * 1024,
+        },
+    )
+    .unwrap();
+    workspace.enable_git_baseline();
+    std::fs::write(fixture.source.join("file.txt"), "later host commit").unwrap();
+    git(&fixture.source, &["add", "file.txt"]);
+    git(
+        &fixture.source,
+        &[
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-m",
+            "host advanced",
+        ],
+    );
+    let advanced = git(&fixture.source, &["rev-parse", "HEAD"]);
+    assert_ne!(captured, advanced);
+    std::fs::write(fixture.snapshot.join("file.txt"), "agent first").unwrap();
+    let broker = TaskGit::prepare(
+        git_program(),
+        TaskGitRoots {
+            source: NativeDirectoryGrant::capture(&fixture.source).unwrap(),
+            control: NativeDirectoryGrant::capture(&fixture.control).unwrap(),
+            task: workspace.directory_grant(),
+        },
+        qq_protocol::RunId::generate().unwrap(),
+        captured.clone(),
+        limits(),
+        operation(),
+    )
+    .await
+    .unwrap();
+    let paths = workspace
+        .changed_git_paths_until(&candidates, &|| false)
+        .unwrap();
+    assert_eq!(paths, [PathBuf::from("file.txt")]);
+    let first = broker
+        .commit(
+            workspace.directory_grant(),
+            paths,
+            "first".into(),
+            qq_protocol::ToolCallId::generate().unwrap(),
+            operation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.base, captured);
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["rev-parse", &format!("{}^", first.oid)]
+        ),
+        captured
+    );
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["show", &format!("{}:user.txt", first.oid)]
+        ),
+        "committed user bytes"
+    );
+    std::fs::write(fixture.snapshot.join("delete.txt"), "agent second").unwrap();
+    let workspace: TaskWorkspace =
+        serde_json::from_slice(&serde_json::to_vec(&workspace).unwrap()).unwrap();
+    let paths = workspace
+        .changed_git_paths_until(&candidates, &|| false)
+        .unwrap();
+    let second = broker
+        .commit(
+            workspace.directory_grant(),
+            paths,
+            "second".into(),
+            qq_protocol::ToolCallId::generate().unwrap(),
+            operation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["show", &format!("{}:file.txt", second.oid)]
+        ),
+        "agent first"
+    );
+    std::fs::write(fixture.snapshot.join("file.txt"), "original\n").unwrap();
+    let paths = workspace
+        .changed_git_paths_until(&candidates, &|| false)
+        .unwrap();
+    assert_eq!(paths, [PathBuf::from("delete.txt")]);
+    let third = broker
+        .commit(
+            workspace.directory_grant(),
+            paths,
+            "revert first".into(),
+            qq_protocol::ToolCallId::generate().unwrap(),
+            operation(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["show", &format!("{}:file.txt", third.oid)]
+        ),
+        "original"
+    );
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["show", &format!("{}:delete.txt", third.oid)]
+        ),
+        "agent second"
+    );
+    assert_eq!(
+        git(
+            &broker.repository.path,
+            &["show", &format!("{}:user.txt", third.oid)]
+        ),
+        "committed user bytes"
+    );
+    assert_eq!(git(&fixture.source, &["rev-parse", "HEAD"]), advanced);
+    assert_eq!(
+        std::fs::read_to_string(fixture.source.join("user.txt")).unwrap(),
+        "unrelated dirty user bytes"
+    );
 }
