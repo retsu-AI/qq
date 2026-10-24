@@ -18,6 +18,19 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         )
         .unwrap();
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
+        std::fs::write(directory.join("spawn-probe.js"), r#"
+const cp=require('child_process'),fs=require('fs');
+const probes=['direct','shell'].map(kind=>{
+  const script=`require('fs').writeFileSync('child-${kind}.txt','yes')`;
+  const file=kind==='direct'?process.execPath:'/bin/sh';
+  const args=kind==='direct'?['-e',script]:['-c','node -e '+JSON.stringify(script)];
+  const result=cp.spawnSync(file,args,{stdio:'inherit',detached:false,timeout:5000});
+  const error=result.error?{code:result.error.code,errno:result.error.errno,syscall:result.error.syscall,message:result.error.message}:null;
+  return {kind,status:result.status,signal:result.signal,error};
+});
+fs.writeFileSync('node-spawn-probe.json',JSON.stringify(probes));
+console.log(JSON.stringify(probes));
+"#).unwrap();
     }
     assert!(
         std::process::Command::new("git")
@@ -27,7 +40,7 @@ async fn installed_node_builds_and_tests_in_default_auto() {
             .unwrap()
             .success()
     );
-    const COMMAND: &str = "command -v node; command -v npm; node --version && npm run build --offline && npm test --offline && cat tested.txt";
+    const COMMAND: &str = "command -v node; command -v npm; node --version && node spawn-probe.js && npm run build --offline && npm test --offline && cat tested.txt";
     let host = tokio::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new("/bin/sh")
@@ -120,6 +133,54 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         .collect();
     assert_eq!(calls.len(), 1);
     let call = &calls[0]["envelope"]["event"]["tool_call"];
+    if call["is_error"] == true {
+        let logs = data_directory(&home)
+            .join("task-workspaces")
+            .join(call["run_id"].as_str().unwrap())
+            .join(".qq/task-home/.npm/_logs");
+        tokio::task::spawn_blocking(move || {
+            let entries = match std::fs::read_dir(&logs) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    println!("Private task npm logs unavailable: {error}");
+                    return;
+                }
+            };
+            for entry in entries.take(4).flatten() {
+                if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                if entry
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "log")
+                {
+                    continue;
+                }
+                let file = rustix::fs::open(
+                    entry.path(),
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::CLOEXEC,
+                    rustix::fs::Mode::empty(),
+                )
+                .map(std::fs::File::from);
+                if let Ok(file) = file {
+                    let mut bytes = Vec::new();
+                    let mut bounded = std::io::Read::take(file, 16 * 1024);
+                    if std::io::Read::read_to_end(&mut bounded, &mut bytes).is_ok() {
+                        println!(
+                            "Private task npm log {}: {}",
+                            entry.file_name().to_string_lossy(),
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
     assert_eq!(call["is_error"], false, "{call}");
     assert!(
         call["result"].as_str().unwrap().contains("tested"),
@@ -138,6 +199,15 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         serde_json::from_slice(&std::fs::read(workspace.join("node-os-proof.json")).unwrap())
             .unwrap();
     assert_eq!(task_os, host_os);
+    let probes: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(workspace.join("node-spawn-probe.json")).unwrap())
+            .unwrap();
+    assert_eq!(probes.len(), 2);
+    for probe in probes {
+        assert_eq!(probe["status"], 0, "{probe}");
+        assert!(probe["signal"].is_null(), "{probe}");
+        assert!(probe["error"].is_null(), "{probe}");
+    }
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();

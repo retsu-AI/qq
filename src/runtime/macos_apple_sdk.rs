@@ -118,20 +118,9 @@ fn roots(
     let clang = clang.canonicalize()?;
     let sdk = sdk.canonicalize()?;
     let bin = clang.parent().ok_or_else(denied)?.to_owned();
-    let lib = bin
-        .parent()
-        .ok_or_else(denied)?
-        .join("lib")
-        .canonicalize()?;
     let developer_bin = developer.join("usr/bin").canonicalize()?;
-    let mut read_only = vec![bin.clone(), lib, sdk];
-    read_only.push(developer_bin.clone());
-    let developer_lib = developer.join("usr/lib");
-    if developer_lib.try_exists()? {
-        read_only.push(developer_lib.canonicalize()?);
-    }
     if !clang.is_file()
-        || read_only.iter().any(|root| {
+        || [&bin, &developer_bin, &sdk].iter().any(|root| {
             !root.is_dir()
                 || !root.starts_with(developer)
                 || root.starts_with(control)
@@ -142,7 +131,10 @@ fn roots(
     }
     Ok(super::macos_sdk::Inputs {
         executable_directories: vec![bin, developer_bin],
-        read_only,
+        // xcrun opens the selected developer directory and its internal
+        // metadata while finding tools/SDKs. Keep that public installation
+        // readable as a unit; unrelated applications and user files stay out.
+        read_only: vec![developer.to_owned()],
     })
 }
 
@@ -150,7 +142,7 @@ fn roots(
 mod tests {
     use super::*;
     #[test]
-    fn selected_apple_inputs_exclude_the_rest_of_the_installation() {
+    fn selected_apple_inputs_exclude_other_installations_and_private_roots() {
         let fixture = tempfile::tempdir().unwrap();
         let base = fixture.path().canonicalize().unwrap();
         let applications = base.join("Applications");
@@ -185,8 +177,10 @@ mod tests {
                 .executable_directories
                 .contains(&developer.join("usr/bin"))
         );
-        assert_eq!(inputs.read_only.len(), 5);
-        assert!(!inputs.read_only.contains(&developer));
+        assert_eq!(
+            inputs.read_only.as_slice(),
+            std::slice::from_ref(&developer)
+        );
         assert!(!inputs.read_only.contains(&applications));
         std::fs::remove_dir(developer.join("usr/lib")).unwrap();
         assert_eq!(
@@ -194,7 +188,7 @@ mod tests {
                 .unwrap()
                 .read_only
                 .len(),
-            4
+            1
         );
         std::fs::create_dir(developer.join("usr/lib")).unwrap();
         assert!(
