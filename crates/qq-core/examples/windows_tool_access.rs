@@ -212,8 +212,20 @@ mod probe {
             )
             .map_err(err)
         };
-        let first = stage()?;
-        let second = stage()?;
+        let started = std::time::Instant::now();
+        eprintln!("ordinary SDK staging: initial copy started");
+        let first = stage().map_err(|error| err(format!("initial SDK copy: {error}")))?;
+        eprintln!(
+            "ordinary SDK staging: initial copy finished in {:?}",
+            started.elapsed()
+        );
+        let started = std::time::Instant::now();
+        eprintln!("ordinary SDK staging: cache validation started");
+        let second = stage().map_err(|error| err(format!("SDK cache validation: {error}")))?;
+        eprintln!(
+            "ordinary SDK staging: cache validation finished in {:?}",
+            started.elapsed()
+        );
         if first.path != second.path || first.identity != second.identity {
             return Err(err("identical SDK input did not reuse its immutable cache"));
         }
