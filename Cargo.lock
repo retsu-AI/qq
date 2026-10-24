@@ -2962,6 +2962,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "hmac 0.12.1",
+ "libproc",
  "nix 0.31.3",
  "qq-auth",
  "qq-client",

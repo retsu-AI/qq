@@ -14,7 +14,7 @@ pub(super) fn apply(
             max_processes,
             cpu_percent,
         } => (memory_bytes, max_processes, cpu_percent),
-        NativeResources::Limited { .. } => {
+        NativeResources::Limited { .. } | NativeResources::Guarded { .. } => {
             return Err(io::Error::other(
                 "requested resource accounting is unavailable on Windows",
             ));
@@ -91,5 +91,17 @@ mod tests {
         }
         assert!(child_cpu_rate(1, Some(0)).is_err());
         assert!(child_cpu_rate(101, None).is_err());
+    }
+    #[test]
+    fn sampled_safeguards_are_refused_before_creating_a_job() {
+        let error = apply(
+            NativeResources::Guarded {
+                memory_bytes: 1024,
+                max_tasks: 2,
+            },
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unavailable on Windows"));
     }
 }

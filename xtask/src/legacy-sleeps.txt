@@ -60,10 +60,10 @@ src/headless.rs	6748	async fn session_resume_after_an_unclean_exit_recovers_the_
 src/headless.rs	7193	fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {	tokio::time::sleep(Duration::from_millis(100)).await;
 src/headless.rs	7713	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
 src/headless.rs	7835	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
-src/runtime.rs	4616	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/runtime.rs	8981	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	8991	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	8999	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
-src/runtime.rs	9164	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
+src/runtime.rs	4622	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/runtime.rs	8987	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	8997	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	9005	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
+src/runtime.rs	9170	fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {	std::thread::sleep(self.delay);
 xtask/src/perf.rs	5869	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
 xtask/src/perf.rs	5912	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;

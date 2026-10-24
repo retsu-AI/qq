@@ -220,7 +220,8 @@ rusqlite.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-nix = { workspace = true, features = ["event"] }
+libproc.workspace = true
+nix = { workspace = true, features = ["event", "process", "signal"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 rappct.workspace = true

@@ -54,16 +54,16 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux, the binary creates detached task scopes for ordinary Auto runs and
-their children. Built-ins use the private task tree; native commands receive its
+On Linux and macOS, the binary creates detached task scopes for ordinary Auto
+runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-is enabled on Linux first. Other platforms retain their existing permission
-behavior until macOS resource limits and Windows containment are implemented
-and qualified. Authorized network egress, credential brokering, per-task aggregate
-resource budgets and concurrent source writers still require further work.
+uses kernel resource limits on Linux and explicit sampled resource safeguards
+on macOS. Windows retains its existing permission behavior pending native
+containment integration and qualification. Authorized network egress, credential
+brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
@@ -155,7 +155,7 @@ Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution and
+non-goal task continuation is unfinished. macOS kernel-quota execution and
 default Windows Auto containment remain unavailable and fail closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
@@ -1388,18 +1388,33 @@ inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
-Descendants cannot call
-`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
-so terminating payloads cannot kill their cleanup owner. It retains the exited
-leader without reaping it, repeatedly terminates remaining members, and checks
-two kernel snapshots for exited process identities before reaping. This also
-covers forks racing with cancellation and worker loss. A terminal payload status
-is returned through the private channel only after cleanup; a missing or partial
-status never confirms quiescence. Exited zombies may await collection by the OS,
-but live members keep cleanup unconfirmed. Loader-injection environment
-variables are refused before helper startup. macOS does not create Linux-style
-mount or PID namespaces, and aggregate resource limits remain unavailable;
-requesting those limits fails closed.
+The profile denies direct `setsid` and `setpgid` syscalls. Darwin spawn
+attributes can still create a new process group or session; those descendants
+retain the same Seatbelt file and network restrictions. The trusted guardian
+stays outside the payload's group, so payload signals cannot kill it. It retains
+the exited leader without reaping it, repeatedly terminates remaining group
+members, and checks their exited process identities before reaping. Cancellation,
+deadlines and worker loss trigger this owned-group cleanup. The private terminal
+receipt confirms that cleanup and the guardian's exit, not the exit of detached
+descendants. Missing or partial receipts do not confirm owned-group cleanup.
+Exited zombies may await collection by the OS, but live group members keep cleanup
+unconfirmed. A deliberately detached process can survive command completion or
+cancellation while remaining sandboxed; QQ does not claim complete descendant
+custody on macOS. Loader-injection environment variables are refused before
+helper startup. macOS does not create Linux-style mount or PID namespaces.
+The payload inherits the launching process's per-process OS limits; QQ does not
+supply kernel aggregate resource quotas on this backend.
+
+An explicit `NativeResources::Guarded` request starts the payload with
+`taskpolicy -b` and samples the pinned process group's physical footprint and
+thread count every 250 ms using Darwin process accounting. The existing owner
+liveness thread performs these checks; no extra per-command thread is created.
+Excess use or unavailable accounting stops the owned group and retains captured
+output. These safeguards can overshoot, exclude charged file cache and omit
+processes that detached from the group. They are not per-task aggregate quotas.
+Guarded commands require restricted filesystem authority. Default macOS Auto
+uses these safeguards with its detached task files.
+Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`
 for ordinary child-process creation and a directory-identity capability for each
