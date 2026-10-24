@@ -679,6 +679,7 @@ impl plan::CompiledAgentPlan {
                                spawn_agent: spawner.is_some(),
                                search_history: history.is_some(),
                                update_goal: goal.is_some(),
+                               task_git: false,
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
