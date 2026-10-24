@@ -18,6 +18,38 @@ jobs:
         with:
           key: command-owner-${{ matrix.os }}
           cache-on-failure: true
+      - uses: actions/checkout@v4
+        with:
+          repository: retsu-AI/rappct
+          ref: 2072cdbe578151684f5ce67b1996da88e81d39ac
+          path: validation-rappct
+      - name: Empty capability layout before correction
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          selector=ffi::sec_caps::tests::empty_capabilities_use_a_null_pointer
+          cargo test --locked --manifest-path validation-rappct/Cargo.toml --lib -- --list | tr -d '\r' | grep -Fx "$selector: test"
+          set +e
+          cargo test --locked --manifest-path validation-rappct/Cargo.toml --lib "$selector" -- --exact > "$RUNNER_TEMP/empty-caps-before.log" 2>&1
+          status=$?
+          set -e
+          cat "$RUNNER_TEMP/empty-caps-before.log"
+          test "$status" -eq 101
+          grep -F 'assertion failed: capabilities.sc.Capabilities.is_null()' "$RUNNER_TEMP/empty-caps-before.log"
+      - uses: actions/checkout@v4
+        with:
+          repository: retsu-AI/rappct
+          ref: 4f3449402a6cad646374404043cf90df4e090939
+          path: validation-rappct
+      - name: Empty capability layout after correction
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          selector=ffi::sec_caps::tests::empty_capabilities_use_a_null_pointer
+          cargo test --locked --manifest-path validation-rappct/Cargo.toml --lib -- --list | tr -d '\r' | grep -Fx "$selector: test"
+          cargo test --locked --manifest-path validation-rappct/Cargo.toml --lib "$selector" -- --exact
       - name: Native production Clippy
         shell: bash
         run: |
