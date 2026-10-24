@@ -62,6 +62,12 @@ jobs:
           & .\target\debug\examples\windows_cargo_images.exe --prepare $cargo $rustc | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
           if ($LASTEXITCODE -ne 0) { throw 'Exact compiler PE metadata failed' }
           $env:QQ_CARGO_IMAGES = $manifest
+          $debugger = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') {
+            $signature = Get-AuthenticodeSignature -LiteralPath $debugger
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation(?:,|$)') { throw 'Expected installed signed Microsoft CDB' }
+            Write-Host 'Installed Microsoft-signed SDK CDB verified'
+          } else { Write-Host 'SDK CDB not available for ARM diagnostic; no substitute installed' }
           $artifacts = & cargo test --config $env:QQ_RAPPCT_PATCH --locked -p qq --no-default-features --bin qq --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $executables = @($artifacts | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'qq' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable })
@@ -70,7 +76,7 @@ jobs:
           # composition, so unrelated SDK copying cannot mask Cargo startup.
           $nodeRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'nodejs' }
           $env:PATH = (($env:PATH -split ';') | Where-Object { $nodeRoots -inotcontains $_.TrimEnd('\') }) -join ';'
-          & ./.github/fixtures/trace-cargo-access.ps1 -TestBinary $executables[0]
+          & $executables[0] runtime::windows_cargo_tests::installed_cargo_startup_through_real_auto_worker --exact --nocapture 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'qq-cargo-startup.log')
           exit $LASTEXITCODE
       - name: Preserve complete Cargo diagnostic output
         if: ${{ always() }}

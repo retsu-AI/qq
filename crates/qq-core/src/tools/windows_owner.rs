@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 mod access;
 mod arguments;
+mod debugger;
 mod desktop;
 mod directory;
 pub(super) mod fleet;
@@ -483,6 +484,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     profile
         .grant_named_object_creation(&write_sid)
         .map_err(io::Error::other)?;
+    let debugger = debugger::Debugger::start(child.pid)?;
     std::io::stderr().write_all(READY)?;
     let mut release = [0];
     input.read_exact(&mut release)?;
@@ -493,6 +495,10 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     child.resume().map_err(io::Error::other)?;
     let code = child.wait(None).map_err(io::Error::other)?;
+    if let Some(debugger) = debugger {
+        debugger.finish();
+    }
+
     // Closing the AppContainer job terminates descendants. Private UI handles
     // remain process-owned until this single-shot helper exits, including error
     // paths; the worker independently proves the outer job empty before results

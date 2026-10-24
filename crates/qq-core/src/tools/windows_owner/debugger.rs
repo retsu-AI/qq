@@ -1,0 +1,277 @@
+//! Disposable-CI diagnostic only: never changes the target token or permissions.
+use std::{
+    fs,
+    io::{self, BufRead as _, Write as _},
+    path::PathBuf,
+    process::{Child, Command, Stdio},
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
+};
+
+pub(super) struct Debugger {
+    child: Child,
+    process: Arc<win_custody::Process>,
+    stop: mpsc::SyncSender<()>,
+    output: Arc<Mutex<Vec<String>>>,
+    done: mpsc::Receiver<()>,
+}
+impl Debugger {
+    pub(super) fn start(pid: u32) -> io::Result<Option<Self>> {
+        if !cfg!(target_arch = "x86_64") {
+            return Ok(None);
+        }
+        let exe = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe");
+        if !exe.is_file() {
+            return Ok(None);
+        }
+        let root = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| io::Error::other("private helper root unavailable"))?
+            .to_owned();
+        let child_script = root.join(format!("cdb-{pid}-child.txt"));
+        let main_script = root.join(format!("cdb-{pid}-main.txt"));
+        let open_script = root.join(format!("cdb-{pid}-open.txt"));
+        let return_script = root.join(format!("cdb-{pid}-return.txt"));
+        write_new(
+            &return_script,
+            r#".printf "QQ_CDB_EVENT_RETURN pid=%x tid=%x status=%x\n", @$tpid, @$tid, @eax
+kn 12
+gc
+"#,
+        )?;
+        write_new(
+            &open_script,
+            &format!(
+                r#".printf "QQ_CDB_EVENT_OPEN pid=%x tid=%x access=%x name=", @$tpid, @$tid, @edx
+.printf "%msu\n", poi(@r8+0x10)
+kn 12
+bp /1 @$ra "$$><{}"
+gc
+"#,
+                return_script.display()
+            ),
+        )?;
+        write_new(
+            &child_script,
+            &format!(
+                r#"bu ntdll!RtlSetLastWin32Error ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS Win32=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
+bu ntdll!RtlNtStatusToDosError ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS NtStatus=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
+bu ntdll!NtOpenEvent "$$><{}"
+.printf "QQ_CDB_READY\n"
+g
+"#,
+                open_script.display()
+            ),
+        )?;
+        write_new(
+            &main_script,
+            &format!(
+                r#".sympath srv*{}*https://msdl.microsoft.com/download/symbols
+sxe -c "$$><{}" ibp
+$$><{}
+"#,
+                root.join("cdb-symbols").display(),
+                child_script.display(),
+                child_script.display()
+            ),
+        )?;
+        let mut child = Command::new(exe)
+            .args([
+                "-p",
+                &pid.to_string(),
+                "-o",
+                "-pd",
+                "-hd",
+                "-G",
+                "-noshell",
+                "-noinh",
+                "-cf",
+            ])
+            .arg(main_script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let process = match win_custody::Process::from_child(&child) {
+            Ok(process) => Arc::new(process),
+            Err(error) => {
+                let _ = child.kill();
+                return Err(error);
+            }
+        };
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let stdout = child.stdout.take().expect("piped debugger output");
+        let observed = Arc::clone(&output);
+        let (ready_send, ready) = mpsc::sync_channel(1);
+        let (done_send, done) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            collect(stdout, &observed, &ready_send);
+            let _ = done_send.send(());
+        });
+        let (stop, stopped) = mpsc::sync_channel(1);
+        let watched = Arc::clone(&process);
+        std::thread::spawn(move || {
+            if stopped.recv_timeout(Duration::from_secs(25)).is_err() {
+                let _ = watched.terminate(1);
+            }
+        });
+        if ready.recv_timeout(Duration::from_secs(10)).is_err() {
+            let _ = stop.try_send(());
+            let _ = process.terminate(1);
+            let cleanup = process.wait(Some(Duration::from_secs(3)));
+            let _ = done.recv_timeout(Duration::from_secs(2));
+            let rows = output.lock().map(|rows| rows.clone()).unwrap_or_default();
+            return Err(io::Error::other(format!(
+                "CDB attachment/breakpoints not ready: cleanup={cleanup:?}; selected={rows:?}"
+            )));
+        }
+        Ok(Some(Self {
+            child,
+            process,
+            stop,
+            output,
+            done,
+        }))
+    }
+    pub(super) fn finish(mut self) {
+        let _ = self.stop.try_send(());
+        let status = self.process.wait(Some(Duration::from_secs(3)));
+        if !matches!(status, Ok(win_custody::WaitOutcome::Signaled)) {
+            let _ = self.process.terminate(1);
+        }
+        let settled = self.process.wait(Some(Duration::from_secs(3)));
+        if matches!(settled, Ok(win_custody::WaitOutcome::Signaled)) {
+            let _ = self.child.wait();
+        }
+        let drained = self.done.recv_timeout(Duration::from_secs(2)).is_ok();
+        eprintln!(
+            "QQ_CDB_STATE exit={:?} cleanup={settled:?} output_drained={drained}",
+            self.process.exit_code()
+        );
+        if let Ok(rows) = self.output.lock() {
+            for row in rows.iter() {
+                eprintln!("{row}");
+            }
+        }
+    }
+}
+impl Drop for Debugger {
+    fn drop(&mut self) {
+        let _ = self.stop.try_send(());
+        let _ = self.process.terminate(1);
+    }
+}
+fn write_new(path: &std::path::Path, text: &str) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(text.as_bytes())
+}
+fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::SyncSender<()>) {
+    let mut reader = io::BufReader::new(stdout);
+    let mut line = Vec::with_capacity(4096);
+    let mut batch = Vec::new();
+    let mut count = 0;
+    let mut bytes = 0;
+    while let Ok(buffer) = reader.fill_buf() {
+        if buffer.is_empty() {
+            break;
+        }
+        let end = buffer.iter().position(|b| *b == b'\n');
+        let used = end.map_or(buffer.len(), |n| n + 1);
+        let remaining = 4096usize.saturating_sub(line.len());
+        line.extend_from_slice(&buffer[..used.min(remaining)]);
+        reader.consume(used);
+        if end.is_none() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&line).trim().to_owned();
+        if text.starts_with("QQ_CDB_READY") {
+            let _ = ready.try_send(());
+        }
+        if text.contains("Syntax error")
+            || text.contains("Couldn't resolve")
+            || text.contains("Unable to insert breakpoint")
+        {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            batch.push(format!("QQ_CDB_DIAGNOSTIC {text}"));
+        } else if text.starts_with("QQ_CDB_") {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            batch.push(text);
+        } else if !batch.is_empty()
+            && batch.len() <= 12
+            && (text.contains('!') || text.to_ascii_lowercase().contains("bcrypt+"))
+            && let Some(symbol) = text
+                .split_whitespace()
+                .find(|word| word.contains('!') || word.to_ascii_lowercase().starts_with("bcrypt+"))
+        {
+            batch.push(symbol.to_owned());
+        }
+        line.clear();
+    }
+    flush(&mut batch, output, &mut count, &mut bytes);
+}
+fn flush(
+    batch: &mut Vec<String>,
+    output: &Mutex<Vec<String>>,
+    count: &mut usize,
+    bytes: &mut usize,
+) {
+    let relevant = batch.iter().any(|row| {
+        row.to_ascii_lowercase().contains("bcrypt!")
+            || row.to_ascii_lowercase().starts_with("bcrypt+")
+    }) || batch
+        .first()
+        .is_some_and(|row| row.starts_with("QQ_CDB_READY") || row.starts_with("QQ_CDB_DIAGNOSTIC"));
+    if relevant && let Ok(mut rows) = output.lock() {
+        for row in batch.drain(..) {
+            if *count < 128 && *bytes + row.len() <= 65536 {
+                *count += 1;
+                *bytes += row.len();
+                rows.push(row);
+            }
+        }
+    }
+    batch.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn keeps_only_crypto_symbols_and_readiness_without_argument_columns() {
+        let bytes = b"QQ_CDB_STATUS Win32=32 pid=1 tid=2\n00 0000 1111 bcrypt!RegisterReopenWait+0x12\nENV_PRIVATE_TOKEN=never-export\nQQ_CDB_STATUS Win32=2 pid=1 tid=2\n01 0000 2222 kernelbase!Unrelated+0x1\nQQ_CDB_STATUS NtStatus=c0000034\n02 0000 3333 bcrypt+0x41\nQQ_CDB_READY\n";
+        let output = Mutex::new(Vec::new());
+        let (ready, received) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(received.try_recv(), Ok(()));
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_STATUS Win32=32 pid=1 tid=2",
+                "bcrypt!RegisterReopenWait+0x12",
+                "QQ_CDB_STATUS NtStatus=c0000034",
+                "bcrypt+0x41",
+                "QQ_CDB_READY"
+            ]
+        );
+    }
+    #[test]
+    fn continues_draining_after_bounded_selected_output() {
+        let mut bytes = Vec::new();
+        for _ in 0..512 {
+            bytes.extend_from_slice(
+                b"QQ_CDB_STATUS NtStatus=c0000034\n0000 bcrypt!NamedObject+0x2\n",
+            );
+        }
+        let mut input = io::Cursor::new(bytes);
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(&mut input, &output, &ready);
+        assert_eq!(input.position(), input.get_ref().len() as u64);
+        let rows = output.lock().unwrap();
+        assert_eq!(rows.len(), 128);
+        assert!(rows.iter().map(String::len).sum::<usize>() <= 65536);
+    }
+}
