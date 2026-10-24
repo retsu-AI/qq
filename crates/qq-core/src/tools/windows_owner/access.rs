@@ -535,37 +535,104 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(open(&root, true).is_err());
-        let encoded_acl = || {
-            ConvertSecurityDescriptorToStringSecurityDescriptor(
-                &acl(&restore.file),
+        let before = ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &acl(&restore.file),
+            SecurityInformation::Dacl,
+        )
+        .unwrap()
+        .into_string()
+        .unwrap();
+        let host = firehazard::open_process_token(
+            firehazard::get_current_process(),
+            firehazard::token::QUERY | firehazard::token::DUPLICATE,
+        )
+        .unwrap();
+        let administrators = firehazard::sid!(S - 1 - 5 - 32 - 544);
+        let notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
+        let filtered = firehazard::create_restricted_token_filter(
+            &host,
+            firehazard::token::RestrictedFlags::default(),
+            |entry| *entry.sid == *administrators,
+            |entry| entry.luid != notify,
+            None,
+        )
+        .unwrap();
+        let ordinary = firehazard::duplicate_token_ex(
+            &filtered,
+            firehazard::token::QUERY
+                | firehazard::token::IMPERSONATE
+                | firehazard::token::ADJUST_DEFAULT,
+            None,
+            firehazard::security::Impersonation,
+            firehazard::token::Impersonation,
+        )
+        .unwrap();
+        ordinary
+            .set_integrity_level(firehazard::sid::AndAttributes::new(
+                firehazard::sid!(S - 1 - 16 - 8192),
+                None,
+            ))
+            .unwrap();
+        // A dedicated synchronous thread cannot leak impersonation into a test
+        // executor. Its exit also clears the token if an assertion panics.
+        std::thread::spawn(move || {
+            firehazard::set_thread_token(None, &ordinary).unwrap();
+            let effective = firehazard::open_thread_token(
+                firehazard::get_current_thread(),
+                firehazard::token::QUERY,
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                *effective.integrity_level().unwrap().label().sid,
+                *firehazard::sid!(S - 1 - 16 - 8192)
+            );
+            let privileges = effective.privileges().unwrap();
+            assert_eq!(privileges.privilege_count(), 1);
+            assert_eq!(privileges.privileges()[0].luid, notify);
+            assert_eq!(
+                privileges.privileges()[0].attributes & firehazard::privilege::ENABLED,
+                firehazard::privilege::ENABLED
+            );
+            assert_eq!(effective.restricted_sids().unwrap().group_count(), 0);
+            let administrators = firehazard::sid!(S - 1 - 5 - 32 - 544);
+            assert!(effective.groups().unwrap().groups().iter().all(|entry| {
+                *entry.sid != *administrators
+                    || entry.attributes & firehazard::sid::group::USE_FOR_DENY_ONLY
+                        == firehazard::sid::group::USE_FOR_DENY_ONLY
+            }));
+            assert!(open(&root, true).is_err());
+            let scope = NativeFilesystem::Restricted {
+                read_only: vec![grant.clone()],
+                read_write: vec![],
+            };
+            let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+            let held = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
+            assert_eq!(held.len(), 1);
+            validate_root(&grant, &held[0]).unwrap();
+            let after = ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &acl(&open(&root, false).unwrap()),
                 SecurityInformation::Dacl,
             )
             .unwrap()
             .into_string()
-            .unwrap()
-        };
-        let before = encoded_acl();
-        let scope = NativeFilesystem::Restricted {
-            read_only: vec![grant.clone()],
-            read_write: vec![],
-        };
-        let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
-        let held = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
-        assert_eq!(held.len(), 1);
-        validate_root(&grant, &held[0]).unwrap();
-        assert_eq!(encoded_acl(), before, "public SDK ACL must stay unchanged");
-        let writable = NativeFilesystem::Restricted {
-            read_only: vec![],
-            read_write: vec![grant],
-        };
-        assert_eq!(
-            prepare(&writable, &package, super::super::unix_ms() + 15_000)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied,
-            "a writable grant cannot fall back to public read authority"
-        );
+            .unwrap();
+            assert_eq!(after, before, "public SDK ACL must stay unchanged");
+            let writable = NativeFilesystem::Restricted {
+                read_only: vec![],
+                read_write: vec![grant],
+            };
+            assert_eq!(
+                prepare(&writable, &package, super::super::unix_ms() + 15_000)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied,
+                "a writable grant cannot fall back to public read authority"
+            );
+            firehazard::revert_to_self().unwrap();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
