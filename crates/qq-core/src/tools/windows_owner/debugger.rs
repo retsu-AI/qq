@@ -45,26 +45,9 @@ impl Debugger {
             &status,
             &format!("QQ_CDB_STATE target_pid={pid} setup_started"),
         );
-        let target_script = root.join(format!("cdb-{pid}-target.txt"));
         let main_script = root.join(format!("cdb-{pid}-main.txt"));
         let open_script = root.join(format!("cdb-{pid}-open.txt"));
         let return_script = root.join(format!("cdb-{pid}-return.txt"));
-        let win32_script = root.join(format!("cdb-{pid}-win32.txt"));
-        let ntstatus_script = root.join(format!("cdb-{pid}-ntstatus.txt"));
-        for (path, function, kind) in [
-            (&win32_script, "RtlSetLastWin32Error", "Win32"),
-            (&ntstatus_script, "RtlNtStatusToDosError", "NtStatus"),
-        ] {
-            write_new(
-                path,
-                &format!(
-                    r#".printf "QQ_CDB_HIT function={function} pid=%x tid=%x\n", @$tpid, @$tid
-.if (@ecx != 0) {{.printf "QQ_CDB_STATUS {kind}=%x pid=%x tid=%x\n", @ecx, @$tpid, @$tid; kn 12}}
-gc
-"#
-                ),
-            )?;
-        }
         write_new(
             &return_script,
             r#".printf "QQ_CDB_EVENT_RETURN pid=%x tid=%x status=%x\n", @$tpid, @$tid, @eax
@@ -84,34 +67,24 @@ gc
                 return_script.display()
             ),
         )?;
-        write_new(
-            &target_script,
-            &format!(
-                r#"bu ntdll!RtlSetLastWin32Error "$$><{}"
-bu ntdll!RtlNtStatusToDosError "$$><{}"
-bu ntdll!NtOpenEvent "$$><{}"
-.printf "QQ_CDB_BREAKPOINTS pid=%x\n", @$tpid
-bl
-.printf "QQ_CDB_READY pid=%x\n", @$tpid
-g
-"#,
-                win32_script.display(),
-                ntstatus_script.display(),
-                open_script.display()
-            ),
-        )?;
         fs::create_dir_all(root.join("cdb-symbols"))?;
         write_new(
             &main_script,
             &format!(
                 r#".sympath {}
-sxn bpe
+sxe bpe
 sxn ibp
 sx
-$$><{}
+bu ntdll!RtlSetLastWin32Error ".echo QQ_CDB_HIT function=RtlSetLastWin32Error; .if (@ecx != 0) {{r ecx; kn 12}}; gc"
+bu ntdll!RtlNtStatusToDosError ".echo QQ_CDB_HIT function=RtlNtStatusToDosError; .if (@ecx != 0) {{r ecx; kn 12}}; gc"
+bu ntdll!NtOpenEvent ".echo QQ_CDB_HIT function=NtOpenEvent; $$><{}"
+.printf "QQ_CDB_BREAKPOINTS pid=%x\n", @$tpid
+bl
+.printf "QQ_CDB_READY pid=%x\n", @$tpid
+g
 "#,
                 root.join("cdb-symbols").display(),
-                target_script.display()
+                open_script.display()
             ),
         )?;
         let mut child = Command::new(exe)
@@ -246,7 +219,7 @@ fn write_new(path: &std::path::Path, text: &str) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(path)?;
-    file.write_all(text.as_bytes())
+    file.write_all(text.replace("\r\n", "\n").replace('\n', "\r\n").as_bytes())
 }
 fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::SyncSender<()>) {
     let mut reader = io::BufReader::new(stdout);
@@ -255,6 +228,7 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
     let mut count = 0;
     let mut bytes = 0;
     let mut hits = 0usize;
+    let mut status_kind = None;
     let mut stops = 0usize;
     let mut read_failed = false;
     loop {
@@ -334,7 +308,23 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
             }
             stops = stops.saturating_add(1);
         }
+        if let Some(value) = text.strip_prefix("ecx=")
+            && !value.is_empty()
+            && value.len() <= 8
+            && value.chars().all(|c| c.is_ascii_hexdigit())
+            && let Some(kind) = status_kind
+        {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            batch.push(format!("QQ_CDB_STATUS {kind}={value}"));
+            line.clear();
+            continue;
+        }
         if text.starts_with("QQ_CDB_HIT ") {
+            status_kind = match text.as_str() {
+                "QQ_CDB_HIT function=RtlSetLastWin32Error" => Some("Win32"),
+                "QQ_CDB_HIT function=RtlNtStatusToDosError" => Some("NtStatus"),
+                _ => None,
+            };
             flush(&mut batch, output, &mut count, &mut bytes);
             if hits < 8 {
                 batch.push(text);
@@ -574,6 +564,23 @@ mod tests {
                 "QQ_CDB_DIAGNOSTIC class=debugger-prompt",
                 "QQ_CDB_STOP_COUNT count=1",
                 "QQ_CDB_DIAGNOSTIC class=read-error-incomplete",
+            ]
+        );
+    }
+    #[test]
+    fn ties_numeric_register_status_to_fixed_handler_kind() {
+        let bytes = b"QQ_CDB_HIT function=RtlNtStatusToDosError\necx=c0000022\n00 0000 1234 bcrypt+0x41\nQQ_CDB_HIT function=NtOpenEvent\necx=PRIVATE\n";
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_HIT function=RtlNtStatusToDosError",
+                "QQ_CDB_STATUS NtStatus=c0000022",
+                "bcrypt+0x41",
+                "QQ_CDB_HIT function=NtOpenEvent",
+                "QQ_CDB_HIT_COUNT count=2",
             ]
         );
     }
