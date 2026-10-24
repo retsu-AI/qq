@@ -201,9 +201,11 @@ implemented; this remains an opt-in host API, not qualified default Auto.
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
 sockets. It works with host filesystem access or explicit file-content grants.
-Loopback is not enabled in this initial offline backend; authorized egress and
-private local services still need implementation. Pipe and unnamed socket-pair
-IPC remain usable. The helper closes ambient inherited descriptors before
+The trusted helper enables loopback inside the new namespace before dropping
+its setup capabilities, so a command and its descendants can run local test
+servers. Host loopback services remain unreachable; authorized external egress
+still needs implementation. Pipe and unnamed socket-pair IPC remain usable.
+The helper closes ambient inherited descriptors before
 spawning any payload, including unrestricted payloads; only standard streams
 and the helper's owned launch descriptors survive the cleanup, with helper
 handles closed on payload exec. Network authority is part of the persisted

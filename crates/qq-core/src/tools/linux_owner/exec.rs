@@ -187,6 +187,11 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     {
         return refuse(&mut ack, b'r', error);
     }
+    if packet.isolated_network
+        && let Err(error) = super::loopback::enable()
+    {
+        return refuse(&mut ack, b'k', error);
+    }
     protect_supervisor()?;
     rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))?;
     live(monitor)?;
@@ -348,7 +353,7 @@ fn monitor(fields: &str) -> io::Result<u8> {
             "private",
         ])
         .args(packet.isolated_network.then_some("--net"))
-        .args(packet.filesystem.is_some().then_some("--keep-caps"))
+        .args((packet.filesystem.is_some() || packet.isolated_network).then_some("--keep-caps"))
         .args(packet.filesystem.is_some().then_some("--ipc"))
         .arg("--")
         .arg(std::ffi::OsString::from_vec(packet.launcher_program))
