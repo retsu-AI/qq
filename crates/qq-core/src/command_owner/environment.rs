@@ -55,6 +55,23 @@ impl NativeEnvironment {
         Self::from_values(values)
     }
 
+    /// Installed Rust toolchains explicitly present on the server's PATH.
+    /// Tasks invoke their real binaries rather than the global rustup proxies,
+    /// whose configuration and hardlinked images stay outside task authority.
+    #[cfg(windows)]
+    pub fn windows_toolchain_bins() -> Vec<std::path::PathBuf> {
+        let home = std::env::var_os("RUSTUP_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|home| std::path::PathBuf::from(home).join(".rustup"))
+            });
+        match (std::env::var_os("PATH"), home) {
+            (Some(path), Some(home)) => toolchain_bins_from(&path, &home),
+            _ => Vec::new(),
+        }
+    }
+
     /// Build a bounded snapshot from explicit native values. Debug output omits values.
     pub fn from_values(
         values: impl IntoIterator<Item = (String, OsString)>,
@@ -105,19 +122,163 @@ impl NativeEnvironment {
         mut self,
         home: &std::path::Path,
     ) -> Result<Self, CommandOwnerError> {
-        self.0
-            .retain(|(name, _)| !same_name(name, "HOME") && !same_name(name, "TMPDIR"));
-        let overrides = Self::from_values([
+        let mut overrides = vec![
             ("HOME".to_owned(), home.as_os_str().to_owned()),
             ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
-        ])?;
-        self.0.extend(overrides.0);
+        ];
+        // Cargo otherwise resolves its default from the private HOME/profile.
+        // Replace an explicitly admitted override without consuming a new slot.
+        if self.get("CARGO_HOME").is_some() {
+            overrides.push((
+                "CARGO_HOME".to_owned(),
+                home.join(".cargo").into_os_string(),
+            ));
+        }
+        #[cfg(windows)]
+        let overrides = {
+            let mut values = overrides;
+            values.extend([
+                ("USERPROFILE".to_owned(), home.as_os_str().to_owned()),
+                ("TEMP".to_owned(), home.join("tmp").into_os_string()),
+                ("TMP".to_owned(), home.join("tmp").into_os_string()),
+                (
+                    "APPDATA".to_owned(),
+                    home.join("AppData/Roaming").into_os_string(),
+                ),
+                (
+                    "LOCALAPPDATA".to_owned(),
+                    home.join("AppData/Local").into_os_string(),
+                ),
+            ]);
+            // Keep child-shell discovery in the frozen environment. Without
+            // COMSPEC, cmd synthesizes its verbatim launch image path, which
+            // ordinary batch-script subprocesses may not accept.
+            if let Some(shell) = self.get("COMSPEC").or_else(|| {
+                self.get("SYSTEMROOT").map(|root| {
+                    std::path::PathBuf::from(root)
+                        .join("System32")
+                        .join("cmd.exe")
+                        .into_os_string()
+                })
+            }) {
+                values.push(("COMSPEC".to_owned(), shell));
+            }
+            // Ordinary Windows tools append slash-separated names to these
+            // values. Keep verbatim syntax only when DOS paths change identity.
+            for (_, value) in &mut values {
+                *value = dunce::simplified(std::path::Path::new(value))
+                    .as_os_str()
+                    .to_owned();
+            }
+            values
+        };
+        self.0.retain(|(name, _)| {
+            !overrides
+                .iter()
+                .any(|(replacement, _)| same_name(name, replacement))
+        });
+        self.0.extend(Self::from_values(overrides)?.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
+    /// Prefix only executable directories supplied by the admitted native scope.
+    pub(crate) fn with_executable_directories(
+        mut self,
+        directories: &[std::path::PathBuf],
+    ) -> Result<Self, CommandOwnerError> {
+        if directories.is_empty() {
+            return Ok(self);
+        }
+        if directories.len() > 16 {
+            return Err(CommandOwnerError::Invalid);
+        }
+        let old = self.get("PATH").unwrap_or_default();
+        // Command processors and SDK batch scripts need ordinary DOS paths
+        // when that spelling preserves identity. Scope grants stay canonical.
+        #[cfg(windows)]
+        let directories = directories
+            .iter()
+            .map(|path| dunce::simplified(path).to_owned());
+        #[cfg(not(windows))]
+        let directories = directories.iter().cloned();
+        let path = std::env::join_paths(directories.chain(std::env::split_paths(&old)))
+            .map_err(|_| CommandOwnerError::Invalid)?;
+        self.0.retain(|(name, _)| !same_name(name, "PATH"));
+        self.0
+            .extend(Self::from_values([("PATH".to_owned(), path)])?.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
+    /// Apply only frozen metadata whose input roots are part of the native scope.
+    pub(crate) fn with_sdk_environment(
+        mut self,
+        scope: Option<&super::NativeCommandScope>,
+    ) -> Result<Self, CommandOwnerError> {
+        let Some(scope) = scope else {
+            return Ok(self);
+        };
+        let Some(sdk) = &scope.sdk_environment else {
+            return Ok(self);
+        };
+        sdk.validate(scope)
+            .map_err(|_| CommandOwnerError::Invalid)?;
+        let spelling = |path: &std::path::Path| {
+            #[cfg(windows)]
+            {
+                dunce::simplified(path).to_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                path.to_owned()
+            }
+        };
+        let overrides = [
+            (
+                "LIB".to_owned(),
+                std::env::join_paths(sdk.libraries.iter().map(|p| spelling(p)))
+                    .map_err(|_| CommandOwnerError::Invalid)?,
+            ),
+            (
+                "INCLUDE".to_owned(),
+                std::env::join_paths(sdk.includes.iter().map(|p| spelling(p)))
+                    .map_err(|_| CommandOwnerError::Invalid)?,
+            ),
+            (
+                format!(
+                    "CARGO_TARGET_{}_LINKER",
+                    sdk.target.to_ascii_uppercase().replace('-', "_")
+                ),
+                spelling(&sdk.linker).into_os_string(),
+            ),
+        ];
+        self.0
+            .retain(|(name, _)| !overrides.iter().any(|(key, _)| same_name(name, key)));
+        self.0.extend(Self::from_values(overrides)?.0);
         self.normalize()?;
         Ok(self)
     }
 
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
-        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+        // Capture/from_values retain the user bound. Only these frozen compiler
+        // overrides may occupy the three additional internal entries.
+        let sdk_entries = self
+            .0
+            .iter()
+            .filter(|(name, _)| {
+                [
+                    "LIB",
+                    "INCLUDE",
+                    "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER",
+                    "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
+                ]
+                .iter()
+                .any(|key| same_name(name, key))
+            })
+            .count()
+            .min(3);
+        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES + sdk_entries {
             return Err(CommandOwnerError::Invalid);
         }
         self.0.sort_by(|a, b| a.0.cmp(&b.0));
@@ -168,6 +329,32 @@ impl NativeEnvironment {
     }
 }
 
+#[cfg(windows)]
+fn toolchain_bins_from(path: &std::ffi::OsStr, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use std::path::Component;
+    if !home.is_absolute() {
+        return Vec::new();
+    }
+    let mut bins = Vec::new();
+    for candidate in std::env::split_paths(path) {
+        let Ok(relative) = candidate.strip_prefix(home) else {
+            continue;
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        if matches!(components.as_slice(),
+            [Component::Normal(tools), Component::Normal(_), Component::Normal(bin)]
+            if tools.eq_ignore_ascii_case("toolchains") && bin.eq_ignore_ascii_case("bin"))
+            && !bins.contains(&candidate)
+        {
+            bins.push(candidate);
+            if bins.len() == 16 {
+                break;
+            }
+        }
+    }
+    bins
+}
+
 fn same_name(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         a.eq_ignore_ascii_case(b)
@@ -179,6 +366,201 @@ fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_msvc_environment_survives_scope_recovery_and_beats_git_linker() {
+        use super::super::{
+            NativeCommandScope, NativeDirectoryGrant, NativeNetwork, NativeResources,
+            NativeSdkEnvironment,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let paths = [
+            "workspace",
+            "msvc-bin",
+            "msvc-lib",
+            "msvc-include",
+            "git-bin",
+        ]
+        .map(|name| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            path.canonicalize().unwrap()
+        });
+        let [workspace, bin, lib, include, git] = paths;
+        let linker = bin.join("link.exe");
+        std::fs::write(&linker, b"owned fixture").unwrap();
+        let scope = NativeCommandScope {
+            workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
+            read_only: [&bin, &lib, &include]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+            executable_directories: vec![bin.clone()],
+            sdk_environment: Some(NativeSdkEnvironment {
+                linker: linker.clone(),
+                libraries: vec![lib.clone()],
+                includes: vec![include.clone()],
+                target: "aarch64-pc-windows-msvc".into(),
+            }),
+            network: NativeNetwork::Isolated,
+            resources: NativeResources::Host,
+        };
+        let encoded = serde_json::to_vec(&scope).unwrap();
+        let scope: NativeCommandScope = serde_json::from_slice(&encoded).unwrap();
+        let options = std::ffi::OsString::from("--max-old-space-size=128");
+        let home = root.path().join("private-home");
+        let initial = NativeEnvironment::from_values([
+            ("PATH".into(), std::env::join_paths([&git]).unwrap()),
+            ("NODE_OPTIONS".into(), options.clone()),
+            ("LIB".into(), "untrusted-old-lib".into()),
+        ])
+        .unwrap()
+        .with_task_home(&home)
+        .unwrap();
+        let environment = initial
+            .with_executable_directories(&scope.executable_directories)
+            .unwrap()
+            .with_sdk_environment(Some(&scope))
+            .unwrap();
+        let spelling = |path: &std::path::Path| {
+            #[cfg(windows)]
+            {
+                dunce::simplified(path).to_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                path.to_owned()
+            }
+        };
+        assert_eq!(
+            std::env::split_paths(&environment.get("PATH").unwrap())
+                .next()
+                .unwrap(),
+            spelling(&bin)
+        );
+        assert_eq!(
+            environment.get("CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER"),
+            Some(spelling(&linker).into_os_string())
+        );
+        assert_eq!(
+            std::env::split_paths(&environment.get("LIB").unwrap()).collect::<Vec<_>>(),
+            [spelling(&lib)]
+        );
+        assert_eq!(
+            std::env::split_paths(&environment.get("INCLUDE").unwrap()).collect::<Vec<_>>(),
+            [spelling(&include)]
+        );
+        assert_eq!(environment.get("NODE_OPTIONS"), Some(options));
+        assert_eq!(
+            environment.get("HOME"),
+            Some(spelling(&home).into_os_string())
+        );
+        let captured = crate::BASE_ENV
+            .iter()
+            .map(|name| ((*name).to_owned(), "base-value".into()))
+            .chain(
+                (0..crate::MAX_SHELL_ENV_NAMES)
+                    .map(|index| (format!("APPROVED_{index}"), "approved-value".into())),
+            )
+            .collect::<Vec<(String, OsString)>>();
+        let maximum = NativeEnvironment::from_values(captured).unwrap();
+        let mut maximum = maximum.with_sdk_environment(Some(&scope)).unwrap();
+        maximum.normalize().unwrap();
+        let encoded = serde_json::to_vec(&maximum).unwrap();
+        let mut restored: NativeEnvironment = serde_json::from_slice(&encoded).unwrap();
+        restored.normalize().unwrap();
+        assert_eq!(restored.get("LIB"), maximum.get("LIB"));
+        assert_eq!(restored.get("APPROVED_15"), Some("approved-value".into()));
+        assert!(
+            NativeEnvironment::capture(&vec!["ALLOWED".into(); crate::MAX_SHELL_ENV_NAMES + 1])
+                .is_err()
+        );
+        let mut unadmitted = scope;
+        unadmitted.read_only.retain(|grant| grant.path != lib);
+        assert!(environment.with_sdk_environment(Some(&unadmitted)).is_err());
+    }
+
+    #[test]
+    fn admitted_tool_search_paths_precede_captured_path_without_host_mutation() {
+        let old = std::env::join_paths([std::path::PathBuf::from("old-bin")]).unwrap();
+        let environment = NativeEnvironment::from_values([("PATH".into(), old)]).unwrap();
+        let prefixed = environment
+            .with_executable_directories(&["sdk-bin".into()])
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(&prefixed.get("PATH").unwrap()).collect::<Vec<_>>(),
+            [std::path::PathBuf::from("sdk-bin"), "old-bin".into()]
+        );
+        assert!(
+            NativeEnvironment::from_values([])
+                .unwrap()
+                .with_executable_directories(&vec!["bin".into(); 17])
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn admitted_tool_search_paths_use_command_compatible_windows_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let sdk = root.path().join("SDK with spaces-λ");
+        std::fs::create_dir(&sdk).unwrap();
+        let canonical = sdk.canonicalize().unwrap();
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_executable_directories(std::slice::from_ref(&canonical))
+            .unwrap();
+        let first = std::env::split_paths(&environment.get("PATH").unwrap())
+            .next()
+            .unwrap();
+        assert!(
+            !first.as_os_str().to_string_lossy().starts_with(r"\\?\"),
+            "Windows tool PATH must use DOS spelling when identity allows it"
+        );
+        assert_eq!(first.canonicalize().unwrap(), canonical);
+        let extended = root.path().canonicalize().unwrap().join("SDK trailing.");
+        std::fs::create_dir(&extended).unwrap();
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_executable_directories(std::slice::from_ref(&extended))
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(&environment.get("PATH").unwrap())
+                .next()
+                .unwrap(),
+            extended,
+            "DOS-incompatible names must keep their original identity"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn toolchain_inputs_never_include_proxy_home_or_arbitrary_path_parents() {
+        use std::path::Path;
+        let home = Path::new(r"C:\Users\operator\.rustup");
+        let admitted = home.join(r"toolchains\stable-host\bin");
+        let path = std::env::join_paths([
+            Path::new(r"C:\Users\operator\.cargo\bin"),
+            Path::new(r"C:\Users\operator"),
+            home,
+            &home.join(r"toolchains\stable-host\lib"),
+            &home.join(r"toolchains\stable-host\bin\private"),
+            &home.join(r"toolchains\..\bin"),
+            &admitted,
+            &admitted,
+        ])
+        .unwrap();
+        assert_eq!(toolchain_bins_from(&path, home), [admitted]);
+        assert!(toolchain_bins_from(&path, Path::new("relative-home")).is_empty());
+        let many = std::env::join_paths(
+            (0..20).map(|index| home.join(format!(r"toolchains\version-{index}\bin"))),
+        )
+        .unwrap();
+        let bounded = toolchain_bins_from(&many, home);
+        assert_eq!(bounded.len(), 16);
+        assert_eq!(bounded[0], home.join(r"toolchains\version-0\bin"));
+        assert_eq!(bounded[15], home.join(r"toolchains\version-15\bin"));
+    }
 
     fn value(bytes: Vec<u8>) -> Value {
         if cfg!(unix) {
@@ -227,6 +609,185 @@ mod tests {
         assert!(
             NativeEnvironment::capture(&vec!["UNSET".to_owned(); crate::MAX_SHELL_ENV_NAMES + 1])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn task_home_replaces_host_profile_and_scratch_values() {
+        let snapshot = NativeEnvironment::from_values(
+            crate::BASE_ENV
+                .iter()
+                .map(|name| ((*name).to_owned(), OsString::from("host-value")))
+                .chain([(
+                    "CARGO_HOME".to_owned(),
+                    OsString::from("private-host-cargo"),
+                )]),
+        )
+        .unwrap();
+        let home = std::path::Path::new("private-task-home");
+        let environment = snapshot.with_task_home(home).unwrap();
+        assert_eq!(environment.get("HOME"), Some(home.into()));
+        assert_eq!(
+            environment.get("CARGO_HOME"),
+            Some(home.join(".cargo").into())
+        );
+        assert_eq!(environment.get("TMPDIR"), Some(home.join("tmp").into()));
+        assert_eq!(environment.get("PATH"), Some("host-value".into()));
+        #[cfg(windows)]
+        for (name, path) in [
+            ("USERPROFILE", home.to_path_buf()),
+            ("TEMP", home.join("tmp")),
+            ("TMP", home.join("tmp")),
+            ("APPDATA", home.join("AppData/Roaming")),
+            ("LOCALAPPDATA", home.join("AppData/Local")),
+        ] {
+            assert_eq!(environment.get(name), Some(path.into_os_string()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_home_supplies_command_compatible_child_shell_selection() {
+        for captured in [
+            vec![("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows"))],
+            vec![
+                ("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows")),
+                (
+                    "COMSPEC".to_owned(),
+                    OsString::from(r"\\?\C:\Windows\System32\cmd.exe"),
+                ),
+            ],
+        ] {
+            let environment = NativeEnvironment::from_values(captured)
+                .unwrap()
+                .with_task_home(std::path::Path::new(r"C:\private-task"))
+                .unwrap();
+            assert_eq!(
+                environment.get("COMSPEC"),
+                Some(OsString::from(r"C:\Windows\System32\cmd.exe")),
+                "Windows child shells need DOS-compatible COMSPEC"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_supports_shell_profile_paths_and_called_batches() {
+        use std::{fs, os::windows::process::CommandExt as _, path::Path, process::Command};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("task space 日本語");
+        let home = workspace.join("profile space 日本語");
+        for directory in ["tmp", "AppData/Local", "AppData/Roaming"] {
+            fs::create_dir_all(home.join(directory)).unwrap();
+        }
+        let canonical = home.canonicalize().unwrap();
+        assert!(matches!(
+            canonical.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+        ));
+        assert!(matches!(
+            home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        ));
+        let variables = [
+            ("HOME", ""),
+            ("USERPROFILE", ""),
+            ("TMPDIR", "tmp"),
+            ("TEMP", "tmp"),
+            ("TMP", "tmp"),
+            ("APPDATA", "AppData/Roaming"),
+            ("LOCALAPPDATA", "AppData/Local"),
+        ];
+        let exercise = |label: &str, task_home: &Path, prefix: &str| {
+            let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+            let environment = NativeEnvironment::from_values([
+                ("SYSTEMROOT".to_owned(), system.clone()),
+                (
+                    "PATH".to_owned(),
+                    Path::new(&system).join("System32").into_os_string(),
+                ),
+            ])
+            .unwrap()
+            .with_task_home(task_home)
+            .unwrap();
+            let mut script = prefix.to_owned();
+            for (name, _) in variables {
+                script.push_str(&format!(
+                    ">\"%{name}%/proof-{name}-{label}\" echo private-{name} & "
+                ));
+            }
+            fs::write(
+                workspace.join(format!("owned {label}.cmd")),
+                format!("@echo off\r\n>called-{label}.txt echo called-batch\r\nexit /b 0\r\n"),
+            )
+            .unwrap();
+            script.push_str(&format!("call \"owned {label}.cmd\""));
+            let raw = format!("/D /S /C \"{script}\"");
+            eprintln!("{label} raw cmd arguments: {raw:?}");
+            let program = Path::new(&system).join("System32").join("cmd.exe");
+            eprintln!("{label} cmd program: {program:?}");
+            let mut command = Command::new(program);
+            command.env_clear().current_dir(&workspace).raw_arg(raw);
+            for (name, _) in &environment.0 {
+                command.env(name, environment.get(name).unwrap());
+            }
+            let output = command.output().unwrap();
+            let proofs = variables.map(|(name, directory)| {
+                let content =
+                    fs::read_to_string(home.join(directory).join(format!("proof-{name}-{label}")))
+                        .map(|content| content.trim().to_owned());
+                (name, content)
+            });
+            let called = fs::read_to_string(workspace.join(format!("called-{label}.txt")));
+            eprintln!(
+                "{label} profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}"
+            );
+            output.status.success()
+                && output.stderr.is_empty()
+                && proofs.iter().all(|(name, result)| {
+                    result
+                        .as_deref()
+                        .is_ok_and(|value| value == format!("private-{name}"))
+                })
+                && called
+                    .as_deref()
+                    .is_ok_and(|value| value.trim() == "called-batch")
+        };
+        assert!(
+            exercise("dos-echo", &home, "echo fixture-control & "),
+            "ordinary DOS task home must validate the echo-first shell fixture",
+        );
+        assert!(
+            exercise("canonical", &canonical, "echo fixture-regression & "),
+            "canonical task home must support ordinary shell path suffixes and called batches",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_preserves_extended_only_names() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        for path in [r"\\?\C:\task.", r"\\?\C:\task ", r"\\?\C:\NUL\task", &long] {
+            let home = std::path::Path::new(path);
+            let environment = NativeEnvironment::from_values([])
+                .unwrap()
+                .with_task_home(home)
+                .unwrap();
+            assert_eq!(environment.get("HOME"), Some(home.into()));
+            assert_eq!(environment.get("TMP"), Some(home.join("tmp").into()));
+        }
+        // A child path can need verbatim semantics even when HOME does not.
+        let home = std::path::PathBuf::from(format!(r"\\?\C:\{}", "a".repeat(245)));
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_task_home(&home)
+            .unwrap();
+        assert_eq!(
+            environment.get("APPDATA"),
+            Some(home.join("AppData/Roaming").into()),
         );
     }
 

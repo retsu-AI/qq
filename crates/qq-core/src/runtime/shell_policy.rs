@@ -14,14 +14,19 @@ pub const BASE_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
 /// Capture it with the other base values rather than adding worker ambient
 /// environment after the invocation has been frozen.
 #[cfg(windows)]
-pub const BASE_ENV: [&str; 7] = [
+pub const BASE_ENV: [&str; 12] = [
     "PATH",
     "HOME",
     "LANG",
     "TERM",
     "TMPDIR",
     "SYSTEMROOT",
+    "COMSPEC",
     "LOCALAPPDATA",
+    "USERPROFILE",
+    "APPDATA",
+    "TEMP",
+    "TMP",
 ];
 /// Names a call may request per invocation.
 pub const MAX_SHELL_ENV_NAMES: usize = 16;

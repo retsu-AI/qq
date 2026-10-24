@@ -19,6 +19,7 @@ use std::{
     io::{self, Read as _, Write as _},
     ops::{Deref, DerefMut},
     os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _, process::ExitStatusExt as _},
+    path::{Path, PathBuf},
     process::ExitStatus,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -830,10 +831,150 @@ pub(super) fn group_is_quiescent(pgid: rustix::process::Pid) -> io::Result<bool>
     Ok(true)
 }
 
+fn literal_read(
+    profile: &mut String,
+    path: &Path,
+    executable: bool,
+    metadata: &mut std::collections::BTreeSet<PathBuf>,
+) -> io::Result<()> {
+    let quote = |path: &Path| {
+        let path = path
+            .to_str()
+            .filter(|path| !path.chars().any(char::is_control))
+            .ok_or_else(|| io::Error::other("invalid native library pathname"))?;
+        serde_json::to_string(path).map_err(io::Error::other)
+    };
+    profile.push_str(&format!(
+        "(allow file-read*{} (literal {}))\n",
+        if executable {
+            " file-map-executable"
+        } else {
+            ""
+        },
+        quote(path)?
+    ));
+    metadata.insert(path.to_owned());
+    for ancestor in path.ancestors().skip(1) {
+        if metadata.insert(ancestor.to_owned()) {
+            profile.push_str(&format!(
+                "(allow file-read-metadata (literal {}))\n",
+                quote(ancestor)?
+            ));
+        }
+    }
+    if profile.len() > 64 * 1024 {
+        return Err(io::Error::other("native sandbox profile exceeds its bound"));
+    }
+    Ok(())
+}
+
+fn homebrew_library_aliases(
+    directory: &Path,
+    prefix: &Path,
+    remaining: &mut usize,
+) -> io::Result<Vec<PathBuf>> {
+    let Ok(suffix) = directory.strip_prefix(prefix.join("Cellar")) else {
+        return Ok(Vec::new());
+    };
+    let parts = suffix.iter().collect::<Vec<_>>();
+    if parts.len() < 3 || parts[2] != "lib" {
+        return Ok(Vec::new());
+    }
+    let mut alias_directory = prefix.join("opt").join(parts[0]);
+    for part in &parts[2..] {
+        alias_directory.push(part);
+    }
+    if directory.canonicalize()? != directory || alias_directory.canonicalize()? != directory {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "installed library alias changed",
+        ));
+    }
+    let mut aliases = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        *remaining = remaining
+            .checked_sub(1)
+            .ok_or_else(|| io::Error::other("too many installed library entries"))?;
+        let entry = entry?;
+        if entry
+            .path()
+            .extension()
+            .is_none_or(|extension| extension != "dylib")
+        {
+            continue;
+        }
+        let target = entry.path().canonicalize()?;
+        let alias = alias_directory.join(entry.file_name());
+        if !target.starts_with(directory) || !target.is_file() || alias.canonicalize()? != target {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "installed library file alias changed",
+            ));
+        }
+        aliases.push(alias);
+    }
+    Ok(aliases)
+}
+
+fn homebrew_openssl_config(directory: &Path, prefix: &Path) -> io::Result<Option<PathBuf>> {
+    let Ok(suffix) = directory.strip_prefix(prefix.join("Cellar")) else {
+        return Ok(None);
+    };
+    let parts = suffix.iter().collect::<Vec<_>>();
+    if parts.len() < 3 || parts[0] != "openssl@3" || parts[2] != "lib" {
+        return Ok(None);
+    }
+    let config = prefix.join("etc/openssl@3/openssl.cnf");
+    let metadata = std::fs::symlink_metadata(&config)?;
+    if config.canonicalize()? != config || !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "installed OpenSSL configuration is aliased",
+        ));
+    }
+    Ok(Some(config))
+}
+
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
+    // Darwin uname() needs these two names in addition to the OS/hardware
+    // names above; Node's OS bootstrap calls it even for ordinary npm scripts.
+    profile.push_str(
+        "(allow sysctl-read (sysctl-name \"kern.hostname\") (sysctl-name \"kern.version\"))\n",
+    );
+    // The system /bin/sh shim reads this root-owned selector before launching
+    // the selected system shell. This grants one file, not its parent tree.
+    profile.push_str("(allow file-read* (literal \"/private/var/select/sh\"))\n");
+    let mut literal_metadata = std::collections::BTreeSet::new();
+    literal_metadata.insert(PathBuf::from("/private/var/select/sh"));
+    // Xcode checks this machine-wide license receipt while resolving its SDK.
+    literal_read(
+        &mut profile,
+        Path::new("/Library/Preferences/com.apple.dt.Xcode.plist"),
+        false,
+        &mut literal_metadata,
+    )?;
+    // LibreSSL loads this OS-public configuration even for Cargo offline work.
+    // User configuration and other files under /private/etc remain excluded.
+    literal_read(
+        &mut profile,
+        Path::new("/private/etc/ssl/openssl.cnf"),
+        false,
+        &mut literal_metadata,
+    )?;
+    for selector in [
+        "/var/select/developer_dir",
+        "/private/var/select/developer_dir",
+    ] {
+        literal_read(
+            &mut profile,
+            Path::new(selector),
+            false,
+            &mut literal_metadata,
+        )?;
+    }
     // dyld opens the root directory while resolving its shared cache. This
     // grants directory entries only, never reads of descendant file contents.
     profile
@@ -849,6 +990,8 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
         } => {
             filesystem.validate()?;
             let mut protected_directories = std::collections::BTreeSet::new();
+            let mut library_entries = 4096;
+            let mut executable_filters = std::collections::BTreeSet::new();
             for (grant, writable) in read_only
                 .iter()
                 .map(|grant| (grant, false))
@@ -865,6 +1008,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     return Err(io::Error::other("control character in native grant"));
                 }
                 let quoted = serde_json::to_string(path).map_err(io::Error::other)?;
+                executable_filters.insert(format!("(subpath {quoted})"));
                 profile.push_str(&format!(
                     "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
@@ -875,6 +1019,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     protected_directories.extend(grant.path.ancestors());
                 }
                 for ancestor in grant.path.ancestors().skip(1) {
+                    literal_metadata.insert(ancestor.to_owned());
                     let quoted = serde_json::to_string(
                         ancestor
                             .to_str()
@@ -886,6 +1031,43 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                         return Err(io::Error::other("native sandbox profile exceeds its bound"));
                     }
                 }
+                if !writable {
+                    for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
+                        if let Some(config) = homebrew_openssl_config(&grant.path, prefix)? {
+                            literal_read(&mut profile, &config, false, &mut literal_metadata)?;
+                        }
+                        for alias in
+                            homebrew_library_aliases(&grant.path, prefix, &mut library_entries)?
+                        {
+                            literal_read(&mut profile, &alias, true, &mut literal_metadata)?;
+                        }
+                    }
+                }
+            }
+            let mut metadata_filters = executable_filters.clone();
+            for path in &literal_metadata {
+                let quoted = serde_json::to_string(
+                    path.to_str()
+                        .ok_or_else(|| io::Error::other("non UTF-8 metadata grant"))?,
+                )
+                .map_err(io::Error::other)?;
+                metadata_filters.insert(format!("(literal {quoted})"));
+            }
+            // Executable lookup may fail at a metadata check before exec.
+            // Reuse only existing read grants; denial remains a denial.
+            profile.push_str(&format!(
+                "(deny file-read-metadata (with errno 13) (require-not (require-any {})))\n",
+                metadata_filters.into_iter().collect::<Vec<_>>().join(" ")
+            ));
+            // Return the normal exec-search error only outside the exact
+            // admitted executable roots. Other denied operations keep EPERM.
+            if executable_filters.is_empty() {
+                profile.push_str("(deny process-exec (with errno 13))\n");
+            } else {
+                profile.push_str(&format!(
+                    "(deny process-exec (with errno 13) (require-not (require-any {})))\n",
+                    executable_filters.into_iter().collect::<Vec<_>>().join(" ")
+                ));
             }
             // Emit denials after every allow so overlapping grants cannot
             // restore permission to replace an authority root or its ancestors.
@@ -905,12 +1087,162 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
             }
         }
     }
+    if profile.len() > 64 * 1024 {
+        return Err(io::Error::other("native sandbox profile exceeds its bound"));
+    }
     Ok(profile)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loader_exec_search_errors_preserve_the_admitted_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let grant = crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap();
+        let text = profile(
+            &NativeFilesystem::Restricted {
+                read_only: vec![grant],
+                read_write: vec![],
+            },
+            NativeNetwork::Isolated,
+        )
+        .unwrap();
+        let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+        assert!(text.contains(&format!(
+            "(deny process-exec (with errno 13) (require-not (require-any (subpath {quoted}))))"
+        )));
+        assert!(text.contains(&format!("process-exec  (subpath {quoted})")));
+        assert!(text.contains("(deny default)"));
+        assert!(
+            text.contains("(deny file-read-metadata (with errno 13) (require-not (require-any ")
+        );
+        assert!(
+            !profile(&NativeFilesystem::Host, NativeNetwork::Isolated)
+                .unwrap()
+                .contains("(deny process-exec")
+        );
+    }
+
+    #[test]
+    fn loader_literals_preserve_parent_content_denial() {
+        let text = profile(
+            &NativeFilesystem::Restricted {
+                read_only: vec![],
+                read_write: vec![],
+            },
+            NativeNetwork::Isolated,
+        )
+        .unwrap();
+        assert!(text.contains("(deny default)"));
+        assert!(text.contains("(deny process-exec (with errno 13))"));
+        assert!(text.contains("(sysctl-name \"kern.hostname\")"));
+        assert!(text.contains("(sysctl-name \"kern.version\")"));
+        assert!(!text.contains("(sysctl-name-prefix \"kern.\")"));
+        assert!(text.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"));
+        assert!(text.contains("(allow file-read* (literal \"/var/select/developer_dir\"))"));
+        assert!(
+            text.contains("(allow file-read* (literal \"/private/var/select/developer_dir\"))")
+        );
+        assert!(!text.contains("(subpath \"/private/var/select\")"));
+        assert!(text.contains(
+            "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))"
+        ));
+        for parent in [
+            "/Library/Preferences",
+            "/Library",
+            "/private/etc/ssl",
+            "/private/etc",
+            "/private",
+        ] {
+            assert!(text.contains(&format!("(allow file-read-metadata (literal {parent:?}))")));
+            assert!(!text.contains(&format!("(allow file-read* (literal {parent:?}))")));
+            assert!(!text.contains(&format!("(subpath {parent:?})")));
+        }
+        let mut literal = String::new();
+        literal_read(
+            &mut literal,
+            Path::new("/owned/opt/libuv/lib/libuv.1.dylib"),
+            true,
+            &mut Default::default(),
+        )
+        .unwrap();
+        assert!(literal.contains("(allow file-read* file-map-executable (literal \"/owned/opt/libuv/lib/libuv.1.dylib\"))"));
+        assert!(literal.contains("(allow file-read-metadata (literal \"/owned/opt/libuv/lib\"))"));
+        assert!(!literal.contains("(subpath "));
+    }
+
+    #[test]
+    fn homebrew_aliases_require_the_admitted_library_target() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().canonicalize().unwrap();
+        let directory = prefix.join("Cellar/libuv/1/lib");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir(prefix.join("opt")).unwrap();
+        std::fs::write(directory.join("libuv.1.dylib"), b"library").unwrap();
+        std::os::unix::fs::symlink("libuv.1.dylib", directory.join("libuv.dylib")).unwrap();
+        let alias = prefix.join("opt/libuv");
+        std::os::unix::fs::symlink(directory.parent().unwrap(), &alias).unwrap();
+        let aliases = homebrew_library_aliases(&directory, &prefix, &mut 8).unwrap();
+        assert_eq!(aliases.len(), 2);
+        assert!(aliases.contains(&alias.join("lib/libuv.1.dylib")));
+        assert!(aliases.contains(&alias.join("lib/libuv.dylib")));
+        assert!(homebrew_library_aliases(&directory, &prefix, &mut 0).is_err());
+        let outside = prefix.join("outside.dylib");
+        std::fs::write(&outside, b"private").unwrap();
+        let escape = directory.join("escape.dylib");
+        std::os::unix::fs::symlink(&outside, &escape).unwrap();
+        assert!(homebrew_library_aliases(&directory, &prefix, &mut 8).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"private");
+        std::fs::remove_file(escape).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        assert!(homebrew_library_aliases(&directory, &prefix, &mut 8).is_err());
+        let private = prefix.join("private");
+        std::fs::create_dir_all(private.join("lib")).unwrap();
+        std::fs::write(private.join("lib/credential"), b"private").unwrap();
+        std::os::unix::fs::symlink(&private, &alias).unwrap();
+        assert_eq!(
+            homebrew_library_aliases(&directory, &prefix, &mut 8)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            std::fs::read(private.join("lib/credential")).unwrap(),
+            b"private"
+        );
+    }
+
+    #[test]
+    fn homebrew_openssl_config_excludes_private_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().canonicalize().unwrap();
+        let directory = prefix.join("Cellar/openssl@3/3/lib");
+        let config = prefix.join("etc/openssl@3/openssl.cnf");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, b"installation configuration").unwrap();
+        assert_eq!(
+            homebrew_openssl_config(&directory, &prefix).unwrap(),
+            Some(config.clone())
+        );
+        assert!(
+            homebrew_openssl_config(&prefix.join("Cellar/private/1/lib"), &prefix)
+                .unwrap()
+                .is_none()
+        );
+        let private = prefix.join("credential");
+        std::fs::write(&private, b"private").unwrap();
+        std::fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&private, &config).unwrap();
+        assert!(homebrew_openssl_config(&directory, &prefix).is_err());
+        std::fs::remove_file(&config).unwrap();
+        std::fs::hard_link(&private, &config).unwrap();
+        assert!(homebrew_openssl_config(&directory, &prefix).is_err());
+        assert_eq!(std::fs::read(private).unwrap(), b"private");
+    }
     #[tokio::test]
     async fn resource_admission_requires_restricted_filesystem_authority() {
         let directory = tempfile::tempdir().unwrap();

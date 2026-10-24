@@ -84,17 +84,20 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux and macOS, the binary creates detached task scopes for ordinary Auto
-runs and their children. Built-ins use the private task tree; native commands receive its
+On Linux, macOS and Windows, the binary creates detached task scopes for ordinary
+Auto runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-uses kernel resource limits on Linux and explicit sampled resource safeguards
-on macOS. Windows retains its existing permission behavior pending native
-containment integration and qualification. Authorized network egress, credential
-brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
-No implicit home, toolchain, temporary or workspace roots are granted.
+uses kernel resource limits on Linux, per-process limits and sampled owned-group
+safeguards on macOS, and committed-memory/process jobs with a payload CPU cap on
+Windows. Windows defaults to 4 GiB committed memory, 512 processes (including
+the helper) and 90% of logical processors for the payload tree. Authorized network
+egress, credential brokering, per-task aggregate resource budgets and concurrent
+source writers still require further work.
+Host home and workspace roots are not implicitly granted; compiler inputs are
+selected separately from trusted server installations.
 
 Trusted embedding hosts can import an explicit file selection with
 `TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
@@ -141,11 +144,24 @@ directories and copying each bounded file chunk. Interrupted imports remove
 their partial private tree before settlement. Restored goal trees adopt the
 current host's file/byte ceilings; a tighter ceiling can refuse publication
 while retaining the private edits.
-Commands receive a private home/temp directory, explicit
-system read roots, isolated networking and the captured task write root. A native
+Commands receive a private home/temp directory. On Windows, `HOME` and
+`USERPROFILE` point to that directory, `TMPDIR`/`TEMP`/`TMP` point to its `tmp`
+subdirectory, and `APPDATA`/`LOCALAPPDATA` point to its private `AppData/Roaming`
+and `AppData/Local` subdirectories. These values replace captured host profile
+paths before dispatch. Commands also receive explicit
+system and selected SDK read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
 child supervision requires it. Ask and Read-only retain their own rules.
+
+The Unix server resolves its installed Rustup default in private control storage,
+then admits the canonical compiler `bin` and `lib` roots read-only. Every task
+admission rejects source overlap with these inputs. For a source `Cargo.lock`,
+the server copies only selected cached crates.io archives, verified against lock
+checksums, and their public sparse-index entries into the private Cargo home.
+This does not grant commands access to the host Cargo home or copy credentials,
+global configuration, Git dependencies or private registries. Missing packages
+remain unavailable to offline Cargo.
 
 Task traversal reads bounded regular ignore files through directory capabilities;
 special files and symlinks cannot block ignore loading. New ignored output files
@@ -181,14 +197,17 @@ source authority; cancellation, budgets and unknown-execution holds still apply.
 Unbound Full and Ask checks recover the original worker's terminal result without
 requiring a restricted scope; recovery never submits replacement execution.
 
-Linux Auto commands request enforced memory, process and CPU limits. Goal work
-retains its private tree across server restart without replaying the original
-command or resetting its goal budget. This integration does not yet qualify
-unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS kernel-quota execution and
-default Windows Auto containment remain unavailable and fail closed. Source
-symlinks are omitted and hardlinked regular inputs are refused. Scoped network
-and credential operations still require separate trusted adapters.
+Linux Auto commands request enforced memory, process and CPU limits. Windows
+uses AppContainer file/network restrictions and Job resource limits. macOS uses
+Seatbelt restrictions and sampled resource safeguards, rather than aggregate
+kernel quotas; detached-process limitations are described below. Import and SDK
+copy limits and storage-pressure checks do not provide hard per-task disk quotas.
+Goal work retains its private tree across server restart without replaying the
+original command or resetting its goal budget. Ordinary non-goal prompts start
+new task trees. Source symlinks are omitted and hardlinked regular inputs are
+refused. Public fetches use configured host grants; `task_commit`, `task_push`
+and `task_pr` use the trusted Git/hosting adapters described below. Payload
+commands retain isolated networking.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
@@ -224,9 +243,10 @@ be registered; an existing root's authority cannot be silently changed. Every
 child session uses the same store-owned restrictions regardless of its model
 profile or approval grants. Corrupt or empty stored scope records refuse startup.
 The metadata has a byte bound and the registry has a capacity bound. Store
-schema 60 prevents older runtimes from ignoring these restrictions. Scope
-retirement/reconfiguration and automatic task-workspace preparation are not yet
-implemented; this remains an opt-in host API, not qualified default Auto.
+schema 60 prevents older runtimes from ignoring these restrictions. Explicit
+embedding registrations cannot be reconfigured or retired in place. Normal
+server Auto sessions prepare isolated task workspaces and register their
+derived authority automatically through `TaskWorkspacePolicy`.
 
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
@@ -1450,14 +1470,18 @@ Guarded commands require restricted filesystem authority. Default macOS Auto
 uses these safeguards with its detached task files.
 Requests for kernel aggregate quotas fail closed on macOS.
 
-The Windows adapter launches restricted requests in LPAC with `registryRead`
-for ordinary child-process creation and a directory-identity capability for each
+The Windows adapter launches restricted requests in an ordinary AppContainer
+with `registryRead` for ordinary child-process creation and a directory-identity capability for each
 non-system read-only root, inside
 QQ's existing owned command job. Its trusted helper obtains the user's local
 application-data directory from Windows for its startup environment. The payload
 keeps its frozen environment, including Windows' required `SYSTEMROOT` and
-`LOCALAPPDATA`. These profile-path values do not grant file access: the LPAC token
-still denies the user's unrelated profile files. The trusted helper starts the payload suspended,
+`LOCALAPPDATA`. These profile-path values do not grant file access: the
+AppContainer token still denies private profile files. Reads that Windows
+already shares with sandboxed apps remain available. A task-specific
+`WRITE_RESTRICTED` SID adds a second access
+check for writes, so OS-shared read access does not grant unrelated writes.
+The trusted helper starts the payload suspended,
 with only its explicit stdin/stdout/stderr handles, then awaits the worker's
 release byte. Cancellation or a deadline during preparation drains the command
 job before returning. Captured user stdin begins after the exact unbuffered
@@ -1470,12 +1494,17 @@ entry, reused across tasks, rather than one package entry per task. Writable
 roots retain task-specific package authority. A root listed as both readable and
 writable uses only its private package authority; both supplied root identities
 are still validated. Writable grants are applied before overlapping read-only
-grants. Non-system hardlinks and reparse points are refused. Directory grants
-are inherited by newly created objects. Grants update the held kernel object
-without requesting a recursive file-object ACL update; each existing object
-must pass the held-handle checks independently. Handles request only metadata
-and ACL rights, preserving the workspace's existing no-delete pins. Windows loader access uses the LPAC
-OS baseline and its per-package profile storage remain available. ACL authority follows objects rather than current pathnames, so
+grants. Reparse points and hardlinks needing new ACL rights are refused.
+Already fully task-authorized regular hardlinks are reused without ACL changes.
+If a read-only SDK ACL cannot be changed, its held identity and existing OS
+sandbox access are retained; writable grants never use this fallback.
+Directory grants are inherited by newly created objects. Grants update the held
+kernel object without requesting a recursive file-object ACL update; each
+existing object must pass the held-handle checks independently. Handles request
+only metadata
+and ACL rights, preserving the workspace's existing no-delete pins. Windows loader
+access uses the AppContainer OS baseline; its per-package profile storage remains
+available. ACL authority follows objects rather than current pathnames, so
 callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,
@@ -1486,7 +1515,9 @@ It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
-Windows Auto integration is unfinished.
+Windows Auto uses this adapter with detached task files, checked copy-based
+publication and a private cache retained for goal continuation. Control-root
+owner and ACL validation runs before admitting task authority.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
@@ -1521,7 +1552,7 @@ Native containment does not itself grant credential access.
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 - A **cleared environment**: the child starts with `PATH HOME LANG TERM
-  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows), plus variables the call names in `env` (≤ 16) that
+  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA USERPROFILE APPDATA TEMP TMP` on Windows), plus variables the call names in `env` (≤ 16) that
   `policy.shell_env` allows. A name outside the allowlist fails the call
   (`env_not_allowed`) before anything runs. Secrets the server holds never
   reach a child by accident. Native command-owner submissions carry a snapshot

@@ -115,6 +115,16 @@ fn insert(
         .resources
         .validate()
         .map_err(|error| invalid(&error.to_string()))?;
+    if scope.executable_directories.len() > 16
+        || scope
+            .executable_directories
+            .iter()
+            .any(|path| !scope.read_only.iter().any(|grant| grant.path == *path))
+    {
+        return Err(invalid(
+            "executable search roots must be admitted read-only",
+        ));
+    }
     if scope.read_only.len() > 63
         || scope
             .read_only
@@ -134,6 +144,10 @@ fn insert(
         return Err(invalid(
             "scope roots must be bounded canonical absolute paths",
         ));
+    }
+    if let Some(sdk) = &scope.sdk_environment {
+        sdk.validate(&scope)
+            .map_err(|error| invalid(&error.to_string()))?;
     }
     scope.read_only.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(old) = policies.get(&scope.workspace.path) {

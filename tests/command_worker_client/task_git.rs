@@ -1,7 +1,7 @@
 //! Real Auto edits and private Git commits share the independent worker.
 use super::{
     client,
-    runtime::{configured_cli, reply},
+    runtime::{configured_cli, data_directory, reply},
 };
 use qq_core::command_owner::NativeCommandService as _;
 use qq_provider::test_support::LoopbackServer;
@@ -47,8 +47,9 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
     let base = git(&workspace, &["rev-parse", "HEAD"]);
     // Preexisting user edits must publish unchanged, without becoming task changes.
     std::fs::write(workspace.join("unrelated"), "user dirty bytes").unwrap();
+    let data = data_directory(&home);
     let worker = client::CommandWorker::new(
-        home.join("data/qq/command-owner-v3"),
+        data.join("command-owner-v3"),
         env!("CARGO_BIN_EXE_qq").into(),
         concat!(
             env!("CARGO_PKG_VERSION"),
@@ -150,8 +151,8 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
     let qq_core::task_git_job::TaskGitJobResult::Committed { commit } = receipt.result else {
         panic!("{result}; {diagnostics}");
     };
-    let private_git = home
-        .join("data/qq/task-workspaces")
+    let private_git = data
+        .join("task-workspaces")
         .join(format!("task-git-{}", receipt.task));
     assert_eq!(
         git(&private_git, &["rev-parse", &commit.branch]),
@@ -189,7 +190,7 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
         std::fs::read_to_string(workspace.join("unrelated")).unwrap(),
         "user dirty bytes"
     );
-    let sessions = rusqlite::Connection::open(home.join("data/qq/sessions.sqlite3")).unwrap();
+    let sessions = rusqlite::Connection::open(data.join("sessions.sqlite3")).unwrap();
     let (id, saved, context): (String, String, Option<String>) = sessions.query_row(
         "SELECT id,result,execution_context_json FROM tool_calls WHERE name='task_commit' AND state='completed'", [],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
@@ -205,7 +206,7 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
         "{diagnostics}"
     );
     let journal =
-        rusqlite::Connection::open(home.join("data/qq/command-owner-v3/commands/commands.sqlite3"))
+        rusqlite::Connection::open(data.join("command-owner-v3/commands/commands.sqlite3"))
             .unwrap();
     assert!(
         journal

@@ -41,6 +41,10 @@ static PUBLICATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)
 pub struct TaskWorkspacePolicy {
     pub directory: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
+    pub executable_directories: Vec<PathBuf>,
+    pub sdk_environment: Option<crate::command_owner::NativeSdkEnvironment>,
+    /// Host-only cache input. Never included in the payload read grants.
+    pub cargo_cache: Option<NativeDirectoryGrant>,
     pub resources: NativeResources,
     pub limits: TaskWorkspaceLimits,
 }
@@ -416,6 +420,26 @@ impl TaskRecord {
     }
 }
 
+fn validate_tool_roots(
+    policy: &TaskWorkspacePolicy,
+    source: &Path,
+) -> Result<(), TaskExecutionError> {
+    let overlaps = |root: &Path| root.starts_with(source) || source.starts_with(root);
+    for root in policy
+        .executable_directories
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(policy.read_only.iter().map(|root| root.path.as_path()))
+    {
+        if overlaps(root) {
+            return Err(TaskExecutionError::Invalid(
+                "installed tool root overlaps task source",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn prepare(
     inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -550,6 +574,8 @@ pub(super) async fn prepare(
             path: source.path().to_owned(),
             identity: NativeWorkspaceIdentity::held(source.root())?,
         };
+        validate_tool_roots(&policy, &source_grant.path)?;
+        let fresh = saved.is_none();
         let source_authority = TaskWorkspaceSource::from_plan(&source_plan)?;
         let mut record: TaskRecord = match saved {
             Some(saved) => serde_json::from_str(&saved)?,
@@ -636,6 +662,8 @@ pub(super) async fn prepare(
                     workspace.enable_git_baseline();
                 }
                 let scope = NativeCommandScope {
+                    sdk_environment: policy.sdk_environment.clone(),
+                    executable_directories: policy.executable_directories.clone(),
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
                     network: NativeNetwork::Isolated,
@@ -653,6 +681,8 @@ pub(super) async fn prepare(
         // A persisted tree retains work, not a permanent grant. Reapply the
         // trusted host's current limits and readable roots on each admission.
         record.scope.read_only = policy.read_only;
+        record.scope.executable_directories = policy.executable_directories;
+        record.scope.sdk_environment = policy.sdk_environment;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
         record.workspace.apply_limits(policy.limits)?;
@@ -670,6 +700,22 @@ pub(super) async fn prepare(
             }
         }
         held.root().create_dir_all(format!("{PRIVATE_HOME}/tmp"))?;
+        #[cfg(windows)]
+        for directory in ["AppData/Local", "AppData/Roaming"] {
+            held.root()
+                .create_dir_all(format!("{PRIVATE_HOME}/{directory}"))?;
+        }
+        if fresh && let Some(cache) = &policy.cargo_cache {
+            crate::storage::check_blocking(&held, policy.limits.max_bytes)?;
+            crate::task_workspace::seed_cargo_cache(
+                cache,
+                &source,
+                held.root(),
+                Path::new(PRIVATE_HOME),
+                policy.limits,
+                &is_stopped,
+            )?;
+        }
         let encoded = encode(&record)?;
         Ok::<_, TaskExecutionError>((
             Arc::new(TaskExecution {

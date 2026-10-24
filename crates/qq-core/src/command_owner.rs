@@ -24,7 +24,7 @@ pub use filesystem::{NativeDirectoryGrant, NativeFilesystem};
 mod resources;
 pub use resources::{NativeResourceLimits, NativeResources};
 mod scope;
-pub use scope::NativeCommandScope;
+pub use scope::{NativeCommandScope, NativeSdkEnvironment};
 mod journal;
 mod workspace_identity;
 pub use environment::NativeEnvironment;

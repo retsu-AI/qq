@@ -258,6 +258,12 @@ async fn run_inner(
         Some(home) => environment.with_task_home(&home)?,
         None => environment,
     };
+    let environment = environment.with_executable_directories(
+        scope
+            .as_ref()
+            .map_or(&[], |scope| scope.executable_directories.as_slice()),
+    )?;
+    let environment = environment.with_sdk_environment(scope.as_deref())?;
     let request = NativeCommand {
         task_git_call: None,
         id,
@@ -479,6 +485,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
         let scope = Arc::new(crate::command_owner::NativeCommandScope {
+            sdk_environment: None,
+            executable_directories: Vec::new(),
             workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
             read_only: vec![],
             network: crate::command_owner::NativeNetwork::Isolated,
