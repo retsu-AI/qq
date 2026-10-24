@@ -214,25 +214,23 @@ pub(super) fn collect_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    struct Fixture(PathBuf);
+    struct Fixture {
+        path: PathBuf,
+        _directory: tempfile::TempDir,
+    }
     impl Fixture {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "qq-windows-sdk-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir(&path).unwrap();
-            Self(path.canonicalize().unwrap())
+            let directory = tempfile::tempdir().unwrap();
+            Self {
+                path: directory.path().canonicalize().unwrap(),
+                _directory: directory,
+            }
         }
         fn installed(&self) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
-            let cargo = self.0.join(".cargo");
-            let rustup = self.0.join("rustup home");
+            let cargo = self.path.join(".cargo");
+            let rustup = self.path.join("rustup home");
             let bin = rustup.join("toolchains").join("stable-test").join("bin");
-            let control = self.0.join("control");
+            let control = self.path.join("control");
             for path in [
                 cargo.join("bin"),
                 bin.clone(),
@@ -252,28 +250,23 @@ mod tests {
             (cargo, rustup, bin, control)
         }
     }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn proxy_only_installation_resolves_default_without_project_overrides() {
         let fixture = Fixture::new();
         let (cargo, rustup, bin, control) = fixture.installed();
         std::fs::write(
-            fixture.0.join("rust-toolchain.toml"),
+            fixture.path.join("rust-toolchain.toml"),
             "untrusted project override",
         )
         .unwrap();
         let mut calls = Vec::new();
         let roots = discover_with(
             &control,
-            &fixture.0,
+            &fixture.path,
             &cargo,
             &rustup,
-            &fixture.0.join("Windows"),
+            &fixture.path.join("Windows"),
             Vec::new(),
             |command| {
                 assert_eq!(command.get_program(), cargo.join("bin").join("rustup.exe"));
@@ -311,11 +304,11 @@ mod tests {
     fn relative_metadata_inputs_never_execute_project_images() {
         let fixture = Fixture::new();
         let (cargo, rustup, _, control) = fixture.installed();
-        let system = fixture.0.join("Windows");
+        let system = fixture.path.join("Windows");
         for index in 0..5 {
             let mut paths = [
                 control.clone(),
-                fixture.0.clone(),
+                fixture.path.clone(),
                 cargo.clone(),
                 rustup.clone(),
                 system.clone(),
@@ -339,15 +332,15 @@ mod tests {
         let fixture = Fixture::new();
         let (conventional, rustup, _, control) = fixture.installed();
         std::fs::remove_file(conventional.join("bin").join("rustup.exe")).unwrap();
-        let custom = fixture.0.join("project-cache");
+        let custom = fixture.path.join("project-cache");
         std::fs::create_dir_all(custom.join("bin")).unwrap();
         std::fs::write(custom.join("bin").join("rustup.exe"), b"untrusted image").unwrap();
         let roots = discover_with(
             &control,
-            &fixture.0,
+            &fixture.path,
             &custom,
             &rustup,
-            &fixture.0.join("Windows"),
+            &fixture.path.join("Windows"),
             Vec::new(),
             |_| panic!("custom Cargo cache must never supply a host query executable"),
         )
@@ -360,15 +353,15 @@ mod tests {
     fn redirected_conventional_cargo_never_executes_a_host_query() {
         let fixture = Fixture::new();
         let (conventional, rustup, _, control) = fixture.installed();
-        let redirected = fixture.0.join("project-cargo");
+        let redirected = fixture.path.join("project-cargo");
         std::fs::rename(&conventional, &redirected).unwrap();
         std::os::unix::fs::symlink(&redirected, &conventional).unwrap();
         let result = discover_with(
             &control,
-            &fixture.0,
+            &fixture.path,
             &conventional,
             &rustup,
-            &fixture.0.join("Windows"),
+            &fixture.path.join("Windows"),
             Vec::new(),
             |_| panic!("redirected conventional Cargo directory must never supply a host image"),
         );
