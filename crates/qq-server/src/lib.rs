@@ -607,7 +607,8 @@ impl ServerHandle {
         self.shutdown_with_grace(DEFAULT_SHUTDOWN_GRACE).await
     }
 
-    /// Requests graceful shutdown, aborting active responses after `grace`.
+    /// Requests graceful shutdown and bounds the wait for response draining to
+    /// `grace`; aborts the serving task on expiry.
     pub async fn shutdown_with_grace(mut self, grace: Duration) -> Result<(), ServerError> {
         self.begin_shutdown();
         let mut task = self.task.take().ok_or(ServerError::ServerTaskStopped)?;
