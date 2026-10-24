@@ -48,8 +48,9 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
-#[cfg(test)]
 mod task_git;
+#[doc(hidden)]
+pub mod task_git_job;
 pub mod task_workspace;
 mod tools;
 

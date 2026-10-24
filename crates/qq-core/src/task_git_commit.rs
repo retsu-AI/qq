@@ -65,6 +65,7 @@ impl TaskGit {
         let observe = Operation {
             cancellation: RunCancellation::new(),
             deadline: Instant::now() + Duration::from_secs(2),
+            worker_owned: self.worker_owned,
         };
         let current = oid(self.text(
             &self.repository.path,
