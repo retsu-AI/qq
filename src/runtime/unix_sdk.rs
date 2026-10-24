@@ -161,6 +161,60 @@ fn roots(home: &Path, cargo: &Path, control: &Path) -> io::Result<Vec<PathBuf>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relative_server_homes_never_execute_project_rustup() {
+        const CHILD: &str = "QQ_UNIX_SDK_RELATIVE_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let directory = std::env::current_dir().unwrap();
+            let result = discover(&directory.join("control"));
+            assert!(
+                !directory.join("metadata-executed").exists(),
+                "relative server home executed project-controlled rustup"
+            );
+            assert!(result.unwrap().is_empty());
+            return;
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().canonicalize().unwrap();
+        for path in [".cargo/bin", ".rustup", "control"] {
+            std::fs::create_dir_all(home.join(path)).unwrap();
+        }
+        let image = home.join(".cargo/bin/rustup");
+        std::fs::write(
+            &image,
+            "#!/bin/sh\n: > ../metadata-executed\nprintf 'stable-test (default)\\n'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for relative in ["HOME", "CARGO_HOME", "RUSTUP_HOME"] {
+            let value = match relative {
+                "HOME" => ".",
+                "CARGO_HOME" => ".cargo",
+                _ => ".rustup",
+            };
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::unix_sdk::tests::relative_server_homes_never_execute_project_rustup",
+                    "--nocapture",
+                ])
+                .current_dir(&home)
+                .env_clear()
+                .env("HOME", &home)
+                .env("CARGO_HOME", home.join(".cargo"))
+                .env("RUSTUP_HOME", home.join(".rustup"))
+                .env(relative, value)
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "relative {relative} queried project metadata: {output:?}"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn conventional_rustup_works_when_client_starts_in_home() {
