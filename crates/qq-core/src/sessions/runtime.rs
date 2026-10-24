@@ -1037,10 +1037,13 @@ impl SessionRuntime {
             SessionCommand::SetGoal {
                 session_id,
                 check: Some(check),
+                check_approval,
                 ..
-            } if !replayed_goal && contained_goal_checks => {
+            } if !replayed_goal => {
                 let authority = self.inner.store.tool_approval_policy(*session_id).await?;
-                (authority.mode == ApprovalMode::Auto).then_some(check.command.as_str())
+                (check_approval.is_some()
+                    || (contained_goal_checks && authority.mode == ApprovalMode::Auto))
+                    .then_some(check.command.as_str())
             }
             _ => None,
         };

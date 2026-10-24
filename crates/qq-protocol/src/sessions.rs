@@ -540,6 +540,9 @@ pub enum SessionCommand {
         objective: String,
         #[serde(default)]
         check: Option<crate::GoalCheck>,
+        /// Apply explicit check consent in the same transaction that admits the goal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check_approval: Option<crate::GoalCheckScope>,
         budget: Box<crate::GoalBudget>,
         #[serde(default)]
         expected: Option<crate::GoalIdentity>,

@@ -175,6 +175,7 @@ impl App {
             .clamp(0, i128::from(u64::MAX)) as u64;
         let session = form.session;
         let command = SessionCommand::SetGoal {
+            check_approval: None,
             session_id: session,
             objective,
             check: if check.trim().is_empty() {

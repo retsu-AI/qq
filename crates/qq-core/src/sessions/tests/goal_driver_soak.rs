@@ -202,8 +202,14 @@ async fn child(setup: Setup) {
     let session = match setup.session {
         Some(session) => session,
         None => {
-            let created =
-                create_session_with_mode(&runtime, workspace, None, ApprovalMode::ReadOnly).await;
+            // Checked soaks exercise explicitly consented host-check recovery.
+            // Model-only soaks retain ReadOnly authority.
+            let mode = if setup.checked {
+                ApprovalMode::Full
+            } else {
+                ApprovalMode::ReadOnly
+            };
+            let created = create_session_with_mode(&runtime, workspace, None, mode).await;
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
                 panic!("session")
             };
