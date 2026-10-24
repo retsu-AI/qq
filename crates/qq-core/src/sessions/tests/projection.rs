@@ -683,6 +683,13 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
         .await
         .unwrap();
     store.close().await.unwrap();
+    Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE metadata SET value='60' WHERE key='schema_version'",
+            [],
+        )
+        .unwrap();
     let reopened = Store::open(path).await.unwrap();
     let result = reopened
         .call(Priority::Control, move |connection| {
@@ -695,6 +702,81 @@ async fn checkpoint_without_exact_projection_fails_closed(reviewed: bool) {
             Err(SessionRuntimeError::ToolProjectionUnavailable { .. })
         ),
         "durable checkpoint consequences must not disappear: {result:?}"
+    );
+    let after_retention = reopened
+        .call(Priority::Control, move |connection| {
+            connection.execute("DELETE FROM events", [])?;
+            load_model_context(connection, session, u64::MAX)
+        })
+        .await;
+    assert!(
+        matches!(
+            after_retention,
+            Err(SessionRuntimeError::ToolProjectionUnavailable { .. })
+        ),
+        "delivery retention must not erase legacy review consequences: {after_retention:?}"
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_goal_cursor_survives_delivery_journal_retention() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let store = Store::open(path.clone()).await.unwrap();
+    let (session, claimed, _) = projection_fixture(&store, directory.path()).await;
+    let workspace = claimed.identity.workspace_id;
+    store
+        .finish_run(
+            &claimed,
+            RunOutcome::Interrupted,
+            None,
+            TeardownComplete::nothing_ran(),
+        )
+        .await
+        .unwrap();
+    let command: SessionCommand = serde_json::from_value(serde_json::json!({
+        "type":"set_goal", "session_id":session, "objective":"retain the startup boundary",
+        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+86_400_000}
+    }))
+    .unwrap();
+    store
+        .command(CommandId::generate().unwrap(), command)
+        .await
+        .unwrap();
+    let sequence: u64 = store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT next_sequence FROM workspaces WHERE id=?1",
+                [workspace.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(sequence > 0);
+    store.close().await.unwrap();
+    let reopened = Store::open(path).await.unwrap();
+    let expected = Some(EventCursor {
+        store_id: reopened.store_id(),
+        workspace_id: workspace,
+        sequence,
+    });
+    assert_eq!(
+        reopened.startup_goal_cursor(workspace).await.unwrap(),
+        expected
+    );
+    reopened
+        .call(Priority::Control, |connection| {
+            connection.execute("DELETE FROM events", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.startup_goal_cursor(workspace).await.unwrap(),
+        expected,
+        "the startup boundary is committed workspace state, not a surviving journal row"
     );
     reopened.close().await.unwrap();
 }

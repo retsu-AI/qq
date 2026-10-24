@@ -476,3 +476,216 @@ async fn a_lagging_subscriber_catches_up_from_the_store_without_gaps_or_duplicat
     }
     harness.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
+    for (tool, arguments, expected) in [
+        ("__test_mutate", "{}", approval::ToolClass::Mutating),
+        (
+            "__test_shell",
+            r#"{"command":"git push origin main","cwd":"crates"}"#,
+            approval::ToolClass::Shell {
+                command: "git push origin main".to_owned(),
+                cwd: Some("crates".to_owned()),
+                read_only: false,
+            },
+        ),
+        (
+            "ask_user",
+            r#"{"questions":[{"prompt":"Which crate?","options":["core","provider"],"free_text":true}]}"#,
+            approval::ToolClass::Interactive {
+                question: Some(QuestionPreview {
+                    questions: vec![qq_protocol::Question {
+                        prompt: "Which crate?".to_owned(),
+                        options: vec!["core".to_owned(), "provider".to_owned()],
+                        free_text: true,
+                    }],
+                }),
+            },
+        ),
+        #[cfg(feature = "tool-fetch")]
+        (
+            "fetch",
+            r#"{"url":"https://docs.invalid/a"}"#,
+            approval::ToolClass::Network {
+                host: Some("docs.invalid".to_owned()),
+                refusal: None,
+            },
+        ),
+    ] {
+        let mut harness = approval_harness(
+            ApprovalMode::Ask,
+            tool,
+            arguments,
+            1,
+            DEFAULT_APPROVAL_TIMEOUT,
+        )
+        .await;
+        let (observed, call) = collect_until_approval_requested(&mut harness.events).await;
+        let expected_previews = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::ToolApprovalRequested {
+                    shell,
+                    edit,
+                    question,
+                    fetch,
+                    delegated,
+                    ..
+                } => Some(tool_calls::ApprovalPreviews {
+                    shell: shell.as_deref().cloned(),
+                    edit: edit.clone(),
+                    question: question.as_deref().cloned(),
+                    fetch: fetch.as_deref().cloned(),
+                    delegated: *delegated,
+                }),
+                _ => None,
+            })
+            .unwrap();
+        let stored_previews: String = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
+                    [call.id.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<tool_calls::ApprovalPreviews>(&stored_previews).unwrap(),
+            expected_previews,
+            "recovery must retain the full server-computed preview, including presentation inputs"
+        );
+        let workspace_id = harness.workspace_id;
+        let session_id = harness.session_id;
+        let run_id = call.run_id;
+        let call_id = call.id;
+        // Keep a genuine pre-recovery store for both migration cases.
+        for missing in [false, true] {
+            let path = harness._directory.path().join(if missing {
+                "legacy-missing.sqlite3"
+            } else {
+                "legacy-complete.sqlite3"
+            });
+            let backup = path.clone();
+            harness
+                .runtime
+                .inner
+                .store
+                .call(Priority::Control, move |connection| {
+                    connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            let legacy = Connection::open(&path).unwrap();
+            legacy
+                .execute_batch(
+                    "DROP TRIGGER tool_calls_clear_approval_inputs;
+                ALTER TABLE tool_calls DROP COLUMN approval_inputs_json;
+                UPDATE metadata SET value='60' WHERE key='schema_version';",
+                )
+                .unwrap();
+            if missing {
+                legacy.execute("DELETE FROM events", []).unwrap();
+            }
+            drop(legacy);
+            let (migrated, _) = store::open_database(&path).unwrap();
+            migrated.execute("DELETE FROM events", []).unwrap();
+            let recovered = tool_calls::load_pending_approval_class(
+                &migrated,
+                workspace_id,
+                session_id,
+                run_id,
+                call_id,
+            );
+            if missing {
+                assert_eq!(recovered.unwrap_err(), SessionRuntimeError::CODEC);
+                // No guess or global startup failure for an incomplete legacy hold.
+                assert_eq!(
+                    migrated
+                        .query_row(
+                            "SELECT state FROM tool_calls WHERE id=?1",
+                            [call_id.to_string()],
+                            |row| row.get::<_, String>(0)
+                        )
+                        .unwrap(),
+                    "awaiting_approval"
+                );
+            } else {
+                assert_eq!(recovered.unwrap(), (tool.to_owned(), expected.clone()));
+            }
+            drop(migrated);
+            let (reopened, _) = store::open_database(&path).unwrap();
+            assert_eq!(
+                reopened
+                    .query_row(
+                        "SELECT value FROM metadata WHERE key='schema_version'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "61"
+            );
+        }
+        let recovered = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                // Durable inputs must not cross any of these authority boundaries.
+                for (workspace, session, run) in [
+                    (WorkspaceId::generate().unwrap(), session_id, run_id),
+                    (workspace_id, SessionId::generate().unwrap(), run_id),
+                    (workspace_id, session_id, RunId::generate().unwrap()),
+                ] {
+                    assert!(
+                        tool_calls::load_pending_approval_class(
+                            connection, workspace, session, run, call_id
+                        )
+                        .is_err()
+                    );
+                }
+                connection.execute(
+                    "DELETE FROM events WHERE workspace_id=?1",
+                    [workspace_id.to_string()],
+                )?;
+                tool_calls::load_pending_approval_class(
+                    connection,
+                    workspace_id,
+                    session_id,
+                    run_id,
+                    call_id,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovered, (tool.to_owned(), expected));
+        respond_approval(&harness.runtime, run_id, call_id, ApprovalDecision::Deny)
+            .await
+            .unwrap();
+        collect_through_finished(&mut harness.events).await;
+        let retained: Option<String> = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT approval_inputs_json FROM tool_calls WHERE id=?1",
+                    [call_id.to_string()],
+                    |row| row.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            retained, None,
+            "resolved input snapshots must not accumulate"
+        );
+        harness.runtime.shutdown().await.unwrap();
+    }
+}

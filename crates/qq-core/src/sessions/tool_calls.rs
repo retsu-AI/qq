@@ -597,54 +597,113 @@ pub(super) fn load_pending_approval_class(
     run_id: RunId,
     tool_call_id: ToolCallId,
 ) -> Result<(String, approval::ToolClass), SessionRuntimeError> {
-    let encoded: String = connection.query_row(
-        "SELECT envelope_json FROM events
-         WHERE workspace_id = ?1
-           AND json_extract(envelope_json, '$.event.type') = 'tool_approval_requested'
-           AND json_extract(envelope_json, '$.session_id') = ?2
-           AND json_extract(envelope_json, '$.run_id') = ?3
-           AND json_extract(envelope_json, '$.event.tool_call.id') = ?4
-         ORDER BY sequence DESC LIMIT 1",
+    let (name, encoded): (String, String) = connection.query_row(
+        "SELECT c.name, c.approval_inputs_json FROM tool_calls c
+         JOIN runs r ON r.id=c.run_id JOIN sessions s ON s.id=r.session_id
+         WHERE c.id=?4 AND c.run_id=?3 AND r.session_id=?2 AND s.workspace_id=?1
+           AND c.state='awaiting_approval' AND c.approval_resolution IS NULL",
         params![
             workspace_id.to_string(),
             session_id.to_string(),
             run_id.to_string(),
             tool_call_id.to_string()
         ],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    let envelope: SessionEventEnvelope = serde_json::from_str(&encoded)?;
-    let SessionEvent::ToolApprovalRequested {
-        tool_call,
-        shell,
-        fetch,
-        question,
-        ..
-    } = envelope.event
-    else {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    };
-    let class = if let Some(shell) = shell {
-        approval::ToolClass::Shell {
-            command: shell.command,
-            cwd: shell.cwd,
-            // The ceiling evaluator classifies the exact command itself.
-            read_only: false,
-        }
-    } else if let Some(fetch) = fetch {
-        approval::ToolClass::Network {
-            host: Some(fetch.host),
-            refusal: None,
-        }
-    } else if let Some(question) = question {
-        approval::ToolClass::Interactive {
-            question: Some(*question),
-        }
-    } else {
-        approval::ToolClass::Mutating
-    };
-    Ok((tool_call.name, class))
+    let inputs: ApprovalPreviews = serde_json::from_str(&encoded)?;
+    Ok((name, inputs.into_class()))
 }
+
+/// Backfill only unresolved holds before a reader may prune delivery events.
+/// An incomplete legacy hold keeps no authority inputs and cannot be approved;
+/// it must not prevent other sessions from opening. Never guess its class.
+pub(super) fn migrate_pending_approval_inputs(
+    connection: &Connection,
+) -> Result<(), SessionRuntimeError> {
+    let mut after = String::new();
+    loop {
+        let pending: Option<(String, String, String, String, String)> = connection
+            .query_row(
+                "SELECT c.id,c.run_id,r.session_id,s.workspace_id,c.name FROM tool_calls c
+             JOIN runs r ON r.id=c.run_id JOIN sessions s ON s.id=r.session_id
+             WHERE c.state='awaiting_approval' AND c.approval_resolution IS NULL
+               AND c.approval_inputs_json IS NULL AND c.id>?1 ORDER BY c.id LIMIT 1",
+                [&after],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((call_id, run_id, session_id, workspace_id, name)) = pending else {
+            return Ok(());
+        };
+        after.clone_from(&call_id);
+        let encoded: Option<String> = connection
+            .query_row(
+                LEGACY_APPROVAL_INPUTS_QUERY,
+                params![workspace_id, session_id, run_id, call_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(encoded) = encoded else {
+            tracing::warn!(%call_id, "legacy approval inputs are unavailable; approval remains disabled for this hold");
+            continue;
+        };
+        let envelope: SessionEventEnvelope = match serde_json::from_str(&encoded) {
+            Ok(envelope) => envelope,
+            Err(_) => {
+                tracing::warn!(%call_id, "legacy approval inputs are malformed; approval remains disabled for this hold");
+                continue;
+            }
+        };
+        let SessionEvent::ToolApprovalRequested {
+            tool_call,
+            shell,
+            fetch,
+            question,
+            edit,
+            delegated,
+        } = envelope.event
+        else {
+            tracing::warn!(%call_id, "legacy approval inputs have the wrong type; approval remains disabled for this hold");
+            continue;
+        };
+        if tool_call.name != name
+            || tool_call.id.to_string() != call_id
+            || tool_call.run_id.to_string() != run_id
+            || tool_call.session_id.to_string() != session_id
+        {
+            tracing::warn!(%call_id, "legacy approval inputs have mismatched ownership; approval remains disabled for this hold");
+            continue;
+        }
+        let inputs = ApprovalPreviews {
+            shell: shell.map(|value| *value),
+            edit,
+            question: question.map(|value| *value),
+            fetch: fetch.map(|value| *value),
+            delegated,
+        };
+        connection.execute(
+            "UPDATE tool_calls SET approval_inputs_json=?2 WHERE id=?1",
+            params![call_id, serde_json::to_string(&inputs)?],
+        )?;
+    }
+}
+
+const LEGACY_APPROVAL_INPUTS_QUERY: &str = "SELECT CASE WHEN length(CAST(envelope_json AS BLOB))<=1048576 THEN envelope_json END FROM events
+         WHERE workspace_id = ?1
+           AND json_extract(envelope_json, '$.event.type') = 'tool_approval_requested'
+           AND json_extract(envelope_json, '$.session_id') = ?2
+           AND json_extract(envelope_json, '$.run_id') = ?3
+           AND json_extract(envelope_json, '$.event.tool_call.id') = ?4
+         ORDER BY sequence DESC LIMIT 1";
 
 pub(super) fn load_tool_approval_policy(
     connection: &Connection,
@@ -810,7 +869,8 @@ pub(super) fn settle_unstarted_tool_call(
 
 /// What a hold tells the client about the call, by kind. At most one is set
 /// for a given call; the event carries each as its own optional field.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ApprovalPreviews {
     pub(crate) shell: Option<ShellCommandPreview>,
     pub(crate) edit: Option<EditPreview>,
@@ -820,6 +880,29 @@ pub(crate) struct ApprovalPreviews {
     pub(crate) delegated: bool,
 }
 
+impl ApprovalPreviews {
+    fn into_class(self) -> approval::ToolClass {
+        if let Some(shell) = self.shell {
+            approval::ToolClass::Shell {
+                command: shell.command,
+                cwd: shell.cwd,
+                read_only: false,
+            }
+        } else if let Some(fetch) = self.fetch {
+            approval::ToolClass::Network {
+                host: Some(fetch.host),
+                refusal: None,
+            }
+        } else if let Some(question) = self.question {
+            approval::ToolClass::Interactive {
+                question: Some(question),
+            }
+        } else {
+            approval::ToolClass::Mutating
+        }
+    }
+}
+
 pub(super) fn request_tool_approval(
     connection: &mut Connection,
     store_id: StoreId,
@@ -827,6 +910,7 @@ pub(super) fn request_tool_approval(
     tool_call_id: ToolCallId,
     previews: ApprovalPreviews,
 ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+    let inputs_json = serde_json::to_string(&previews)?;
     let ApprovalPreviews {
         shell,
         edit,
@@ -837,12 +921,13 @@ pub(super) fn request_tool_approval(
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
     let updated = transaction.execute(
-        "UPDATE tool_calls SET state = 'awaiting_approval', approval_delegated = ?3
+        "UPDATE tool_calls SET state = 'awaiting_approval', approval_delegated = ?3, approval_inputs_json = ?4
              WHERE id = ?1 AND run_id = ?2 AND state = 'requested'",
         params![
             tool_call_id.to_string(),
             identity.run_id.to_string(),
-            delegated
+            delegated,
+            inputs_json
         ],
     )?;
     if updated != 1 {
