@@ -58,6 +58,16 @@ pub(crate) struct ExecutionContextProof {
     pub(crate) manifest: Arc<[crate::runtime::ApprovedReadImage]>,
     pub(crate) policy_sha256: ContentHash,
     pub(crate) producer: Arc<provenance::ProducerEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) task_git: Option<TaskGitReceiptBinding>,
+}
+
+/// Binds a logical task call while retaining the actual launch proof unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskGitReceiptBinding {
+    tool: String,
+    arguments_sha256: ContentHash,
 }
 
 pub(crate) fn policy_digest() -> ContentHash {
@@ -144,7 +154,10 @@ impl ExecutionContextReceipt {
                     let Ok(manifest) = ApprovedReadImages::new(proof.manifest.to_vec()) else {
                         return false;
                     };
-                    manifest.entries() == proof.manifest.as_ref()
+                    proof.task_git.as_ref().is_none_or(|binding| {
+                        super::task_git::is_tool(&binding.tool)
+                            && matches!(facts.verdict, ExecutionVerdict::Work { .. })
+                    }) && manifest.entries() == proof.manifest.as_ref()
                         && manifest.digest() == facts.manifest_sha256
                         && match facts.verdict {
                             ExecutionVerdict::VerifiedRead {
@@ -163,6 +176,17 @@ impl ExecutionContextReceipt {
         let Some((digest, requested_env)) = argument_identity(tool, arguments) else {
             return false;
         };
+        if let Self::V2(proof) = self
+            && let Some(binding) = &proof.task_git
+        {
+            return self.valid()
+                && proof.facts.context_id == call_id
+                && binding.tool == tool
+                && binding.arguments_sha256 == digest;
+        }
+        if super::task_git::is_tool(tool) {
+            return false;
+        }
         self.valid()
             && digest == self.facts().arguments_sha256
             && match self {
@@ -171,6 +195,31 @@ impl ExecutionContextReceipt {
                     proof.facts.context_id == call_id && proof.facts.requested_env == requested_env
                 }
             }
+    }
+    pub(crate) fn bind_task_git(
+        &mut self,
+        call_id: ToolCallId,
+        launch_arguments: &str,
+        call: &crate::command_owner::NativeTaskGitCall,
+    ) -> Result<(), ()> {
+        if !super::task_git::is_tool(&call.tool)
+            || !self.bound_to(call_id, "exec", launch_arguments)
+        {
+            return Err(());
+        }
+        let digest = arguments_digest(&call.tool, &call.arguments).ok_or(())?;
+        let Self::V2(proof) = self else {
+            return Err(());
+        };
+        if proof.task_git.is_some() || !matches!(proof.facts.verdict, ExecutionVerdict::Work { .. })
+        {
+            return Err(());
+        }
+        proof.task_git = Some(TaskGitReceiptBinding {
+            tool: call.tool.clone(),
+            arguments_sha256: digest,
+        });
+        Ok(())
     }
 }
 
@@ -190,6 +239,10 @@ fn argument_identity(tool: &str, arguments: &str) -> Option<(ContentHash, bool)>
             let args: ExecArgs = serde_json::from_str(arguments).ok()?;
             super::shell::Launch::Exec(&args).validate().ok()?;
             (serde_json::to_vec(&args).ok()?, !args.env.is_empty())
+        }
+        name if super::task_git::is_tool(name) => {
+            let args = super::task_git::parse(name, arguments).ok()?;
+            (serde_json::to_vec(&args).ok()?, false)
         }
         _ => return None,
     };
@@ -569,6 +622,7 @@ pub(super) fn prepare(
     };
     let receipt = match call_id {
         Some(_) => ExecutionContextReceipt::V2(ExecutionContextProof {
+            task_git: None,
             facts,
             manifest: approvals.shared_entries(),
             policy_sha256: policy_digest(),

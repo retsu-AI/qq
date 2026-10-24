@@ -34,6 +34,7 @@ async fn reopen_preserves_completed_native_results_without_reexecuting_commands(
         .unwrap();
     owner
         .submit(NativeCommand {
+            task_git_call: None,
             id,
             workspace: workspace.clone(),
             workspace_identity: NativeWorkspaceIdentity::capture(&workspace).unwrap(),
@@ -357,6 +358,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             .unwrap();
         owner
             .submit(NativeCommand {
+                task_git_call: None,
                 id,
                 workspace: workspace.clone(),
                 workspace_identity: NativeWorkspaceIdentity::capture(&workspace).unwrap(),
@@ -1347,5 +1349,101 @@ async fn wait_for_recovery(runtime: &SessionRuntime, run: RunId) {
             "native result recovery failed"
         );
         settlements.changed().await.unwrap();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn task_git_native_recovery_binds_original_call_before_acknowledgement() {
+    use crate::command_owner::{
+        CommandOwner, CommandOwnerError, CommandStatus, NativeCommand, NativeEnvironment,
+        NativeFilesystem, NativeNetwork, NativeResources, NativeTaskGitCall,
+        NativeWorkspaceIdentity,
+    };
+    for (tool, arguments) in [
+        ("task_commit", r#"{"message":"frozen"}"#),
+        ("task_push", "{}"),
+        ("task_pr", r#"{"title":"title","body":"body"}"#),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let database = workspace.join("sessions.sqlite3");
+        let store = Store::open(database.clone()).await.unwrap();
+        let (claimed, id) = pending_process_call(&store, &workspace, tool, arguments).await;
+        let run = claimed.identity.run_id;
+        let owner = CommandOwner::open(
+            workspace.join("owner"),
+            "unknown",
+            crate::command_owner::tests::launcher(),
+        )
+        .await
+        .unwrap();
+        store
+            .set_native_owner(claimed.identity, id, Some(owner.store_id()))
+            .await
+            .unwrap();
+        let launch = serde_json::json!({"program":"/bin/sh", "args":["-c","printf once >> counter; printf task-result"]}).to_string();
+        let request = NativeCommand {
+            task_git_call: Some(NativeTaskGitCall {
+                tool: tool.into(),
+                arguments: arguments.into(),
+            }),
+            id,
+            workspace: workspace.clone(),
+            workspace_identity: NativeWorkspaceIdentity::capture(&workspace).unwrap(),
+            tool: "exec".into(),
+            arguments: launch.clone(),
+            shell_policy: crate::ShellPolicy::default(),
+            approved_images: Vec::new(),
+            environment: NativeEnvironment::capture(&[]).unwrap(),
+            filesystem: NativeFilesystem::Host,
+            network: NativeNetwork::Host,
+            resources: NativeResources::Host,
+            not_after_ms: None,
+        };
+        owner.submit(request.clone()).await.unwrap();
+        let mut version = 0;
+        let receipt = loop {
+            let snapshot = owner.wait(id, version).await.unwrap();
+            version = snapshot.version;
+            if snapshot.status == CommandStatus::Finished {
+                break snapshot.process.unwrap().into_context();
+            }
+        };
+        store
+            .record_tool_process(claimed.identity, id, receipt.clone())
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let mut options = SessionRuntimeOptions::new(database);
+        options.native_commands = Some(Arc::new(owner.clone()));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(ScriptedRunsLoader {
+                requests: requests.clone(),
+                runs: Vec::new(),
+                loads: StdMutex::new(0),
+            }),
+        )
+        .await
+        .unwrap();
+        wait_for_recovery(&runtime, run).await;
+        let encoded:String = runtime.inner.store.call(Priority::Control, move |connection| {
+            Ok(connection.query_row("SELECT execution_context_json FROM tool_calls WHERE id=?1 AND state='completed' AND result LIKE '%task-result%'", [id.to_string()], |row| row.get(0))?)
+        }).await.unwrap();
+        let saved: crate::tools::process_context::ExecutionContextReceipt =
+            serde_json::from_str(&encoded).unwrap();
+        assert_eq!(saved, *receipt);
+        assert!(saved.bound_to(id, tool, arguments));
+        assert!(!saved.bound_to(id, "exec", &launch));
+        runtime.shutdown().await.unwrap();
+        assert!(matches!(
+            owner.snapshot(id).await,
+            Err(CommandOwnerError::Retired)
+        ));
+        owner.shutdown().await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("counter")).unwrap(), b"once");
+        assert!(requests.lock().unwrap().is_empty());
     }
 }

@@ -90,7 +90,7 @@ pub(super) fn set_native_owner(
     }
     let written = transaction.execute(
         "INSERT INTO native_command_owners(tool_call_id, owner_id)
-         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec')
+         SELECT id, ?3 FROM tool_calls WHERE id=?1 AND run_id=?2 AND state='running' AND name IN ('shell','exec','task_commit','task_push','task_pr')
          ON CONFLICT(tool_call_id) DO UPDATE SET owner_id=excluded.owner_id WHERE native_command_owners.owner_id=excluded.owner_id",
         params![id.to_string(),identity.run_id.to_string(),owner.to_string()],
     )?;
