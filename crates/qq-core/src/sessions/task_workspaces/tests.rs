@@ -69,6 +69,7 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
         resources: NativeResources::Host,
     };
     let record = TaskRecord {
+        git_base: None,
         source: NativeDirectoryGrant::capture(&source).unwrap(),
         workspace,
         scope: scope.clone(),
