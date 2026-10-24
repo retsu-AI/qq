@@ -8,13 +8,16 @@ async fn installed_node_builds_and_tests_in_default_auto() {
     let home = root.path().canonicalize().unwrap();
     let workspace = home.join("workspace");
     let host_workspace = home.join("host-workspace");
+    let credential = home.join("outside-credential");
+    std::fs::write(&credential, b"owned private credential canary").unwrap();
     let package = json!({"name":"qq-node-proof","version":"1.0.0","private":true,"scripts":{"build":"node build.js","test":"node test.js"}});
     for directory in [&workspace, &host_workspace] {
         std::fs::create_dir(directory).unwrap();
         std::fs::write(directory.join("package.json"), package.to_string()).unwrap();
         std::fs::write(
             directory.join("build.js"),
-            "const os=require('os'),fs=require('fs'),assert=require('assert');assert.ok(os.type().length>0);assert.ok(os.version().length>0);fs.writeFileSync('node-os-proof.json',JSON.stringify({type:os.type(),version:os.version()}));fs.writeFileSync('built.txt','built');\n",
+            "const os=require('os'),fs=require('fs'),assert=require('assert');assert.ok(os.type().length>0);assert.ok(os.version().length>0);fs.writeFileSync('node-os-proof.json',JSON.stringify({type:os.type(),version:os.version()}));let privateCode='READ_ALLOWED';try{fs.readFileSync(__PRIVATE_CANARY__)}catch(error){privateCode=error.code}fs.writeFileSync('private-canary-proof.json',JSON.stringify({code:privateCode}));fs.writeFileSync('built.txt','built');\n"
+                .replace("__PRIVATE_CANARY__", &serde_json::to_string(&credential).unwrap()),
         )
         .unwrap();
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
@@ -46,6 +49,11 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         String::from_utf8_lossy(&host.stderr)
     );
     assert!(host.status.success());
+    let host_private: Value = serde_json::from_slice(
+        &std::fs::read(host_workspace.join("private-canary-proof.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host_private["code"], "READ_ALLOWED");
     let host_os: Value =
         serde_json::from_slice(&std::fs::read(host_workspace.join("node-os-proof.json")).unwrap())
             .unwrap();
@@ -138,6 +146,15 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         serde_json::from_slice(&std::fs::read(workspace.join("node-os-proof.json")).unwrap())
             .unwrap();
     assert_eq!(task_os, host_os);
+    let private_proof: Value = serde_json::from_slice(
+        &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_proof["code"], "EACCES");
+    assert_eq!(
+        std::fs::read(&credential).unwrap(),
+        b"owned private credential canary"
+    );
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();
