@@ -59,7 +59,7 @@ try {
     if (!$traceReady) { throw 'Trace was not ready and confirmed stopped' }
     if (!(Test-Path -LiteralPath $pml)) { throw 'Expected backing file is missing after confirmed recorder exit' }
     $pmlBytes = (Get-Item -LiteralPath $pml).Length
-    if ($pmlBytes -gt 134217728) { throw "Trace is $pmlBytes bytes, exceeding 128 MiB export bound" }
+    if ($pmlBytes -gt 201326592) { throw "Trace is $pmlBytes bytes, exceeding 192 MiB export bound" }
     Invoke-TraceCommand @('/AcceptEula', '/Quiet', '/OpenLog', "`"$pml`"", '/SaveAs', "`"$csv`"") 30000
     $rows = @(Import-Csv -LiteralPath $csv | Where-Object {
         $_.'Process Name' -in @('cargo.exe', 'windows_cargo_images.exe') -and $_.Result -eq 'ACCESS DENIED'

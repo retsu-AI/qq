@@ -291,8 +291,8 @@ async fn installed_cargo_startup_through_real_auto_worker() {
     assert!(
         objects.lines().any(|line| line
             .starts_with("self-event name=Local\\qq-crypto-self-event-")
-            && line.contains("ERROR(0x0005 5)")),
-        "explicit session namespace must remain blocked: {objects}"
+            && line.ends_with("reopen: Ok(())")),
+        "Local-prefixed event must reopen with the scoped namespace grant: {objects}"
     );
     eprintln!(
         "AUTO private-read exit={:?}",
