@@ -33,13 +33,20 @@ a tool error so the agent can try an allowed alternative. Ask requires fresh
 human approval. Durable execution and task-continuation foundations are also
 implemented; this does not mean the entire plan is qualified.
 
-The row 2 follow-up isolates CLI state through `QQ_HOME` and adds a real
-default-Auto CLI scenario on Linux, macOS and Windows. It uses an ordinary
-directory without Git and checks detached shell execution, artifact publication,
-no approvals and the durable worker record. Native CI must pass this scenario
-before the row 2 baseline is qualified. The platform limitations below remain
-shipped behavior; stronger isolation is separate hardening work. Row 3 still
-needs integrated interruption/recovery qualification.
+Row 2's practical baseline is qualified. Merged
+[#464](https://github.com/retsu-AI/qq/pull/464) isolates CLI state through
+`QQ_HOME`; [#465](https://github.com/retsu-AI/qq/pull/465) verifies real
+default-Auto CLI execution on Linux, macOS and Windows. Native CI passed the
+scenario: an ordinary directory without Git, detached shell execution, artifact
+publication, no approvals and the durable worker record. The platform limitations
+below remain shipped behavior; stronger isolation is separate hardening work.
+
+Row 3 is the current focus. Existing restart tests cover durable commands and
+goal recovery. The integrated approval case follows an Ask approval timeout through
+store reopen and explicit resume, checking the same task identity, retained
+budget and deadline, one successor, and no replay of the denied action. Auto
+still never waits for approval. Steering, client reconnect and deadline expiry
+must also meet the row's proof before row 3 is qualified.
 
 ## Small fixes, in dependency order
 
