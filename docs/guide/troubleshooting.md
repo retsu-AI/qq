@@ -40,6 +40,7 @@ empty value also disables it. Other values are errors. Logs are separate from
 stdout and stderr under the QQ state directory's `logs/qq-N.jsonl` (on Linux,
 `${XDG_STATE_HOME:-$HOME/.local/state}/qq/logs`). Platforms without a separate
 state directory use the platform local-data directory.
+With `QQ_HOME` set, logs instead go to `<QQ_HOME>/data/logs`.
 
 Run, turn, provider, tool, store and native command startup spans record numeric
 ordinals and timing, not prompts, model output, arguments/results, paths,

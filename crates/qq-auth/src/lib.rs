@@ -201,6 +201,8 @@ impl CredentialPaths {
 
 #[derive(Debug, Error)]
 pub enum AuthError {
+    #[error("QQ_HOME must be a nonempty absolute path")]
+    InvalidHome,
     #[error(transparent)]
     Codex(#[from] codex::CodexAuthError),
 
@@ -482,6 +484,17 @@ impl StoredResolutionFailure {
 
 impl CredentialStore {
     pub fn system() -> Result<Self, AuthError> {
+        Self::system_with_home(std::env::var_os("QQ_HOME").as_deref())
+    }
+
+    fn system_with_home(home: Option<&std::ffi::OsStr>) -> Result<Self, AuthError> {
+        if let Some(home) = home {
+            let root = Path::new(home);
+            if home.is_empty() || !root.is_absolute() {
+                return Err(AuthError::InvalidHome);
+            }
+            return Ok(Self::with_paths(CredentialPaths::new(root.join("data"))));
+        }
         let project_dirs =
             ProjectDirs::from("dev", "qq", "qq").ok_or(AuthError::SystemDirectoriesUnavailable)?;
         Ok(Self::with_paths(CredentialPaths::new(

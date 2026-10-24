@@ -2537,6 +2537,8 @@ fn trust_required_message(pending: &[PendingTrust]) -> String {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("QQ_HOME must be a nonempty absolute path")]
+    InvalidHome,
     #[error("the platform configuration directories are unavailable")]
     SystemDirectoriesUnavailable,
     #[error("failed to determine the current directory: {error}")]

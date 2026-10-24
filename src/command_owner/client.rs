@@ -111,6 +111,7 @@ impl CommandWorker {
                     .env("QQ_LOG", "info")
                     .env("XDG_STATE_HOME", self.diagnostic_directory());
                 for name in qq_core::BASE_ENV.into_iter().chain([
+                    "QQ_HOME",
                     "SYSTEMROOT",
                     "WINDIR",
                     "USERPROFILE",

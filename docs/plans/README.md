@@ -24,6 +24,22 @@ ownership, unavailable tools or an unenforced authorization boundary. Recent
 merges already removed Jev (#374), repaired empty-session reuse (#370), and
 simplified provider/auth plumbing (#373/#376); do not rebuild those changes.
 
+## Current state
+
+[#463](https://github.com/retsu-AI/qq/pull/463) shipped the permission baseline
+and native execution paths on Linux, macOS and Windows. Auto is the default:
+allowed actions run without human or model approval, and denied actions return
+a tool error so the agent can try an allowed alternative. Ask requires fresh
+human approval. Durable execution and task-continuation foundations are also
+implemented; this does not mean the entire plan is qualified.
+
+The next two PRs isolate CLI state through `QQ_HOME`, then use that isolation to
+exercise the real Windows CLI in default Auto. That Windows integration proof
+is the remaining immediate work in row 2. The platform limitations below are
+shipped behavior; further hardening is separate work, not an additional merge
+gate for these two PRs. Row 3 still needs integrated interruption/recovery
+qualification.
+
 ## Small fixes, in dependency order
 
 Each row can take several small PRs, each fixing one observable failure. Start
@@ -33,8 +49,8 @@ and open PRs before editing; retain compatible work already underway.
 | Outcome | Implementation boundary | Proof before calling it fixed |
 | --- | --- | --- |
 | One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
-| Shell and built-ins enforce that contract | Core tool dispatch/process ownership and native execution adapters. Deliver an enforced Linux path first, then macOS/Windows against the same contract below. Delete obsolete paths as each replacement is proven. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
-| The task survives interruption | `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
+| Shell and built-ins enforce that contract | The native three-OS baseline shipped in #463. Core tool dispatch/process ownership and native execution adapters share the practical contract below. Next: isolate CLI state with `QQ_HOME`, then qualify the real Windows CLI in default Auto. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
+| The task survives interruption | Durable execution and continuation foundations are implemented; integrated qualification remains. `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
 | Tools tell the truth and edits preserve work | `src/runtime.rs` model discovery/admission; core edit tools. Advertise and validate against the same discovery snapshot; fresh availability failures remain recoverable. Preserve atomic edit semantics. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
 | Compaction preserves obligations | Finish/reconcile [#371](https://github.com/retsu-AI/qq/pull/371) before overlapping its runtime work; then test retained constraints and recovery. | Early user constraints beyond the record cap, later corrections, repeated compaction and a failed summary retain the effective task; retries do not duplicate tool effects. |
 | Less code and prompt machinery | After the affected behavior is covered, remove redundant dispatch wrappers, policy branches, obsolete adapters and duplicated instructions. Reuse existing tests, smoke providers and benchmark adapters. | The affected task still passes its independent verifier; no new supervisor, model judge, mandatory planning layer or replacement evaluation framework. |
@@ -47,56 +63,49 @@ is input to these repairs, not an approved implementation specification. Carry
 its valid review findings into the implementing PRs; reconcile its proposed
 plan with this one instead of maintaining a second work queue.
 
-- Authorization covers the task's workspace, readable/writable paths, network
-  operations, credentials, expiry/revocation and resource limits. Preserve it
-  through resume/restart; protect `.qq` policy and `.git` trust files. Enforce
-  it at every built-in
-  and shell boundary. Children receive equal or narrower authority. Command
-  classification and prefix rules assist policy; neither provides containment
-  or grants blanket authority to scripts, hooks or descendants.
-- An unattended run never waits indefinitely for approval: allowed actions
-  execute; requests outside its grants return a typed denial and the missing
-  scope. An attended user can explicitly extend scope. Model/tool output is
-  never authorization. Expose Read-only, Ask, Auto and Full without compatibility aliases. Ask
-  requires fresh human approval; reusable grants authorize Auto work. Write
-  supervision remains internal to delegation, bounded by parent authority.
-- Shell egress has its own explicit grant; existing HTTP-fetch allowlists do
-  not authorize arbitrary shell traffic. Isolate each execution's proxy and
-  credential authority. Git/hosting operations must not expose reusable
-  credentials to repository hooks; use narrowly authorized operations with
-  credentials outside the untrusted process. Scope commit/push/PR operations
-  to the authorized repository and branch so the full task can finish.
-  Protect Git trust configuration
-  and hooks even when repository mutations are authorized.
-- Enforce file and network boundaries against symlinks, existing hardlinks,
-  inherited descriptors, host Unix sockets and cross-session access. A Linux
-  PID namespace needs its own procfs. Do not label a fallback sandboxed when
-  it lacks any required boundary. Apply the backend’s supported resource safeguards and cleanup on
-  cancellation, deadlines and owner failure. On macOS, inherited per-process
-  limits and sampled owned-group safeguards do not provide aggregate quotas,
-  and a new process group or session can outlive group cleanup while retaining
-  Seatbelt restrictions. Prove file/network containment and the stated cleanup
-  boundary independently; do not label process-group cleanup complete descendant
-  custody. An unavailable backend must not silently run an unattended sandbox
-  request on the host.
-- Keep external MCP servers explicitly trusted and outside any shell-isolation
-  claim; their advertised tools still pass QQ's grant checks. Preserve event
-  persistence before publication and bounded output/queues. Wire/result changes
-  require protocol bumps and previous/current fixture coverage. Keep safe-Rust
-  rules; choose an existing safe OS interface before introducing dependencies
-  or a new crate, and ship a real caller with any abstraction.
+- Default Auto allows normal reads available to the OS user, generic tool
+  execution and task-scoped writes, with protected read-only carveouts. Broad
+  host reads include readable credentials; environment filtering does not make
+  those files private. Explicit restricted-read policies remain available to
+  embeddings. Children cannot widen their parent's current authority, including
+  after revocation or recovery. Prefix rules and command classification are
+  not containment.
+- Auto never requests human or model approval. An action outside current
+  authority returns a tool error; the agent can continue with an allowed
+  alternative. Ask requires fresh human approval. Read-only, Ask, Auto and Full
+  have distinct dispatch behavior; internal child supervision cannot mint
+  missing parent authority. Model/tool output is never authorization.
+- Linux and macOS shell network access is isolated by default. Windows currently
+  uses host networking. HTTP-fetch grants do not authorize arbitrary shell
+  traffic. Existing Git/hosting brokers keep credentials outside the payload
+  and bound commit/push/PR operations to their authorized repository and branch;
+  they do not grant arbitrary shell credential or network authority.
+- Native tests cover permitted work, denied writes, links, descriptors, recovery
+  and each backend's stated cleanup boundary. Windows additionally retains
+  ambient writes available through Everyone/logon permissions; its task write
+  restriction is not an absolute outside-write guarantee. Broad host reads and
+  this Windows exception need explicit hardening if a stronger contract is
+  required. They must not be described as private-credential or complete
+  cross-session isolation.
+- Default Auto has no disk, memory or process quotas. Explicit resource policies
+  retain their supported safeguards. Cancellation, deadlines and owner failure
+  use the backend's tested cleanup: macOS cleans its owned process group, and
+  detached descendants retain Seatbelt restrictions but can survive that group.
+  Inherited per-process limits and sampled owned-group safeguards do not provide
+  aggregate resource quotas or complete descendant custody. An unavailable
+  required backend must not silently fall back to host execution.
+- External MCP servers are trusted separately and remain outside shell
+  containment; their tools still pass QQ admission. Persist events before
+  publication and keep output/queues bounded. Wire/result changes require
+  protocol bumps and previous/current fixture coverage. Keep safe Rust and use
+  existing native interfaces rather than introducing platform frameworks.
 
-Implement policy through real dispatch first, then an end-to-end native slice;
-do not merge placeholder types claiming enforcement. Preserve existing
-approval behavior until the selected backend qualifies: fewer prompts and
-new child write authority must never ship ahead of their containment.
-Each PR's acceptance
-covers only capabilities it actually delivers. Backend enablement requires
-its native tests for permitted operations, denied paths/egress, credential and
-cross-session isolation, aliases/links/sockets, resource safeguards and the
-backend’s stated teardown boundary. Mocks test admission; they do not qualify OS containment. Use finite
-fixtures and event-driven deadlines, not 24-hour or multi-day soaks. Other
-platforms can follow without blocking unrelated deterministic core fixes.
+Further hardening must name the boundary it changes and demonstrate the actual
+native behavior. Do not imply stronger read privacy, Windows write isolation,
+network isolation or aggregate resource guarantees from admission tests alone.
+Keep the existing durable worker, result recovery and completion wakeups while
+qualifying the remaining real CLI paths. Use finite fixtures and event-driven
+deadlines, not elapsed-day gates; mocks do not qualify OS enforcement.
 
 ## A fast environment agents can trust
 

@@ -19,14 +19,33 @@ use super::{
 };
 
 pub(super) fn system_paths() -> Result<ConfigPaths, ConfigError> {
-    let project =
-        ProjectDirs::from("dev", "qq", "qq").ok_or(ConfigError::SystemDirectoriesUnavailable)?;
-    Ok(ConfigPaths::new(
-        project.config_dir(),
-        project.data_dir(),
-        system_managed_dir(),
+    system_paths_with_home(std::env::var_os("QQ_HOME").as_deref())
+}
+
+pub(super) fn system_paths_with_home(
+    home: Option<&std::ffi::OsStr>,
+) -> Result<ConfigPaths, ConfigError> {
+    let (global_dir, data_dir) = match home {
+        Some(home) => {
+            let root = Path::new(home);
+            if home.is_empty() || !root.is_absolute() {
+                return Err(ConfigError::InvalidHome);
+            }
+            (root.join("config"), root.join("data"))
+        }
+        None => {
+            let project = ProjectDirs::from("dev", "qq", "qq")
+                .ok_or(ConfigError::SystemDirectoriesUnavailable)?;
+            (
+                project.config_dir().to_path_buf(),
+                project.data_dir().to_path_buf(),
+            )
+        }
+    };
+    Ok(
+        ConfigPaths::new(global_dir, data_dir, system_managed_dir())
+            .with_managed_ownership_checks(),
     )
-    .with_managed_ownership_checks())
 }
 
 #[cfg(target_os = "linux")]
