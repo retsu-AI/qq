@@ -3,71 +3,28 @@
 QQ separates two questions:
 
 - **Trust** — may this project's configuration influence QQ at all?
-  Answered once per file content, in the TUI when it opens or with
-  `qq trust`.
+  Enabled explicitly for reviewed content with `qq trust`; task startup
+  ignores sensitive project settings until then.
 - **Approval** — may the agent take this action right now? Answered by the
   session's approval mode, the grants in effect, and, when neither decides,
   you.
 
 ## Project trust
 
-A repository can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
-`.qq/packs/`. Those files can declare providers, MCP servers that run
-commands, sub-agent rosters, and grants that let tools run without asking.
-QQ therefore refuses to load a project file that declares anything sensitive
-until you have accepted that exact content. Every project `pack.ron` (under
-`.qq/packs/` or named by a project `packs` entry) is sensitive on its own,
-even in a repository with no other configuration, and changing one asks
-again. A project `packs` entry must stay inside the repository: a path
-that leads out of it (absolute or through `..`) or through a symbolic link
-is a configuration error
-and is never opened, because QQ lists those manifests before you have
-trusted anything. Declare packs that live elsewhere in your own global
-configuration instead. A `packs` entry in your own
-global, `QQ_CONFIG`, or managed configuration is yours and loads without a
-prompt, even when it points into a repository.
+QQ starts tasks using trusted configuration and non-sensitive project settings.
+It does not ask you to approve a project before Auto can work. Untrusted project
+providers, models, MCP servers, packs, and permission grants stay disabled;
+QQ neither starts their commands nor records trust automatically.
 
-Bare `qq` opens the TUI and asks, listing each pending file and what it
-declares:
+Your global configuration, `QQ_CONFIG`, `QQ_CONFIG_CONTENT`, and managed
+configuration remain trusted sources. Configure your model and connections
+there when you want them available across projects.
 
-```
-◇ this project's configuration needs your trust
-  /home/you/repo/.qq/config.ron
-    model anthropic/claude-sonnet-5
-    MCP linear → https://mcp.linear.app/mcp
-    MCP executor → executor
-    grants: 2 tools, 3 shell prefixes
-  t trust   s this session   q quit
-```
-
-- `t` records the files exactly as `qq trust` does; the next launch does
-  not ask.
-- `s` loads them for this process only. Nothing is written; the next `qq`
-  asks again. Runs you start in this TUI (and the embedded server that
-  serves them) see the trusted configuration.
-- `q` (or `Esc`) leaves without loading them.
-
-Only names, commands, URLs, and counts are shown; open the file for the
-rest. The prompt appears only when this `qq` owns the server: a client
-attached to a server on another host cannot read or record trust for that
-host's files and sees the error below instead.
-
-`qq ask`, `qq run`, and `qq serve` do not prompt; they exit:
-
-```
-error: project configuration needs your trust before it is used:
-  /home/you/repo/.qq/config.ron
-Review the file, then run `qq trust` in this directory to accept it. Sensitive
-sections (providers, MCP servers, grants, model) load only after that.
-```
-
-Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
-`organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `approval_delegate`,
-`reasoning_effort`, or a `policy` grant (`allow_tools`,
-`allow_shell_prefixes`, `allow_hosts`, `shell_env`).
-A project file that only sets `policy.exposed_tools` or `max_output_tokens`
-loads without trust.
+A project can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
+`.qq/packs/`. To enable its sensitive settings, review the content and explicitly
+run `qq trust` in that project. Trust applies to the exact sensitive content;
+changing it disables the changed settings until you explicitly trust them again.
+Project pack entries must stay inside the project, including through symlinks.
 
 ```sh
 qq trust
@@ -75,13 +32,17 @@ trusted /home/you/repo/.qq/config.ron
   declares: model, policy.allow_tools, policy.allow_shell_prefixes
 ```
 
-Trust is recorded as a digest of the file's sensitive sections in your data
-directory, not in the repository. Any edit to a sensitive section of a
-trusted file — yours or from `git pull` — makes QQ ask again (in the TUI, or
-as the error above); a session-only grant expires the same way. `qq config
-sources` shows `pending trust:` lines for files awaiting your decision.
+`qq config sources` reports files awaiting trust. Explicit configuration inspection
+commands still report pending trust so you can see which settings are withheld.
+Task startup continues with the trusted settings instead of displaying a prompt.
+Trust is stored in your QQ data directory, outside the project.
 
-Nothing in your global configuration needs trust: you wrote it.
+Sensitive settings include `model`, `worker_model`, `reviewer_model`,
+`organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
+`audit`, `approval_delegate`, `reasoning_effort`, and policy grants
+(`allow_tools`, `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
+A project file that only sets `policy.exposed_tools` or `max_output_tokens`
+loads without trust. Syntax, path boundaries, and managed policy still apply.
 
 ## Protected task files
 

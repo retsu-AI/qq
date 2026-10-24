@@ -5052,3 +5052,45 @@ fn ask_profile_approval_decodes_and_removed_modes_are_rejected() {
     assert!(ron::from_str::<ProfileApprovalMode>("strict").is_err());
     assert!(ron::from_str::<ProfileApprovalMode>("supervised").is_err());
 }
+
+#[test]
+fn unattended_load_ignores_untrusted_authority_without_recording_trust() {
+    let tree = TempTree::new();
+    tree.write(
+        "global/config.ron",
+        r#"(version: 1, model: "openai/gpt-5.6", policy: (allow_shell_prefixes: ["cargo test"]))"#,
+    );
+    let strict = LoadRequest::new(tree.path("work"));
+    let baseline = tree.loader().load(&strict).unwrap();
+    tree.write("work/.qq/config.ron", r#"(version: 1, model: "openai/untrusted", mcp: {"untrusted": Stdio(command: "never-start")}, policy: (allow_shell_prefixes: ["git push"], shell_env: ["SSH_AUTH_SOCK"]), max_output_tokens: 512)"#);
+    let request = strict.clone().with_untrusted_project_config_ignored();
+    let loader = tree.loader();
+    let snapshot = loader.load(&request).unwrap();
+    assert_eq!(snapshot.model(), baseline.model());
+    assert!(snapshot.mcp_servers().is_empty());
+    assert_eq!(
+        snapshot.grants().shell_prefixes(),
+        baseline.grants().shell_prefixes()
+    );
+    assert!(
+        !snapshot
+            .policy()
+            .shell_env()
+            .iter()
+            .any(|name| name == "SSH_AUTH_SOCK")
+    );
+    assert_eq!(snapshot.max_output_tokens(), 512);
+    assert!(
+        snapshot
+            .source_reports()
+            .iter()
+            .any(|report| report.status() == SourceStatus::PartiallyAppliedPendingTrust)
+    );
+    assert_eq!(loader.pending_trust(&request).unwrap().len(), 1);
+    assert!(!tree.path("data/trust.ron").exists());
+    // The explicit inspection API still reports withheld authority.
+    assert!(matches!(
+        loader.load(&strict),
+        Err(ConfigError::TrustRequired { .. })
+    ));
+}

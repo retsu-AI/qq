@@ -258,7 +258,7 @@ pub(super) fn load_for_client(
         )?;
     }
 
-    if !report.pending.is_empty() {
+    if !report.pending.is_empty() && !request.ignore_untrusted_project_config {
         return Err(ConfigError::TrustRequired {
             pending: report.pending,
             reports: report.sources,

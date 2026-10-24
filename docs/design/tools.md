@@ -2180,28 +2180,16 @@ fields stay managed-only:
   would cover the denied commands (`cargo` denied removes `cargo test`;
   `cargo test` denied also removes a bare `cargo` grant, because a
   config-layer filter cannot partially subtract a broader grant).
-- **Trust.** Workspace-declared grants are sensitive operations behind
-  the same trust flow as MCP declarations, and remote configuration may
-  not declare them at all. The flow (ADR-0042): `qq-config` computes the
-  pending set (`ConfigLoader::pending_trust`, read-only; each entry names
-  the file, its sensitive digest, the sections, and typed
-  `TrustDeclaration`s — routes, provider names and kinds, MCP names with
-  command or URL, grant counts, pack ids — never a secret, argument list,
-  or environment value). Bare `qq` in a client that owns the server opens
-  the TUI on that set, and the composition root keeps the `(path, digest)`
-  pairs the prompt displayed. Either answer covers exactly those pairs: `t`
-  calls `grant_reviewed_trust` (the same write `qq trust` performs, but
-  re-scanned under the trust-state lock) and `s` checks the set with
-  `reviewed_pending_trust` before admitting it for the process only through
-  `LoadRequest::with_process_trust`, which every load the embedded server
-  makes for that workspace carries and which is part of the plan cache key.
-  If any file is pending at a digest the prompt did not show (edited while
-  it was open), both refuse with `ConfigError::TrustChanged { pending }`,
-  write and admit nothing, and the TUI redraws the prompt with the current
-  set. `qq trust` itself still grants the current set, because it prints
-  what it records. Headless surfaces and a client attached to a
-  server elsewhere keep the `TrustRequired` error: trust is decided on the
-  host that holds `trust.ron`. No protocol type is involved.
+- **Trust.** Workspace-declared grants, providers, models, MCP servers,
+  and packs remain sensitive. Task startup uses
+  `LoadRequest::with_untrusted_project_config_ignored`: the loader withholds
+  sensitive content before merging, applies non-sensitive settings, and
+  continues without recording trust or opening a human prompt. Explicit
+  configuration inspection retains `TrustRequired`; `qq trust` records the
+  reviewed authority on the server host. Runtime and strict inspection use
+  separate plan-cache keys. Existing process-scoped trust grants also remain
+  part of that key, so a plan compiled without project authority cannot serve
+  a trusted request, or vice versa.
 - **Promotion.** The approval prompt's workspace-lifetime choice appends
   the grant to `.qq/config.ron` by targeted text insertion — comments
   and formatting survive — with an atomic temp-and-rename write that

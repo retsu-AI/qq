@@ -66,6 +66,8 @@ pub struct PlanKey {
     /// withheld) is not served after the user trusts it for the session.
     /// `None` when the request carries no such grant.
     pub process_trust: Option<ProcessTrustFingerprint>,
+    /// Keep strict inspection separate from runtime loads withholding untrusted authority.
+    pub ignore_untrusted_project_config: bool,
 }
 
 /// SHA-256 over the sorted `(path, digest)` grants of a request. Paths and
@@ -122,6 +124,10 @@ impl std::fmt::Debug for PlanKey {
                 &self.explicit_config_content.as_ref().map(|_| "<redacted>"),
             )
             .field("process_trust", &self.process_trust)
+            .field(
+                "ignore_untrusted_project_config",
+                &self.ignore_untrusted_project_config,
+            )
             .finish()
     }
 }
@@ -661,6 +667,7 @@ mod tests {
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,
+            ignore_untrusted_project_config: false,
         }
     }
 
