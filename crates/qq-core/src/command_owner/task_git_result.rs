@@ -16,7 +16,7 @@ pub(super) async fn reconcile(
     {
         return output;
     }
-    let Some(call) = call.filter(|call| call.tool == "task_commit") else {
+    let Some(call) = call else {
         return output;
     };
     let Some(reference) = call.job else {
@@ -26,7 +26,7 @@ pub(super) async fn reconcile(
         std::time::Duration::from_secs(2),
         blocking(move || {
             reference
-                .committed_receipt(&call.arguments)
+                .successful_receipt(&call.tool, &call.arguments)
                 .map_err(|_| CommandOwnerError::Invalid)
         }),
     )

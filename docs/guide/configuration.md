@@ -201,8 +201,11 @@ Each grant selects one absolute, normalized workspace path and one GitHub
 repository/base branch. The workspace may be offline when configuration loads;
 the task host must resolve its canonical identity before use. Credentials use
 an existing stored name; `Env(...)` and literal tokens are rejected here. The
-runtime derives the task branch. This grants no shell credentials or arbitrary
-remote/ref access. The list replaces an earlier host layer's list; `[]` revokes
+runtime derives the task branch. Store the token with
+`qq auth set github/work --endpoint https://github.com`; credential entry is
+separate from task execution. Auto never opens an approval request for these
+operations: without a matching host grant it refuses the remote action.
+This grants no shell credentials or arbitrary remote/ref access. The list replaces an earlier host layer's list; `[]` revokes
 it. These declarations supply authority to the scoped hosting implementation;
 they do not configure ordinary `git push` commands.
 

@@ -90,14 +90,6 @@ impl TaskGitRunInput {
             Ok(request) => request,
             Err(error) => return ToolOutput::refused(error.to_string()),
         };
-        let message = match request {
-            TaskGitRequest::Commit { message } => message,
-            TaskGitRequest::Push | TaskGitRequest::PullRequest { .. } => {
-                return ToolOutput::refused(
-                    "No authorized hosting destination is installed for this task",
-                );
-            }
-        };
         if cancellation.is_cancelled() {
             return ToolOutput::interrupted("task Git action cancelled before admission");
         }
@@ -115,6 +107,55 @@ impl TaskGitRunInput {
         if let Err(error) = self.admit(call).await {
             return ToolOutput::refused(error.to_string());
         }
+        let (operation, credential) = match request {
+            TaskGitRequest::Commit { message } => (
+                crate::task_git_job::TaskGitJobOperation::Commit { message },
+                None,
+            ),
+            request => {
+                let source = match self.task.source_grant() {
+                    Ok(source) => source,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let authorized = tokio::select! {
+                    biased;
+                    () = cancellation.cancelled() => return ToolOutput::interrupted("task hosting cancelled before admission"),
+                    () = tokio::time::sleep_until(admission_deadline) => return ToolOutput::interrupted("task hosting expired before admission"),
+                    authorized = self.inner.loader.authorize_task_hosting(source) => authorized,
+                };
+                let authorization = match authorized {
+                    Ok(Some(authorization)) => authorization,
+                    Ok(None) => {
+                        return ToolOutput::refused(
+                            "No authorized hosting destination is installed for this workspace",
+                        );
+                    }
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let target = match crate::task_git_job::TaskGitHostingTarget::new(
+                    authorization.owner,
+                    authorization.repository,
+                    authorization.base_branch,
+                ) {
+                    Ok(target) => target,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let operation = match request {
+                    TaskGitRequest::Push => {
+                        crate::task_git_job::TaskGitJobOperation::Push { target }
+                    }
+                    TaskGitRequest::PullRequest { title, body } => {
+                        crate::task_git_job::TaskGitJobOperation::PullRequest {
+                            target,
+                            title,
+                            body,
+                        }
+                    }
+                    TaskGitRequest::Commit { .. } => unreachable!("commit handled above"),
+                };
+                (operation, Some(authorization.credential))
+            }
+        };
         let job = match self
             .task
             .clone()
@@ -122,7 +163,7 @@ impl TaskGitRunInput {
                 &self.inner,
                 call.id,
                 policy.git.clone(),
-                message,
+                operation,
                 not_after_ms,
                 cancellation.clone(),
             )
@@ -173,13 +214,19 @@ impl TaskGitRunInput {
         if let Err(error) = self.admit(call).await {
             return ToolOutput::refused(error.to_string());
         }
-        let environment = match NativeEnvironment::capture(&[]) {
+        let environment = match NativeEnvironment::capture(&[]).and_then(|environment| {
+            match credential.as_ref() {
+                Some(credential) => environment.with_task_hosting_token(credential),
+                None => Ok(environment),
+            }
+        }) {
             Ok(environment) => environment,
             Err(error) => return ToolOutput::refused(error.to_string()),
         };
         let arguments = serde_json::json!({
             "program":helper,
             "args":["_task-git",files.request],
+            "env": if credential.is_some() { vec![crate::task_git_job::HOSTING_TOKEN_ENV] } else { vec![] },
         })
         .to_string();
         let command = NativeCommand {
@@ -201,7 +248,14 @@ impl TaskGitRunInput {
                 tool: call.name.clone(),
                 arguments: call.arguments.clone(),
             }),
-            shell_policy: crate::ShellPolicy::default(),
+            shell_policy: crate::ShellPolicy {
+                env_allowlist: if credential.is_some() {
+                    Arc::from([crate::task_git_job::HOSTING_TOKEN_ENV.to_owned()])
+                } else {
+                    Arc::from([])
+                },
+                ..crate::ShellPolicy::default()
+            },
             approved_images: Vec::new(),
             not_after_ms: Some(not_after_ms),
         };
