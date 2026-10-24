@@ -1697,15 +1697,26 @@ async fn exercise_publication_cancellation_order(pause: PublicationPause) {
 fn installed_tool_inputs_reject_source_overlap_and_allow_sibling_tasks() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().canonicalize().unwrap();
-    for path in ["control/sdk", "control/task", "rust/bin", "rust/lib"] {
+    for path in [
+        "control/sdk",
+        "control/task",
+        "rust/bin",
+        "rust/lib",
+        "dependencies/icu/lib",
+    ] {
         std::fs::create_dir_all(root.join(path)).unwrap();
     }
     let policy = TaskWorkspacePolicy {
         directory: NativeDirectoryGrant::capture(&root.join("control")).unwrap(),
-        read_only: ["control/sdk", "rust/bin", "rust/lib"]
-            .into_iter()
-            .map(|path| NativeDirectoryGrant::capture(&root.join(path)).unwrap())
-            .collect(),
+        read_only: [
+            "control/sdk",
+            "rust/bin",
+            "rust/lib",
+            "dependencies/icu/lib",
+        ]
+        .into_iter()
+        .map(|path| NativeDirectoryGrant::capture(&root.join(path)).unwrap())
+        .collect(),
         executable_directories: vec![root.join("control/sdk"), root.join("rust/bin")],
         cargo_cache: None,
         resources: NativeResources::Host,
@@ -1721,6 +1732,9 @@ fn installed_tool_inputs_reject_source_overlap_and_allow_sibling_tasks() {
         "rust",
         "rust/bin/project",
         "rust/lib/project",
+        "dependencies/icu/lib",
+        "dependencies/icu/lib/project",
+        "dependencies",
     ] {
         assert!(
             validate_tool_roots(&policy, &root.join(source)).is_err(),
