@@ -1427,7 +1427,7 @@ async fn prepare_session_with_interrupt(
             )
         }
     };
-    if approval == HeadlessApproval::Auto {
+    if matches!(approval, HeadlessApproval::Auto | HeadlessApproval::Full) {
         sessions
             .seed_session_grants(
                 session_id,
