@@ -15,11 +15,10 @@ use std::{
 };
 
 use qq_protocol::{
-    AgentProfileId, ApprovalResolution, DelegateIdentity, EditPreview, FetchPreview, MessageId,
-    MessageRole, MessageSnapshot, MessageState, ModelDescriptor, PendingHold, QuestionPreview,
-    RunActivity, RunId, RunOutcome, RunPlanIdentity, SessionId, SessionSnapshot, SessionStatus,
-    SessionSummary, ShellCommandPreview, SnapshotRequest, TokenUsage, ToolCallId, ToolCallSnapshot,
-    ToolCallState, WorkspaceId,
+    AgentProfileId, ApprovalResolution, DelegateIdentity, MessageId, MessageRole, MessageSnapshot,
+    MessageState, ModelDescriptor, PendingHold, RunActivity, RunId, RunOutcome, RunPlanIdentity,
+    SessionId, SessionSnapshot, SessionStatus, SessionSummary, SnapshotRequest, TokenUsage,
+    ToolCallId, ToolCallSnapshot, ToolCallState, WorkspaceId,
 };
 
 mod reduce;
@@ -509,8 +508,12 @@ impl SessionStore {
                     .iter()
                     .any(|call| call.id == *id && call.state == ToolCallState::Running)
             });
-            view.approval_previews = previous.approval_previews;
         }
+        view.approval_previews = snapshot
+            .approval_previews
+            .into_iter()
+            .map(|pending| (pending.tool_call_id, pending.preview))
+            .collect();
         // The summary's holds are exact at this snapshot's cursor; the
         // body's bounded tool-call window may not reach every one.
         view.live.set_holds(&view.summary.pending_holds);
@@ -882,29 +885,7 @@ pub struct LiveStatus {
     pub with_delegate: BTreeSet<ToolCallId>,
 }
 
-/// What one `ToolApprovalRequested` event said the call would do.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ApprovalPreview {
-    pub shell: Option<ShellCommandPreview>,
-    pub edit: Option<EditPreview>,
-    /// Present when the hold is an `ask_user` question rather than a
-    /// permission: the client collects answers instead of a yes/no.
-    pub question: Option<QuestionPreview>,
-    /// Present when the held call is `fetch`: the URL and the host a grant
-    /// would name.
-    pub fetch: Option<FetchPreview>,
-    /// Why the hold reached the human after a delegate was consulted, from
-    /// `tool_approval_escalated`: the delegate (or `None` when its clock ran
-    /// out) and its bounded reason. Absent while no delegate has answered.
-    pub escalated: Option<ApprovalEscalation>,
-}
-
-/// A delegate declined to settle the hold; the prompt says why.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ApprovalEscalation {
-    pub delegate: Option<DelegateIdentity>,
-    pub reason: String,
-}
+pub use qq_protocol::{ApprovalEscalation, ApprovalPreview};
 
 /// One session as the client sees it: the summary every surface lists, and
 /// the warm body, live status, and per-run detail a transcript shows.

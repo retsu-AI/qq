@@ -1171,6 +1171,23 @@ impl SessionRuntime {
             .await
     }
 
+    /// Already-cancelled runs sponsored by this session's goal, including
+    /// historical goals that were cleared or replaced while work drained.
+    /// This read never includes replacement work or requests cancellation.
+    pub async fn cancelled_goal_runs(
+        &self,
+        session_id: SessionId,
+        goal_id: qq_protocol::GoalId,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .cancelled_goal_runs(session_id, goal_id)
+            .await
+    }
+
     /// Whether an unsettled run is sponsored by this exact live goal.
     pub async fn goal_owns_run(
         &self,
@@ -1212,6 +1229,36 @@ impl SessionRuntime {
             .await
     }
 
+    /// Sessions in this root's bounded family that have unresolved holds.
+    pub async fn approval_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+        root: SessionId,
+    ) -> Result<Vec<SessionId>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner.store.approval_sessions(workspace_id, root).await
+    }
+
+    /// Reads a finished run's exact reply and original terminal receipt.
+    /// Returns None while that run is still active or queued. Historical mixed
+    /// channels without persisted delivery order cannot be reconstructed.
+    pub async fn run_result(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<Option<RunResult>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .run_result(workspace_id, session_id, run_id)
+            .await
+    }
+
     /// Reads an exact durable run, independently of transcript pagination.
     /// Workspace and session fences prevent accidentally reading another lane.
     pub async fn run_snapshot(
@@ -1249,9 +1296,9 @@ impl SessionRuntime {
     /// (warm reconnect), otherwise from SQLite. Then events are read from the
     /// ring by cursor with no store access. A subscriber that falls more than
     /// the ring capacity behind is redirected to catch-up from its last
-    /// cursor, so the sequence it observes is contiguous and complete
-    /// whatever the pace. SQLite is authoritative throughout: nothing is
-    /// published to the ring that was not already committed.
+    /// cursor. If the retained journal no longer covers it, CursorExpired
+    /// requires a fresh snapshot instead of silently skipping history.
+    /// Nothing is published to the ring that was not already committed.
     pub fn subscribe_published(
         &self,
         request: SubscribeRequest,
@@ -1862,6 +1909,8 @@ pub enum SessionRuntimeError {
     ContextTooLarge,
     #[error("model output exceeds the session size limit")]
     OutputTooLarge,
+    #[error("pending approval details exceed the snapshot byte budget")]
+    SnapshotTooLarge,
     #[error("session event exceeds the durable size limit")]
     EventTooLarge,
     #[error("command ID was reused with different content")]
@@ -1874,6 +1923,8 @@ pub enum SessionRuntimeError {
     CursorStoreMismatch,
     #[error("event cursor belongs to another workspace")]
     CursorWorkspaceMismatch,
+    #[error("delivery history expired; load a fresh snapshot")]
+    CursorExpired,
     #[error("session accounting is unavailable")]
     AccountingUnavailable,
     #[error("session runtime is overloaded")]

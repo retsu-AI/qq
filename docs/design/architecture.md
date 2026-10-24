@@ -763,20 +763,20 @@ other cursor is validated and paged from SQLite in pages of
 `MAX_REPLAY_EVENTS` inside one control job that also joins the ring, so no
 commit can land between the page and the first live read. Live delivery is
 then a ring lookup per event; a subscriber that lags past the ring capacity is
-redirected to SQLite catch-up from its last cursor, so every subscriber
-observes a contiguous, complete sequence at its own pace and slows only
-itself. The HTTP server writes `json` into the SSE frame as-is, so a live
+redirected to SQLite catch-up from its last cursor. If that cursor has expired,
+the subscriber receives a typed reset requiring a fresh snapshot; it never
+silently skips history. The HTTP server writes `json` into the SSE frame as-is, so a live
 delivery and a replay are byte-identical and no event is serialized more than
 once. `qq_client::observer::run` is the
 ingestion contract for products that consume events (memory, analytics,
 notifications): it owns its cursor, delivers each committed event in sequence
 order to one `EventSink`, reconnects with bounded backoff (50 ms to 5 s) from
 the last acknowledged cursor after transport loss, and exits with a typed
-`ObserverExit` (`Stopped`, `CursorRejected` for a cursor from another store,
+`ObserverExit` (`Stopped`, `CursorRejected` for a foreign or expired cursor,
 `EventTooLarge`) that requires a fresh snapshot rather than a silent resume.
 The capability document's `events` section states the contract: post-commit
 delivery, the replay page, the subscription cap, the event bound, and that
-retention is unbounded.
+retention is bounded.
 
 ### Structured Input And Steering
 
@@ -1653,6 +1653,22 @@ discovery file, and capabilities identify the exact build a long-running
 server came from. `qq version` prints the product version and every contract.
 
 ## Persistence
+
+The delivery journal is a global window of at most 65,536 events and 64 MiB
+of encoded envelope payloads. Transactional counters bound pruning work on
+ordinary appends; schema 63 counts and trims a legacy archive once. Trimming
+removes only the oldest delivery rows. Durable messages, model turns, tool
+projections, pending approval inputs and terminal receipts keep their existing
+lifetimes. Freed SQLite pages are reused; retention does not vacuum or shrink
+the database file. Expired cold cursors require a fresh snapshot. Warm feeds
+may still replay older committed events from their bounded rings.
+
+Pending approval details and their call rows reserve snapshot capacity before
+history. A focused body's irreducible holds that exceed its byte budget fail
+explicitly; extra bodies can be omitted. Headless clients reconcile canonical
+state after gaps without resubmitting work, refreshing budgets or replaying
+tool effects. Exact terminal replies are assembled on demand from stored text
+and committed turn truncations, bounded to 64 MiB and 4,096 text messages.
 
 Terminal `RunFinished` receipts are saved on their run rows in the same
 transaction as their delivery events. Headless goal-result replay reads these

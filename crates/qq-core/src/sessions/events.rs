@@ -38,6 +38,18 @@ pub(super) fn read_published_event_page(
     after: u64,
     limit: u16,
 ) -> Result<Vec<Arc<feed::PublishedEvent>>, SessionRuntimeError> {
+    let (tail, oldest): (u64, Option<u64>) = connection
+        .query_row(
+            "SELECT w.next_sequence,(SELECT MIN(sequence) FROM events WHERE workspace_id=w.id)
+         FROM workspaces w WHERE w.id=?1",
+            [workspace_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?
+        .ok_or(SessionRuntimeError::WorkspaceNotFound)?;
+    if oldest.map_or(after < tail, |first| after < first.saturating_sub(1)) {
+        return Err(SessionRuntimeError::CursorExpired);
+    }
     let mut statement = connection.prepare_cached(
         "SELECT envelope_json FROM events
              WHERE workspace_id = ?1 AND sequence > ?2
@@ -194,6 +206,7 @@ pub(super) fn append_event(
             return Err(SessionRuntimeError::CONSTRAINT);
         }
     }
+    prune(transaction, EVENT_JOURNAL_BYTES, EVENT_JOURNAL_ROWS)?;
     // The encoding is kept, not dropped: after commit the worker publishes
     // it to live subscribers and the server writes it to the wire as-is.
     feed::stage(Arc::new(feed::PublishedEvent {
@@ -201,4 +214,66 @@ pub(super) fn append_event(
         json: Arc::from(encoded),
     }));
     Ok(envelope)
+}
+
+/// Global delivery window; canonical session state has its own lifetime.
+pub(super) const EVENT_JOURNAL_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const EVENT_JOURNAL_ROWS: u64 = 65_536;
+
+pub(super) fn initialize_retention(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS event_journal_usage (
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+            bytes INTEGER NOT NULL CHECK(bytes>=0),
+            rows INTEGER NOT NULL CHECK(rows>=0)
+         ) STRICT;
+         INSERT OR IGNORE INTO event_journal_usage
+            SELECT 1,COALESCE(SUM(length(CAST(envelope_json AS BLOB))),0),COUNT(*) FROM events;
+         CREATE TRIGGER IF NOT EXISTS event_journal_insert AFTER INSERT ON events BEGIN
+            UPDATE event_journal_usage SET bytes=bytes+length(CAST(NEW.envelope_json AS BLOB)),rows=rows+1 WHERE singleton=1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS event_journal_delete AFTER DELETE ON events BEGIN
+            UPDATE event_journal_usage SET bytes=bytes-length(CAST(OLD.envelope_json AS BLOB)),rows=rows-1 WHERE singleton=1;
+         END;
+         CREATE TRIGGER IF NOT EXISTS event_journal_update AFTER UPDATE OF envelope_json ON events BEGIN
+            UPDATE event_journal_usage SET bytes=bytes-length(CAST(OLD.envelope_json AS BLOB))+length(CAST(NEW.envelope_json AS BLOB)) WHERE singleton=1;
+         END;",
+    )?;
+    prune(connection, EVENT_JOURNAL_BYTES, EVENT_JOURNAL_ROWS)
+}
+
+pub(super) fn prune(
+    connection: &Connection,
+    max_bytes: u64,
+    max_rows: u64,
+) -> Result<(), SessionRuntimeError> {
+    let (mut bytes, mut count): (u64, u64) = connection.query_row(
+        "SELECT bytes,rows FROM event_journal_usage WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    while bytes > max_bytes || count > max_rows {
+        let mut statement = connection.prepare_cached(
+            "SELECT rowid,length(CAST(envelope_json AS BLOB)) FROM events ORDER BY rowid LIMIT 128",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut through = None;
+        while bytes > max_bytes || count > max_rows {
+            let Some(row) = rows.next()? else {
+                break;
+            };
+            through = Some(row.get::<_, i64>(0)?);
+            bytes = bytes
+                .checked_sub(row.get(1)?)
+                .ok_or(SessionRuntimeError::CONSTRAINT)?;
+            count = count
+                .checked_sub(1)
+                .ok_or(SessionRuntimeError::CONSTRAINT)?;
+        }
+        drop(rows);
+        drop(statement);
+        let through = through.ok_or(SessionRuntimeError::CONSTRAINT)?;
+        connection.execute("DELETE FROM events WHERE rowid<=?1", [through])?;
+    }
+    Ok(())
 }

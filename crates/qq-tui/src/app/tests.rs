@@ -2469,6 +2469,7 @@ fn summary_named(byte: u8, title: &str) -> SessionSummary {
 
 fn body_for(summary: &SessionSummary, output: &str) -> SessionSnapshot {
     SessionSnapshot {
+        approval_previews: Vec::new(),
         goal: None,
         side_questions: Vec::new(),
         summary: summary.clone(),

@@ -183,6 +183,14 @@ class _User:
         self.message = message
 
 
+class _RecoveredAnswer:
+    """Canonical final text recovered after delivery expiry, not a new LLM call."""
+
+    def __init__(self, occurred_at_ms: int, message: str) -> None:
+        self.occurred_at_ms = occurred_at_ms
+        self.message = message
+
+
 class _Session:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
@@ -568,6 +576,11 @@ def _session_trajectory(
     steps: list[dict[str, Any]] = []
     model_name = _model_name(session, trial)
     items = list(session.items)
+    if not embedded and outcome is not None and "recovered_answer" in outcome:
+        answer = outcome["recovered_answer"]
+        if not isinstance(answer, str):
+            raise TraceError("recovered_answer must be a string")
+        items.append(_RecoveredAnswer(session.run_finished_at_ms or 0, answer))
     terminal = _outcome_system_item(session)
     if terminal is not None:
         items.append(terminal)
@@ -586,6 +599,13 @@ def _session_trajectory(
             steps.append(step)
         elif isinstance(item, _Turn):
             steps.append(_turn_step(step_id, item, spawn_map, model_name))
+        elif isinstance(item, _RecoveredAnswer):
+            step = {"step_id": step_id, "source": "agent", "message": item.message,
+                    "extra": {"qq_recovered_answer": True}}
+            timestamp = _iso(item.occurred_at_ms)
+            if timestamp is not None:
+                step["timestamp"] = timestamp
+            steps.append(step)
         elif isinstance(item, _System):
             step = {
                 "step_id": step_id,

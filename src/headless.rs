@@ -21,10 +21,9 @@ use qq_core::{SessionRuntime, SessionRuntimeError};
 use qq_protocol::{
     ApprovalDecision, ApprovalGrant, ApprovalMode, ApprovalResolution, BudgetLimitKind, CommandId,
     CommandOutcome, CommandReceipt, ContentHash, HeadlessOutcome, HeadlessRecordRef, HeadlessTrial,
-    InputPart, MessageId, MessageRole, ModelSelection, RunId, RunLimits, RunOutcome,
-    RunPromptIdentity, SessionAccounting, SessionCommand, SessionEvent, SessionEventEnvelope,
-    SessionId, ShellCommandPreview, SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState,
-    WorkspaceId,
+    InputPart, ModelSelection, RunId, RunLimits, RunOutcome, RunPromptIdentity, SessionAccounting,
+    SessionCommand, SessionEvent, SessionEventEnvelope, SessionId, ShellCommandPreview,
+    SnapshotRequest, SubscribeRequest, TokenUsage, ToolCallState, WorkspaceId,
 };
 pub use qq_protocol::{HeadlessApproval, HeadlessStatus};
 use sha2::{Digest, Sha256};
@@ -346,6 +345,7 @@ fn report_detached_cleanup_failure(message: &str) {
 
 /// The terminal result of the event-streaming phase.
 struct RunEnd {
+    delivery_recovered: bool,
     status: HeadlessStatus,
     message: Option<String>,
     usage: Option<TokenUsage>,
@@ -365,6 +365,7 @@ struct RunEnd {
 impl RunEnd {
     fn failure(failure: Failure) -> Self {
         Self {
+            delivery_recovered: false,
             status: failure.status,
             message: Some(failure.message),
             usage: None,
@@ -551,8 +552,68 @@ pub async fn run_goal(
                     final_goal = Some((goal, through.sequence, interrupted.then_some(qq_protocol::HeadlessGoalStatus::Interrupted)));
                 }
                 event = events.next() => {
-                    let envelope = event.ok_or_else(|| Failure::harness("goal event stream ended"))?
-                        .map_err(|error| Failure::harness(error.to_string()))?;
+                    let envelope = match event {
+                        Some(Ok(envelope)) => envelope,
+                        Some(Err(SessionRuntimeError::CursorExpired)) => {
+                            let snapshot = recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
+                            events = subscribe_current(sessions, &snapshot)?;
+                            replay_settled_goal_runs(sessions, sink, stdout, &handle, expected,
+                                direct_record_cursor.unwrap_or(handle.subscribe_after), snapshot.cursor).await?;
+                            direct_record_cursor = Some(snapshot.cursor);
+                            observed = snapshot.cursor.sequence;
+                            goal = snapshot.focused.and_then(|body| body.goal)
+                                .filter(|goal| goal.goal_id==expected.goal_id && goal.revision>=expected.revision)
+                                .ok_or_else(|| Failure::harness("goal changed while recovering delivery history"))?;
+                            expected = goal_identity(&goal);
+                            guard.expected = expected;
+                            accepted = Some((handle.workspace_id, goal.clone()));
+                            if goal.status!=qq_protocol::GoalStatus::Active {
+                                interrupt_armed = false;
+                                let (settled, through) = settle_goal(sessions, &handle, expected).await?;
+                                let forced = final_goal.as_ref().and_then(|(_, _, forced)| *forced);
+                                final_goal = Some((settled, through.sequence, forced));
+                            }
+                            if final_goal.is_none() {
+                                for session in sessions.approval_sessions(handle.workspace_id, handle.session_id).await.map_err(|error| Failure::harness(error.to_string()))? {
+                                    let body = recovery_snapshot(sessions, handle.workspace_id, session).await?.focused
+                                        .ok_or_else(|| Failure::harness("approval session has no snapshot body"))?;
+                                    for hold in &body.summary.pending_holds {
+                                        if hold.delegated { continue; }
+                                        let call = body.tool_calls.iter().find(|call| call.id==hold.tool_call_id)
+                                            .ok_or_else(|| Failure::harness("pending approval is missing its call"))?;
+                                        if !sessions.goal_owns_run(handle.session_id, expected, call.run_id).await.map_err(|error| Failure::harness(error.to_string()))? { continue; }
+                                        let preview = body.approval_previews.iter().find(|entry| entry.tool_call_id==call.id).map(|entry| &entry.preview);
+                                        if preview.is_some_and(|preview| preview.question.is_some()) {
+                                            let id = CommandId::generate().map_err(|error| Failure::harness(error.to_string()))?;
+                                            let receipt = match sessions.command(id, SessionCommand::GoalControl { session_id: handle.session_id, expected,
+                                                action: qq_protocol::GoalControl::PauseForInput { tool_call_id: call.id } }).await {
+                                                Ok(receipt) => receipt,
+                                                Err(SessionRuntimeError::GoalInputNotPending) => continue,
+                                                Err(error) => return Err(Failure::harness(error.to_string())),
+                                            };
+                                            goal = goal_receipt(receipt)?;
+                                            expected = goal_identity(&goal);
+                                            guard.expected = expected;
+                                            interrupt_armed = false;
+                                            let (settled, through) = settle_goal(sessions, &handle, expected).await?;
+                                            final_goal = Some((settled, through.sequence, None));
+                                            break;
+                                        } else if let Some(preview) = preview {
+                                            let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id,
+                                                subscribe_after: snapshot.cursor, wait_for_delegate: false, child_waits_for_delegate: false };
+                                            unattended_call(sessions, &options, &client, call, preview.shell.as_ref(), preview.fetch.as_ref(), stderr).await;
+                                        } else {
+                                            respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Deny, stderr).await;
+                                        }
+                                    }
+                                    if final_goal.is_some() { break; }
+                                }
+                            }
+                            continue;
+                        }
+                        Some(Err(error)) => return Err(Failure::harness(error.to_string())),
+                        None => return Err(Failure::harness("goal event stream ended")),
+                    };
                     // Cleanup owns this durable revision even if its output fails.
                     if let SessionEvent::GoalUpdated { goal: updated } = &envelope.event
                         && updated.session_id == handle.session_id
@@ -593,6 +654,19 @@ pub async fn run_goal(
                                     .map_err(|error| Failure::harness(error.to_string()))?,
                                 None => true,
                             } => {}
+                        SessionEvent::ToolApprovalEscalated { tool_call_id, .. }
+                            if final_goal.is_none() => {
+                            if let Some(run_id) = envelope.run_id
+                                && sessions.goal_owns_run(handle.session_id, expected, run_id).await
+                                    .map_err(|error| Failure::harness(error.to_string()))?
+                            {
+                                // A recovered delegated hold did not arm the
+                                // live request's deferred deny. Once the reviewer
+                                // passes or times out, supply the unattended answer.
+                                respond_approval(sessions, run_id, *tool_call_id,
+                                    ApprovalDecision::Deny, stderr).await;
+                            }
+                        }
                         SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
                             // The core validates held-question ownership before stopping.
                             let id = CommandId::generate()
@@ -795,24 +869,52 @@ async fn settle_goal(
         })
         .map_err(|error| Failure::harness(error.to_string()))?;
     tokio::time::timeout(SHUTDOWN_GRACE, async {
+        let snapshot = recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
+        events = subscribe_current(sessions, &snapshot)?;
         loop {
-            let pending = sessions
+            let (pending, cancel) = match sessions
                 .goal_pending_runs(handle.session_id, expected)
                 .await
-                .map_err(|error| Failure::harness(error.to_string()))?;
+            {
+                Ok(pending) => (pending, true),
+                Err(
+                    SessionRuntimeError::GoalNotFound | SessionRuntimeError::GoalConflict { .. },
+                ) => {
+                    // Clear/replacement revokes the live identity, not the old
+                    // family's cancellation obligation. Observe only work the
+                    // core already cancelled; never cancel a replacement run.
+                    (
+                        sessions
+                            .cancelled_goal_runs(handle.session_id, expected.goal_id)
+                            .await
+                            .map_err(|error| Failure::harness(error.to_string()))?,
+                        false,
+                    )
+                }
+                Err(error) => return Err(Failure::harness(error.to_string())),
+            };
             if pending.is_empty() {
                 break;
             }
-            for run in &pending {
-                request_cancel(sessions, *run).await?;
+            if cancel {
+                for run in &pending {
+                    request_cancel(sessions, *run).await?;
+                }
             }
             let mut pending: std::collections::HashSet<_> = pending.into_iter().collect();
             while !pending.is_empty() {
-                let event = events
-                    .next()
-                    .await
-                    .ok_or_else(|| Failure::harness("goal drain stream ended"))?
-                    .map_err(|error| Failure::harness(error.to_string()))?;
+                let event = match events.next().await {
+                    Some(Ok(event)) => event,
+                    Some(Err(SessionRuntimeError::CursorExpired)) => {
+                        let snapshot =
+                            recovery_snapshot(sessions, handle.workspace_id, handle.session_id)
+                                .await?;
+                        events = subscribe_current(sessions, &snapshot)?;
+                        break;
+                    }
+                    Some(Err(error)) => return Err(Failure::harness(error.to_string())),
+                    None => return Err(Failure::harness("goal drain stream ended")),
+                };
                 if let SessionEvent::RunFinished { run_id, .. } = event.event {
                     pending.remove(&run_id);
                 }
@@ -921,10 +1023,20 @@ impl AcceptedGoalGuard {
         &mut self,
     ) -> Result<Option<(Box<qq_protocol::GoalSnapshot>, qq_protocol::EventCursor)>, Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
-            let receipt = sessions
+            let receipt = match sessions
                 .pause_goal_if_active(*session_id, self.expected)
                 .await
-                .map_err(|error| Failure::harness(error.to_string()))?;
+            {
+                Ok(receipt) => receipt,
+                Err(
+                    SessionRuntimeError::GoalNotFound | SessionRuntimeError::GoalConflict { .. },
+                ) => {
+                    let drained = settle_goal(sessions, &self.handle, self.expected).await;
+                    self.disarm();
+                    return drained.map(Some);
+                }
+                Err(error) => return Err(Failure::harness(error.to_string())),
+            };
             let goal = goal_receipt(receipt)?;
             self.expected = goal_identity(&goal);
             let (goal, through) = settle_goal(sessions, &self.handle, self.expected).await?;
@@ -1088,6 +1200,7 @@ pub async fn run(
     };
 
     let RunEnd {
+        delivery_recovered,
         status,
         message,
         usage,
@@ -1095,10 +1208,13 @@ pub async fn run(
         prompt_identity,
         audit,
         final_output,
-        answer,
+        mut answer,
         denied_calls,
     } = end;
-    let outcome = HeadlessOutcome {
+    let mut outcome = HeadlessOutcome {
+        recovered_answer: (delivery_recovered
+            && (options.format == HeadlessFormat::Jsonl || options.trace.is_some()))
+        .then(|| std::mem::take(&mut answer)),
         status,
         exit_code: status.code(),
         message,
@@ -1116,6 +1232,7 @@ pub async fn run(
         return HeadlessStatus::HarnessFailure;
     }
 
+    let answer = outcome.recovered_answer.take().unwrap_or(answer);
     if options.format == HeadlessFormat::Text {
         match status {
             HeadlessStatus::Completed => {
@@ -1502,12 +1619,7 @@ async fn stream_run(
     let mut needs_input: Option<String> = None;
     let mut shutdown_at: Option<Instant> = None;
 
-    // The final answer is the text of the last assistant message that starts
-    // streaming; earlier turns are progress, not the answer.
-    let mut answer = String::new();
-    let mut answer_message: Option<MessageId> = None;
-    let mut answer_truncated = false;
-    let mut denied_calls: usize = 0;
+    let mut delivery_recovered = false;
     let text = options.format == HeadlessFormat::Text;
 
     loop {
@@ -1563,6 +1675,47 @@ async fn stream_run(
             event = events.next() => {
                 let envelope = match event {
                     Some(Ok(envelope)) => envelope,
+                    Some(Err(SessionRuntimeError::CursorExpired)) => {
+                        delivery_recovered = true;
+                        let snapshot = recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
+                        events = subscribe_current(sessions, &snapshot)?;
+                        if let Some(result) = sessions.run_result(handle.workspace_id, handle.session_id, handle.run_id).await
+                            .map_err(|error| Failure::harness(error.to_string()))?
+                        {
+                            sink.record(stdout, HeadlessRecordRef::Event { envelope: &result.completion.receipt })
+                                .map_err(|error| Failure::harness(error.to_string()))?;
+                            return finish_run(result, needs_input.as_deref(), interrupted, delivery_recovered, text, stderr);
+                        }
+                        for session in sessions.approval_sessions(handle.workspace_id, handle.session_id).await.map_err(|error| Failure::harness(error.to_string()))? {
+                            let body = recovery_snapshot(sessions, handle.workspace_id, session).await?.focused
+                                .ok_or_else(|| Failure::harness("approval session has no snapshot body"))?;
+                            for hold in &body.summary.pending_holds {
+                                if hold.delegated { continue; }
+                                let call = body.tool_calls.iter().find(|call| call.id==hold.tool_call_id)
+                                    .ok_or_else(|| Failure::harness("pending approval is missing its call"))?;
+                                if session==handle.session_id && call.run_id!=handle.run_id { continue; }
+                                let preview = body.approval_previews.iter().find(|entry| entry.tool_call_id==call.id).map(|entry| &entry.preview);
+                                if let Some(question) = preview.and_then(|preview| preview.question.as_ref()) {
+                                    if session==handle.session_id {
+                                        if needs_input.is_none() {
+                                            needs_input = Some(question.questions.first().map(|question| question.prompt.clone()).unwrap_or_default());
+                                            request_cancel(sessions, handle.run_id).await?;
+                                            shutdown_at = Some(Instant::now()+SHUTDOWN_GRACE);
+                                        }
+                                    } else {
+                                        respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Answer { answers: Vec::new() }, stderr).await;
+                                    }
+                                } else if let Some(preview) = preview {
+                                    let client = SessionHandle { approval: handle.approval, workspace_id: handle.workspace_id, session_id: handle.session_id, subscribe_after: snapshot.cursor, wait_for_delegate: false, child_waits_for_delegate: false };
+                                    unattended_call(sessions, options, &client, call, preview.shell.as_ref(), preview.fetch.as_ref(), stderr).await;
+                                } else {
+                                    // Missing legacy inputs convey no authority.
+                                    respond_approval(sessions, call.run_id, call.id, ApprovalDecision::Deny, stderr).await;
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     Some(Err(error)) => {
                         return Err(Failure {
                             status: status_for_error(&error),
@@ -1580,22 +1733,9 @@ async fn stream_run(
                         Failure::harness(format!("could not write an event record: {error}"))
                     })?;
 
-                let ours = envelope.session_id == handle.session_id;
+                let ours = envelope.session_id == handle.session_id && envelope.run_id == Some(handle.run_id);
                 match &envelope.event {
-                    SessionEvent::AssistantMessageStarted { message } if ours => {
-                        if message.role == MessageRole::Assistant {
-                            // A message that follows a truncated one is the
-                            // same answer resumed: keep the prefix.
-                            if !answer_truncated {
-                                answer.clear();
-                            }
-                            answer_truncated = false;
-                            answer_message = Some(message.id);
-                            answer.push_str(&message.output);
-                        }
-                    }
                     SessionEvent::RunOutputTruncated { continuation, .. } if ours => {
-                        answer_truncated = true;
                         if text {
                             let _ = writeln!(
                                 stderr,
@@ -1604,14 +1744,9 @@ async fn stream_run(
                             );
                         }
                     }
-                    SessionEvent::TextAppended { message_id, text: chunk, .. } if ours => {
-                        if Some(*message_id) == answer_message {
-                            answer.push_str(chunk);
-                            if text {
-                                let _ = stderr.write_all(chunk.as_bytes());
-                                let _ = stderr.flush();
-                            }
-                        }
+                    SessionEvent::TextAppended { text: chunk, .. } if ours && text => {
+                        let _ = stderr.write_all(chunk.as_bytes());
+                        let _ = stderr.flush();
                     }
                     SessionEvent::ToolCallStarted { tool_call } if ours => {
                         if text {
@@ -1678,9 +1813,6 @@ async fn stream_run(
                         }
                     }
                     SessionEvent::ToolCallFinished { tool_call } if ours => {
-                        if tool_call.state == ToolCallState::Denied {
-                            denied_calls += 1;
-                        }
                         if text {
                             let verdict = match tool_call.state {
                                 ToolCallState::Completed => "ok",
@@ -1737,43 +1869,11 @@ async fn stream_run(
                             child_waits_for_delegate: handle.child_waits_for_delegate,
                         }, &envelope, stderr).await;
                     }
-                    SessionEvent::RunFinished { session, run_id, outcome, usage, final_output, .. }
-                        if *run_id == handle.run_id => {
-                        let usage = inclusive_usage(session.accounting, *usage);
-                        let cost = inclusive_cost(
-                            session.accounting,
-                            session.estimated_cost_usd_nanos,
-                        );
-                        let (status, message) = match (&needs_input, outcome) {
-                            (Some(question), RunOutcome::Cancelled) => (
-                                HeadlessStatus::NeedsInput,
-                                Some(format!(
-                                    "the model asked the user a question and no client could answer: {question}"
-                                )),
-                            ),
-                            _ => settle(outcome, final_output.as_deref(), interrupted),
-                        };
-                        if text
-                            && matches!(
-                                status,
-                                HeadlessStatus::BudgetExhausted | HeadlessStatus::TimedOut
-                            )
-                        {
-                            let _ = writeln!(stderr, "[run] {}", status.as_str());
-                        }
-                        let (prompt_identity, audit) =
-                            run_prompt_identity(sessions, handle).await?;
-                        return Ok(RunEnd {
-                            status,
-                            message,
-                            usage,
-                            estimated_cost_usd_nanos: cost,
-                            prompt_identity,
-                            audit,
-                            final_output: final_output.clone(),
-                            answer,
-                            denied_calls,
-                        });
+                    SessionEvent::RunFinished { run_id, .. } if *run_id == handle.run_id => {
+                        let result = sessions.run_result(handle.workspace_id, handle.session_id, handle.run_id).await
+                            .map_err(|error| Failure::harness(error.to_string()))?
+                            .ok_or_else(|| Failure::harness("the terminal run has no durable result"))?;
+                        return finish_run(result, needs_input.as_deref(), interrupted, delivery_recovered, text, stderr);
                     }
                     _ => {}
                 }
@@ -1806,34 +1906,79 @@ fn workspace_identity(workspace: &Path) -> ContentHash {
     ContentHash::from_bytes(Sha256::digest(workspace.as_os_str().as_encoded_bytes()).into())
 }
 
-async fn run_prompt_identity(
+async fn recovery_snapshot(
     sessions: &SessionRuntime,
-    handle: &RunHandle,
-) -> Result<
-    (
-        Option<Box<RunPromptIdentity>>,
-        Option<Box<qq_protocol::AuditRecord>>,
-    ),
-    Failure,
-> {
-    let snapshot = sessions
-        .snapshot(SnapshotRequest {
-            workspace_id: handle.workspace_id,
-            focused_session_id: Some(handle.session_id),
-            include_sessions: Vec::new(),
-            session_limit: 1,
-            message_limit: 1,
-        })
+    workspace: WorkspaceId,
+    session: SessionId,
+) -> Result<qq_protocol::WorkspaceSnapshot, Failure> {
+    sessions
+        .snapshot(SnapshotRequest::new(workspace, Some(session), 1, 1))
         .await
-        .map_err(|error| Failure {
-            status: status_for_error(&error),
-            message: format!("could not read the terminal run identity: {error}"),
-        })?;
-    snapshot
-        .focused
-        .and_then(|session| session.runs.into_iter().find(|run| run.id == handle.run_id))
-        .map(|run| (run.prompt_identity, run.audit))
-        .ok_or_else(|| Failure::harness("the terminal run is missing from its session snapshot"))
+        .map_err(|error| Failure::harness(error.to_string()))
+}
+
+fn subscribe_current(
+    sessions: &SessionRuntime,
+    snapshot: &qq_protocol::WorkspaceSnapshot,
+) -> Result<qq_core::SessionEventStream, Failure> {
+    sessions
+        .subscribe(SubscribeRequest {
+            workspace_id: snapshot.cursor.workspace_id,
+            after: snapshot.cursor,
+        })
+        .map_err(|error| Failure::harness(error.to_string()))
+}
+
+fn finish_run(
+    result: qq_core::RunResult,
+    needs_input: Option<&str>,
+    interrupted: bool,
+    delivery_recovered: bool,
+    text: bool,
+    stderr: &mut impl Write,
+) -> Result<RunEnd, Failure> {
+    let SessionEvent::RunFinished {
+        session,
+        outcome,
+        usage,
+        final_output,
+        ..
+    } = result.completion.receipt.event
+    else {
+        return Err(Failure::harness("the terminal receipt has the wrong type"));
+    };
+    let (status, message) = match (needs_input, &outcome) {
+        (Some(question), RunOutcome::Cancelled) => (
+            HeadlessStatus::NeedsInput,
+            Some(format!(
+                "the model asked the user a question and no client could answer: {question}"
+            )),
+        ),
+        _ => settle(&outcome, final_output.as_deref(), interrupted),
+    };
+    if text
+        && matches!(
+            status,
+            HeadlessStatus::BudgetExhausted | HeadlessStatus::TimedOut
+        )
+    {
+        let _ = writeln!(stderr, "[run] {}", status.as_str());
+    }
+    Ok(RunEnd {
+        delivery_recovered,
+        status,
+        message,
+        usage: inclusive_usage(session.accounting, usage),
+        estimated_cost_usd_nanos: inclusive_cost(
+            session.accounting,
+            session.estimated_cost_usd_nanos,
+        ),
+        prompt_identity: result.completion.run.prompt_identity,
+        audit: result.completion.run.audit,
+        final_output,
+        answer: result.answer,
+        denied_calls: result.denied_calls,
+    })
 }
 
 /// Maps the run's durable outcome plus this invocation's interrupt intent to
@@ -1943,13 +2088,34 @@ async fn cancel_and_settle(sessions: &SessionRuntime, handle: &RunHandle) -> Res
             message: format!("could not observe cancellation settlement: {error}"),
         })?;
     tokio::time::timeout(SHUTDOWN_GRACE, async {
+        let snapshot = recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
+        events = subscribe_current(sessions, &snapshot)?;
+        let mut check_terminal = true;
         loop {
+            if check_terminal {
+                if sessions
+                    .run_snapshot(handle.workspace_id, handle.session_id, handle.run_id)
+                    .await
+                    .map_err(|error| Failure::harness(error.to_string()))?
+                    .outcome
+                    .is_some()
+                {
+                    return Ok(());
+                }
+                check_terminal = false;
+            }
             match events.next().await {
                 Some(Ok(SessionEventEnvelope {
                     event: SessionEvent::RunFinished { run_id, .. },
                     ..
                 })) if run_id == handle.run_id => return Ok(()),
                 Some(Ok(_)) => {}
+                Some(Err(SessionRuntimeError::CursorExpired)) => {
+                    let snapshot =
+                        recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
+                    events = subscribe_current(sessions, &snapshot)?;
+                    check_terminal = true;
+                }
                 Some(Err(error)) => {
                     return Err(Failure {
                         status: status_for_error(&error),
@@ -2033,6 +2199,27 @@ async fn unattended_approval(
     else {
         return;
     };
+    unattended_call(
+        sessions,
+        options,
+        handle,
+        tool_call,
+        shell.as_deref(),
+        fetch.as_deref(),
+        stderr,
+    )
+    .await;
+}
+
+async fn unattended_call(
+    sessions: &SessionRuntime,
+    options: &HeadlessOptions,
+    handle: &SessionHandle,
+    tool_call: &qq_protocol::ToolCallSnapshot,
+    shell: Option<&ShellCommandPreview>,
+    fetch: Option<&qq_protocol::FetchPreview>,
+    stderr: &mut impl Write,
+) {
     let text = options.format == HeadlessFormat::Text;
     // The headless invocation is the approval client.
     // An explicit allowlist answers first, as a session
@@ -2052,9 +2239,9 @@ async fn unattended_approval(
     // headless root only supplies the unattended fallback
     // (a deferred deny), never a blanket approve. The
     // allowlist still applies: the human declared it.
-    let granted = allowlisted_grant(options, &tool_call.name, shell.as_deref(), fetch.as_deref());
+    let granted = allowlisted_grant(options, &tool_call.name, shell, fetch);
     let approval =
-        if handle.approval == HeadlessApproval::Ask || envelope.session_id == handle.session_id {
+        if handle.approval == HeadlessApproval::Ask || tool_call.session_id == handle.session_id {
             handle.approval
         } else {
             HeadlessApproval::Auto
@@ -2073,31 +2260,31 @@ async fn unattended_approval(
         }
         (None, HeadlessApproval::Full) => Some(ApprovalDecision::ApproveOnce),
         (None, HeadlessApproval::Auto)
-            if (envelope.session_id == handle.session_id && handle.wait_for_delegate)
-                || (envelope.session_id != handle.session_id
+            if (tool_call.session_id == handle.session_id && handle.wait_for_delegate)
+                || (tool_call.session_id != handle.session_id
                     && handle.child_waits_for_delegate) =>
         {
-            if let Some(run_id) = envelope.run_id {
-                let sessions = sessions.clone();
-                let tool_call_id = tool_call.id;
-                tokio::spawn(async move {
-                    tokio::time::sleep(REVIEWER_DENY_GRACE).await;
-                    let _ = send(
-                        &sessions,
-                        SessionCommand::RespondToolApproval {
-                            run_id,
-                            tool_call_id,
-                            decision: ApprovalDecision::Deny,
-                        },
-                    )
-                    .await;
-                });
-            }
+            let run_id = tool_call.run_id;
+            let sessions = sessions.clone();
+            let tool_call_id = tool_call.id;
+            tokio::spawn(async move {
+                tokio::time::sleep(REVIEWER_DENY_GRACE).await;
+                let _ = send(
+                    &sessions,
+                    SessionCommand::RespondToolApproval {
+                        run_id,
+                        tool_call_id,
+                        decision: ApprovalDecision::Deny,
+                    },
+                )
+                .await;
+            });
             None
         }
         (None, HeadlessApproval::Auto | HeadlessApproval::ReadOnly) => Some(ApprovalDecision::Deny),
     };
-    if let (Some(run_id), Some(decision)) = (envelope.run_id, decision) {
+    if let Some(decision) = decision {
+        let run_id = tool_call.run_id;
         respond_approval(sessions, run_id, tool_call.id, decision, stderr).await;
     }
 }
@@ -2921,6 +3108,23 @@ mod tests {
         }
     }
 
+    async fn retire_delivery_history(fixture: &Fixture) {
+        let database = fixture
+            ._directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("sessions.sqlite3");
+        tokio::task::spawn_blocking(move || {
+            rusqlite::Connection::open(database)
+                .unwrap()
+                .execute("DELETE FROM events", [])
+                .unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
     fn options(workspace: &Path) -> HeadlessOptions {
         HeadlessOptions {
             prompt: "do the task".to_owned(),
@@ -3181,6 +3385,8 @@ mod tests {
                     }
                 }
             }).await.unwrap();
+            drop(events);
+            retire_delivery_history(&fixture).await;
             let mut resume = goal_request();
             resume.objective = None;
             let mut stdout = Vec::new();
@@ -4931,6 +5137,14 @@ mod tests {
                             budget: Box::new(goal.budget.clone()), expected: Some(goal_identity(&stopped)), replace: true,
                         }).await.unwrap();
                     }
+                    if matches!(action, "clear" | "replace") {
+                        let mut draining = fixture.sessions.cancelled_goal_runs(handle.session_id, expected.goal_id).await.unwrap();
+                        let mut family = vec![root, child];
+                        draining.sort();
+                        family.sort();
+                        assert_eq!(draining, family);
+                        assert!(fixture.sessions.cancelled_goal_runs(foreign.session_id, expected.goal_id).await.unwrap().is_empty());
+                    }
                     assert!(foreground.as_mut().now_or_never().is_none());
                     assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())
                         .iter().any(|record| record["type"] == "goal"));
@@ -4974,7 +5188,17 @@ mod tests {
                     let durable = fixture.sessions.snapshot(SnapshotRequest::new(
                         handle.workspace_id, Some(handle.session_id), 1, 16,
                     )).await.unwrap().focused.unwrap();
-                    assert_eq!(durable.summary.active_run_id, None);
+                    if action == "replace" {
+                        if let Some(run) = durable.summary.active_run_id {
+                            assert_ne!(run, root, "the old family must have drained");
+                            let replacement = fixture.sessions.run_snapshot(handle.workspace_id, handle.session_id, run).await.unwrap();
+                            assert!(matches!(replacement.origin,
+                                Some(qq_protocol::RunOrigin::Goal { goal_id, .. })
+                                if goal_id == durable.goal.as_ref().unwrap().goal_id));
+                        }
+                    } else {
+                        assert_eq!(durable.summary.active_run_id, None, "{action}");
+                    }
                     if action == "clear" {
                         assert!(durable.goal.is_none());
                     } else {
@@ -4982,8 +5206,9 @@ mod tests {
                         if action == "replace" {
                             assert_ne!(final_goal.goal_id, expected.goal_id);
                             assert_eq!(final_goal.objective, "replacement must survive");
+                        } else {
+                            assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
                         }
-                        assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
                     }
                     let mut finished = Vec::new();
                     while finished.len() < 2 {
@@ -7824,6 +8049,400 @@ mod tests {
             )
             .collect();
         assert_eq!(replayed_runs, expected_runs);
+        fixture.sessions.close().await.unwrap();
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_finished_run_recovers_its_answer_after_delivery_history_expires() {
+        struct StalledOutput {
+            sessions: SessionRuntime,
+            database: PathBuf,
+            retired: bool,
+            bytes: Vec<u8>,
+        }
+        impl Write for StalledOutput {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if !self.retired
+                    && let Ok(qq_protocol::HeadlessRecord::Trial(trial)) =
+                        serde_json::from_slice(bytes)
+                {
+                    // Model a consumer blocked at its first record while the
+                    // independent runtime completes and delivery history expires.
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                        let snapshot = recovery_snapshot(&self.sessions,trial.workspace_id,trial.session_id).await.unwrap();
+                        let mut events = subscribe_current(&self.sessions,&snapshot).unwrap();
+                        if self.sessions.run_snapshot(trial.workspace_id,trial.session_id,trial.run_id).await.unwrap().outcome.is_none() {
+                            loop {
+                                let envelope = events.next().await.unwrap().unwrap();
+                                if matches!(envelope.event,SessionEvent::RunFinished { run_id,.. } if run_id==trial.run_id) { break; }
+                            }
+                        }
+                        drop(events);
+                        let database = self.database.clone();
+                        tokio::task::spawn_blocking(move || {
+                            rusqlite::Connection::open(database).unwrap().execute("DELETE FROM events",[]).unwrap();
+                        }).await.unwrap();
+                    })
+                    });
+                    self.retired = true;
+                }
+                self.bytes.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        struct CountedTextProvider(Arc<std::sync::atomic::AtomicUsize>);
+        impl Provider for CountedTextProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                TextProvider.stream(request)
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let fixture = fixture(move || CountedTextProvider(Arc::clone(&observed))).await;
+        let mut output = StalledOutput {
+            sessions: fixture.sessions.clone(),
+            database: fixture
+                ._directory
+                .path()
+                .canonicalize()
+                .unwrap()
+                .join("sessions.sqlite3"),
+            retired: false,
+            bytes: Vec::new(),
+        };
+        let mut stderr = Vec::new();
+        let status = run(
+            &fixture.sessions,
+            options(&fixture.workspace),
+            std::future::pending(),
+            None,
+            &mut output,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(
+            status,
+            HeadlessStatus::Completed,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        assert!(output.retired);
+        let records = parse_records(&String::from_utf8(output.bytes).unwrap());
+        assert_eq!(records.last().unwrap()["recovered_answer"], "hello");
+        assert_eq!(records.last().unwrap()["status"], "completed");
+        assert_eq!(records.last().unwrap()["exit_code"], 0);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "recovering a finished task must not send another provider request"
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_denies_a_reviewers_escalation_without_waiting_for_approval_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+        let mut opts = options(&fixture.workspace);
+        opts.approval = HeadlessApproval::Auto;
+        opts.reviewer_configured = true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_goal(
+                &fixture.sessions,
+                opts,
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .expect("the reviewer has passed; no human is attached to this goal");
+        assert_eq!(code, 8, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let terminal = records.last().unwrap();
+        let workspace = serde_json::from_value(terminal["workspace_id"].clone()).unwrap();
+        let session = serde_json::from_value(terminal["goal"]["session_id"].clone()).unwrap();
+        let body = recovery_snapshot(&fixture.sessions, workspace, session)
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(body.tool_calls.len(), 2);
+        assert!(
+            body.tool_calls
+                .iter()
+                .all(|call| call.state == ToolCallState::Denied)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_interrupt_keeps_its_exit_status_when_delivery_history_expires() {
+        struct EnteredProvider(Arc<tokio::sync::Notify>);
+        impl Provider for EnteredProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                self.0.notify_one();
+                Box::pin(stream::pending())
+            }
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let fixture = fixture({
+            let entered = entered.clone();
+            move || EnteredProvider(entered.clone())
+        })
+        .await;
+        let mut opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        opts.session = Some(handle.session_id);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let interrupted = async {
+            // Retire the initial backlog before the foreground subscription is
+            // first polled, as if the CLI was descheduled during startup.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    entered.notified().await;
+                    retire_delivery_history(&fixture).await;
+                });
+            });
+        };
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            goal_request(),
+            interrupted,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["status"], "interrupted");
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_question_survives_a_delivery_gap_without_an_invented_answer() {
+        let fixture = fixture(|| AskingProvider {
+            turn: Mutex::new(0),
+        })
+        .await;
+        let mut options = options(&fixture.workspace);
+        options.approval = HeadlessApproval::Full;
+        let handle = submit(
+            &fixture.sessions,
+            &options,
+            vec![InputPart::text("finish")],
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        loop {
+            let event = events.next().await.unwrap().unwrap();
+            if matches!(
+                event.event,
+                SessionEvent::ToolApprovalRequested {
+                    question: Some(_),
+                    ..
+                }
+            ) {
+                break;
+            }
+        }
+        drop(events);
+        retire_delivery_history(&fixture).await;
+        let mut sink = RecordSink::open(&options).unwrap();
+        let end = stream_run(
+            &fixture.sessions,
+            &options,
+            &handle,
+            &mut sink,
+            std::future::pending(),
+            None,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(end.status, HeadlessStatus::NeedsInput);
+        assert_eq!(
+            end.message.as_deref(),
+            Some("the model asked the user a question and no client could answer: Which crate?")
+        );
+        assert!(end.answer.is_empty());
+        assert_eq!(
+            fixture
+                .sessions
+                .run_snapshot(handle.workspace_id, handle.session_id, handle.run_id)
+                .await
+                .unwrap()
+                .outcome,
+            Some(RunOutcome::Cancelled)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn canonical_replies_preserve_long_utf8_and_truncations_without_text_messages() {
+        struct ContinuedProvider(Mutex<usize>);
+        impl Provider for ContinuedProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let mut turn = self.0.lock().unwrap();
+                let current = *turn;
+                *turn += 1;
+                drop(turn);
+                let mut events = Vec::new();
+                if current == 0 {
+                    events.push(Ok(ProviderEvent::OutputTextDelta {
+                        text: "prefix:".to_owned(),
+                    }));
+                }
+                if current == 2 {
+                    events.push(Ok(ProviderEvent::OutputTextDelta {
+                        text: "答".repeat(24_000),
+                    }));
+                }
+                events.push(Ok(if current < 2 {
+                    ProviderEvent::Incomplete {
+                        usage: None,
+                        reason: if current == 1 {
+                            qq_provider::IncompleteReason::Paused
+                        } else {
+                            qq_provider::IncompleteReason::OutputTokens
+                        },
+                    }
+                } else {
+                    ProviderEvent::Completed { usage: None }
+                }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        let fixture = fixture(|| ContinuedProvider(Mutex::new(0))).await;
+        let mut opts = options(&fixture.workspace);
+        opts.format = HeadlessFormat::Text;
+        let (status, stdout, stderr) = run_to_end(&fixture, opts, std::future::pending()).await;
+        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+        let expected = format!("prefix:{}\n", "答".repeat(24_000));
+        assert_eq!(stdout.len(), expected.len());
+        assert!(
+            stdout == expected,
+            "the exact final reply must retain its prefix and complete UTF-8 tail"
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+    #[tokio::test]
+    async fn canonical_reply_channel_order_survives_database_maintenance() {
+        struct MixedProvider;
+        impl Provider for MixedProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "one".to_owned(),
+                    }),
+                    Ok(ProviderEvent::RefusalDelta {
+                        text: "!".to_owned(),
+                    }),
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "two".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        let mut fixture = fixture(|| MixedProvider).await;
+        let handle = submit(
+            &fixture.sessions,
+            &options(&fixture.workspace),
+            vec![InputPart::text("finish")],
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        let mut events = fixture
+            .sessions
+            .subscribe(SubscribeRequest {
+                workspace_id: handle.workspace_id,
+                after: handle.subscribe_after,
+            })
+            .unwrap();
+        loop {
+            if matches!(events.next().await.unwrap().unwrap().event,SessionEvent::RunFinished { run_id,.. } if run_id==handle.run_id)
+            {
+                break;
+            }
+        }
+        drop(events);
+        let result = fixture
+            .sessions
+            .run_result(handle.workspace_id, handle.session_id, handle.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.answer, "one!two");
+        fixture.sessions.close().await.unwrap();
+        let path = fixture
+            ._directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("sessions.sqlite3");
+        let database = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            connection.execute("DELETE FROM events", []).unwrap();
+            connection.execute_batch("VACUUM;").unwrap();
+        })
+        .await
+        .unwrap();
+        fixture.sessions = SessionRuntime::open(
+            SessionRuntimeOptions::new(path),
+            Arc::new(ProviderLoader(|| MixedProvider)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fixture
+                .sessions
+                .run_result(handle.workspace_id, handle.session_id, handle.run_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            result
+        );
         fixture.sessions.close().await.unwrap();
     }
 }

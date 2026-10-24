@@ -521,6 +521,7 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
         delegated,
     };
     let mut snapshot = SessionSnapshot {
+        approval_previews: Vec::new(),
         goal: None,
         side_questions: Vec::new(),
         summary: SessionSummary {
@@ -931,6 +932,7 @@ fn internal_summary_completion_notifies_once_in_both_terminal_orders() {
                     .collect();
                 store.install_session_snapshot(
                     qq_protocol::SessionSnapshot {
+                        approval_previews: Vec::new(),
                         goal: None,
                         side_questions: Vec::new(),
                         summary: running.clone(),
@@ -1105,6 +1107,7 @@ fn observed_turn_prices_survive_older_snapshot_replay_once() {
     running.status = SessionStatus::Running;
     running.active_run_id = Some(run_id);
     let snapshot = qq_protocol::SessionSnapshot {
+        approval_previews: Vec::new(),
         goal: None,
         side_questions: Vec::new(),
         summary: running,
@@ -1323,6 +1326,7 @@ fn terminal_cost_uses_the_run_snapshot_instead_of_the_session_delta() {
             if shown { Vec::new() } else { vec![session_id] }
         );
         let snapshot = qq_protocol::SessionSnapshot {
+            approval_previews: Vec::new(),
                         goal: None,
             side_questions: Vec::new(), summary: idle, messages: vec![message(8, session_id, prompt, "answer")],
             runs: vec![serde_json::from_value(serde_json::json!({
@@ -2125,6 +2129,7 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     // session." for a session with history, and the warm view never refetched.
     let session_id = SessionId::from_bytes([7; 16]);
     let starved = SessionSnapshot {
+        approval_previews: Vec::new(),
         goal: None,
         side_questions: Vec::new(),
         summary: summary(session_id),
@@ -2176,4 +2181,42 @@ fn a_body_the_snapshot_budget_starved_stays_cold_instead_of_empty() {
     };
     store.install_session_snapshot(empty, &[], 6);
     assert!(store.get(&session_id).unwrap().is_warm());
+}
+
+#[test]
+fn cold_and_refreshed_snapshots_replace_pending_approval_details() {
+    let session_id = SessionId::from_bytes([3; 16]);
+    let call = ToolCallId::from_bytes([7; 16]);
+    let expected = ApprovalPreview {
+        question: Some(qq_protocol::QuestionPreview {
+            questions: vec![qq_protocol::Question {
+                prompt: "Which crate?".to_owned(),
+                options: vec!["core".to_owned(), "provider".to_owned()],
+                free_text: true,
+            }],
+        }),
+        escalated: Some(ApprovalEscalation {
+            delegate: None,
+            reason: "Reviewer unavailable".to_owned(),
+        }),
+        ..ApprovalPreview::default()
+    };
+    let mut body: SessionSnapshot = serde_json::from_value(json!({
+        "summary":summary(session_id), "messages":[], "runs":[], "tool_calls":[], "has_older_messages":false,
+        "approval_previews":[{"tool_call_id":call,"preview":expected}]
+    })).unwrap();
+    body.summary.pending_holds = vec![qq_protocol::PendingHold {
+        tool_call_id: call,
+        delegated: false,
+    }];
+    let mut store = SessionStore::default();
+    store.install_isolated_session_snapshot(body.clone(), &[], 17);
+    assert_eq!(store[&session_id].approval_previews[&call], expected);
+    body.summary.pending_holds.clear();
+    body.approval_previews.clear();
+    store.install_isolated_session_snapshot(body, &[], 18);
+    assert!(
+        store[&session_id].approval_previews.is_empty(),
+        "a refreshed snapshot must clear a resolved hold's stale preview"
+    );
 }

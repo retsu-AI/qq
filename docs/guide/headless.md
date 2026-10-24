@@ -124,7 +124,11 @@ Each line is one JSON object with a `type`:
 | --- | --- | --- |
 | `trial` | once, first | QQ version and revision, `protocol_version`, workspace/session/run ids, model, profile, approval, limits, `correlation` labels |
 | `event` | every protocol event | the same envelope the TUI consumes: prompts, model text, tool calls and results, approvals, usage |
-| `outcome` | once, last | `status`, `exit_code`, token `usage`, `estimated_cost_usd_nanos`, `final_output` when a schema was given |
+| `outcome` | once, last | `status`, `exit_code`, token `usage`, `estimated_cost_usd_nanos`, `final_output` when a schema was given; `recovered_answer` after a delivery gap |
+
+Slow consumers can outlive the replay window. QQ recovers from durable state
+without restarting the task. If an outcome includes `recovered_answer`, use
+that complete reply instead of text accumulated from the partial event stream.
 
 The shapes are versioned with `PROTOCOL_VERSION` and pinned by golden
 fixtures under `crates/qq-protocol/tests/fixtures/headless/`; a consumer

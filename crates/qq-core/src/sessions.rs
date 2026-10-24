@@ -57,7 +57,7 @@ mod compaction;
 mod completions;
 pub(crate) mod context;
 mod deliveries;
-pub use completions::RunCompletion;
+pub use completions::{RunCompletion, RunResult};
 mod events;
 mod execution;
 mod feed;

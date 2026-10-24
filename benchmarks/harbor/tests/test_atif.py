@@ -48,6 +48,21 @@ class AtifConversionTests(unittest.TestCase):
                 self.assertEqual(qq["outcome"]["prompt_identity"]["version"], 7)
                 json.dumps(first)
 
+    def test_recovered_reply_survives_missing_delivery_without_inventing_a_model_call(self) -> None:
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                records = load_trace(FIXTURES / "text_only.trace.jsonl")
+                if missing:
+                    records = [record for record in records if record["type"] != "event"
+                               or record["envelope"]["event"]["type"] == "run_finished"]
+                records[-1]["recovered_answer"] = "The complete recovered reply"
+                trajectory = convert_trace(records)
+                reply = [step for step in trajectory["steps"] if step["source"] == "agent"][-1]
+                self.assertEqual(reply["message"], "The complete recovered reply")
+                self.assertEqual(reply["extra"], {"qq_recovered_answer": True})
+                self.assertNotIn("llm_call_count", reply)
+                self.assertNotIn("metrics", reply)
+
     def test_parent_child_trace_embeds_a_referenced_subagent_trajectory(self) -> None:
         trajectory = convert_trace(load_trace(FIXTURES / "subagent.trace.jsonl"))
 
@@ -90,15 +105,23 @@ class AtifConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "trajectory.json"
             for trace in sorted(FIXTURES.glob("*.trace.jsonl")):
-                with self.subTest(trace=trace.name):
-                    trajectory = convert_trace(load_trace(trace))
-                    output.write_text(
-                        format_trajectory_json(trajectory) + "\n", encoding="utf-8"
-                    )
-                    self.assertTrue(
-                        validator.validate(output),
-                        "; ".join(validator.get_errors()),
-                    )
+                for recovered in (False, True):
+                    with self.subTest(trace=trace.name, recovered=recovered):
+                        records = load_trace(trace)
+                        if recovered:
+                            root = records[0]["session_id"]
+                            records = [record for record in records if record["type"] != "event"
+                                       or (record["envelope"]["event"]["type"] == "run_finished"
+                                           and record["envelope"]["session_id"] == root)]
+                            records[-1]["recovered_answer"] = "The complete recovered reply"
+                        trajectory = convert_trace(records)
+                        output.write_text(
+                            format_trajectory_json(trajectory) + "\n", encoding="utf-8"
+                        )
+                        self.assertTrue(
+                            validator.validate(output),
+                            "; ".join(validator.get_errors()),
+                        )
 
     def test_installed_agent_rejects_a_missing_durable_trace(self) -> None:
         from qq_harbor.agent import QQAgent
