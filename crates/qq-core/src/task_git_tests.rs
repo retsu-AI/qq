@@ -1092,3 +1092,63 @@ async fn task_git_uses_import_base_and_only_cumulative_agent_changes() {
         "unrelated dirty user bytes"
     );
 }
+
+#[test]
+fn task_git_unresolved_head_keeps_file_work_available_without_git_authority() {
+    use crate::task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource};
+    let directory = TempDir::new().unwrap();
+    let source = directory.path().join("source");
+    let control = directory.path().join("control");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::create_dir(&control).unwrap();
+    git(&source, &["init", "--template=", "."]);
+    std::fs::write(source.join("file"), "existing local work").unwrap();
+    let capture = || {
+        TaskGit::capture_base(
+            &git_program(),
+            &NativeDirectoryGrant::capture(&source).unwrap(),
+            &NativeDirectoryGrant::capture(&control).unwrap(),
+            &operation(),
+        )
+    };
+    assert_eq!(capture().unwrap(), None);
+    let runtime = crate::Runtime::new(
+        qq_provider::test_support::ScriptedProvider::new(vec![]),
+        "demo",
+        256,
+    )
+    .unwrap();
+    let plan = crate::plan::CompiledAgentPlan::compile_blocking(
+        crate::plan::AgentProfile::embedded(&runtime, source.clone()),
+    )
+    .unwrap();
+    let destination = control.join("task");
+    let mut workspace = TaskWorkspace::import(
+        &TaskWorkspaceSource::from_plan(&plan).unwrap(),
+        &destination,
+        &[PathBuf::from("file")],
+        TaskWorkspaceLimits {
+            max_entries: 10,
+            max_bytes: 1024,
+        },
+    )
+    .unwrap();
+    std::fs::write(destination.join("file"), "agent edit").unwrap();
+    workspace.publish(&[PathBuf::from("file")]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(source.join("file")).unwrap(),
+        "agent edit"
+    );
+    let reference = git(&source, &["symbolic-ref", "HEAD"]);
+    std::fs::write(source.join(".git").join(reference), "not-an-object\n").unwrap();
+    assert_eq!(capture().unwrap(), None);
+    assert!(matches!(
+        TaskGit::capture_base(
+            &control.join("missing-git"),
+            &NativeDirectoryGrant::capture(&source).unwrap(),
+            &NativeDirectoryGrant::capture(&control).unwrap(),
+            &operation()
+        ),
+        Err(TaskGitError::Io(_))
+    ));
+}
