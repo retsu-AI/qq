@@ -7083,6 +7083,156 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "tool-fetch")]
+    async fn explicit_root_host_flags_reach_auto_children_under_full_and_auto() {
+        struct ChildFetchProvider {
+            child: bool,
+            first: Mutex<bool>,
+        }
+        impl Provider for ChildFetchProvider {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                let first = std::mem::replace(&mut *self.first.lock().unwrap(), false);
+                if !first {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let (name, arguments) = if self.child {
+                    ("fetch", r#"{"url":"https://docs.invalid/page"}"#)
+                } else {
+                    (
+                        "spawn_agent",
+                        r#"{"task":"read explicitly allowed docs","model":"test/child","authority":"write"}"#,
+                    )
+                };
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "probe".into(),
+                        name: name.into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "probe".into(),
+                        json: arguments.into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "probe".into() }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct ChildFetchLoader;
+        impl RuntimeLoader for ChildFetchLoader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                Box::pin(async move {
+                    let runtime = Runtime::new(
+                        ChildFetchProvider {
+                            child: request.model.model.as_deref() == Some("test/child"),
+                            first: Mutex::new(true),
+                        },
+                        "test-model",
+                        256,
+                    )
+                    .unwrap()
+                    .with_spawn_model_routes(vec!["test/child".into()])
+                    .with_delegation(qq_protocol::DelegationRoster {
+                        roster: Vec::new(),
+                        default_role: qq_protocol::DelegationRole::Balanced,
+                        max_depth: 1,
+                        write_children: true,
+                    });
+                    Ok(loaded_runtime(runtime, &request.workspace, None))
+                })
+            }
+        }
+        struct DenyChildFetch(Arc<std::sync::atomic::AtomicUsize>);
+        impl qq_core::ApprovalReviewer for DenyChildFetch {
+            fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {
+                    qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Deny {
+                        reason: "stop before network dispatch".into(),
+                    })
+                })
+            }
+        }
+        for approval in [HeadlessApproval::Full, HeadlessApproval::Auto] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(directory.path()).unwrap();
+            let workspace = root.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let consulted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+            runtime_options.max_active_runs = 2;
+            runtime_options.approval_reviewer =
+                Some(Arc::new(DenyChildFetch(Arc::clone(&consulted))));
+            let fixture = Fixture {
+                sessions: SessionRuntime::open(runtime_options, Arc::new(ChildFetchLoader))
+                    .await
+                    .unwrap(),
+                workspace,
+                _directory: directory,
+            };
+            let mut options = options(&fixture.workspace);
+            options.approval = approval;
+            options.allow_hosts = vec!["docs.invalid".into()];
+            options.reviewer_configured = true;
+            let (status, stdout, _) = run_to_end(&fixture, options, std::future::pending()).await;
+            assert_eq!(status, HeadlessStatus::Completed, "{approval:?}: {stdout}");
+            let records = parse_records(&stdout);
+            let events = event_records(&records);
+            let child = events
+                .iter()
+                .find_map(|record| {
+                    let event = &record["envelope"]["event"];
+                    (event["type"] == "session_created"
+                        && event["session"]["parent_id"].is_string())
+                    .then(|| event["session"].clone())
+                })
+                .expect("actual write child must be created");
+            assert_eq!(child["approval_mode"], "auto");
+            assert_eq!(
+                consulted.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{approval:?}: explicit host authority must reach mandatory child review: {stdout}"
+            );
+            assert!(
+                events.iter().any(|record| {
+                    let envelope = &record["envelope"];
+                    let event = &envelope["event"];
+                    envelope["session_id"] == child["id"]
+                        && event["type"] == "tool_approval_resolved"
+                        && event["resolution"] == "denied_by_reviewer"
+                        && event["tool_call"]["name"] == "fetch"
+                        && event["tool_call"]["state"] == "denied"
+                }),
+                "{stdout}"
+            );
+            assert!(
+                !events.iter().any(|record| {
+                    let event = &record["envelope"]["event"];
+                    (event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch")
+                        || (event["type"] == "tool_approval_requested"
+                            && event["delegated"] != true)
+                        || event["type"] == "tool_approval_escalated"
+                }),
+                "reviewer denial must prevent network dispatch without human fallback: {stdout}"
+            );
+            assert!(
+                events.iter().any(|record| {
+                    let envelope = &record["envelope"];
+                    envelope["session_id"] == child["id"]
+                        && envelope["event"]["type"] == "run_finished"
+                        && envelope["event"]["outcome"]["type"] == "completed"
+                }),
+                "child must settle: {stdout}"
+            );
+            fixture.sessions.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn root_auto_without_authority_does_not_consult_a_configured_reviewer() {
         let (fixture, calls) = root_shell_reviewer_fixture(false).await;
         let mut options = options(&fixture.workspace);
