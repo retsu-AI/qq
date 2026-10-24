@@ -629,7 +629,7 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
                         |row| row.get::<_, String>(0)
                     )
                     .unwrap(),
-                "61"
+                STORE_SCHEMA_VERSION.to_string()
             );
         }
         let recovered = harness
@@ -688,4 +688,349 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
         );
         harness.runtime.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn terminal_receipts_remain_scoped_and_recover_from_legacy_delivery_history() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new(); 2]).await;
+    let mut expected = Vec::new();
+    for _ in 0..2 {
+        submit_prompt(&harness, "finish this task").await;
+        let observed = collect_through_finished(&mut harness.events).await;
+        expected.push(
+            observed
+                .into_iter()
+                .find(|event| matches!(event.event, SessionEvent::RunFinished { .. }))
+                .unwrap(),
+        );
+    }
+    let through = expected[1].cursor;
+    let after = EventCursor {
+        sequence: 0,
+        ..through
+    };
+    let session = harness.session_id;
+    let page = harness
+        .runtime
+        .completed_runs(session, after, through)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|item| item.receipt.clone())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    for completion in &page {
+        assert_eq!(completion.run.id, completion.receipt.run_id.unwrap());
+        assert_eq!(completion.run.status, qq_protocol::RunStatus::Completed);
+    }
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(session, expected[0].cursor, through)
+            .await
+            .unwrap(),
+        page[1..]
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(session, after, expected[0].cursor)
+            .await
+            .unwrap(),
+        page[..1]
+    );
+    assert!(
+        harness
+            .runtime
+            .completed_runs(session, through, through)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(
+                session,
+                EventCursor {
+                    store_id: StoreId::generate().unwrap(),
+                    ..after
+                },
+                through
+            )
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::CursorStoreMismatch
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(
+                session,
+                after,
+                EventCursor {
+                    workspace_id: WorkspaceId::generate().unwrap(),
+                    ..through
+                }
+            )
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::CursorWorkspaceMismatch
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(SessionId::generate().unwrap(), after, through)
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::SessionNotFound
+    );
+    let wrong_workspace = WorkspaceId::generate().unwrap();
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(
+                session,
+                EventCursor {
+                    workspace_id: wrong_workspace,
+                    ..after
+                },
+                EventCursor {
+                    workspace_id: wrong_workspace,
+                    ..through
+                }
+            )
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::SessionNotFound
+    );
+
+    // Upgrade a real schema-61 store, with and without the original receipt.
+    for missing in [false, true] {
+        let path = harness._directory.path().join(if missing {
+            "missing-receipts.sqlite3"
+        } else {
+            "legacy-receipts.sqlite3"
+        });
+        let backup = path.clone();
+        harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "DROP INDEX runs_completion;
+            ALTER TABLE runs DROP COLUMN completion_json;
+            ALTER TABLE runs DROP COLUMN completion_sequence;
+            UPDATE metadata SET value='61' WHERE key='schema_version';",
+            )
+            .unwrap();
+        if missing {
+            legacy.execute("DELETE FROM events", []).unwrap();
+        } else {
+            let mut foreign = expected[1].clone();
+            foreign.cursor.sequence += 100;
+            foreign.session_id = SessionId::generate().unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO events(workspace_id,sequence,envelope_json) VALUES (?1,?2,?3)",
+                    params![
+                        through.workspace_id.to_string(),
+                        foreign.cursor.sequence,
+                        serde_json::to_string(&foreign).unwrap()
+                    ],
+                )
+                .unwrap();
+            legacy
+                .execute(
+                    "INSERT INTO events(workspace_id,sequence,envelope_json) VALUES (?1,?2,?3)",
+                    params![
+                        through.workspace_id.to_string(),
+                        foreign.cursor.sequence + 1,
+                        r#"{"event":{"type":"run_finished"}}"#
+                    ],
+                )
+                .unwrap();
+        }
+        drop(legacy);
+        let (mut migrated, _) = store::open_database(&path).unwrap();
+        migrated.execute("DELETE FROM events", []).unwrap();
+        let recovered = completions::read(&migrated, session, after, through).unwrap();
+        if missing {
+            assert!(
+                recovered.is_empty(),
+                "missing original evidence must not be fabricated from terminal status"
+            );
+        } else {
+            assert_eq!(recovered, page);
+            // A second terminal event must not replace the original receipt.
+            let transaction = migrated.transaction().unwrap();
+            let receipt = &expected[0];
+            let context = events::EventContext::for_run_ids(
+                after.store_id,
+                after.workspace_id,
+                session,
+                receipt.run_id.unwrap(),
+                None,
+                receipt.occurred_at_ms,
+            );
+            assert_eq!(
+                events::append_event(&transaction, context, receipt.event.clone()).unwrap_err(),
+                SessionRuntimeError::CONSTRAINT
+            );
+            transaction.rollback().unwrap();
+            assert_eq!(
+                completions::read(&migrated, session, after, through).unwrap(),
+                page
+            );
+        }
+        drop(migrated);
+        let (reopened, _) = store::open_database(&path).unwrap();
+        assert_eq!(
+            completions::read(&reopened, session, after, through).unwrap(),
+            recovered
+        );
+    }
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            connection.execute("DELETE FROM events", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        harness
+            .runtime
+            .completed_runs(session, after, through)
+            .await
+            .unwrap(),
+        page
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_receipt_pages_bound_rows_and_bytes_without_skipping_runs() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
+    submit_prompt(&harness, "finish").await;
+    let receipt = collect_through_finished(&mut harness.events)
+        .await
+        .into_iter()
+        .find(|event| matches!(event.event, SessionEvent::RunFinished { .. }))
+        .unwrap();
+    let original_run = receipt.run_id.unwrap();
+    let after = receipt.cursor;
+    let through = EventCursor {
+        sequence: after.sequence + 140,
+        ..after
+    };
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let columns = connection
+                .prepare("PRAGMA table_info(runs)")?
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let select = columns
+                .iter()
+                .map(|column| match column.as_str() {
+                    "id" => "?1",
+                    "command_id" => "?2",
+                    "completion_sequence" => "?3",
+                    "completion_json" => "?4",
+                    other => other,
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO runs({}) SELECT {select} FROM runs WHERE id=?5",
+                columns.join(",")
+            );
+            for offset in 1..=140 {
+                let run = RunId::generate().unwrap();
+                let mut cloned = receipt.clone();
+                cloned.cursor.sequence += offset;
+                cloned.run_id = Some(run);
+                let SessionEvent::RunFinished {
+                    run_id, session, ..
+                } = &mut cloned.event
+                else {
+                    unreachable!()
+                };
+                *run_id = run;
+                // Nine individually valid receipts exceed the 8 MiB page budget.
+                if offset <= 10 {
+                    session.title = "x".repeat(950_000);
+                }
+                connection.execute(
+                    &sql,
+                    params![
+                        run.to_string(),
+                        CommandId::generate().unwrap().to_string(),
+                        cloned.cursor.sequence,
+                        serde_json::to_string(&cloned)?,
+                        original_run.to_string()
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let first = harness
+        .runtime
+        .completed_runs(harness.session_id, after, through)
+        .await
+        .unwrap();
+    assert!(
+        !first.is_empty() && first.len() < 10,
+        "the byte budget must end the page before all large receipts"
+    );
+    let mut observed = first
+        .iter()
+        .map(|item| item.receipt.cursor.sequence)
+        .collect::<Vec<_>>();
+    let mut cursor = first.last().unwrap().receipt.cursor;
+    loop {
+        let page = harness
+            .runtime
+            .completed_runs(harness.session_id, cursor, through)
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= usize::from(MAX_REPLAY_EVENTS));
+        cursor = page.last().unwrap().receipt.cursor;
+        observed.extend(page.iter().map(|item| item.receipt.cursor.sequence));
+    }
+    assert_eq!(
+        observed,
+        (after.sequence + 1..=through.sequence).collect::<Vec<_>>()
+    );
+    let small_after = EventCursor {
+        sequence: after.sequence + 10,
+        ..after
+    };
+    let small = harness
+        .runtime
+        .completed_runs(harness.session_id, small_after, through)
+        .await
+        .unwrap();
+    assert_eq!(small.len(), usize::from(MAX_REPLAY_EVENTS));
+    harness.runtime.shutdown().await.unwrap();
 }

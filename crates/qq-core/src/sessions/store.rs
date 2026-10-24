@@ -1068,6 +1068,18 @@ impl Store {
         .await
     }
 
+    pub(super) async fn completed_runs(
+        &self,
+        session_id: SessionId,
+        after: EventCursor,
+        through: EventCursor,
+    ) -> Result<Vec<RunCompletion>, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            completions::read(connection, session_id, after, through)
+        })
+        .await
+    }
+
     pub(super) async fn run_snapshot(
         &self,
         workspace_id: WorkspaceId,

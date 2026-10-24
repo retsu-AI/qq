@@ -1187,6 +1187,31 @@ impl SessionRuntime {
             .await
     }
 
+    /// Reads a bounded page of terminal run receipts in (after, through].
+    /// Continue with the last receipt's cursor until an empty page is returned.
+    pub async fn completed_runs(
+        &self,
+        session_id: SessionId,
+        after: EventCursor,
+        through: EventCursor,
+    ) -> Result<Vec<RunCompletion>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        if after.store_id != self.inner.store.store_id()
+            || through.store_id != self.inner.store.store_id()
+        {
+            return Err(SessionRuntimeError::CursorStoreMismatch);
+        }
+        if after.workspace_id != through.workspace_id {
+            return Err(SessionRuntimeError::CursorWorkspaceMismatch);
+        }
+        self.inner
+            .store
+            .completed_runs(session_id, after, through)
+            .await
+    }
+
     /// Reads an exact durable run, independently of transcript pagination.
     /// Workspace and session fences prevent accidentally reading another lane.
     pub async fn run_snapshot(
