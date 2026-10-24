@@ -171,8 +171,7 @@ mod proof {
                 "control: task write, OS/public reads, private-read denial and ARAP outside write passed"
             );
             fs::write(&outside, b"original")?;
-            // Controls have joined their pipe readers before this synchronous
-            // process-station selection interval begins.
+            // Each payload uses its own desktop in the existing station.
             let ui = PrivateUi::create(&name, &user, &write_sid, profile.sid.as_string())?;
             let launched = launch_restricted_payload(root, &write_sid, &ui.path);
             if let Err(error) = launched {
@@ -181,8 +180,7 @@ mod proof {
                 std::mem::forget(ui);
                 return Err(error);
             }
-            // Successful launch verifies zero active job processes before UI
-            // close; field order closes the desktop before its station.
+            // Successful launch verifies zero active job processes before close.
             drop(ui);
             assert_results(root, "filtered", "denied")?;
             if fs::read(&outside)? != b"original" {
@@ -578,20 +576,10 @@ mod proof {
         Ok(())
     }
 
-    // Diagnostic-only owned UI objects. Fields drop in order: desktop, station.
+    // The desktop belongs to the existing station; no host UI ACL is edited.
     struct PrivateUi {
         _desktop: firehazard_sid::desktop::OwnedHandle,
-        _station: firehazard_sid::winsta::OwnedHandle,
         path: String,
-    }
-
-    fn station_participant() -> firehazard_sid::winsta::AccessRights {
-        use firehazard_sid::winsta::*;
-        READATTRIBUTES
-            | WRITEATTRIBUTES
-            | ENUMDESKTOPS
-            | ACCESSGLOBALATOMS
-            | firehazard_sid::access::READ_CONTROL
     }
 
     fn desktop_participant() -> firehazard_sid::desktop::AccessRights {
@@ -610,30 +598,19 @@ mod proof {
             let user = ui::convert_string_sid_to_sid_w(user).map_err(err)?;
             let task = ui::convert_string_sid_to_sid_w(task).map_err(err)?;
             let package = ui::convert_string_sid_to_sid_w(package).map_err(err)?;
-            let mut station_acl = ui::acl::Builder::new(ui::acl::REVISION);
             let mut desktop_acl = ui::acl::Builder::new(ui::acl::REVISION);
-            station_acl
-                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &user)
-                .map_err(err)?;
             desktop_acl
                 .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &user)
                 .map_err(err)?;
             // CreateProcessAsUser requires full access for the trusted helper.
             // Its task SID is granted this only on these fresh noninteractive
             // objects; the LPAC package keeps the narrower participant rights.
-            station_acl
-                .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &task)
-                .map_err(err)?;
             desktop_acl
                 .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &task)
-                .map_err(err)?;
-            station_acl
-                .add_access_allowed_ace(ui::acl::REVISION, station_participant(), &package)
                 .map_err(err)?;
             desktop_acl
                 .add_access_allowed_ace(ui::acl::REVISION, desktop_participant(), &package)
                 .map_err(err)?;
-            station_acl.finish().map_err(err)?;
             desktop_acl.finish().map_err(err)?;
             let mut label = ui::acl::Builder::new(ui::acl::REVISION);
             // SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, with a Low object label.
@@ -646,55 +623,27 @@ mod proof {
                 )
                 .map_err(err)?;
             label.finish().map_err(err)?;
-            let station_sd = ui::security::DescriptorBuilder::new()
-                .dacl(station_acl.as_acl(), false)
-                .map_err(err)?
-                .sacl(label.as_acl(), false)
-                .map_err(err)?
-                .finish();
             let desktop_sd = ui::security::DescriptorBuilder::new()
                 .dacl(desktop_acl.as_acl(), false)
                 .map_err(err)?
                 .sacl(label.as_acl(), false)
                 .map_err(err)?
                 .finish();
-            let station = ui::create_window_station_w(
-                name,
-                None,
-                ui::access::GENERIC_ALL,
-                Some(&ui::security::Attributes::new(Some(&station_sd), false)),
-            )
-            .map_err(|error| admission_error("CreateWindowStationW(private)", error))?;
-            let original = ui::open_process_window_station().map_err(err)?;
-            ui::set_process_window_station(&station).map_err(err)?;
+            // CreateDesktop associates the object with the current station.
+            // A desktop-only STARTUPINFO name selects it in the inherited station.
             let desktop = ui::create_desktop_w(
-                "Task",
+                name,
                 (),
                 None,
                 None,
                 ui::access::GENERIC_ALL,
                 Some(&ui::security::Attributes::new(Some(&desktop_sd), false)),
             );
-            // Always attempt restoration, including CreateDesktop failure.
-            let restored = ui::set_process_window_station(&original);
-            // This duplicate becomes the process connection on restoration.
-            // Retain it until this bounded diagnostic exits; this is NOT a
-            // reusable production lifetime design. Host ACLs are unchanged.
-            std::mem::forget(original);
-            if let Err(error) = restored {
-                // Restoration failure leaves the private station connected.
-                // Do not invoke Close* on still-connected objects; the bounded
-                // diagnostic process releases them on exit and reports failure.
-                std::mem::forget(station);
-                std::mem::forget(desktop);
-                return Err(admission_error("SetProcessWindowStation(restore)", error));
-            }
             let desktop =
                 desktop.map_err(|error| admission_error("CreateDesktopW(private)", error))?;
             Ok(Self {
                 _desktop: desktop,
-                _station: station,
-                path: format!("{name}\\Task"),
+                path: name.to_owned(),
             })
         }
     }
@@ -888,8 +837,8 @@ mod proof {
         );
         // All constructor roles use the same actual user SID: no package/task
         // identity receives rights on this outer broker's fresh private UI.
-        // This corrects unmeasured startup preconditions; it does not identify
-        // which original hosted-runner object caused STATUS_DLL_INIT_FAILED.
+        // This corrects unmeasured desktop startup preconditions; it does not
+        // identify which hosted-runner object caused STATUS_DLL_INIT_FAILED.
         let ui_name = format!("qq.ordinary-broker.{}", std::process::id());
         let ordinary_ui = std::mem::ManuallyDrop::new(PrivateUi::create(
             &ui_name, &user_sid, &user_sid, &user_sid,
