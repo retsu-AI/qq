@@ -4497,6 +4497,7 @@ fn published_document_field_names_match_the_struct_and_all_parse() {
             "allow_shell_prefixes" => r#"["cargo test"]"#,
             "allow_hosts" => r#"["docs.rs"]"#,
             "shell_env" => r#"["CARGO_HOME"]"#,
+            "task_hosting" => "[]",
             "builtin_preference" => "hint",
             "deny_tools" => r#"["shell"]"#,
             "deny_shell_prefixes" => r#"["rm -rf"]"#,
@@ -4564,6 +4565,7 @@ fn published_policy_key_lists_are_exactly_what_each_layer_rejects() {
             "allow_shell_prefixes" | "deny_shell_prefixes" => r#"["cargo test"]"#,
             "allow_hosts" | "deny_hosts" => r#"["docs.rs"]"#,
             "shell_env" => r#"["CARGO_HOME"]"#,
+            "task_hosting" => "[]",
             _ => r#"["openai"]"#,
         };
         let content = format!("(version: 1, policy: ({name}: {value}))");
@@ -5093,4 +5095,190 @@ fn unattended_load_ignores_untrusted_authority_without_recording_trust() {
         loader.load(&strict),
         Err(ConfigError::TrustRequired { .. })
     ));
+}
+
+fn task_hosting_document(workspace: &Path, owner: &str, credential: &str) -> String {
+    format!(
+        r#"(version:1, policy:(task_hosting:[(workspace:{:?}, owner:{owner:?}, repository:"qq", base_branch:"main", credential:{credential})]))"#,
+        workspace.to_string_lossy()
+    )
+}
+
+#[test]
+fn task_hosting_is_host_only_even_for_trusted_project_configuration() {
+    let tree = TempTree::new();
+    let content = task_hosting_document(&tree.path("work"), "owner", r#"Stored("github/work")"#);
+    for kind in [
+        SourceKind::Global,
+        SourceKind::Explicit,
+        SourceKind::Inline,
+        SourceKind::Managed,
+        SourceKind::Mdm,
+    ] {
+        let origin = SourceIdentity::virtual_source(kind, "host");
+        assert!(
+            document::Document::parse(&content, &origin).is_ok(),
+            "{kind:?}"
+        );
+    }
+    for kind in [
+        SourceKind::Project,
+        SourceKind::Compiled,
+        SourceKind::Runtime,
+        SourceKind::TrustState,
+    ] {
+        let origin = SourceIdentity::virtual_source(kind, "not host");
+        assert!(
+            matches!(
+                document::Document::parse(&content, &origin),
+                Err(ConfigError::TaskHostingOutsideHost { .. })
+            ),
+            "{kind:?}"
+        );
+    }
+    assert!(matches!(
+        document::Document::parse(
+            &content,
+            &SourceIdentity::virtual_source(SourceKind::Remote, "organization")
+        ),
+        Err(ConfigError::RemotePolicyGrantsForbidden { .. })
+    ));
+    tree.write("work/.qq/config.ron", &content);
+    assert!(matches!(
+        tree.loader().load(&tree.request()),
+        Err(ConfigError::TaskHostingOutsideHost { .. })
+    ));
+    assert!(matches!(
+        tree.loader().grant_pending_trust(&tree.request()),
+        Err(ConfigError::TaskHostingOutsideHost { .. })
+    ));
+}
+
+#[test]
+fn task_hosting_layers_replace_revoke_and_preserve_workspace_provenance() {
+    let tree = TempTree::new();
+    // Other machines' or offline workspaces must not block this config load.
+    let workspace = tree.path("offline/project");
+    assert!(!workspace.exists());
+    tree.write(
+        "global/config.ron",
+        &task_hosting_document(&workspace, "first", r#"Stored("github/work")"#),
+    );
+    let snapshot = tree.loader().load(&tree.request()).unwrap();
+    let grants = snapshot.policy().task_hosting();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].workspace(), workspace);
+    assert_eq!(grants[0].owner(), "first");
+    assert_eq!(grants[0].repository(), "qq");
+    assert_eq!(grants[0].base_branch(), "main");
+    assert_eq!(
+        grants[0].credential(),
+        SecretRef::Stored("github/work".into())
+    );
+    assert_eq!(
+        snapshot
+            .provenance()
+            .task_hosting(&workspace)
+            .unwrap()
+            .kind(),
+        SourceKind::Global
+    );
+    tree.write(
+        "override.ron",
+        &task_hosting_document(&workspace, "second", r#"Stored("github/other")"#),
+    );
+    let request = tree.request().with_explicit_path(tree.path("override.ron"));
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert_eq!(snapshot.policy().task_hosting().len(), 1);
+    assert_eq!(snapshot.policy().task_hosting()[0].owner(), "second");
+    assert_eq!(
+        snapshot
+            .provenance()
+            .task_hosting(&workspace)
+            .unwrap()
+            .kind(),
+        SourceKind::Explicit
+    );
+    tree.write(
+        "managed/managed.ron",
+        "(version:1, policy:(task_hosting:[]))",
+    );
+    let snapshot = tree.loader().load(&request).unwrap();
+    assert!(snapshot.policy().task_hosting().is_empty());
+    assert!(snapshot.provenance().task_hosting(&workspace).is_none());
+}
+
+#[test]
+fn task_hosting_rejects_unsafe_destinations_branches_and_credential_sources() {
+    let tree = TempTree::new();
+    let origin = SourceIdentity::virtual_source(SourceKind::Global, "host");
+    let valid = task_hosting_document(&tree.path("work"), "owner", r#"Stored("github/work")"#);
+    for credential in [
+        r#"Env("GITHUB_TOKEN")"#,
+        r#"Value("private-token-material")"#,
+        r#"Stored("")"#,
+        r#"Stored("Uppercase")"#,
+        r#"Stored("github/work secret")"#,
+        r#"Stored("github//work")"#,
+        r#"Stored("github/../work")"#,
+    ] {
+        let content = task_hosting_document(&tree.path("work"), "owner", credential);
+        let error = document::Document::parse(&content, &origin).unwrap_err();
+        assert!(!error.to_string().contains("private-token-material"));
+    }
+    for (from, to) in [
+        (r#"owner:"owner""#, r#"owner:"owner/other""#),
+        (r#"repository:"qq""#, r#"repository:"../qq""#),
+        (r#"base_branch:"main""#, r#"base_branch:"--all""#),
+        (r#"base_branch:"main""#, r#"base_branch:"refs/heads/main""#),
+        (r#"base_branch:"main""#, r#"base_branch:"a..b""#),
+        (r#"base_branch:"main""#, r#"base_branch:"a.lock""#),
+        (r#"base_branch:"main""#, r#"base_branch:"HEAD""#),
+    ] {
+        assert!(
+            document::Document::parse(&valid.replace(from, to), &origin).is_err(),
+            "{to}"
+        );
+    }
+    for workspace in [PathBuf::from("relative"), tree.path("work/../other")] {
+        assert!(
+            document::Document::parse(
+                &task_hosting_document(&workspace, "owner", r#"Stored("github/work")"#),
+                &origin
+            )
+            .is_err()
+        );
+    }
+    let grant = format!(
+        r#"(workspace:{:?},owner:"owner",repository:"qq",base_branch:"main",credential:Stored("github/work"))"#,
+        tree.path("work").to_string_lossy()
+    );
+    for count in [2, 257] {
+        let repeated = std::iter::repeat_n(grant.as_str(), count)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert!(
+            document::Document::parse(
+                &format!("(version:1,policy:(task_hosting:[{repeated}]))"),
+                &origin
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn task_hosting_destination_changes_are_part_of_authority_digest() {
+    let tree = TempTree::new();
+    let origin = SourceIdentity::virtual_source(SourceKind::Global, "host");
+    let first = task_hosting_document(&tree.path("work"), "first", r#"Stored("github/work")"#);
+    let second = task_hosting_document(&tree.path("work"), "second", r#"Stored("github/work")"#);
+    let first = document::Document::parse(&first, &origin).unwrap();
+    let second = document::Document::parse(&second, &origin).unwrap();
+    assert_ne!(
+        first.sensitive_digest().unwrap(),
+        second.sensitive_digest().unwrap()
+    );
+    let encoded = ron::to_string(&first).unwrap();
+    assert_eq!(document::Document::parse(&encoded, &origin).unwrap(), first);
 }
