@@ -22,6 +22,17 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
     let rustup = std::env::var_os("RUSTUP_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".rustup"));
+    // A relative server setting resolves through its launch directory, which
+    // may be a project. It must not authorize a Host metadata executable.
+    if !home.is_absolute() || !cargo.is_absolute() || !rustup.is_absolute() {
+        return Ok(Vec::new());
+    }
+    if !control.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SDK metadata requires absolute private control storage",
+        ));
+    }
     let image = cargo.join("bin/rustup");
     if !image.is_file() {
         return Ok(Vec::new());
