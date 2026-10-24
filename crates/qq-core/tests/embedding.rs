@@ -81,6 +81,7 @@ async fn runtime_options_survive_both_embedding_paths() {
         .with_shell_policy(ShellPolicy {
             env_allowlist: std::sync::Arc::from(["BUILD_MODE".to_owned()]),
             builtin_preference: BuiltinPreference::Strict,
+            ..Default::default()
         })
         .with_network_policy(NetworkPolicy {
             deny_hosts: std::sync::Arc::from(["example.com".to_owned()]),

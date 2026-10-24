@@ -76,6 +76,83 @@ pub(super) fn worker(path: &Path) -> client::CommandWorker {
 }
 
 #[tokio::test]
+async fn workspace_write_uses_installed_tools_and_preserves_read_only_carveouts() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let workspace = root.join("workspace");
+    let protected = workspace.join("protected");
+    let nested = protected.join("nested");
+    let installed = root.join("arbitrary-installed-tool");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir(&installed).unwrap();
+    std::fs::write(installed.join("dependency"), "VALUE=installed-tool-input\n").unwrap();
+    let tool = installed.join("unusual-tool-name");
+    std::fs::write(
+        &tool,
+        format!(
+            "#!/bin/sh\n. '{}/dependency'\nprintf '%s' \"$VALUE\"\n",
+            installed.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(root.join("host-readable"), b"host-readable").unwrap();
+    std::fs::write(protected.join("kept"), b"protected").unwrap();
+    let client = worker(&root.join("owner"));
+    let mut results = Vec::new();
+    for reverse in [false, true] {
+        let script = format!(
+            r#"set -eu
+'{}'
+cat ../host-readable
+printf allowed > allowed
+if (printf changed > ../host-readable) 2>/dev/null; then exit 21; fi
+if (printf changed > protected/kept) 2>/dev/null; then exit 22; fi
+if (printf changed > protected/nested/denied) 2>/dev/null; then exit 23; fi
+if mv protected moved 2>/dev/null; then exit 24; fi
+printf complete
+"#,
+            tool.display()
+        );
+        let mut command = request(&workspace, "shell", &script);
+        let mut read_write = vec![
+            NativeDirectoryGrant::capture(&workspace).unwrap(),
+            NativeDirectoryGrant::capture(&nested).unwrap(),
+        ];
+        if reverse {
+            read_write.reverse();
+        }
+        command.filesystem = NativeFilesystem::WorkspaceWrite {
+            read_only: vec![NativeDirectoryGrant::capture(&protected).unwrap()],
+            read_write,
+        };
+        results.push(finish(&client, command).await.result.unwrap());
+    }
+    client.stop_spawned().await;
+    for result in results {
+        assert!(!result.is_error(), "{}", result.text());
+        assert!(
+            result.text().contains("installed-tool-inputhost-readable"),
+            "{}",
+            result.text()
+        );
+        assert!(result.text().contains("complete"), "{}", result.text());
+    }
+    assert_eq!(
+        std::fs::read(root.join("host-readable")).unwrap(),
+        b"host-readable"
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("allowed")).unwrap(),
+        b"allowed"
+    );
+    assert_eq!(std::fs::read(protected.join("kept")).unwrap(), b"protected");
+    assert!(!nested.join("denied").exists());
+    assert!(!workspace.join("moved").exists());
+}
+
+#[tokio::test]
 async fn detached_task_workspace_confines_edits_without_modifying_source_inputs() {
     use qq_core::task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource};
     let (root, source, detached) = tokio::task::spawn_blocking(|| {

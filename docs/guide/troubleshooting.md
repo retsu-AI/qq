@@ -223,13 +223,12 @@ safe commands; grant specific extras with `--allow-shell` / `--allow-tool` /
 
 ### The agent says a command was `forbidden`
 
-The shell classifier refuses some shapes under every mode — `rm -rf` outside
-the workspace, `sudo`, `git push --force`, `curl … | sh`, writes to `~/.ssh`
-or `/etc`. A prefix grant does not lift that. A grant that quotes the exact
-command string does, and only when that string fits a session grant (at most
-256 bytes); a longer command cannot be blessed this way. Otherwise run it
-yourself. Rules:
-[Permissions](permissions.md#what-the-shell-classifier-decides).
+A conservative unscoped embedding can refuse a command shape without dispatching
+it. Native task-scoped Auto does not use that command-name veto, and Full does
+not have it. Explicit managed controls and native filesystem/network policy
+still apply. A denied Auto call returns a tool error so the agent can choose a
+permitted alternative. See
+[Command controls](permissions.md#command-controls).
 
 ### `unavailable MCP servers: …`
 

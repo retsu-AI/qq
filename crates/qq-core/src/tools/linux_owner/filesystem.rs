@@ -16,6 +16,10 @@ pub(super) struct Directory {
     pub fd: i32,
     pub path: Vec<u8>,
     pub writable: bool,
+    #[serde(default)]
+    pub carveout: bool,
+    #[serde(default)]
+    pub host_read: bool,
 }
 
 /// Open and verify every grant before launch. Rules refer to these held objects,
@@ -24,18 +28,37 @@ pub(super) fn prepare(
     scope: &crate::command_owner::NativeFilesystem,
 ) -> io::Result<(Vec<Directory>, Vec<OwnedFd>)> {
     scope.validate()?;
-    let crate::command_owner::NativeFilesystem::Restricted {
-        read_only,
-        read_write,
-    } = scope
-    else {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "host access does not require filesystem rules",
-        ));
+    use crate::command_owner::NativeFilesystem;
+    let (read_only, read_write, broad_read) = match scope {
+        NativeFilesystem::Restricted {
+            read_only,
+            read_write,
+        } => (read_only, read_write, false),
+        NativeFilesystem::WorkspaceWrite {
+            read_only,
+            read_write,
+        } => (read_only, read_write, true),
+        NativeFilesystem::Host => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "host access does not require filesystem rules",
+            ));
+        }
     };
     let mut rules = Vec::new();
     let mut descriptors = Vec::new();
+    if broad_read {
+        let root = std::fs::File::open("/")?;
+        let fd: OwnedFd = root.into();
+        rules.push(Directory {
+            fd: fd.as_raw_fd(),
+            path: b"/".to_vec(),
+            writable: false,
+            carveout: false,
+            host_read: true,
+        });
+        descriptors.push(fd);
+    }
     for (grants, writable) in [(read_only, false), (read_write, true)] {
         for grant in grants {
             let workspace = crate::workspace::Workspace::open(&grant.path)?;
@@ -60,6 +83,8 @@ pub(super) fn prepare(
                 fd: fd.as_raw_fd(),
                 path: grant.path.as_os_str().as_bytes().to_vec(),
                 writable,
+                carveout: broad_read && !writable,
+                host_read: false,
             });
             descriptors.push(fd);
         }

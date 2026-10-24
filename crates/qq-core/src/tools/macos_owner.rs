@@ -125,7 +125,9 @@ impl MacosOwner {
             validate_resources(&native.filesystem, native.resources)?;
         }
         if let Some(NativeExecution {
-            filesystem: NativeFilesystem::Restricted { read_write, .. },
+            filesystem:
+                NativeFilesystem::Restricted { read_write, .. }
+                | NativeFilesystem::WorkspaceWrite { read_write, .. },
             ..
         }) = native
         {
@@ -846,8 +848,18 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
         NativeFilesystem::Restricted {
             read_only,
             read_write,
+        }
+        | NativeFilesystem::WorkspaceWrite {
+            read_only,
+            read_write,
         } => {
             filesystem.validate()?;
+            let workspace_write = matches!(filesystem, NativeFilesystem::WorkspaceWrite { .. });
+            if workspace_write {
+                profile.push_str("(allow file-read* file-map-executable process-exec)\n");
+                // libuv's uname implementation reads these public OS values.
+                profile.push_str("(allow sysctl-read (sysctl-name \"kern.hostname\") (sysctl-name \"kern.version\"))\n");
+            }
             let mut protected_directories = std::collections::BTreeSet::new();
             for (grant, writable) in read_only
                 .iter()
@@ -869,7 +881,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
                 ));
-                if writable {
+                if writable || workspace_write {
                     // Moving an ancestor also relocates the authority root.
                     // Unrelated directories and grant contents stay writable.
                     protected_directories.extend(grant.path.ancestors());
@@ -903,7 +915,23 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     return Err(io::Error::other("native sandbox profile exceeds its bound"));
                 }
             }
+            if workspace_write {
+                // Explicit read-only subtrees win even when a broader or nested
+                // writable grant overlaps them. These are write carveouts, not
+                // read restrictions on the host filesystem.
+                for grant in read_only {
+                    let path = grant
+                        .path
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("non UTF-8 native grant"))?;
+                    let quoted = serde_json::to_string(path).map_err(io::Error::other)?;
+                    profile.push_str(&format!("(deny file-write* (subpath {quoted}))\n"));
+                }
+            }
         }
+    }
+    if profile.len() > 64 * 1024 {
+        return Err(io::Error::other("native sandbox profile exceeds its bound"));
     }
     Ok(profile)
 }
@@ -911,6 +939,92 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn workspace_write_reads_host_files_but_preserves_write_carveouts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let task = root.join("task");
+        let protected = task.join("protected");
+        let nested = protected.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(task.join("src")).unwrap();
+        std::fs::create_dir(task.join("tmp")).unwrap();
+        std::fs::write(
+            task.join("Cargo.toml"),
+            "[package]\nname = \"native-workspace-proof\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("src/lib.rs"),
+            r#"pub fn add(a: u32, b: u32) -> u32 { a + b }
+#[test]
+fn builds_and_tests() {
+    assert_eq!(add(20, 22), 42);
+    std::fs::write("cargo-artifact", "native-cargo-tested").unwrap();
+}
+"#,
+        )
+        .unwrap();
+        let outside = root.join("host-file");
+        std::fs::write(&outside, b"host-readable").unwrap();
+        std::fs::write(protected.join("kept"), b"protected").unwrap();
+        let grant = |path: &std::path::Path| {
+            crate::command_owner::NativeDirectoryGrant::capture(path).unwrap()
+        };
+        for reverse in [false, true] {
+            let mut read_write = vec![grant(&task), grant(&nested)];
+            if reverse {
+                read_write.reverse();
+            }
+            let policy = profile(
+                &NativeFilesystem::WorkspaceWrite {
+                    read_only: vec![grant(&protected)],
+                    read_write,
+                },
+                NativeNetwork::Isolated,
+            )
+            .unwrap();
+            let output = std::process::Command::new(SANDBOX_EXEC)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").expect("native fixture PATH"))
+                .env("HOME", std::env::var_os("HOME").expect("native fixture HOME"))
+                .env("TMPDIR", task.join("tmp"))
+                .env("CARGO_HOME", task.join(".cargo"))
+                .env("CARGO_TARGET_DIR", task.join("target"))
+                .env("RUSTUP_AUTO_INSTALL", "0")
+                .current_dir(&task)
+                .args(["-p", &policy, "/bin/sh", "-c"])
+                .arg(
+                    r#"set -eu
+/bin/cat "$1"
+printf allowed > "$2/allowed"
+if (printf changed > "$1") 2>/dev/null; then exit 21; fi
+if (printf changed > "$3/kept") 2>/dev/null; then exit 22; fi
+if (printf changed > "$3/nested/denied") 2>/dev/null; then exit 23; fi
+if /bin/mv "$3" "$2/moved" 2>/dev/null; then exit 24; fi
+node -e 'const os = require("node:os"); if (os.type() !== "Darwin" || !os.version()) process.exit(25); process.stdout.write("os-readable")'
+if ! cargo test --offline --quiet > "$2/cargo-log" 2>&1; then /bin/cat "$2/cargo-log" >&2; exit 26; fi
+printf cargo-tested
+"#,
+                )
+                .arg("workspace-write-test")
+                .args([&outside, &task, &protected])
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(output.stdout, b"host-readableos-readablecargo-tested");
+            assert_eq!(std::fs::read(&outside).unwrap(), b"host-readable");
+            assert_eq!(std::fs::read(task.join("allowed")).unwrap(), b"allowed");
+            assert_eq!(std::fs::read(protected.join("kept")).unwrap(), b"protected");
+            assert!(!nested.join("denied").exists());
+            assert_eq!(
+                std::fs::read(task.join("cargo-artifact")).unwrap(),
+                b"native-cargo-tested"
+            );
+        }
+    }
     #[tokio::test]
     async fn resource_admission_requires_restricted_filesystem_authority() {
         let directory = tempfile::tempdir().unwrap();

@@ -992,7 +992,7 @@ impl CompiledAgentPlan {
                     .replace("no shell interpretation", "arguments are literal")
                     .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
                     .replace("; reserve shell for pipelines", "")
-                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
+                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace under host environment policy, the task deadline or an earlier explicit timeout, and bounded output.")),
                 "write_file" if !has_read_file => Some(
                     "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
                 ),
@@ -1192,6 +1192,10 @@ impl CompiledAgentPlan {
     /// The network policy the plan's `fetch` calls are judged by.
     pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {
         Arc::clone(&self.runtime.network)
+    }
+
+    pub(crate) fn shell_policy(&self) -> Arc<crate::ShellPolicy> {
+        Arc::clone(&self.runtime.shell)
     }
 
     /// Who settles the approvals this plan's sessions hold. Not part of the
@@ -1760,7 +1764,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "dde5903c9fa2e696c2641c91a2a3b528c6c514f544875728630da5347ea310f4"
+            "949bcf5f6192b025e98521fb8045142d3a228ca5bbceea26c5198c4a9f59c392"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
@@ -1771,6 +1775,7 @@ mod tests {
     #[test]
     fn historical_descriptor_15_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
+        descriptor.prompt_version = PromptVersion::new(22).unwrap();
         descriptor.version = 15;
         descriptor.protected_pack_roots.clear();
         assert_eq!(
@@ -1782,6 +1787,7 @@ mod tests {
     #[test]
     fn historical_descriptor_13_prompt_20_through_22_digests_are_preserved() {
         let mut descriptor = golden_descriptor();
+        descriptor.prompt_version = PromptVersion::new(22).unwrap();
         descriptor.version = 13;
         descriptor.protected_pack_roots.clear();
         descriptor.tool_output_projection = None;
@@ -1819,6 +1825,7 @@ mod tests {
     #[test]
     fn historical_descriptor_14_prompt_22_digest_is_preserved() {
         let mut descriptor = golden_descriptor();
+        descriptor.prompt_version = PromptVersion::new(22).unwrap();
         descriptor.version = 14;
         descriptor.protected_pack_roots.clear();
         descriptor.tool_output_projection = None;

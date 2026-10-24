@@ -608,8 +608,7 @@ pub(crate) async fn execute_with_images(
                     .unwrap_or(&[]);
                 if let Some(name) = requested.iter().find(|name| !shell_policy.permits_env(name)) {
                     return ToolOutput::refused(format!(
-                        "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
-                        crate::BASE_ENV.join(" ")
+                        "env_not_allowed: {name} is not in policy.shell_env; normal tool configuration is inherited, but credential-like values require an explicit grant"
                     ));
                 }
                 let environment = match crate::command_owner::NativeEnvironment::capture(requested)
@@ -618,7 +617,14 @@ pub(crate) async fn execute_with_images(
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
                 let environment = if let Some(home) = tasks.0.task_home.get() {
-                    match environment.with_task_home(home) {
+                    let environment = if scope.as_ref().is_some_and(|scope| {
+                        scope.read_access == crate::command_owner::NativeReadAccess::Host
+                    }) {
+                        environment.with_task_temporary(home)
+                    } else {
+                        environment.with_task_home(home)
+                    };
+                    match environment {
                         Ok(environment) => environment,
                         Err(error) => return ToolOutput::refused(error.to_string()),
                     }
@@ -696,12 +702,21 @@ environment,
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _lease = lease;
+        let host_reads = scope
+            .as_ref()
+            .is_some_and(|scope| scope.read_access == crate::command_owner::NativeReadAccess::Host);
         if let Some(scope) = scope {
             let checked = crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())
                 .and_then(|identity| scope.validate_workspace(workspace.path(), identity));
             if let Err(error) = checked {
                 return ToolOutput::refused(error.to_string());
             }
+        }
+        if host_reads
+            && let Some(result) =
+                execute_host_read(&workspace, &file_state, &name, &arguments, &cancelled)
+        {
+            return result;
         }
         execute_blocking(&workspace, &file_state, &name, &arguments, &cancelled)
     })
@@ -983,6 +998,79 @@ struct TestMutateArgs {
 pub(crate) fn test_executions_started() -> usize {
     TEST_EXECUTIONS_STARTED.load(Ordering::Acquire)
 }
+
+// External read results must not record workspace-relative hashes in the
+// session's edit state. Write tools always retain the original workspace.
+fn execute_host_read(
+    workspace: &Workspace,
+    file_state: &FileState,
+    name: &str,
+    arguments: &str,
+    cancelled: &ToolCancellation,
+) -> Option<ToolOutput> {
+    if !matches!(
+        BuiltInTool::from_name(name),
+        Some(BuiltInTool::ReadFile | BuiltInTool::Search | BuiltInTool::Tree)
+    ) {
+        return None;
+    }
+    if cancelled.is_cancelled() {
+        return Some(ToolOutput::interrupted("tool execution was cancelled"));
+    }
+    let ReadOnlyObject(mut object) = serde_json::from_str(arguments).ok()?;
+    let requested = match object.get("path") {
+        Some(serde_json::Value::String(path)) if !path.is_empty() => path.as_str(),
+        None if name != "read_file" => ".",
+        _ => return None,
+    };
+    if workspace.contained_path(requested).is_ok() {
+        return None;
+    }
+    let resolved = match workspace.path().join(requested).canonicalize() {
+        Ok(path) => path,
+        Err(error) => return Some(ToolOutput::refused(error.to_string())),
+    };
+    if let Ok(relative) = resolved.strip_prefix(workspace.path()) {
+        object.insert(
+            "path".to_owned(),
+            relative.to_string_lossy().into_owned().into(),
+        );
+        let arguments = serde_json::Value::Object(object).to_string();
+        return Some(execute_blocking(
+            workspace, file_state, name, &arguments, cancelled,
+        ));
+    }
+    let (root, relative) = if resolved.is_dir() {
+        (resolved.as_path(), std::path::Path::new("."))
+    } else {
+        (
+            resolved.parent()?,
+            std::path::Path::new(resolved.file_name()?),
+        )
+    };
+    let external = match Workspace::open(root) {
+        Ok(workspace) => workspace,
+        Err(error) => return Some(ToolOutput::refused(error.to_string())),
+    };
+    object.insert(
+        "path".to_owned(),
+        relative.to_string_lossy().into_owned().into(),
+    );
+    let arguments = serde_json::Value::Object(object).to_string();
+    let mut result = execute_blocking(
+        &external,
+        &FileState::default(),
+        name,
+        &arguments,
+        cancelled,
+    );
+    result.file_states.clear();
+    Some(result)
+}
+
+#[cfg(test)]
+#[path = "dispatch/host_reads_tests.rs"]
+mod host_reads_tests;
 
 #[inline]
 pub(super) fn execute_blocking(

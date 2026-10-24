@@ -60,6 +60,224 @@ async fn auto_denies_out_of_scope_shell_and_continues_without_approval_or_review
     harness.runtime.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn auto_children_execute_authorized_edits_without_a_reviewer_and_obey_parent_revocation() {
+    for revoke_parent in [false, true] {
+        let (release, pending) = oneshot::channel();
+        let child = Arc::new(GatedApprovalProvider {
+            inner: ApprovalProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                turn: StdMutex::new(0),
+                tool: "__test_mutate",
+                arguments: "{}",
+                tool_turns: 1,
+                usage: None,
+            },
+            release: StdMutex::new(Some(pending)),
+        });
+        let (mut harness, _) = write_child_harness(child, vec![("spawn_agent",
+            r#"{"task":"edit within parent authority","model":"test/child","authority":"write"}"#.into())],
+            None, ApprovalMode::Auto).await;
+        let run_id = submit_prompt_to(&harness.runtime, harness.session_id, "delegate").await;
+        let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = harness.events.next().await.unwrap().unwrap();
+                if let SessionEvent::SessionCreated { session } = event.event
+                    && session.parent_id == Some(harness.session_id)
+                {
+                    break session.id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        harness
+            .runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SetApprovalDelegate {
+                    session_id: child_id,
+                    delegate: Some(approval::ApprovalDelegate::Off),
+                },
+            )
+            .await
+            .unwrap();
+        if revoke_parent {
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    SessionCommand::SetApprovalMode {
+                        session_id: harness.session_id,
+                        mode: ApprovalMode::ReadOnly,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        release.send(()).unwrap();
+        let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+        assert_no_human_permission_request(&observed);
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+        );
+        let completed = observed
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::ToolCallFinished { tool_call }
+                    if event.session_id == child_id && tool_call.name == "__test_mutate" =>
+                {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("child edit settles");
+        assert_eq!(completed.is_error, revoke_parent, "{:?}", completed.result);
+        if !revoke_parent {
+            assert_eq!(completed.result.as_deref(), Some("mutated"));
+        }
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn auto_returns_questions_as_tool_errors_and_continues_without_a_human() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Auto,
+        vec![vec![
+            ("ask_user", ASK_ARGUMENTS.into()),
+            ("__test_mutate", "{}".into()),
+        ]],
+    )
+    .await;
+    let run_id = submit_prompt(&harness, "make a reasonable choice and continue").await;
+    let observed = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_until_run_finished(&mut harness.events, run_id),
+    )
+    .await
+    .expect("Auto questions must return a tool error instead of waiting for a human");
+    assert_no_human_permission_request(&observed);
+    assert!(
+        !observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "ask_user" && tool_call.is_error
+            && tool_call.result.as_deref() == Some(approval::UNATTENDED_QUESTION_RESULT)
+    )));
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error
+    )));
+    assert!(matches!(
+        observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
+        }
+    ));
+    harness.runtime.shutdown().await.unwrap();
+}
+
+struct ManagedShellDenyLoader {
+    script: Vec<(&'static str, String)>,
+}
+
+impl RuntimeLoader for ManagedShellDenyLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let provider = ScriptedRunProvider {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            script: self.script.clone(),
+            turn: StdMutex::new(0),
+        };
+        Box::pin(async move {
+            Runtime::new(provider, "test-model", 256)
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_shell_policy(crate::ShellPolicy {
+                            deny_prefixes: Arc::from(["managed-tool --dangerous".to_owned()]),
+                            ..Default::default()
+                        }),
+                        &request.workspace,
+                        None,
+                    )
+                })
+                .map_err(|error| RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    message: error.to_string(),
+                })
+        })
+    }
+}
+
+#[tokio::test]
+async fn managed_shell_denial_precedes_auto_and_full_and_allows_continuation() {
+    for mode in [ApprovalMode::Auto, ApprovalMode::Full] {
+        for (tool, arguments) in [
+            (
+                "shell",
+                r#"{"command":"unlisted-tool; managed-tool --dangerous && another-tool"}"#,
+            ),
+            (
+                "exec",
+                r#"{"program":"managed-tool","args":["--dangerous"]}"#,
+            ),
+        ] {
+            let directory = test_directory();
+            let runtime = SessionRuntime::open(
+                SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+                Arc::new(ManagedShellDenyLoader {
+                    script: vec![(tool, arguments.into()), ("__test_mutate", "{}".into())],
+                }),
+            )
+            .await
+            .unwrap();
+            let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+            let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("session")
+            };
+            let mut events = runtime
+                .subscribe(SubscribeRequest {
+                    workspace_id,
+                    after: created.committed_through,
+                })
+                .unwrap();
+            let run_id =
+                submit_prompt_to(&runtime, session_id, "continue with an allowed alternative")
+                    .await;
+            let observed = collect_until_run_finished(&mut events, run_id).await;
+            assert_no_human_permission_request(&observed);
+            assert!(
+                !observed
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+            );
+            assert!(!observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolCallStarted { tool_call } if tool_call.name == tool
+            )));
+            assert!(observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == tool && tool_call.is_error
+                    && tool_call.result.as_deref().is_some_and(|result| result.contains("managed_shell_deny"))
+            )));
+            assert!(observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate" && !tool_call.is_error
+            )));
+            assert!(matches!(
+                observed.last().unwrap().event,
+                SessionEvent::RunFinished {
+                    outcome: RunOutcome::Completed,
+                    ..
+                }
+            ));
+            runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
 pub(super) struct GatedApprovalProvider {
     pub(super) inner: ApprovalProvider,
     pub(super) release: StdMutex<Option<oneshot::Receiver<()>>>,
@@ -145,8 +363,8 @@ async fn an_auto_parent_prevents_child_mode_changes_from_introducing_human_appro
             assert!(!completed.is_error, "{:?}", completed.result);
             assert_eq!(
                 consulted.lock().unwrap().len(),
-                1,
-                "a refused Full elevation cannot bypass internal supervision"
+                0,
+                "a refused Full elevation leaves authorized Auto work independent of a reviewer"
             );
         } else {
             assert!(completed.is_error);
@@ -719,167 +937,6 @@ async fn config_grants_seed_new_sessions_and_cover_calls_without_prompting() {
     );
 }
 
-// Outbox tests resolve a real delegated hold directly through the API. The
-// action already has authority; this fixture never requests human approval.
-async fn grant_promotion_harness(
-    tool_turns: usize,
-    authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-) -> (ApprovalHarness, oneshot::Sender<()>) {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let harness = supervised_approval_harness(
-        "__test_shell",
-        r#"{"command":"cargo test"}"#,
-        tool_turns,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        authority,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    (harness, release)
-}
-
-#[tokio::test]
-async fn approve_for_workspace_records_the_session_grant_and_promotes_it() {
-    let authority = ScriptedGrantAuthority::new(
-        WorkspaceGrantSeed::default(),
-        WorkspaceGrantOutcome::Written {
-            path: "/w/.qq/config.ron".to_owned(),
-        },
-    );
-    let (mut harness, _review_release) = grant_promotion_harness(2, Some(authority.clone())).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let command_id = CommandId::generate().unwrap();
-    let command = SessionCommand::RespondToolApproval {
-        run_id: harness.run_id,
-        tool_call_id: tool_call.id,
-        decision: ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    };
-    let receipt = harness
-        .runtime
-        .command(command_id, command.clone())
-        .await
-        .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        CommandOutcome::ToolApprovalResolved {
-            resolution: ApprovalResolution::ApprovedForWorkspace,
-            ..
-        }
-    ));
-
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        !observed.iter().any(|event| matches!(
-            event.event,
-            SessionEvent::ToolApprovalRequested {
-                delegated: false,
-                ..
-            }
-        )),
-        "subsequent supervision must not request human approval"
-    );
-    assert_eq!(
-        observed
-            .iter()
-            .filter(|event| matches!(
-                &event.event,
-                SessionEvent::ToolCallFinished { tool_call }
-                    if tool_call.state == ToolCallState::Completed
-            ))
-            .count(),
-        2
-    );
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    ));
-
-    let promoted = grant_promotion_event(&observed, &mut harness.events).await;
-    assert_eq!(promoted.caused_by, Some(command_id));
-    assert_eq!(promoted.run_id, Some(harness.run_id));
-    assert!(matches!(
-        &promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            grant: ApprovalGrant::Tool { name },
-            outcome: WorkspaceGrantOutcome::Written { path },
-        } if name == "__test_shell" && path == "/w/.qq/config.ron"
-    ));
-    {
-        let promotions = authority.promotions.lock().unwrap();
-        assert_eq!(promotions.len(), 1);
-        assert_eq!(
-            promotions[0].0,
-            std::fs::canonicalize(harness._directory.path()).unwrap()
-        );
-    }
-
-    // Retrying the same command replays the durable receipt without
-    // re-running the promotion.
-    let retried = harness.runtime.command(command_id, command).await.unwrap();
-    assert_eq!(retried, receipt);
-    assert_eq!(authority.promotions.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn cancelled_command_future_cannot_lose_a_committed_promotion_wake() {
-    let authority = ScriptedGrantAuthority::new(
-        WorkspaceGrantSeed::default(),
-        WorkspaceGrantOutcome::Written {
-            path: "/w/.qq/config.ron".to_owned(),
-        },
-    );
-    let (mut harness, _review_release) = grant_promotion_harness(1, Some(authority.clone())).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let command_id = CommandId::generate().unwrap();
-    let command = SessionCommand::RespondToolApproval {
-        run_id: harness.run_id,
-        tool_call_id: tool_call.id,
-        decision: ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    };
-    let (committed, release) = store::hold_committed_command(command_id);
-    let runtime = harness.runtime.clone();
-    let submitted = command.clone();
-    let command_task = tokio::spawn(async move { runtime.command(command_id, submitted).await });
-    tokio::time::timeout(Duration::from_secs(2), committed)
-        .await
-        .unwrap()
-        .unwrap();
-    command_task.abort();
-    assert!(command_task.await.unwrap_err().is_cancelled());
-    release.send(()).unwrap();
-
-    let promoted = grant_promotion_event(&[], &mut harness.events).await;
-    assert_eq!(promoted.caused_by, Some(command_id));
-    assert!(matches!(
-        promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            outcome: WorkspaceGrantOutcome::Written { .. },
-            ..
-        }
-    ));
-    assert_eq!(authority.promotions.lock().unwrap().len(), 1);
-
-    // Replaying the durable command releases the original tool waiter but
-    // cannot enqueue or execute the already-settled promotion again.
-    harness.runtime.command(command_id, command).await.unwrap();
-    collect_through_finished(&mut harness.events).await;
-    assert_eq!(authority.promotions.lock().unwrap().len(), 1);
-    harness.runtime.shutdown().await.unwrap();
-}
-
 #[tokio::test]
 async fn promotion_outbox_rejects_a_mismatched_embedded_command_id() {
     let directory = tempfile::tempdir().unwrap();
@@ -984,242 +1041,51 @@ async fn workspace_promotion_outbox_is_atomic_with_the_approval() {
     store.close().await.unwrap();
 }
 
-struct PendingSupervisionReviewer;
-
-impl ApprovalReviewer for PendingSupervisionReviewer {
-    fn review(&self, _request: ReviewRequest) -> ReviewFuture {
-        Box::pin(std::future::pending())
-    }
-}
-
 #[tokio::test]
-async fn workspace_grant_promotions_are_serialized() {
-    let (entered, mut entries) = mpsc::unbounded_channel();
-    let release = Arc::new(Semaphore::new(0));
-    let max_active = Arc::new(AtomicUsize::new(0));
-    let authority = Arc::new(ObservedBlockingGrantAuthority {
-        entered,
-        release: Arc::clone(&release),
-        active: Arc::new(AtomicUsize::new(0)),
-        max_active: Arc::clone(&max_active),
-    });
-    // Distinct grants for the same allowed action exercise serialization;
-    // mandatory child supervision remains even when the first grant matches.
-    let mut harness = supervised_approval_harness(
-        "__test_shell",
-        r#"{"command":"cargo test"}"#,
-        2,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        Some(authority),
-        Arc::new(PendingSupervisionReviewer),
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let run_id = harness.run_id;
-
-    let (_, first) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        run_id,
-        first.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::ShellPrefix {
-                prefix: "cargo".to_owned(),
+async fn retained_workspace_promotion_outbox_recovers_after_restart() {
+    let (directory, store, claimed, tool_call_id) =
+        stored_approval_fixture("__test_shell", r#"{"command":"git push origin main"}"#).await;
+    let workspace_id = claimed.identity.workspace_id;
+    let store_id = store.store_id();
+    store
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::RespondToolApproval {
+                run_id: claimed.identity.run_id,
+                tool_call_id,
+                decision: ApprovalDecision::ApproveForWorkspace {
+                    grant: ApprovalGrant::Tool {
+                        name: "__test_shell".into(),
+                    },
+                },
             },
-        },
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        entries.recv().await,
-        Some(ApprovalGrant::ShellPrefix { prefix }) if prefix == "cargo"
-    ));
-
-    let (_, second) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        run_id,
-        second.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::ShellPrefix {
-                prefix: "cargo test".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(25), entries.recv())
-            .await
-            .is_err(),
-        "the second authority call must wait behind the first"
-    );
-
-    release.add_permits(1);
-    assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), entries.recv())
-            .await
-            .unwrap(),
-        Some(ApprovalGrant::ShellPrefix { prefix }) if prefix == "cargo test"
-    ));
-    release.add_permits(1);
-    collect_through_finished(&mut harness.events).await;
-    harness.runtime.shutdown().await.unwrap();
-    assert_eq!(max_active.load(Ordering::Acquire), 1);
-}
-
-#[tokio::test]
-async fn shutdown_waits_for_an_accepted_workspace_grant_promotion() {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let authority = Arc::new(BlockingGrantAuthority {
-        entered: Arc::clone(&entered),
-        release: Arc::clone(&release),
-    });
-    let (mut harness, _review_release) = grant_promotion_harness(1, Some(authority)).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    entered.notified().await;
-    let observed = collect_through_finished(&mut harness.events).await;
-
-    let runtime = harness.runtime.clone();
-    let shutdown = tokio::spawn(async move { runtime.shutdown().await });
-    tokio::task::yield_now().await;
-    assert!(!shutdown.is_finished());
-    release.notify_one();
-
-    shutdown.await.unwrap().unwrap();
-    let promoted = grant_promotion_event(&observed, &mut harness.events).await;
-    assert!(matches!(
-        promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            outcome: WorkspaceGrantOutcome::Written { .. },
-            ..
-        }
-    ));
-}
-
-#[tokio::test]
-async fn shutdown_reports_an_accepted_grant_promotion_persistence_failure() {
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let authority = Arc::new(BlockingGrantAuthority {
-        entered: Arc::clone(&entered),
-        release: Arc::clone(&release),
-    });
-    let (mut harness, _review_release) = grant_promotion_harness(1, Some(authority)).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    entered.notified().await;
-    collect_through_finished(&mut harness.events).await;
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .execute_batch(
-                    "CREATE TRIGGER reject_grant_promotion_event
-                     BEFORE INSERT ON events
-                     WHEN NEW.envelope_json LIKE '%workspace_grant_promoted%'
-                     BEGIN SELECT RAISE(ABORT, 'injected promotion failure'); END;",
-                )
-                .map_err(|_| SessionRuntimeError::CODEC)
-        })
+        )
         .await
         .unwrap();
-
-    let runtime = harness.runtime.clone();
-    let shutdown = tokio::spawn(async move { runtime.shutdown().await });
-    tokio::task::yield_now().await;
-    assert!(!shutdown.is_finished());
-    release.notify_one();
-
-    assert_eq!(
-        shutdown.await.unwrap().unwrap_err(),
-        SessionRuntimeError::Unavailable
-    );
-    let pending: u32 = harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::CODEC)
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        pending, 1,
-        "a failed fate commit must retain its outbox row"
-    );
-
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .execute("DROP TRIGGER reject_grant_promotion_event", [])
-                .map(|_| ())
-                .map_err(|_| SessionRuntimeError::CONSTRAINT)
-        })
-        .await
-        .unwrap();
-    let database_path = harness._directory.path().join("sessions.sqlite3");
-    let store_id = harness.runtime.inner.store.store_id();
-    harness.runtime.inner.store.close().await.unwrap();
-
-    let recovered_authority = ScriptedGrantAuthority::new(
+    assert!(store.next_grant_promotion().await.unwrap().is_some());
+    store.close().await.unwrap();
+    let authority = ScriptedGrantAuthority::new(
         WorkspaceGrantSeed::default(),
         WorkspaceGrantOutcome::AlreadyPresent {
-            path: "/w/.qq/config.ron".to_owned(),
+            path: "/w/.qq/config.ron".into(),
         },
     );
-    let mut options = SessionRuntimeOptions::new(database_path);
-    options.grant_authority = Some(recovered_authority.clone());
-    let recovered = SessionRuntime::open(options, Arc::new(ScriptedLoader))
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.grant_authority = Some(authority.clone());
+    let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
         .await
         .unwrap();
-    let mut recovered_events = recovered
+    let mut events = runtime
         .subscribe(SubscribeRequest {
-            workspace_id: harness.workspace_id,
+            workspace_id,
             after: EventCursor {
                 store_id,
-                workspace_id: harness.workspace_id,
+                workspace_id,
                 sequence: 0,
             },
         })
         .unwrap();
-    let promoted = grant_promotion_event(&[], &mut recovered_events).await;
+    let promoted = grant_promotion_event(&[], &mut events).await;
     assert!(matches!(
         promoted.event,
         SessionEvent::WorkspaceGrantPromoted {
@@ -1227,53 +1093,17 @@ async fn shutdown_reports_an_accepted_grant_promotion_persistence_failure() {
             ..
         }
     ));
-    assert_eq!(recovered_authority.promotions.lock().unwrap().len(), 1);
-    let remaining: u32 = recovered
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(|_| SessionRuntimeError::CODEC)
-        })
-        .await
-        .unwrap();
-    assert_eq!(remaining, 0);
-    recovered.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_panicking_grant_authority_persists_a_failed_promotion_fate() {
-    let (mut harness, _review_release) =
-        grant_promotion_harness(1, Some(Arc::new(PanickingGrantAuthority))).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-
-    let observed = collect_through_finished(&mut harness.events).await;
-    let promoted = grant_promotion_event(&observed, &mut harness.events).await;
-    assert!(matches!(
-        promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            outcome: WorkspaceGrantOutcome::Failed { ref message },
-            ..
-        } if message == "the workspace grant authority panicked"
-    ));
-    harness.runtime.shutdown().await.unwrap();
+    assert_eq!(authority.promotions.lock().unwrap().len(), 1);
+    assert!(
+        runtime
+            .inner
+            .store
+            .next_grant_promotion()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1285,89 +1115,6 @@ async fn shutdown_never_reports_success_after_the_runtime_has_failed() {
         runtime.shutdown().await.unwrap_err(),
         SessionRuntimeError::Unavailable
     );
-}
-
-#[tokio::test]
-async fn failed_workspace_grant_promotion_leaves_the_approval_standing() {
-    let authority = ScriptedGrantAuthority::new(
-        WorkspaceGrantSeed::default(),
-        WorkspaceGrantOutcome::Failed {
-            message: "denied by managed policy".to_owned(),
-        },
-    );
-    let (mut harness, _review_release) = grant_promotion_harness(1, Some(authority)).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        observed.iter().any(|event| matches!(
-            &event.event,
-            SessionEvent::ToolCallFinished { tool_call }
-                if tool_call.state == ToolCallState::Completed
-        )),
-        "the approved call must execute despite the failed promotion"
-    );
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    ));
-    let promoted = grant_promotion_event(&observed, &mut harness.events).await;
-    assert!(matches!(
-        &promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            outcome: WorkspaceGrantOutcome::Failed { message },
-            ..
-        } if message == "denied by managed policy"
-    ));
-}
-
-#[tokio::test]
-async fn approve_for_workspace_without_an_authority_reports_a_failed_promotion() {
-    let (mut harness, _review_release) = grant_promotion_harness(1, None).await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForWorkspace {
-            grant: ApprovalGrant::Tool {
-                name: "__test_shell".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    ));
-    let promoted = grant_promotion_event(&observed, &mut harness.events).await;
-    assert!(matches!(
-        &promoted.event,
-        SessionEvent::WorkspaceGrantPromoted {
-            outcome: WorkspaceGrantOutcome::Failed { message },
-            ..
-        } if message.contains("no workspace grant store")
-    ));
 }
 
 #[tokio::test]
@@ -1449,145 +1196,8 @@ async fn ask_shell_approval_requests_carry_the_command_preview() {
 }
 
 #[tokio::test]
-async fn reviewer_approval_executes_a_held_call_without_a_client() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        observed.iter().any(|event| matches!(
-            &event.event,
-            SessionEvent::ToolApprovalRequested {
-                delegated: true,
-                ..
-            }
-        )),
-        "the request says the reviewer decides first (ENG-1034)"
-    );
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::ApprovedByReviewer,
-            ..
-        }
-    )));
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolCallFinished { tool_call }
-            if tool_call.state == ToolCallState::Completed
-    )));
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    ));
-    let requests = consulted.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].tool_name, "__test_mutate");
-    assert!(matches!(
-        requests[0].origin,
-        ReviewOrigin::Child { depth: 1, .. }
-    ));
-}
-
-#[tokio::test]
-async fn a_delegate_approval_records_an_exact_command_grant_and_nothing_wider() {
-    // Delegate grants remain exact audit records. Every permitted child action
-    // still passes internal supervision, including repeated commands.
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_scripted_approval_harness(
-        vec![
-            ("__test_shell", r#"{"command":"cargo test x"}"#.to_owned()),
-            ("__test_shell", r#"{"command":"cargo test x"}"#.to_owned()),
-            ("__test_shell", r#"{"command":"cargo test y"}"#.to_owned()),
-        ],
-        None,
-        reviewer,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    let held: Vec<String> = observed
-        .iter()
-        .filter_map(|event| match &event.event {
-            SessionEvent::ToolApprovalRequested {
-                shell: Some(shell), ..
-            } => Some(shell.command.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        held,
-        ["cargo test x", "cargo test x", "cargo test y"],
-        "stored grants never bypass mandatory child supervision"
-    );
-    assert_eq!(
-        consulted.lock().unwrap().len(),
-        3,
-        "the reviewer supervises every child command"
-    );
-    assert_eq!(
-        observed
-            .iter()
-            .filter(|event| matches!(
-                &event.event,
-                SessionEvent::ToolCallFinished { tool_call }
-                    if tool_call.state == ToolCallState::Completed
-            ))
-            .count(),
-        3
-    );
-    let (_, grants, _) = harness
-        .runtime
-        .inner
-        .store
-        .approval_policy(harness.session_id)
-        .await
-        .unwrap();
-    assert!(
-        grants.shell_prefixes.is_empty(),
-        "a delegate grant is not a human prefix grant: {grants:?}"
-    );
-    assert_eq!(
-        grants.delegate.commands,
-        ["cargo test x".to_owned(), "cargo test y".to_owned()]
-            .into_iter()
-            .collect()
-    );
-    // The same row shape a delegate writes is never a workspace promotion.
-    let pending: u32 = harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .query_row(
-                    "SELECT COUNT(*) FROM pending_workspace_grant_promotions",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(Into::into)
-        })
-        .await
-        .unwrap();
-    assert_eq!(pending, 0, "a delegate verdict never schedules a promotion");
-}
-
-#[tokio::test]
 #[cfg(feature = "tool-fetch")]
-async fn a_delegate_host_grant_covers_the_exact_host_only() {
+async fn a_recorded_delegate_host_grant_remains_distinct_from_human_grants() {
     // Test persistence and exact matching independently of live admission:
     // a reviewer cannot supply host authority missing from an Auto task.
     let (_directory, store, claimed, id) =
@@ -1632,101 +1242,6 @@ async fn a_delegate_host_grant_covers_the_exact_host_only() {
         grants.delegate.hosts,
         ["docs.invalid".to_owned()].into_iter().collect()
     );
-    let class = |host: &str| approval::ToolClass::Network {
-        host: Some(host.to_owned()),
-        refusal: None,
-    };
-    assert!(matches!(
-        approval::evaluate(ApprovalMode::Auto, "fetch", &class("docs.invalid"), &grants),
-        approval::PolicyDecision::Execute
-    ));
-    assert!(matches!(
-        approval::evaluate(
-            ApprovalMode::Auto,
-            "fetch",
-            &class("api.docs.invalid"),
-            &grants
-        ),
-        approval::PolicyDecision::RequireApproval
-    ));
-}
-
-#[tokio::test]
-async fn a_reviewer_approval_records_a_delegate_grant_row_that_still_matches_exactly() {
-    // DA5: a reviewer's grant row names its source, so an audit can tell it
-    // from a human grant. It is a delegate row: exact match only, counted
-    // against the same per-run cap, never a human prefix grant. New rows
-    // never say `jev`: that source is historical.
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_scripted_approval_harness(
-        vec![
-            ("__test_shell", r#"{"command":"cargo test x"}"#.to_owned()),
-            ("__test_shell", r#"{"command":"cargo test x"}"#.to_owned()),
-            (
-                "__test_shell",
-                r#"{"command":"cargo test x --amend"}"#.to_owned(),
-            ),
-        ],
-        None,
-        reviewer,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_eq!(
-        consulted.lock().unwrap().len(),
-        3,
-        "each permitted child action is supervised, including repeated commands"
-    );
-    assert!(observed.iter().all(|event| !matches!(
-        &event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::DeniedByReviewer,
-            ..
-        }
-    )));
-    let rows: Vec<(String, String, String)> = harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            let mut statement = connection.prepare(
-                "SELECT kind, value, source FROM session_grants ORDER BY created_at_ms, value",
-            )?;
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        rows,
-        [
-            (
-                "shell_prefix".to_owned(),
-                "cargo test x".to_owned(),
-                "delegate".to_owned()
-            ),
-            (
-                "shell_prefix".to_owned(),
-                "cargo test x --amend".to_owned(),
-                "delegate".to_owned()
-            ),
-        ]
-    );
-    let (_, grants, _) = harness
-        .runtime
-        .inner
-        .store
-        .approval_policy(harness.session_id)
-        .await
-        .unwrap();
-    assert!(
-        grants.shell_prefixes.is_empty(),
-        "a reviewer row is a delegate row, not a human prefix: {grants:?}"
-    );
-    assert!(grants.delegate.commands.contains("cargo test x"));
 }
 
 #[tokio::test]
@@ -1856,368 +1371,6 @@ async fn a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reach
 }
 
 #[tokio::test]
-async fn reviewer_escalation_denies_without_waiting_for_a_client() {
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Escalate {
-        reason: "unsure".to_owned(),
-    }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    assert!(observed.iter().any(|event| matches!(&event.event,
-        SessionEvent::ToolApprovalResolved { resolution: ApprovalResolution::DeniedByReviewer, tool_call, .. }
-            if tool_call.result.as_deref().is_some_and(|result| result.contains("unsure"))
-    )));
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
-    );
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn the_session_summary_says_who_a_hold_waits_on_until_it_settles() {
-    // ENG-1034 (PR #289 review): a client that never loaded the session's
-    // body, or attached after the request event, learns from the summary
-    // alone whether a held call needs a human.
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
-        reason: "unsure".to_owned(),
-    }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let holds = |snapshot: WorkspaceSnapshot| snapshot.focused.unwrap().summary.pending_holds;
-    let request = SnapshotRequest {
-        workspace_id: harness.workspace_id,
-        focused_session_id: Some(harness.session_id),
-        include_sessions: Vec::new(),
-        session_limit: 1,
-        message_limit: 8,
-    };
-    assert_eq!(
-        holds(harness.runtime.snapshot(request.clone()).await.unwrap()),
-        [qq_protocol::PendingHold {
-            tool_call_id: tool_call.id,
-            delegated: true,
-        }],
-        "the reviewer is deciding"
-    );
-
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    // Settled summaries clear the internal review without asking a human.
-    for event in &observed {
-        if let SessionEvent::RunFinished { session, .. } = &event.event {
-            assert!(session.pending_holds.is_empty());
-        }
-    }
-    assert!(holds(harness.runtime.snapshot(request).await.unwrap()).is_empty());
-}
-
-#[tokio::test]
-async fn a_failed_reviewer_denial_write_fails_instead_of_waiting_for_a_human() {
-    // A failed internal-denial transaction must fail the run instead of
-    // leaving an unresolved review or falling back to a human.
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
-        reason: "unsure".to_owned(),
-    }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    collect_until_approval_requested(&mut harness.events).await;
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, |connection| {
-            connection
-                .execute_batch(
-                    r#"CREATE TRIGGER reject_reviewer_denial BEFORE INSERT ON events
-                       WHEN NEW.envelope_json LIKE '%"type":"tool_approval_resolved"%'
-                         AND NEW.envelope_json LIKE '%"resolution":"denied_by_reviewer"%'
-                       BEGIN SELECT RAISE(ABORT, 'injected reviewer denial failure'); END;"#,
-                )
-                .map_err(|_| SessionRuntimeError::CODEC)
-        })
-        .await
-        .unwrap();
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolApprovalEscalated { .. }))
-    );
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Failed { .. },
-            session,
-            ..
-        } if session.pending_holds.is_empty()
-    ));
-}
-
-#[tokio::test]
-async fn a_reviewer_denial_is_final_under_auto_and_no_human_is_asked() {
-    // A supervised child's reviewer denial is final, names its reason,
-    // and lets the model continue without executing the denied action.
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
-            reason: "pushes to a shared branch".to_owned(),
-        }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    // The hold is published before the reviewer is consulted (a client may
-    // still answer first), and the denial settles it.
-    let denied = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalResolved {
-                tool_call,
-                resolution: ApprovalResolution::DeniedByReviewer,
-                ..
-            } => Some(tool_call.clone()),
-            _ => None,
-        })
-        .expect("the reviewer denial is published");
-    assert_eq!(denied.state, ToolCallState::Denied);
-    let result = denied.result.as_deref().unwrap();
-    assert!(result.starts_with(approval::reviewer_denied_result()));
-    assert!(result.contains("pushes to a shared branch"));
-    assert!(
-        !result.contains("supervised"),
-        "the denial preserves the reviewer reason: {result}"
-    );
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
-    );
-    assert!(matches!(
-        &observed.last().unwrap().event,
-        SessionEvent::RunFinished {
-            outcome: RunOutcome::Completed,
-            ..
-        }
-    ));
-    assert_eq!(consulted.lock().unwrap().len(), 1);
-    // The model saw the denial as a tool error and the run went on.
-    {
-        let requests = harness.requests.lock().unwrap();
-        assert!(
-            requests[1]
-                .messages()
-                .iter()
-                .flat_map(Message::content)
-                .any(
-                    |block| matches!(block, ContentBlock::ToolResult { content, is_error: true, .. }
-                if content.starts_with(approval::reviewer_denied_result()))
-                )
-        );
-    }
-    // A late client answer finds the call already settled.
-    let receipt = respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        denied.id,
-        ApprovalDecision::ApproveOnce,
-    )
-    .await;
-    assert!(
-        matches!(
-            receipt,
-            Ok(CommandReceipt {
-                outcome: CommandOutcome::ToolApprovalResolved {
-                    resolution: ApprovalResolution::DeniedByReviewer,
-                    ..
-                },
-                ..
-            }) | Err(SessionRuntimeError::ApprovalNotPending)
-        ),
-        "a settled denial is not reopened by a late approval"
-    );
-}
-
-#[tokio::test]
-async fn a_reviewer_escalation_reason_is_durably_denied_and_cannot_be_overridden() {
-    let reason = "the task brief does not authorize this action";
-    let (reviewer, _) = StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Escalate {
-        reason: reason.to_owned(),
-    }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    let denied = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalResolved {
-                resolution: ApprovalResolution::DeniedByReviewer,
-                delegate: Some(DelegateIdentity::Reviewer),
-                tool_call,
-                ..
-            } => Some(tool_call),
-            _ => None,
-        })
-        .expect("the reviewer's escalation becomes a durable denial");
-    assert!(denied.result.as_deref().unwrap().contains(reason));
-    let late = respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        denied.id,
-        ApprovalDecision::ApproveOnce,
-    )
-    .await;
-    assert!(matches!(
-        late,
-        Ok(CommandReceipt {
-            outcome: CommandOutcome::ToolApprovalResolved {
-                resolution: ApprovalResolution::DeniedByReviewer,
-                ..
-            },
-            ..
-        }) | Err(SessionRuntimeError::ApprovalNotPending)
-    ));
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_reviewer_escalation_settles_even_with_no_human_deadline() {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Escalate {
-        reason: "unsure".to_owned(),
-    }));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        None,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    collect_until_approval_requested(&mut harness.events).await;
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    assert!(observed.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::DeniedByReviewer,
-            ..
-        }
-    )));
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_reviewer_timeout_denies_without_waiting_on_a_human() {
-    let (reviewer, _release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        None,
-        Duration::from_millis(200),
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    assert!(observed.iter().any(|event| matches!(&event.event,
-        SessionEvent::ToolApprovalResolved { resolution: ApprovalResolution::DeniedByReviewer, tool_call, .. }
-            if tool_call.result.as_deref().is_some_and(|result| result.contains(approval::DELEGATE_TIMED_OUT_REASON))
-    )));
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
-    );
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_short_human_clock_cannot_replace_the_internal_reviewer_clock() {
-    let (reviewer, _release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        Some(Duration::from_millis(1)),
-        Duration::from_millis(200),
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    assert!(observed.iter().any(|event| matches!(&event.event,
-        SessionEvent::ToolApprovalResolved { resolution: ApprovalResolution::DeniedByReviewer, tool_call, .. }
-            if tool_call.result.as_deref().is_some_and(|result| result.contains(approval::DELEGATE_TIMED_OUT_REASON))
-    )));
-    assert!(!observed.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::DeniedTimeout,
-            ..
-        }
-    )));
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn an_interactive_hold_has_no_server_deadline_by_default() {
     // DA2 / RR9: `approval_timeout: None` (the default) means the server
     // never denies a held call on its own clock. The hold outlives what the
@@ -2252,48 +1405,6 @@ async fn an_interactive_hold_has_no_server_deadline_by_default() {
         &event.event,
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Completed
-    )));
-}
-
-#[tokio::test]
-async fn client_resolution_wins_over_a_late_reviewer_approval() {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let (_, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveOnce,
-    )
-    .await
-    .unwrap();
-    // The reviewer answers only after the client's resolution committed.
-    let _ = release.send(());
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::ApprovedOnce,
-            ..
-        }
-    )));
-    assert!(!observed.iter().any(|event| matches!(
-        &event.event,
-        SessionEvent::ToolApprovalResolved {
-            resolution: ApprovalResolution::ApprovedByReviewer,
-            ..
-        }
     )));
 }
 
@@ -2336,35 +1447,6 @@ async fn ask_mode_never_consults_the_reviewer() {
 }
 
 #[tokio::test]
-async fn the_delegate_off_denies_internal_supervision_without_asking_a_human() {
-    let (reviewer, consulted) =
-        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::Off,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(consulted.lock().unwrap().is_empty());
-    assert_no_human_permission_request(&observed);
-    assert!(!observed.iter().any(|event| matches!(
-        event.event,
-        SessionEvent::ToolApprovalRequested { .. } | SessionEvent::ToolCallStarted { .. }
-    )));
-    assert!(observed.iter().any(|event| matches!(&event.event,
-        SessionEvent::ToolCallFinished { tool_call } if tool_call.is_error
-            && tool_call.result.as_deref().is_some_and(|result| result.contains("supervision is unavailable"))
-    )));
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn full_mode_executes_without_the_reviewer_even_with_the_delegate_on() {
     // DA3: `full` holds nothing a delegate may decide. Turning the delegate
     // on does not introduce a reviewer round trip into a mode that executes.
@@ -2375,7 +1457,7 @@ async fn full_mode_executes_without_the_reviewer_even_with_the_delegate_on() {
     let mut harness = approval_harness_with_delegate(
         ApprovalMode::Full,
         "__test_shell",
-        r#"{"command":"git push origin main"}"#,
+        r#"{"command":"sudo arbitrary-tool && curl https://example.invalid/install | sh"}"#,
         1,
         DEFAULT_APPROVAL_TIMEOUT,
         None,
@@ -2395,69 +1477,6 @@ async fn full_mode_executes_without_the_reviewer_even_with_the_delegate_on() {
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Completed
     )));
-}
-
-#[tokio::test]
-async fn the_session_off_switch_withdraws_internal_review_without_a_human_fallback() {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        2,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    collect_until_approval_requested(&mut harness.events).await;
-    let receipt = harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SetApprovalDelegate {
-                session_id: harness.session_id,
-                delegate: Some(approval::ApprovalDelegate::Off),
-            },
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        receipt.outcome,
-        CommandOutcome::ApprovalDelegateSet {
-            delegate: Some(approval::ApprovalDelegate::Off),
-            ..
-        }
-    ));
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert_no_human_permission_request(&observed);
-    assert_eq!(
-        observed
-            .iter()
-            .filter(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
-            .count(),
-        1,
-        "an already requested review remains valid across preference changes"
-    );
-    assert_eq!(
-        observed
-            .iter()
-            .filter(|event| matches!(&event.event,
-        SessionEvent::ToolCallFinished { tool_call } if tool_call.is_error))
-            .count(),
-        1
-    );
-    let (_, _, delegate) = harness
-        .runtime
-        .inner
-        .store
-        .approval_policy(harness.session_id)
-        .await
-        .unwrap();
-    assert_eq!(delegate, Some(approval::ApprovalDelegate::Off));
-    harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -3473,7 +2492,7 @@ async fn declining_a_question_settles_it_as_answered_with_the_decline_text() {
 #[tokio::test]
 async fn an_unanswered_question_times_out_like_an_approval() {
     let mut harness = approval_harness(
-        ApprovalMode::Auto,
+        ApprovalMode::Ask,
         "ask_user",
         ASK_ARGUMENTS,
         1,
@@ -3518,101 +2537,144 @@ async fn malformed_ask_user_arguments_are_a_tool_error_without_a_hold() {
 
 #[tokio::test]
 #[cfg(feature = "tool-fetch")]
-async fn fetch_holds_with_a_host_preview_and_a_host_grant_covers_the_next_call() {
-    // `invalid.` is reserved (RFC 6761) and never resolves, so the approved
-    // call fails at resolution — a tool error, not a policy event — while
-    // everything this test asserts happens before dispatch.
-    let mut harness = approval_harness(
-        ApprovalMode::Ask,
-        "fetch",
-        r#"{"url":"https://docs.invalid/axum"}"#,
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-    )
-    .await;
-    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let preview = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalRequested {
-                fetch, shell, edit, ..
-            } => {
-                assert!(shell.is_none() && edit.is_none());
-                fetch.clone()
-            }
-            _ => None,
-        })
-        .expect("the hold carries the fetch preview");
-    assert_eq!(preview.url, "https://docs.invalid/axum");
-    assert_eq!(preview.host, "docs.invalid");
-    assert!(preview.method.is_none());
-
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForSession {
-            grant: ApprovalGrant::Host {
-                host: "*.invalid".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    collect_through_finished(&mut harness.events).await;
-    harness.runtime.shutdown().await.unwrap();
-    let authority = ScriptedGrantAuthority::new(
-        WorkspaceGrantSeed {
-            tools: Vec::new(),
-            shell_prefixes: Vec::new(),
-            hosts: vec!["*.invalid".to_owned()],
-        },
-        WorkspaceGrantOutcome::Failed {
-            message: "unused".to_owned(),
-        },
-    );
-    let mut harness = approval_harness_with_authority(
-        ApprovalMode::Auto,
-        "fetch",
-        r#"{"url":"https://docs.invalid/axum"}"#,
-        2,
-        DEFAULT_APPROVAL_TIMEOUT,
-        Some(authority),
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
-        "the host grant must cover the second call"
-    );
-    let finished: Vec<_> = observed
-        .iter()
-        .filter_map(|event| match &event.event {
-            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(finished.len(), 2);
-    for call in finished {
-        assert!(call.is_error);
-        assert!(
-            call.result
-                .as_deref()
-                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
-            "{:?}",
-            call.result
-        );
+async fn ask_fetch_has_a_preview_while_auto_fetch_needs_no_host_grant() {
+    struct Loader {
+        arguments: String,
+        turns: usize,
     }
-    let (_, grants, _) = harness
-        .runtime
-        .inner
-        .store
-        .approval_policy(harness.session_id)
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let provider = ScriptedRunProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                script: (0..self.turns)
+                    .map(|_| ("fetch", self.arguments.clone()))
+                    .collect(),
+                turn: StdMutex::new(0),
+            };
+            Box::pin(async move {
+                let runtime = Runtime::new(provider, "test-model", 256)
+                    .unwrap()
+                    .with_network_policy(crate::NetworkPolicy {
+                        allow_private_for_tests: true,
+                        ..Default::default()
+                    });
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    for (mode, turns) in [(ApprovalMode::Ask, 1), (ApprovalMode::Auto, 2)] {
+        let server = qq_provider::test_support::LoopbackServer::respond_sequence(
+            (0..turns)
+                .map(|_| {
+                    (
+                        200,
+                        Some("text/plain"),
+                        vec![b"fixture-public-docs".to_vec()],
+                    )
+                })
+                .collect(),
+        );
+        let url = format!("{}/docs", server.base_url);
+        let directory = test_directory();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                arguments: serde_json::json!({"url":url}).to_string(),
+                turns,
+            }),
+        )
         .await
         .unwrap();
-    assert_eq!(grants.hosts, ["*.invalid"]);
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let run_id = submit_prompt_to(&runtime, session_id, "read docs").await;
+        if mode == ApprovalMode::Ask {
+            let (observed, call) = collect_until_approval_requested(&mut events).await;
+            let preview = observed
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::ToolApprovalRequested {
+                        fetch, shell, edit, ..
+                    } => {
+                        assert!(shell.is_none() && edit.is_none());
+                        fetch.as_ref()
+                    }
+                    _ => None,
+                })
+                .expect("Ask retains its fetch preview");
+            assert_eq!(preview.url, url);
+            assert_eq!(preview.host, "127.0.0.1");
+            assert!(preview.method.is_none());
+            let receipt = respond_approval(
+                &runtime,
+                run_id,
+                call.id,
+                ApprovalDecision::ApproveForSession {
+                    grant: ApprovalGrant::Host {
+                        host: "127.0.0.1".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                receipt.outcome,
+                CommandOutcome::ToolApprovalResolved {
+                    resolution: ApprovalResolution::ApprovedOnce,
+                    ..
+                }
+            ));
+        }
+        let observed = collect_until_run_finished(&mut events, run_id).await;
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
+            "Auto needs no host approval and Ask has already received its fresh response"
+        );
+        let finished: Vec<_> = observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), turns);
+        for call in finished {
+            assert!(!call.is_error, "{:?}", call.result);
+            assert!(
+                call.result
+                    .as_deref()
+                    .is_some_and(|result| result.contains("fixture-public-docs"))
+            );
+        }
+        let (_, grants, _) = runtime
+            .inner
+            .store
+            .approval_policy(session_id)
+            .await
+            .unwrap();
+        assert!(grants.hosts.is_empty());
+        let requests = tokio::task::spawn_blocking(move || server.capture_all())
+            .await
+            .unwrap();
+        assert_eq!(requests.len(), turns);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.request_line() == Some("GET /docs HTTP/1.1"))
+        );
+        runtime.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -3645,12 +2707,8 @@ async fn fetch_to_a_blocked_host_is_denied_under_full_without_a_hold() {
 #[tokio::test]
 #[cfg(feature = "tool-fetch")]
 async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve() {
-    // Plan acceptance 2, host half: under `auto` an ungranted host is exactly
-    // the kind of call the delegate settles, so this is where a permissive
-    // delegate could matter. It must not: a private or link-local host is
-    // refused before the hold that consults any delegate, the reviewer sees
-    // nothing, and no `tool_approval_requested` is published for a client to
-    // answer either.
+    // Managed/private host restrictions are enforced before mode admission,
+    // even when a configured reviewer would approve the request.
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = approval_harness_with_delegate(
@@ -3892,6 +2950,7 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                 claimed.clone(),
                 cancellation,
                 Arc::new(crate::tools::network::NetworkPolicy::default()),
+                Arc::new(crate::ShellPolicy::default()),
                 approval::ApprovalDelegate::Off,
                 false,
             );
@@ -4072,7 +3131,7 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
         .await
         .unwrap();
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-        let created = create_session(&runtime, workspace, None).await;
+        let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("session")
         };
@@ -4191,52 +3250,6 @@ async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval()
 }
 
 #[tokio::test]
-async fn changing_auto_to_ask_revokes_an_inflight_reviewer_approval() {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let run_id = harness.run_id;
-    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SetApprovalMode {
-                session_id: harness.session_id,
-                mode: ApprovalMode::Ask,
-            },
-        )
-        .await
-        .unwrap();
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        !observed.iter().any(|event| matches!(
-            &event.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id
-        )),
-        "a stale reviewer approval must not execute after Ask is selected"
-    );
-    assert!(observed.iter().any(|event| matches!(
-        &event.event, SessionEvent::ToolApprovalResolved { tool_call, resolution: ApprovalResolution::Denied, .. }
-            if tool_call.id == call.id && tool_call.state == ToolCallState::Denied
-    )), "authority revocation must persist a denied receipt: {observed:?}");
-    assert!(matches!(
-        finished_outcome(&observed, run_id),
-        Some(RunOutcome::Completed)
-    ));
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn readonly_revocation_denies_a_late_human_approval_without_recording_grants() {
     for mode in [ApprovalMode::Ask] {
         for decision in [
@@ -4302,49 +3315,6 @@ async fn readonly_revocation_denies_a_late_human_approval_without_recording_gran
             harness.runtime.shutdown().await.unwrap();
         }
     }
-}
-
-#[tokio::test]
-async fn selecting_equivalent_delegate_policy_preserves_an_inflight_reviewer_approval() {
-    let (reviewer, release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
-    let mut harness = supervised_approval_harness(
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-        DEFAULT_DELEGATE_TIMEOUT,
-        None,
-        reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await;
-    let run_id = harness.run_id;
-    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
-    harness
-        .runtime
-        .command(
-            CommandId::generate().unwrap(),
-            SessionCommand::SetApprovalDelegate {
-                session_id: harness.session_id,
-                delegate: Some(qq_protocol::ApprovalDelegate::ByMode),
-            },
-        )
-        .await
-        .unwrap();
-    release.send(()).unwrap();
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(observed.iter().any(|event| matches!(
-        &event.event, SessionEvent::ToolApprovalResolved { tool_call, resolution: ApprovalResolution::ApprovedByReviewer, .. }
-            if tool_call.id == call.id
-    )), "a delegate preference is not an authority change: {observed:?}");
-    assert!(observed.iter().any(|event| matches!(
-        &event.event, SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id
-    )));
-    assert!(matches!(
-        finished_outcome(&observed, run_id),
-        Some(RunOutcome::Completed)
-    ));
-    harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -4498,222 +3468,48 @@ async fn explicit_session_grants_are_bounded_idempotent_and_durable() {
 
 #[tokio::test]
 #[cfg(feature = "tool-fetch")]
-async fn write_children_inherit_only_human_grants_and_keep_internal_review() {
-    for (human_host, revoke_parent) in [(true, false), (false, false), (true, true)] {
-        let (reviewer, consulted) =
-            StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
-                reason: "stop before network dispatch".into(),
-            }));
-        let (release_child, pending_child) = oneshot::channel();
-        let child: Arc<dyn Provider> = Arc::new(GatedApprovalProvider {
-            inner: ApprovalProvider {
-                requests: Arc::new(StdMutex::new(Vec::new())),
-                turn: StdMutex::new(0),
-                tool: "fetch",
-                arguments: r#"{"url":"https://docs.invalid/page"}"#,
-                tool_turns: 1,
-                usage: None,
-            },
-            release: StdMutex::new(Some(pending_child)),
-        });
-        let (mut harness, _) = write_child_harness(
-            child,
-            vec![(
-                "spawn_agent",
-                r#"{"task":"read approved docs","model":"test/child","authority":"write"}"#.into(),
-            )],
-            Some(reviewer),
-            ApprovalMode::Auto,
-        )
-        .await;
-        let parent_id = harness.session_id;
-        harness
-            .runtime
-            .seed_session_grants(
-                parent_id,
-                WorkspaceGrantSeed {
-                    tools: vec!["write_file".into()],
-                    shell_prefixes: vec!["cargo test".into()],
-                    hosts: if human_host {
-                        vec!["docs.invalid".into()]
-                    } else {
-                        Vec::new()
-                    },
-                },
-            )
-            .await
-            .unwrap();
-        harness
-            .runtime
-            .inner
-            .store
-            .call(Priority::Control, move |connection| {
-                // Historical reviewer authority must remain exact and local.
-                connection.execute(
-                    "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
-                 VALUES (?1,'shell_prefix','npm install',0,'delegate')",
-                    [parent_id.to_string()],
-                )?;
-                connection.execute(
-                    "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
-                 VALUES (?1,'host','reviewer.invalid',0,'delegate')",
-                    [parent_id.to_string()],
-                )?;
-                if !human_host {
-                    connection.execute(
-                        "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
-                     VALUES (?1,'host','docs.invalid',0,'delegate')",
-                        [parent_id.to_string()],
-                    )?;
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let run_id = submit_prompt_to(&harness.runtime, parent_id, "delegate docs").await;
-        let mut observed = Vec::new();
-        let child_id = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let event = harness.events.next().await.unwrap().unwrap();
-                let child_id = match &event.event {
-                    SessionEvent::SessionCreated { session }
-                        if session.parent_id == Some(parent_id) =>
-                    {
-                        Some(session.id)
-                    }
-                    _ => None,
-                };
-                observed.push(event);
-                if let Some(child_id) = child_id {
-                    break child_id;
-                }
-            }
-        })
-        .await
-        .unwrap();
-        if revoke_parent {
-            harness.runtime.inner.store.call(Priority::Control, move |connection| {
-                connection.execute(
-                    "DELETE FROM session_grants WHERE session_id=?1 AND kind='host' AND value='docs.invalid'",
-                    [parent_id.to_string()],
-                )?;
-                Ok(())
-            }).await.unwrap();
-        }
-        release_child.send(()).unwrap();
-        observed.extend(collect_until_run_finished(&mut harness.events, run_id).await);
-        let policy = harness
-            .runtime
-            .inner
-            .store
-            .tool_approval_policy(child_id)
-            .await
-            .unwrap();
-        assert!(policy.supervised);
-        assert_eq!(policy.mode, ApprovalMode::Auto);
-        assert_eq!(
-            policy.grants.tools,
-            ["write_file".to_owned()].into_iter().collect()
-        );
-        assert_eq!(policy.grants.shell_prefixes, ["cargo test"]);
-        assert!(policy.grants.delegate.commands.is_empty());
-        assert!(policy.grants.delegate.hosts.is_empty());
-        assert_eq!(
-            policy.grants.hosts,
-            if human_host {
-                vec!["docs.invalid"]
-            } else {
-                Vec::new()
-            }
-        );
-        assert_eq!(
-            consulted.lock().unwrap().len(),
-            usize::from(human_host && !revoke_parent),
-            "only explicit human authority may reach child supervision"
-        );
-        assert_no_human_permission_request(&observed);
-        assert!(!observed.iter().any(|event| matches!(&event.event,
-            SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "fetch")));
-        let child_events: Vec<_> = observed
+async fn auto_returns_a_blocked_fetch_as_a_tool_error_and_completes_an_allowed_alternative() {
+    let (reviewer, consulted) =
+        StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
+    let mut harness = scripted_runs_harness_with(
+        ApprovalMode::Auto,
+        vec![vec![
+            (
+                "fetch",
+                r#"{"url":"http://169.254.169.254/latest/meta-data"}"#.into(),
+            ),
+            ("__test_mutate", "{}".into()),
+        ]],
+        None,
+        Some(reviewer),
+    )
+    .await;
+    let run_id = submit_prompt(&harness, "use available information and continue").await;
+    let observed = collect_until_run_finished(&mut harness.events, run_id).await;
+    assert_no_human_permission_request(&observed);
+    assert!(
+        !observed
             .iter()
-            .filter(|event| event.session_id == child_id)
-            .collect();
-        assert!(
-            child_events.iter().any(|event| matches!(
-                &event.event,
-                SessionEvent::RunFinished {
-                    outcome: RunOutcome::Completed,
-                    ..
-                }
-            )),
-            "child must settle before its foreground parent: {child_events:#?}"
-        );
-        let denied = child_events
-            .iter()
-            .find_map(|event| match &event.event {
-                SessionEvent::ToolApprovalResolved {
-                    tool_call,
-                    resolution: ApprovalResolution::DeniedByReviewer,
-                    ..
-                } if human_host && !revoke_parent => Some(tool_call),
-                SessionEvent::ToolCallFinished { tool_call } if !human_host || revoke_parent => {
-                    Some(tool_call)
-                }
-                _ => None,
-            })
-            .expect("the exact typed denial event must be present");
-        assert_eq!(denied.name, "fetch");
-        assert_eq!(denied.state, ToolCallState::Denied, "{child_events:#?}");
-        assert!(denied.is_error);
-        let expected_reason = if revoke_parent {
-            "parent_permission_required"
-        } else if human_host {
-            "stop before network dispatch"
-        } else {
-            "outside_auto_scope"
-        };
-        assert!(
-            denied
-                .result
-                .as_deref()
-                .is_some_and(|result| result.contains(expected_reason)),
-            "{child_events:#?}"
-        );
-        let denied_id = denied.id;
-        let persisted = harness
-            .runtime
-            .inner
-            .store
-            .call(Priority::Control, move |connection| {
-                Ok(connection.query_row(
-                    "SELECT state,is_error FROM tool_calls WHERE id=?1",
-                    [denied_id.to_string()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
-                )?)
-            })
-            .await
-            .unwrap();
-        assert_eq!(persisted, ("denied".into(), true));
-        if revoke_parent {
-            assert!(observed.iter().any(|event| matches!(&event.event,
-                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch"
-                    && tool_call.result.as_deref().is_some_and(|result| result.contains("parent_permission_required")))));
+            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. }))
+    );
+    assert!(consulted.lock().unwrap().is_empty());
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch"
+            && tool_call.state == ToolCallState::Denied && tool_call.is_error
+            && tool_call.result.as_deref().is_some_and(|result| result.contains("private"))
+    )));
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "__test_mutate"
+            && !tool_call.is_error && tool_call.result.as_deref() == Some("mutated")
+    )));
+    assert!(matches!(
+        observed.last().unwrap().event,
+        SessionEvent::RunFinished {
+            outcome: RunOutcome::Completed,
+            ..
         }
-        assert_eq!(
-            observed
-                .iter()
-                .filter(|event| matches!(
-                    &event.event,
-                    SessionEvent::ToolApprovalResolved {
-                        resolution: ApprovalResolution::DeniedByReviewer,
-                        ..
-                    }
-                ))
-                .count(),
-            usize::from(human_host && !revoke_parent)
-        );
-        harness.runtime.shutdown().await.unwrap();
-    }
+    ));
+    harness.runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]

@@ -311,6 +311,7 @@ async fn prepare_execution(
             claimed.clone(),
             cancellation.clone(),
             loaded.plan.network_policy(),
+            loaded.plan.shell_policy(),
             loaded.plan.approval_delegate(),
             resources.task.get().is_some(),
         ))

@@ -6,6 +6,16 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Whether tool execution reads only explicitly granted roots or the files
+/// already readable to the host user. Broad reads do not hide credentials.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeReadAccess {
+    #[default]
+    Granted,
+    Host,
+}
+
 /// A directory and the identity the host authorized before submitting work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,32 +35,27 @@ impl NativeDirectoryGrant {
     }
 }
 
-/// Default-deny filesystem access, with explicit readable and writable roots.
-///
-/// Linux mounts the granted directories in a private root and applies
-/// Landlock before payload execution. Metadata writes outside writable roots
-/// are blocked too. A verified /dev/null supports standard subprocess I/O;
-/// no implicit home, toolchain, temporary or workspace roots are added.
-/// macOS applies a default-deny Seatbelt profile with these explicit roots;
-/// its loader baseline also permits listing the root directory itself.
-/// It does not create a private mount tree. Windows uses LPAC with the
-/// registryRead and identity-bound read-only root capabilities. Writable grants
-/// use task-specific package SIDs. It requires isolated networking and accepts
-/// Host or Committed resource policy. Non-system roots must contain regular, unaliased
-/// files without reparse points. These roots must be private task inputs:
-/// Windows ACL authority follows objects moved outside the original directory.
-/// System loader access uses the OS LPAC baseline; the package's own OS profile
-/// storage is available too. No backend silently
-/// substitutes host access.
-/// This does not bound CPU/memory or broker credentials in readable inputs,
-/// and is not a complete Auto sandbox. Nested mounts need explicit grants.
-/// Grants are additive: a writable ancestor includes its descendants, including
-/// existing hardlinks. Callers must not treat this primitive as protection for
-/// policy files or host inodes already aliased inside a writable root.
+/// Filesystem authority supplied by the embedding host. This does not bound
+/// CPU/memory or hide credentials in readable files. Writable directory grants
+/// include existing inode aliases; detached task inputs avoid host hardlinks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "access", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeFilesystem {
     Host,
+    /// Normal installed-tool reads with workspace write authority.
+    /// `read_only` paths carve out protected subtrees from writable roots.
+    /// Linux/macOS enforce write confinement. The Windows caller-token backend
+    /// also retains writes already granted to Everyone or the logon SID, as in
+    /// Codex's legacy backend; it is not account or network isolation.
+    WorkspaceWrite {
+        read_only: Vec<NativeDirectoryGrant>,
+        read_write: Vec<NativeDirectoryGrant>,
+    },
+    /// Explicit readable/writable roots. Linux uses a private mount tree and
+    /// Landlock; macOS uses Seatbelt; Windows uses LPAC. Windows grants follow
+    /// file objects moved outside the original root, and retain the OS loader
+    /// and package profile baseline. Writable ancestors include descendants;
+    /// unlike WorkspaceWrite, read-only children do not subtract write grants.
     Restricted {
         read_only: Vec<NativeDirectoryGrant>,
         read_write: Vec<NativeDirectoryGrant>,
@@ -59,14 +64,18 @@ pub enum NativeFilesystem {
 
 impl NativeFilesystem {
     pub(crate) fn is_restricted(&self) -> bool {
-        matches!(self, Self::Restricted { .. })
+        !matches!(self, Self::Host)
     }
 
     pub(crate) fn validate(&self) -> io::Result<()> {
-        let Self::Restricted {
+        let (Self::Restricted {
             read_only,
             read_write,
-        } = self
+        }
+        | Self::WorkspaceWrite {
+            read_only,
+            read_write,
+        }) = self
         else {
             return Ok(());
         };

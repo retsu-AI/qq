@@ -800,8 +800,8 @@ async fn run_owned_child(
         detached,
     } = request;
     // Authority attenuates strictly: a read child is ReadOnly; a write child
-    // uses Auto with mandatory review and needs the roster's permission to
-    // adjudicate its actions. Only depth one may write (children have no
+    // uses Auto within its parent's authority and needs the roster's explicit
+    // write permission. Only depth one may write (children have no
     // spawner at all, so this is structural). A ReadOnly parent cannot grant
     // write: its own policy already denied the mutating spawn call.
     let child_mode = match authority {
@@ -811,12 +811,6 @@ async fn run_owned_child(
                 return spawn_error(
                     "write sub-agents are not enabled: set delegation.write_children = true in \
                      the configuration, or spawn with authority read",
-                );
-            }
-            if inner.approval_reviewer.is_none() {
-                return spawn_error(
-                    "write sub-agents require a configured reviewer_model to adjudicate their \
-                     actions; spawn with authority read instead",
                 );
             }
             ApprovalMode::Auto

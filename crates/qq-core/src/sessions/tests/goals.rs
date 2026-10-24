@@ -8882,6 +8882,8 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             }
             if task {
                 options.task_workspaces = Some(crate::sessions::TaskWorkspacePolicy {
+                    read_access: Default::default(),
+                    network: crate::command_owner::NativeNetwork::Isolated,
                     directory: crate::command_owner::NativeDirectoryGrant::capture(&control)
                         .unwrap(),
                     read_only: vec![],

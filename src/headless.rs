@@ -2787,6 +2787,33 @@ mod tests {
     /// Turn one fetches a reserved (never-resolving) host; turn two answers.
     struct FetchingProvider {
         turn: Mutex<usize>,
+        url: String,
+    }
+
+    struct FetchingLoader {
+        url: String,
+    }
+
+    impl RuntimeLoader for FetchingLoader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let url = self.url.clone();
+            Box::pin(async move {
+                let runtime = Runtime::new(
+                    FetchingProvider {
+                        turn: Mutex::new(0),
+                        url,
+                    },
+                    "test-model",
+                    256,
+                )
+                .unwrap()
+                .with_network_policy(qq_core::NetworkPolicy {
+                    allow_private_for_tests: true,
+                    ..Default::default()
+                });
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
     }
 
     impl Provider for FetchingProvider {
@@ -2803,7 +2830,7 @@ mod tests {
                     }),
                     Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: "call_fetch".to_owned(),
-                        json: r#"{"url":"https://docs.invalid/x"}"#.to_owned(),
+                        json: serde_json::json!({"url": self.url}).to_string(),
                     }),
                     Ok(ProviderEvent::ToolCallCompleted {
                         id: "call_fetch".to_owned(),
@@ -6089,65 +6116,52 @@ mod tests {
         );
     }
 
-    /// Host patterns are granted before dispatch; Auto never opens a hold.
+    /// Public fetch needs no per-host grant; legacy flags never add a hold.
     #[tokio::test]
-    async fn allow_host_grants_fetch_before_dispatch() {
-        let fixture = fixture(|| FetchingProvider {
-            turn: Mutex::new(0),
-        })
-        .await;
-        let mut options = options(&fixture.workspace);
-        options.approval = HeadlessApproval::Auto;
-        options.allow_hosts = vec!["*.invalid".to_owned()];
-        let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
-        assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
-        let records = parse_records(&stdout);
-        assert!(event_records(&records).iter().all(|record| {
-            !matches!(
-                record["envelope"]["event"]["type"].as_str(),
-                Some(
-                    "tool_approval_requested"
-                        | "tool_approval_resolved"
-                        | "tool_approval_escalated"
-                )
-            )
-        }));
-        // The approved call ran and failed at resolution: a tool error, not
-        // a denial, and the run still completed.
-        let finished = finished_tool_calls(&records);
-        assert_eq!(finished.len(), 1);
-        assert_eq!(finished[0]["state"], "failed");
-        assert!(
-            finished[0]["result"]
-                .as_str()
-                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
-            "{}",
-            finished[0]["result"]
-        );
-
-        // Without the allowlist, Auto denies without requesting approval.
-        let bare = self::fixture(|| FetchingProvider {
-            turn: Mutex::new(0),
-        })
-        .await;
-        let mut bare_options = self::options(&bare.workspace);
-        bare_options.approval = HeadlessApproval::Auto;
-        let (status, stdout, _) = run_to_end(&bare, bare_options, std::future::pending()).await;
-        assert_eq!(status, HeadlessStatus::Completed);
-        let records = parse_records(&stdout);
-        assert!(event_records(&records).iter().all(|record| {
-            !matches!(
-                record["envelope"]["event"]["type"].as_str(),
-                Some(
-                    "tool_approval_requested"
-                        | "tool_approval_resolved"
-                        | "tool_approval_escalated"
-                )
-            )
-        }));
-        let calls = finished_tool_calls(&records);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["state"], "denied");
+    async fn auto_fetch_dispatches_public_hosts_with_or_without_host_flags() {
+        for with_host_flag in [false, true] {
+            let server = qq_provider::test_support::LoopbackServer::respond(
+                200,
+                "text/plain",
+                "fixture-public-docs",
+            );
+            let fixture = fixture_with_loader(Arc::new(FetchingLoader {
+                url: format!("{}/docs", server.base_url),
+            }))
+            .await;
+            let mut options = options(&fixture.workspace);
+            options.approval = HeadlessApproval::Auto;
+            if with_host_flag {
+                options.allow_hosts = vec!["127.0.0.1".into()];
+            }
+            let (status, stdout, stderr) =
+                run_to_end(&fixture, options, std::future::pending()).await;
+            assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
+            let records = parse_records(&stdout);
+            assert!(event_records(&records).iter().all(|record| {
+                !record["envelope"]["event"]["type"]
+                    .as_str()
+                    .is_some_and(|kind| kind.starts_with("tool_approval_"))
+            }));
+            let finished = finished_tool_calls(&records);
+            assert_eq!(finished.len(), 1);
+            assert_eq!(finished[0]["state"], "completed");
+            assert!(
+                finished[0]["result"]
+                    .as_str()
+                    .is_some_and(|result| result.contains("fixture-public-docs")),
+                "{stdout}"
+            );
+            assert!(event_records(&records).iter().any(
+                |record| record["envelope"]["event"]["type"] == "tool_call_started"
+                    && record["envelope"]["event"]["tool_call"]["name"] == "fetch"
+            ));
+            let request = tokio::task::spawn_blocking(move || server.capture())
+                .await
+                .unwrap();
+            assert_eq!(request.request_line(), Some("GET /docs HTTP/1.1"));
+            fixture.sessions.close().await.unwrap();
+        }
     }
 
     /// A question with nobody to answer it ends the run at the question with
@@ -7099,7 +7113,7 @@ mod tests {
         assert_eq!(outcomes.len(), 1, "exactly one terminal outcome");
         assert_eq!(outcomes[0]["status"], "completed");
         assert_eq!(outcomes[0]["exit_code"], 0);
-        assert_eq!(outcomes[0]["prompt_identity"]["version"], 22);
+        assert_eq!(outcomes[0]["prompt_identity"]["version"], 23);
         assert!(outcomes[0]["prompt_identity"]["system_prompt_hash"].is_string());
         assert!(outcomes[0]["prompt_identity"]["tool_schema_hash"].is_string());
         assert_eq!(
@@ -7326,10 +7340,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_root_host_flags_reach_auto_children_under_full_and_auto() {
+    async fn auto_children_fetch_public_hosts_but_explicit_managed_denies_prevent_dispatch() {
         struct ChildFetchProvider {
             child: bool,
             first: Mutex<bool>,
+            url: String,
         }
         impl Provider for ChildFetchProvider {
             fn stream(&self, _request: ModelRequest) -> ProviderStream {
@@ -7343,11 +7358,12 @@ mod tests {
                     ]));
                 }
                 let (name, arguments) = if self.child {
-                    ("fetch", r#"{"url":"https://docs.invalid/page"}"#)
+                    ("fetch", serde_json::json!({"url": self.url}).to_string())
                 } else {
                     (
                         "spawn_agent",
-                        r#"{"task":"read explicitly allowed docs","model":"test/child","authority":"write"}"#,
+                        r#"{"task":"read docs","model":"test/child","authority":"write"}"#
+                            .to_owned(),
                     )
                 };
                 Box::pin(stream::iter([
@@ -7357,26 +7373,40 @@ mod tests {
                     }),
                     Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: "probe".into(),
-                        json: arguments.into(),
+                        json: arguments,
                     }),
                     Ok(ProviderEvent::ToolCallCompleted { id: "probe".into() }),
                     Ok(ProviderEvent::Completed { usage: None }),
                 ]))
             }
         }
-        struct ChildFetchLoader;
+        struct ChildFetchLoader {
+            deny_host: bool,
+            url: String,
+        }
         impl RuntimeLoader for ChildFetchLoader {
             fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let deny_host = self.deny_host;
+                let url = self.url.clone();
                 Box::pin(async move {
                     let runtime = Runtime::new(
                         ChildFetchProvider {
                             child: request.model.model.as_deref() == Some("test/child"),
                             first: Mutex::new(true),
+                            url,
                         },
                         "test-model",
                         256,
                     )
                     .unwrap()
+                    .with_network_policy(qq_core::NetworkPolicy {
+                        deny_hosts: if deny_host {
+                            Arc::from(["docs.invalid".to_owned()])
+                        } else {
+                            Arc::from([])
+                        },
+                        allow_private_for_tests: true,
+                    })
                     .with_spawn_model_routes(vec!["test/child".into()])
                     .with_delegation(qq_protocol::DelegationRoster {
                         roster: Vec::new(),
@@ -7399,7 +7429,23 @@ mod tests {
                 })
             }
         }
-        for approval in [HeadlessApproval::Full, HeadlessApproval::Auto] {
+        for (approval, deny_host) in [
+            (HeadlessApproval::Full, false),
+            (HeadlessApproval::Auto, false),
+            (HeadlessApproval::Full, true),
+            (HeadlessApproval::Auto, true),
+        ] {
+            let server = (!deny_host).then(|| {
+                qq_provider::test_support::LoopbackServer::respond(
+                    200,
+                    "text/plain",
+                    "fixture-child-docs",
+                )
+            });
+            let url = server
+                .as_ref()
+                .map(|server| format!("{}/docs", server.base_url))
+                .unwrap_or_else(|| "https://docs.invalid/page".into());
             let directory = tempfile::tempdir().unwrap();
             let root = std::fs::canonicalize(directory.path()).unwrap();
             let workspace = root.join("work");
@@ -7410,9 +7456,12 @@ mod tests {
             runtime_options.approval_reviewer =
                 Some(Arc::new(DenyChildFetch(Arc::clone(&consulted))));
             let fixture = Fixture {
-                sessions: SessionRuntime::open(runtime_options, Arc::new(ChildFetchLoader))
-                    .await
-                    .unwrap(),
+                sessions: SessionRuntime::open(
+                    runtime_options,
+                    Arc::new(ChildFetchLoader { deny_host, url }),
+                )
+                .await
+                .unwrap(),
                 workspace,
                 _directory: directory,
             };
@@ -7436,30 +7485,50 @@ mod tests {
             assert_eq!(child["approval_mode"], "auto");
             assert_eq!(
                 consulted.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "{approval:?}: explicit host authority must reach mandatory child review: {stdout}"
+                0,
+                "{approval:?}: public research never needs a reviewer: {stdout}"
             );
-            assert!(
-                events.iter().any(|record| {
+            let fetch = events
+                .iter()
+                .find_map(|record| {
                     let envelope = &record["envelope"];
                     let event = &envelope["event"];
-                    envelope["session_id"] == child["id"]
-                        && event["type"] == "tool_approval_resolved"
-                        && event["resolution"] == "denied_by_reviewer"
-                        && event["tool_call"]["name"] == "fetch"
-                        && event["tool_call"]["state"] == "denied"
-                }),
+                    (envelope["session_id"] == child["id"]
+                        && event["type"] == "tool_call_finished"
+                        && event["tool_call"]["name"] == "fetch")
+                        .then(|| event["tool_call"].clone())
+                })
+                .expect("the child fetch settles");
+            assert_eq!(
+                fetch["state"],
+                if deny_host { "denied" } else { "completed" },
                 "{stdout}"
             );
             assert!(
-                !events.iter().any(|record| {
-                    let event = &record["envelope"]["event"];
-                    (event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch")
-                        || (event["type"] == "tool_approval_requested"
-                            && event["delegated"] != true)
-                        || event["type"] == "tool_approval_escalated"
-                }),
-                "reviewer denial must prevent network dispatch without human fallback: {stdout}"
+                fetch["result"]
+                    .as_str()
+                    .is_some_and(|result| result.contains(if deny_host {
+                        "denied by managed policy"
+                    } else {
+                        "fixture-child-docs"
+                    })),
+                "{stdout}"
+            );
+            let started = events.iter().any(|record| {
+                let event = &record["envelope"]["event"];
+                event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch"
+            });
+            assert_eq!(
+                started, !deny_host,
+                "managed denies precede dispatch even with host flags: {stdout}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|record| record["envelope"]["event"]["type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("tool_approval_"))),
+                "{stdout}"
             );
             assert!(
                 events.iter().any(|record| {
@@ -7470,6 +7539,12 @@ mod tests {
                 }),
                 "child must settle: {stdout}"
             );
+            if let Some(server) = server {
+                let request = tokio::task::spawn_blocking(move || server.capture())
+                    .await
+                    .unwrap();
+                assert_eq!(request.request_line(), Some("GET /docs HTTP/1.1"));
+            }
             fixture.sessions.close().await.unwrap();
         }
     }

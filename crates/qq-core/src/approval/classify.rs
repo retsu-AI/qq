@@ -340,6 +340,72 @@ fn parser() -> Parser {
     parser
 }
 
+/// Applies explicit command controls to literal argv in the shell parse.
+/// Unknown/dynamic commands are not denied merely because rules exist. These
+/// controls do not establish filesystem/network containment or inspect programs.
+pub(crate) fn managed_shell_denied(command: &str, denied_prefixes: &[String]) -> bool {
+    if denied_prefixes.is_empty() {
+        return false;
+    }
+    let commands = literal_policy_argv(command);
+    denied_prefixes.iter().any(|prefix| {
+        let prefixes = literal_policy_argv(prefix);
+        let [prefix] = prefixes.as_slice() else {
+            return false;
+        };
+        !prefix.is_empty()
+            && commands.iter().any(|argv| {
+                argv.len() >= prefix.len()
+                    && prefix
+                        .iter()
+                        .zip(argv)
+                        .enumerate()
+                        .all(|(index, (expected, actual))| {
+                            let (Some(expected), Some(actual)) = (expected, actual) else {
+                                return false;
+                            };
+                            if index == 0 && !expected.contains(['/', '\\']) {
+                                basename(actual) == basename(expected)
+                            } else {
+                                actual == expected
+                            }
+                        })
+            })
+    })
+}
+
+fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
+    // Tool dispatch bounds argument bytes. Its explicit literal controls must
+    // inspect that entire input, not the conservative classifier's smaller cap.
+    let Some(tree) = parser().parse(source, None) else {
+        return Vec::new();
+    };
+    let mut nodes = vec![tree.root_node()];
+    let mut commands = Vec::new();
+    while let Some(node) = nodes.pop() {
+        if node.kind() == "command" {
+            let mut argv = Vec::new();
+            for child in node.named_children(&mut node.walk()) {
+                match child.kind() {
+                    "command_name" => argv.push(
+                        child
+                            .named_child(0)
+                            .and_then(|name| literal_word(name, source.as_bytes())),
+                    ),
+                    "variable_assignment"
+                    | "file_redirect"
+                    | "heredoc_redirect"
+                    | "herestring_redirect" => {}
+                    _ => argv.push(literal_word(child, source.as_bytes())),
+                }
+            }
+            commands.push(argv);
+        }
+        nodes.extend(node.named_children(&mut node.walk()));
+    }
+    commands
+}
+
 /// Matches managed denies against every visible shell command, including
 /// wrappers and nested shell payloads. Unresolved syntax refuses authority.
 /// This is independent of ordinary prefix grants and is used only for checks.
@@ -1227,6 +1293,41 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod managed_policy_tests {
+    use super::{MAX_CLASSIFIED_BYTES, managed_shell_denied};
+
+    #[test]
+    fn managed_shell_denies_match_literal_commands_without_classifying_unknown_programs() {
+        let denied = vec![
+            "cargo publish".to_owned(),
+            "managed-tool --dangerous".to_owned(),
+        ];
+        for command in [
+            "cargo publish",
+            "printf done; cargo publish --dry-run",
+            "if true; then 'cargo' publish; fi",
+            "/usr/bin/cargo publish",
+            "echo $(managed-tool --dangerous)",
+        ] {
+            assert!(managed_shell_denied(command, &denied), "{command}");
+        }
+        for command in [
+            "cargo test",
+            "unknown-tool --custom && another-tool",
+            "$BUILD_COMMAND --custom",
+            "python -c 'do_work()'",
+            "printf 'cargo publish'",
+            "echo cargo publish",
+        ] {
+            assert!(!managed_shell_denied(command, &denied), "{command}");
+        }
+        assert!(!managed_shell_denied("cargo publish", &[]));
+        let long_literal = format!("cargo publish # {}", "x".repeat(MAX_CLASSIFIED_BYTES + 1));
+        assert!(managed_shell_denied(&long_literal, &denied));
     }
 }
 

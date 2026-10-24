@@ -164,6 +164,90 @@ pub(super) fn prepare(
     Ok(held)
 }
 
+pub(super) fn prepare_workspace_write(
+    scope: &NativeFilesystem,
+    capability: &str,
+    deadline: u64,
+) -> io::Result<Vec<File>> {
+    let NativeFilesystem::WorkspaceWrite {
+        read_only,
+        read_write,
+    } = scope
+    else {
+        return Err(io::Error::other("workspace-write authority is missing"));
+    };
+    // A writable child cannot coexist with an ancestor write carveout. Reject
+    // the conflicting request before modifying any held object.
+    if read_only.iter().any(|protected| {
+        read_write.iter().any(|writable| {
+            writable.path != protected.path && writable.path.starts_with(&protected.path)
+        })
+    }) {
+        return Err(io::Error::other(
+            "writable authority is beneath a protected Windows directory",
+        ));
+    }
+    let sid: LocalBox<Sid> = capability.parse()?;
+    let lock = lock_security()?;
+    let mut held = Vec::new();
+    let mut count = 0;
+    for grant in read_write {
+        let root = open(&grant.path, true)?;
+        validate_root(grant, &root)?;
+        walk_mode(
+            &grant.path,
+            root.try_clone()?,
+            AccessMode::LegacyWrite,
+            &sid,
+            &mut count,
+            deadline,
+            &lock,
+        )?;
+        held.push(root);
+    }
+    for grant in read_only {
+        // These are write carveouts, not a catalogue of permitted reads.
+        let protected = read_write
+            .iter()
+            .any(|root| grant.path.starts_with(&root.path));
+        let root = open(&grant.path, protected)?;
+        validate_root(grant, &root)?;
+        if protected {
+            walk_mode(
+                &grant.path,
+                root.try_clone()?,
+                AccessMode::DenyWrite,
+                &sid,
+                &mut count,
+                deadline,
+                &lock,
+            )?;
+        }
+        held.push(root);
+    }
+    Ok(held)
+}
+
+#[derive(Clone, Copy)]
+enum AccessMode {
+    Read,
+    Write,
+    LegacyWrite,
+    DenyWrite,
+}
+impl AccessMode {
+    fn mask(self) -> u32 {
+        match self {
+            Self::Read => READ_EXECUTE,
+            Self::Write | Self::LegacyWrite => READ_WRITE_EXECUTE_DELETE,
+            Self::DenyWrite => 0x000d_0156,
+        }
+    }
+    fn denied(self) -> bool {
+        matches!(self, Self::DenyWrite)
+    }
+}
+
 fn validate_root(grant: &NativeDirectoryGrant, root: &File) -> io::Result<()> {
     if !root.metadata()?.is_dir()
         || NativeWorkspaceIdentity::held(&cap_std::fs::Dir::from_std_file(root.try_clone()?))?
@@ -240,8 +324,32 @@ fn lock_acl(
 
 fn walk(
     path: &Path,
-    mut file: File,
+    file: File,
     writable: bool,
+    sid: &Sid,
+    count: &mut usize,
+    deadline: u64,
+    lock_security: &win_custody::SecurityDescriptor,
+) -> io::Result<()> {
+    walk_mode(
+        path,
+        file,
+        if writable {
+            AccessMode::Write
+        } else {
+            AccessMode::Read
+        },
+        sid,
+        count,
+        deadline,
+        lock_security,
+    )
+}
+
+fn walk_mode(
+    path: &Path,
+    mut file: File,
+    mode: AccessMode,
     sid: &Sid,
     count: &mut usize,
     deadline: u64,
@@ -256,7 +364,7 @@ fn walk(
     let info = winapi_util::file::information(&file)?;
     let metadata = file.metadata()?;
     if info.file_attributes() & 0x400 != 0
-        || (!metadata.is_dir() && (!metadata.is_file() || info.number_of_links() != 1))
+        || (!metadata.is_dir() && (!metadata.is_file() || info.number_of_links() == 0))
     {
         return Err(io::Error::other(
             "native file grant contains a reparse point or aliased file",
@@ -279,15 +387,16 @@ fn walk(
     let dacl = security
         .dacl()
         .ok_or_else(|| io::Error::other("native file grant has no discretionary access list"))?;
-    let mask = if writable {
-        READ_WRITE_EXECUTE_DELETE
-    } else {
-        READ_EXECUTE
-    };
-    if !(0..dacl.len())
+    let mask = mode.mask();
+    let present = (0..dacl.len())
         .filter_map(|index| dacl.get_ace(index))
         .any(|entry| {
-            entry.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE
+            entry.ace_type()
+                == if mode.denied() {
+                    AceType::ACCESS_DENIED_ACE_TYPE
+                } else {
+                    AceType::ACCESS_ALLOWED_ACE_TYPE
+                }
                 && entry.sid() == Some(sid)
                 && entry.mask().bits() & mask == mask
                 && !entry
@@ -297,19 +406,36 @@ fn walk(
                     || entry
                         .flags()
                         .contains(AceFlags::ObjectInherit | AceFlags::ContainerInherit))
-        })
-    {
+        });
+    if metadata.is_file() && info.number_of_links() != 1 {
+        if present && matches!(mode, AccessMode::LegacyWrite | AccessMode::DenyWrite) {
+            return Ok(());
+        }
+        return Err(io::Error::other(
+            "native file grant contains a reparse point or aliased file",
+        ));
+    }
+    if !present {
         let mut encoded = ConvertSecurityDescriptorToStringSecurityDescriptor(
             &security,
             SecurityInformation::Dacl,
         )?
         .into_string()
         .map_err(|_| io::Error::other("native access list is not Unicode"))?;
-        // New objects need to inherit the package SID; the caller's default
+        // New objects need to inherit the granted SID; the caller's default
         // DACL need not contain it. Update only the held kernel object below,
         // rather than asking the file-object adapter to walk existing children.
         let inheritance = if metadata.is_dir() { "OICI" } else { "" };
-        encoded.push_str(&format!("(A;{inheritance};0x{mask:x};;;{sid})"));
+        let entry = format!(
+            "({};{inheritance};0x{mask:x};;;{sid})",
+            if mode.denied() { "D" } else { "A" }
+        );
+        if mode.denied() {
+            let index = encoded.find('(').unwrap_or(encoded.len());
+            encoded.insert_str(index, &entry);
+        } else {
+            encoded.push_str(&entry);
+        }
         let expanded: LocalBox<SecurityDescriptor> = encoded.parse()?;
         at(
             path,
@@ -334,10 +460,10 @@ fn walk(
         for entry in parent.entries()? {
             let name = entry?.file_name();
             let path = path.join(&name);
-            walk(
+            walk_mode(
                 &path,
                 open_child(&parent, &name)?,
-                writable,
+                mode,
                 sid,
                 count,
                 deadline,
@@ -368,6 +494,22 @@ mod tests {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         command
+    }
+
+    #[test]
+    fn workspace_write_refuses_a_writable_child_of_a_protected_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let child = root.join("writable");
+        std::fs::create_dir(&child).unwrap();
+        let scope = NativeFilesystem::WorkspaceWrite {
+            read_only: vec![NativeDirectoryGrant::capture(&root).unwrap()],
+            read_write: vec![NativeDirectoryGrant::capture(&child).unwrap()],
+        };
+        let package = super::super::legacy::capability_sid(&scope).unwrap();
+        let error = prepare_workspace_write(&scope, &package, super::super::unix_ms() + 15_000)
+            .unwrap_err();
+        assert!(error.to_string().contains("beneath a protected"));
     }
 
     #[test]

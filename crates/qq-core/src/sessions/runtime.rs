@@ -423,8 +423,8 @@ pub struct ReviewRequest {
     /// The child's task brief (the prompt that created its run), truncated to
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
-    /// The session's approval mode. Auto and its descendants use the reviewer
-    /// for internal supervision; an unavailable verdict denies the action.
+    /// The session's approval mode. Native Auto does not consult the reviewer;
+    /// explicit supervised delegation outside Auto may still request a verdict.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,

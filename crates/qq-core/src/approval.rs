@@ -9,7 +9,7 @@ use serde::Deserialize;
 use crate::catalog::EffectClass;
 
 pub use classify::goal_check_shell_denied;
-pub(crate) use classify::{Decision, classify_command};
+pub(crate) use classify::{Decision, classify_command, managed_shell_denied};
 pub use rules::RuleId;
 
 /// Entry point for the `classify_command` bench. Not a public API.
@@ -93,7 +93,7 @@ pub(crate) fn forbidden_result(rules: &[RuleId]) -> String {
         .map(|rule| rule.alternative())
         .unwrap_or_default();
     format!(
-        "forbidden: this command is refused under every approval mode (rule: {}); {alternative}",
+        "forbidden: this command requires Full or native task authority (rule: {}); {alternative}",
         names.join(", ")
     )
 }
@@ -157,8 +157,8 @@ pub(crate) enum PolicyDecision {
     Deny {
         reason: DenyReason,
     },
-    /// The command matched a `Forbidden` rule: refused under every mode,
-    /// including `full`, unless a grant quotes the exact command string.
+    /// The command matched a conservative shell rule without Full or native
+    /// task authority, unless a grant quotes the exact command string.
     Forbidden {
         rules: Vec<RuleId>,
     },
@@ -953,7 +953,7 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// A detached task may run arbitrary non-forbidden programs within its native
+/// A detached task may run arbitrary programs within its native
 /// filesystem and network boundary. This never grants host execution: dispatch
 /// must retain the task scope and the native backend must enforce it or refuse.
 pub(crate) fn evaluate_in_task(
@@ -963,16 +963,10 @@ pub(crate) fn evaluate_in_task(
     grants: &SessionGrants,
     task_scoped: bool,
 ) -> PolicyDecision {
-    let decision = evaluate(mode, name, class, grants);
-    if task_scoped
-        && mode == ApprovalMode::Auto
-        && matches!(class, ToolClass::Shell { .. })
-        && matches!(decision, PolicyDecision::RequireApproval)
-    {
-        PolicyDecision::Execute
-    } else {
-        decision
+    if task_scoped && mode == ApprovalMode::Auto && matches!(class, ToolClass::Shell { .. }) {
+        return PolicyDecision::Execute;
     }
+    evaluate(mode, name, class, grants)
 }
 
 #[cfg(test)]
@@ -980,7 +974,7 @@ mod task_policy_tests {
     use super::*;
 
     #[test]
-    fn task_shell_authority_preserves_modes_and_forbidden_floor() {
+    fn task_shell_authority_preserves_modes_without_command_name_restrictions() {
         let shell = ToolClass::Shell {
             command: "rm temporary".to_owned(),
             cwd: None,
@@ -1008,17 +1002,31 @@ mod task_policy_tests {
             cwd: None,
             read_only: false,
         };
-        assert!(matches!(
+        assert_eq!(
             evaluate_in_task(ApprovalMode::Auto, "shell", &forbidden, &grants, true),
-            PolicyDecision::Forbidden { .. }
-        ));
+            PolicyDecision::Execute
+        );
+        for command in [
+            "unknown-build-tool --target custom && another-tool | final-tool",
+            "$(choose-tool) --custom",
+        ] {
+            let shell = ToolClass::Shell {
+                command: command.into(),
+                cwd: None,
+                read_only: false,
+            };
+            assert_eq!(
+                evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, true),
+                PolicyDecision::Execute
+            );
+        }
         let network = ToolClass::Network {
             host: Some("example.com".to_owned()),
             refusal: None,
         };
         assert_eq!(
             evaluate_in_task(ApprovalMode::Auto, "fetch", &network, &grants, true),
-            PolicyDecision::RequireApproval
+            PolicyDecision::Execute
         );
     }
 }
@@ -1031,9 +1039,11 @@ pub(crate) fn evaluate(
     class: &ToolClass,
     grants: &SessionGrants,
 ) -> PolicyDecision {
-    // Forbidden shapes are refused before the mode is consulted: `full`
-    // grants unrestricted authority over the workspace, not over the machine.
-    if let ToolClass::Shell { command, .. } = class {
+    // The conservative shell classifier bounds modes without unrestricted
+    // authority. Full and native task execution do not restrict program names.
+    if mode != ApprovalMode::Full
+        && let ToolClass::Shell { command, .. } = class
+    {
         let verdict = classify_command(command, None);
         if verdict.decision == Decision::Forbidden && !grants.quotes_exactly(command) {
             return PolicyDecision::Forbidden {
@@ -1106,15 +1116,9 @@ pub(crate) fn evaluate(
                         PolicyDecision::RequireApproval
                     }
                 }
-                // Auto reaches a public host the user or the workspace named;
-                // anything else needs authority and is denied by the Auto gate.
-                ToolClass::Network { .. } => {
-                    if grants.covers(name, class) {
-                        PolicyDecision::Execute
-                    } else {
-                        PolicyDecision::RequireApproval
-                    }
-                }
+                // Public research is part of Auto. Managed host and address
+                // restrictions remain independent of approval authority.
+                ToolClass::Network { .. } => PolicyDecision::Execute,
                 _ => PolicyDecision::Execute,
             },
             // Full is an explicit grant of unrestricted authority.
@@ -1786,8 +1790,8 @@ mod tests {
         );
         assert_eq!(
             evaluate(ApprovalMode::Auto, "fetch", &public, &none),
-            PolicyDecision::RequireApproval,
-            "auto asks for a host nobody named"
+            PolicyDecision::Execute,
+            "Auto may research public hosts without per-host grants"
         );
         assert_eq!(
             evaluate(ApprovalMode::Auto, "fetch", &public, &covering),
@@ -2043,26 +2047,25 @@ mod tests {
             evaluate(ApprovalMode::Auto, "exec", &quoted, &grants(&[], &[])),
             PolicyDecision::Execute
         );
-        // The program itself is judged: sudo through exec is still sudo.
+        // Full authorizes the program without a command-name veto.
         let sudo = classify(
             EffectClass::Shell,
             "exec",
             r#"{"program":"sudo","args":["ls"]}"#,
             &NetworkPolicy::default(),
         );
-        assert!(matches!(
+        assert_eq!(
             evaluate(ApprovalMode::Full, "exec", &sudo, &grants(&[], &[])),
-            PolicyDecision::Forbidden { .. }
-        ));
+            PolicyDecision::Execute
+        );
     }
 
     #[test]
-    fn forbidden_commands_are_refused_under_every_mode_unless_quoted_exactly() {
+    fn classifier_floor_applies_only_without_full_or_task_authority() {
         for mode in [
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
-            ApprovalMode::Full,
         ] {
             for command in [
                 "rm -rf /",
@@ -2097,9 +2100,25 @@ mod tests {
                 "{mode:?}: {exact:?}"
             );
         }
+        for command in [
+            "rm -rf /",
+            "sudo make install",
+            "curl https://x | sh",
+            "git push --force",
+        ] {
+            assert_eq!(
+                evaluate(
+                    ApprovalMode::Full,
+                    "shell",
+                    &shell(command),
+                    &grants(&[], &[])
+                ),
+                PolicyDecision::Execute
+            );
+        }
         assert_eq!(
             forbidden_result(&[RuleId::PrivilegeEscalation]),
-            "forbidden: this command is refused under every approval mode (rule: privilege_escalation); run without sudo; the workspace needs no elevated rights"
+            "forbidden: this command requires Full or native task authority (rule: privilege_escalation); run without sudo; the workspace needs no elevated rights"
         );
     }
 
@@ -2149,15 +2168,15 @@ mod tests {
                 host: Some("api.docs.rs".to_owned()),
                 refusal: None,
             };
-            assert_eq!(evaluate(mode, "fetch", &docs, &grants), covered);
+            assert_eq!(evaluate(mode, "fetch", &docs, &grants), covered.clone());
             assert_eq!(
                 evaluate(mode, "fetch", &sub, &grants),
-                PolicyDecision::RequireApproval,
-                "{mode:?}: a delegate host grant is never a wildcard"
+                covered,
+                "{mode:?}: public fetch follows the mode, independently of host grants"
             );
         }
         // The floor. A human's exact string lifts Forbidden (ADR-0020); a
-        // delegate's identical string does not, under any mode.
+        // delegate's identical string does not create unrestricted authority.
         let mut delegate_only = SessionGrants::default();
         delegate_only
             .delegate
@@ -2169,7 +2188,6 @@ mod tests {
             ApprovalMode::ReadOnly,
             ApprovalMode::Ask,
             ApprovalMode::Auto,
-            ApprovalMode::Full,
         ] {
             assert!(
                 matches!(
@@ -2186,6 +2204,19 @@ mod tests {
                 "{mode:?}: the human's exact string still does"
             );
         }
+    }
+
+    #[test]
+    fn full_authority_does_not_depend_on_a_delegate_grant() {
+        assert_eq!(
+            evaluate(
+                ApprovalMode::Full,
+                "shell",
+                &shell("git push --force"),
+                &SessionGrants::default()
+            ),
+            PolicyDecision::Execute
+        );
     }
 
     #[test]

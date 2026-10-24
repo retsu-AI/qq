@@ -205,13 +205,21 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh command_owner::environment::tests::automatic_macos_capture_omits_loader_overrides_without_normalizing_explicit_values
+          bash .github/scripts/test-exact.sh tools::macos_owner::tests::workspace_write_reads_host_files_but_preserves_write_carveouts
           bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
+      - name: Windows restricted token API
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::windows_owner::legacy::tests::restricted_token_api_accepts_the_production_sid_and_flag_combination
       - name: Windows restricted payload boundary
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh tools::windows_owner::legacy::tests::workspace_write_runs_generic_tools_with_host_reads_and_best_effort_writes
           bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
           bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job
           cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
@@ -245,6 +253,7 @@ jobs:
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::confirmed_launch_failure_releases_custody_without_reporting_an_exit
             bash .github/scripts/test-exact.sh tools::macos_owner::resources::tests::native_memory_pressure_query_is_available_without_setup
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
+            cargo test --locked -p qq --no-default-features --test command_worker_client runtime::default_auto -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame

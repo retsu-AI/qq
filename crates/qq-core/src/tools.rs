@@ -3462,7 +3462,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "6f5ee886cbf2c09329fd373d88e1cb2091c8929a0fcb1f5de7e2ee2abfc7017f"
+            "521e3115c1cf748d75b32e337ce10c086b8e424d569a905238bd63e5917b32ef"
         );
     }
 
@@ -5128,6 +5128,7 @@ mod tests {
         let allowing = crate::runtime::ShellPolicy {
             env_allowlist: std::sync::Arc::from(["CARGO_MANIFEST_DIR".to_owned()]),
             builtin_preference: crate::runtime::BuiltinPreference::Hint,
+            ..Default::default()
         };
 
         let leaked = run(
@@ -5296,6 +5297,7 @@ mod tests {
                     Arc::new(crate::runtime::ShellPolicy {
                         env_allowlist: std::sync::Arc::from([]),
                         builtin_preference: policy,
+                        ..Default::default()
                     }),
                     Arc::default(),
                 )

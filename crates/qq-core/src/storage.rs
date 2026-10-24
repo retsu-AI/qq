@@ -64,7 +64,9 @@ impl NativeStorage {
         filesystem: &NativeFilesystem,
         journal: &std::path::Path,
     ) -> Result<Option<Self>, Pressure> {
-        let NativeFilesystem::Restricted { read_write, .. } = filesystem else {
+        let (NativeFilesystem::Restricted { read_write, .. }
+        | NativeFilesystem::WorkspaceWrite { read_write, .. }) = filesystem
+        else {
             return Ok(None);
         };
         let grants = read_write.clone();

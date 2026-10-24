@@ -255,6 +255,13 @@ async fn run_inner(
     )?;
     let environment = NativeEnvironment::capture(&[])?;
     let environment = match resources.task_home() {
+        Some(home)
+            if scope.as_ref().is_some_and(|scope| {
+                scope.read_access == crate::command_owner::NativeReadAccess::Host
+            }) =>
+        {
+            environment.with_task_temporary(&home)?
+        }
         Some(home) => environment.with_task_home(&home)?,
         None => environment,
     };
@@ -479,6 +486,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
         let scope = Arc::new(crate::command_owner::NativeCommandScope {
+            read_access: Default::default(),
             workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
             read_only: vec![],
             network: crate::command_owner::NativeNetwork::Isolated,

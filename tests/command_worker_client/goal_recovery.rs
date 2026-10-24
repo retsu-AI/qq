@@ -179,59 +179,9 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
             )
             .unwrap();
         let mut record: Value = serde_json::from_str(&record).unwrap();
-        let resources = worker.resource_root();
-        let groups = std::fs::read_dir(&resources)
-            .unwrap()
-            .map(Result::unwrap)
-            .filter(|entry| entry.file_type().unwrap().is_dir())
-            .collect::<Vec<_>>();
         assert_eq!(
-            groups.len(),
-            1,
-            "the blocked invocation has one resource group"
-        );
-        let group = groups[0].path();
-        for (name, expected) in [
-            ("memory.max", "4294967296"),
-            ("memory.swap.max", "0"),
-            ("pids.max", "512"),
-        ] {
-            assert_eq!(
-                std::fs::read_to_string(group.join(name)).unwrap().trim(),
-                expected
-            );
-        }
-        let cpu = record["scope"]["resources"]["limits"]["cpu_millicores"]
-            .as_u64()
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(group.join("cpu.max"))
-                .unwrap()
-                .trim(),
-            format!("{} 100000", cpu * 100)
-        );
-        assert!(
-            std::fs::read_to_string(group.join("pids.current"))
-                .unwrap()
-                .trim()
-                .parse::<u64>()
-                .unwrap()
-                > 0,
-            "limits must contain the running invocation, not an empty placeholder group"
-        );
-        assert_eq!(
-            std::fs::read_to_string(resources.join("pids.max"))
-                .unwrap()
-                .trim(),
-            "4096"
-        );
-        assert!(
-            std::fs::read_to_string(resources.join("memory.max"))
-                .unwrap()
-                .trim()
-                .parse::<u64>()
-                .unwrap()
-                > 0
+            record["scope"]["resources"]["access"], "host",
+            "default Auto does not require delegated resource setup"
         );
         let task: qq_core::task_workspace::TaskWorkspace =
             serde_json::from_value(record["workspace"].clone()).unwrap();
@@ -240,9 +190,17 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
             "in-flight Auto work must stay private"
         );
         if max_runs > 1 {
-            // Simulate a tighter host policy after restart. Old persisted
-            // authority must not override the current server's resource limits.
-            record["scope"]["resources"] = json!({"access":"host"});
+            // Simulate a previously persisted explicit resource policy. Task
+            // recovery must reapply today's server policy rather than require
+            // delegation for this old resource setting.
+            record["scope"]["resources"] = json!({
+                "access": "limited",
+                "limits": {
+                    "memory_bytes": 64 * 1024 * 1024,
+                    "max_processes": 4,
+                    "cpu_millicores": 100,
+                }
+            });
             db.execute(
                 "UPDATE metadata SET value=?2 WHERE key=?1",
                 rusqlite::params![
@@ -395,7 +353,7 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
             .unwrap();
         let record: Value = serde_json::from_str(&record).unwrap();
         assert_eq!(
-            record["scope"]["resources"]["access"], "limited",
+            record["scope"]["resources"]["access"], "host",
             "restored tasks must use the current host policy"
         );
         assert_eq!(

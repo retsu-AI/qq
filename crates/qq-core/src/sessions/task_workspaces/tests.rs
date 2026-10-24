@@ -63,6 +63,7 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
     .unwrap();
     std::fs::write(workspace.path().join("vendor/policy.md"), "agent edit").unwrap();
     let scope = NativeCommandScope {
+        read_access: Default::default(),
         workspace: workspace.directory_grant(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -101,6 +102,8 @@ async fn open_session(
         let control = root.join("control");
         std::fs::create_dir(&control).unwrap();
         let policy = TaskWorkspacePolicy {
+            read_access: Default::default(),
+            network: crate::command_owner::NativeNetwork::Isolated,
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,

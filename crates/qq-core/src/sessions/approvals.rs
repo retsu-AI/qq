@@ -9,6 +9,7 @@ pub(super) struct SessionToolGate {
     claimed: ClaimedRun,
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
+    shell: Arc<crate::ShellPolicy>,
     delegate: approval::ApprovalDelegate,
     task_scoped: bool,
 }
@@ -19,6 +20,7 @@ impl SessionToolGate {
         claimed: ClaimedRun,
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
+        shell: Arc<crate::ShellPolicy>,
         delegate: approval::ApprovalDelegate,
         task_scoped: bool,
     ) -> Self {
@@ -27,6 +29,7 @@ impl SessionToolGate {
             claimed,
             cancellation,
             network,
+            shell,
             delegate,
             task_scoped,
         }
@@ -40,6 +43,7 @@ impl ToolGate for SessionToolGate {
         let call = call.clone();
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
+        let shell = Arc::clone(&self.shell);
         let delegate = self.delegate;
         let task_scoped = self.task_scoped;
         Box::pin(async move {
@@ -63,12 +67,46 @@ impl ToolGate for SessionToolGate {
             // hold, so it applies to the next held call without a restart.
             let delegate = session_delegate.unwrap_or(delegate);
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
+            if let approval::ToolClass::Shell { command, .. } = &class
+                && approval::managed_shell_denied(command, &shell.deny_prefixes)
+            {
+                let message = "permission_denied: managed_shell_deny: this command matches an explicitly configured deny_shell_prefixes entry; continue with an allowed operation".to_owned();
+                return match inner
+                    .store
+                    .deny_tool_call(&claimed, call.id, message.clone())
+                    .await
+                {
+                    Ok(_) => GateDecision::Deny { message },
+                    Err(error) => approval_persistence_failure(error),
+                };
+            }
             // Auto is an unattended ceiling for the entire descendant tree,
             // even if a child session later selects a different mode.
-            let no_human_approval = mode == ApprovalMode::Auto
+            let auto_ceiling = mode == ApprovalMode::Auto
                 || ancestors
                     .iter()
                     .any(|(mode, _)| *mode == ApprovalMode::Auto);
+            if auto_ceiling
+                && matches!(
+                    class,
+                    approval::ToolClass::Interactive { question: Some(_) }
+                )
+            {
+                let message = approval::UNATTENDED_QUESTION_RESULT.to_owned();
+                return match inner
+                    .store
+                    .deny_tool_call(&claimed, call.id, message.clone())
+                    .await
+                {
+                    Ok(_) => GateDecision::Deny { message },
+                    Err(error) => approval_persistence_failure(error),
+                };
+            }
+            // Existing explicit internal supervision remains available outside
+            // Auto. Authorized Auto child actions use their parent's policy,
+            // without introducing another per-action reviewer.
+            let internal_supervision = supervised && !auto_ceiling && mode == ApprovalMode::Full;
+            let no_human_approval = auto_ceiling || internal_supervision;
             let mut mode = mode;
             for (parent_mode, parent_grants) in ancestors {
                 let message = match approval::evaluate_in_task(parent_mode, &call.name, &class, &parent_grants, task_scoped) {
@@ -106,9 +144,8 @@ impl ToolGate for SessionToolGate {
             } else {
                 decision
             };
-            // Write children retain mandatory supervision independently of the
-            // user's approval mode. The parent's policy was checked above.
-            let decision = if supervised
+            // Parent ceilings were checked before any internal supervision.
+            let decision = if internal_supervision
                 && matches!(decision, approval::PolicyDecision::Execute)
                 && !matches!(
                     class,
@@ -286,7 +323,7 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     };
-                    // Auto uses the reviewer only for internal child supervision.
+                    // Only existing internal supervision reaches a reviewer.
                     // Missing authority was denied above; a reviewer cannot grant it.
                     // Ask requires a human and never consults the reviewer.
                     let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {

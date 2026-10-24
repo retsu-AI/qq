@@ -3,6 +3,8 @@ use super::CommandOwnerError;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 
+const MAX_NATIVE_ENV_NAMES: usize = 1024;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NativeEnvironment(Vec<(String, Value)>);
@@ -26,7 +28,10 @@ impl std::fmt::Debug for NativeEnvironment {
 }
 
 impl NativeEnvironment {
-    /// Capture the base environment and explicitly requested names from the caller.
+    /// Preserve the caller's normal tool environment, excluding credential values
+    /// unless the host explicitly permits the requested name.
+    /// macOS loader overrides are not inherited automatically: they could run
+    /// code in sandbox-exec before its policy takes effect.
     /// Missing names stay absent; the worker never supplies replacement values.
     pub fn capture(requested: &[String]) -> Result<Self, CommandOwnerError> {
         if requested.len() > crate::MAX_SHELL_ENV_NAMES
@@ -36,23 +41,23 @@ impl NativeEnvironment {
         {
             return Err(CommandOwnerError::Invalid);
         }
-        let mut values = Vec::new();
-        for name in crate::BASE_ENV
-            .iter()
-            .copied()
-            .chain(requested.iter().map(String::as_str))
-        {
-            if values
-                .iter()
-                .any(|(saved, _): &(String, OsString)| same_name(saved, name))
-            {
-                continue;
-            }
-            if let Some(value) = std::env::var_os(name) {
-                values.push((name.to_owned(), value));
-            }
-        }
-        Self::from_values(values)
+        Self::capture_values(
+            std::env::vars_os().filter_map(|(name, value)| Some((name.into_string().ok()?, value))),
+            requested,
+        )
+    }
+
+    fn capture_values(
+        values: impl IntoIterator<Item = (String, OsString)>,
+        requested: &[String],
+    ) -> Result<Self, CommandOwnerError> {
+        Self::from_values(values.into_iter().filter(|(name, _)| {
+            let loader_override =
+                cfg!(target_os = "macos") && (name.starts_with("DYLD_") || name.starts_with("LD_"));
+            crate::runtime::valid_env_name(name)
+                && ((!credential_name(name) && !loader_override)
+                    || requested.iter().any(|requested| same_name(requested, name)))
+        }))
     }
 
     /// Build a bounded snapshot from explicit native values. Debug output omits values.
@@ -61,7 +66,7 @@ impl NativeEnvironment {
     ) -> Result<Self, CommandOwnerError> {
         let mut entries = Vec::new();
         for (name, value) in values {
-            if entries.len() >= crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+            if entries.len() >= MAX_NATIVE_ENV_NAMES {
                 return Err(CommandOwnerError::Invalid);
             }
             #[cfg(unix)]
@@ -116,8 +121,34 @@ impl NativeEnvironment {
         Ok(self)
     }
 
+    /// Keep HOME and installed-tool configuration; only scratch writes move
+    /// into the task's writable directory.
+    pub(crate) fn with_task_temporary(
+        mut self,
+        home: &std::path::Path,
+    ) -> Result<Self, CommandOwnerError> {
+        let names: &[&str] = if cfg!(windows) {
+            &["TMPDIR", "TEMP", "TMP"]
+        } else {
+            &["TMPDIR"]
+        };
+        self.0
+            .retain(|(name, _)| !names.iter().any(|key| same_name(name, key)));
+        let temporary = home.join("tmp").into_os_string();
+        self.0.extend(
+            Self::from_values(
+                names
+                    .iter()
+                    .map(|name| ((*name).to_owned(), temporary.clone())),
+            )?
+            .0,
+        );
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
-        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+        if self.0.len() > MAX_NATIVE_ENV_NAMES {
             return Err(CommandOwnerError::Invalid);
         }
         self.0.sort_by(|a, b| a.0.cmp(&b.0));
@@ -162,10 +193,22 @@ impl NativeEnvironment {
         }
     }
 
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.iter().map(|(name, _)| name.as_str())
+    }
+
     pub(super) fn fingerprint(&self) -> Result<String, CommandOwnerError> {
         use sha2::{Digest as _, Sha256};
         Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(self)?)))
     }
+}
+
+fn credential_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name == "QQ_CONFIG_CONTENT"
+        || ["KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"]
+            .iter()
+            .any(|part| name.contains(part))
 }
 
 fn same_name(a: &str, b: &str) -> bool {
@@ -179,6 +222,81 @@ fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_macos_capture_omits_loader_overrides_without_normalizing_explicit_values() {
+        let names = [
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "LD_LIBRARY_PATH",
+        ];
+        let inherited = NativeEnvironment::capture_values(
+            names.map(|name| (name.to_owned(), "loader-canary".into())),
+            &[],
+        )
+        .unwrap();
+        for name in names {
+            if cfg!(target_os = "macos") {
+                assert_eq!(inherited.get(name), None);
+            } else {
+                assert_eq!(inherited.get(name), Some("loader-canary".into()));
+            }
+            // Explicit values still reach the launcher's existing safety check;
+            // capture must not silently rewrite an explicitly submitted command.
+            let explicit = NativeEnvironment::capture_values(
+                [(name.to_owned(), "loader-canary".into())],
+                &[name.to_owned()],
+            )
+            .unwrap();
+            assert_eq!(explicit.get(name), Some("loader-canary".into()));
+            let frozen =
+                NativeEnvironment::from_values([(name.to_owned(), "loader-canary".into())])
+                    .unwrap();
+            assert_eq!(frozen.get(name), Some("loader-canary".into()));
+        }
+    }
+
+    #[test]
+    fn normal_tool_environment_does_not_require_a_tool_catalog() {
+        let values = [
+            ("HOME", "host-home"),
+            ("UNLISTED_COMPILER_HOME", "installed-tool"),
+            ("FUTURE_BUILD_CONFIG", "custom-config"),
+            ("PROVIDER_API_TOKEN", "credential-canary"),
+            ("QQ_CONFIG_CONTENT", "configuration-canary"),
+        ];
+        let captured = NativeEnvironment::capture_values(
+            values.map(|(name, value)| (name.to_owned(), value.into())),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            captured.get("UNLISTED_COMPILER_HOME"),
+            Some("installed-tool".into())
+        );
+        assert_eq!(
+            captured.get("FUTURE_BUILD_CONFIG"),
+            Some("custom-config".into())
+        );
+        assert_eq!(captured.get("PROVIDER_API_TOKEN"), None);
+        assert_eq!(captured.get("QQ_CONFIG_CONTENT"), None);
+        let home = tempfile::tempdir().unwrap();
+        let captured = captured.with_task_temporary(home.path()).unwrap();
+        assert_eq!(captured.get("HOME"), Some("host-home".into()));
+        assert_eq!(
+            captured.get("TMPDIR"),
+            Some(home.path().join("tmp").into_os_string())
+        );
+        let explicit = NativeEnvironment::capture_values(
+            [("PROVIDER_API_TOKEN".to_owned(), "credential-canary".into())],
+            &["PROVIDER_API_TOKEN".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            explicit.get("PROVIDER_API_TOKEN"),
+            Some("credential-canary".into())
+        );
+    }
 
     fn value(bytes: Vec<u8>) -> Value {
         if cfg!(unix) {
@@ -213,7 +331,7 @@ mod tests {
                 Err(CommandOwnerError::Invalid)
             ));
         }
-        let capacity = crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES;
+        let capacity = MAX_NATIVE_ENV_NAMES;
         assert!(
             NativeEnvironment::from_values((0..capacity).map(|n| (format!("VAR_{n}"), "x".into())))
                 .is_ok()
