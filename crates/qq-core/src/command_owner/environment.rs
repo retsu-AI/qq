@@ -87,6 +87,20 @@ impl NativeEnvironment {
         Ok(environment)
     }
 
+    /// Dedicated trusted-helper input. Ordinary shell policy never supplies it.
+    pub(crate) fn with_task_hosting_token(
+        mut self,
+        credential: &qq_provider::SecretLiteral,
+    ) -> Result<Self, CommandOwnerError> {
+        let name = crate::task_git_job::HOSTING_TOKEN_ENV;
+        self.0.retain(|(saved, _)| !same_name(saved, name));
+        let added =
+            Self::from_values([(name.to_owned(), OsString::from(credential.expose_secret()))])?;
+        self.0.extend(added.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(crate) fn with_task_home(
         mut self,
         home: &std::path::Path,

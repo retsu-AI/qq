@@ -100,6 +100,15 @@ pub(super) struct TaskExecution {
 }
 
 impl TaskExecution {
+    pub(super) fn source_grant(&self) -> Result<NativeDirectoryGrant, TaskExecutionError> {
+        Ok(self
+            .record
+            .lock()
+            .map_err(|_| TaskExecutionError::Invalid("task record poisoned"))?
+            .source
+            .clone())
+    }
+
     pub(super) fn directory_grant(&self) -> NativeDirectoryGrant {
         self.scope.workspace.clone()
     }
@@ -115,7 +124,7 @@ impl TaskExecution {
         inner: &SessionRuntimeInner,
         call: ToolCallId,
         git_program: PathBuf,
-        message: String,
+        operation: crate::task_git_job::TaskGitJobOperation,
         not_after_ms: u64,
         cancellation: RunCancellation,
     ) -> Result<crate::task_git_job::TaskGitJob, TaskExecutionError> {
@@ -175,14 +184,21 @@ impl TaskExecution {
                 .clone()
                 .ok_or(TaskExecutionError::Invalid("task has no captured Git base"))?;
             let limits = record.workspace_limits();
-            let mut paths: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
-            paths.extend(files_until(&root, limits, false, &stopped)?);
-            // A preserved input can be protected against mutation.
-            // Never turn its presence in the import manifest into commit authority.
-            paths.retain(|path| root.check_write_path(&path.to_string_lossy(), path).is_ok());
-            let paths = record
-                .workspace
-                .changed_git_paths_until(&paths.into_iter().collect::<Vec<_>>(), &stopped)?;
+            let paths = if matches!(
+                &operation,
+                crate::task_git_job::TaskGitJobOperation::Commit { .. }
+            ) {
+                let mut paths: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
+                paths.extend(files_until(&root, limits, false, &stopped)?);
+                // A preserved input can be protected against mutation.
+                // Never turn its presence in the import manifest into commit authority.
+                paths.retain(|path| root.check_write_path(&path.to_string_lossy(), path).is_ok());
+                record
+                    .workspace
+                    .changed_git_paths_until(&paths.into_iter().collect::<Vec<_>>(), &stopped)?
+            } else {
+                Vec::new()
+            };
             if paths.len() > limits.max_entries {
                 return Err(TaskExecutionError::Invalid("too many task commit paths"));
             }
@@ -206,7 +222,7 @@ impl TaskExecution {
                 },
                 paths,
                 protected_paths,
-                message,
+                operation,
                 not_after_ms,
             })
         })
