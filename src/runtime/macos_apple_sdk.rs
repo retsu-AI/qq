@@ -27,31 +27,33 @@ pub(super) fn discover(control: &Path) -> io::Result<super::macos_sdk::Inputs> {
     else {
         return Ok(Default::default());
     };
-    let developer = validate_developer(
+    selected_inputs(
         &path(&selected)?,
         Path::new("/Applications"),
         Path::new("/Library/Developer/CommandLineTools"),
         control,
-    )?;
-    let Some(clang) = super::unix_sdk::query_until(
-        command("/usr/bin/xcrun", &["--find", "clang"], Some(&developer)),
-        deadline,
-    )?
-    else {
-        return Ok(Default::default());
-    };
-    let Some(sdk) = super::unix_sdk::query_until(
-        command(
-            "/usr/bin/xcrun",
-            &["--sdk", "macosx", "--show-sdk-path"],
-            Some(&developer),
-        ),
-        deadline,
-    )?
-    else {
-        return Ok(Default::default());
-    };
-    roots(&developer, &path(&clang)?, &path(&sdk)?, control)
+        |developer| {
+            let Some(clang) = super::unix_sdk::query_until(
+                command("/usr/bin/xcrun", &["--find", "clang"], Some(developer)),
+                deadline,
+            )?
+            else {
+                return Ok(None);
+            };
+            let Some(sdk) = super::unix_sdk::query_until(
+                command(
+                    "/usr/bin/xcrun",
+                    &["--sdk", "macosx", "--show-sdk-path"],
+                    Some(developer),
+                ),
+                deadline,
+            )?
+            else {
+                return Ok(None);
+            };
+            Ok(Some((path(&clang)?, path(&sdk)?)))
+        },
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -61,6 +63,35 @@ fn path(bytes: &[u8]) -> io::Result<PathBuf> {
         return Err(denied());
     }
     Ok(PathBuf::from(text))
+}
+
+fn selected_inputs(
+    selected: &Path,
+    applications: &Path,
+    command_line_tools: &Path,
+    control: &Path,
+    query: impl FnOnce(&Path) -> io::Result<Option<(PathBuf, PathBuf)>>,
+) -> io::Result<super::macos_sdk::Inputs> {
+    if !selected.is_absolute()
+        || selected.components().any(|part| {
+            !matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+        || !control.is_absolute()
+        || control.canonicalize()? != control
+    {
+        return Err(denied());
+    }
+    if !conventional(selected, applications, command_line_tools) {
+        return Ok(Default::default());
+    }
+    let developer = validate_developer(selected, applications, command_line_tools, control)?;
+    let Some((clang, sdk)) = query(&developer)? else {
+        return Ok(Default::default());
+    };
+    roots(&developer, &clang, &sdk, control)
 }
 
 fn denied() -> io::Error {
@@ -80,10 +111,22 @@ fn validate_developer(
         return Err(denied());
     }
     let developer = selected.canonicalize()?;
-    let conventional = if developer == command_line_tools {
+    let installation = installation_root(&developer);
+    if !conventional(&developer, applications, command_line_tools)
+        || installation.starts_with(control)
+        || control.starts_with(installation)
+        || !developer.is_dir()
+    {
+        return Err(denied());
+    }
+    Ok(developer)
+}
+
+fn conventional(selected: &Path, applications: &Path, command_line_tools: &Path) -> bool {
+    if selected == command_line_tools {
         true
     } else {
-        developer
+        selected
             .strip_prefix(applications)
             .ok()
             .is_some_and(|suffix| {
@@ -95,15 +138,21 @@ fn validate_developer(
                         .to_str()
                         .is_some_and(|name| name.starts_with("Xcode") && name.ends_with(".app"))
             })
-    };
-    if !conventional
-        || developer.starts_with(control)
-        || control.starts_with(&developer)
-        || !developer.is_dir()
-    {
-        return Err(denied());
     }
-    Ok(developer)
+}
+
+fn installation_root(developer: &Path) -> &Path {
+    if developer
+        .file_name()
+        .is_some_and(|name| name == "Developer")
+        && developer
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "Contents"))
+    {
+        developer.parent().unwrap_or(developer)
+    } else {
+        developer
+    }
 }
 
 fn roots(
@@ -119,17 +168,7 @@ fn roots(
     let sdk = sdk.canonicalize()?;
     let bin = clang.parent().ok_or_else(denied)?.to_owned();
     let developer_bin = developer.join("usr/bin").canonicalize()?;
-    let installation = if developer
-        .file_name()
-        .is_some_and(|name| name == "Developer")
-        && developer
-            .parent()
-            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "Contents"))
-    {
-        developer.parent().ok_or_else(denied)?
-    } else {
-        developer
-    };
+    let installation = installation_root(developer);
     if installation.canonicalize()? != installation
         || !installation.is_dir()
         || installation.starts_with(control)
@@ -160,6 +199,54 @@ fn roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_apple_selection_skips_metadata_without_blocking_startup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let control = base.join("control");
+        let selected = base.join("Volumes/Custom/Xcode.app/Contents/Developer");
+        std::fs::create_dir(&control).unwrap();
+        std::fs::create_dir_all(&selected).unwrap();
+        let inputs = selected_inputs(
+            &selected,
+            &base.join("Applications"),
+            &base.join("CommandLineTools"),
+            &control,
+            |_| panic!("unsupported selection must not query xcrun"),
+        )
+        .unwrap();
+        assert!(inputs.read_only.is_empty());
+        assert!(inputs.executable_directories.is_empty());
+        assert!(
+            selected_inputs(
+                Path::new("relative"),
+                &base.join("Applications"),
+                &base.join("CommandLineTools"),
+                &control,
+                |_| panic!("malformed selection must not query xcrun"),
+            )
+            .is_err()
+        );
+        let escaped = base.join("Applications/Xcode_escape.app/Contents/Developer");
+        let private = base.join("private");
+        std::fs::create_dir_all(escaped.parent().unwrap()).unwrap();
+        std::fs::create_dir(&private).unwrap();
+        std::os::unix::fs::symlink(&private, &escaped).unwrap();
+        assert_eq!(
+            selected_inputs(
+                &escaped,
+                &base.join("Applications"),
+                &base.join("CommandLineTools"),
+                &control,
+                |_| panic!("escaping supported selection must not query xcrun"),
+            )
+            .err()
+            .unwrap()
+            .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     #[test]
     fn selected_command_line_tools_do_not_admit_their_parent() {
         let fixture = tempfile::tempdir().unwrap();
@@ -240,10 +327,16 @@ mod tests {
         let sibling_control = contents.join("private-control");
         std::fs::create_dir(&sibling_control).unwrap();
         assert_eq!(
-            roots(&selected, &clang, &sdk, &sibling_control)
-                .err()
-                .unwrap()
-                .kind(),
+            selected_inputs(
+                &selected,
+                &applications,
+                &base.join("CommandLineTools"),
+                &sibling_control,
+                |_| panic!("control-overlapping installation must not query xcrun")
+            )
+            .err()
+            .unwrap()
+            .kind(),
             io::ErrorKind::PermissionDenied
         );
         std::fs::remove_dir(developer.join("usr/lib")).unwrap();
