@@ -263,7 +263,7 @@ fn pause_after_committed_command(command_id: CommandId) {
 pub(super) struct Store {
     inner: Arc<StoreInner>,
     store_id: StoreId,
-    startup_goal_event_rowid: Option<i64>,
+    startup_goal_sequences: Option<Arc<HashMap<WorkspaceId, u64>>>,
 }
 
 pub(super) struct FeedAttachment {
@@ -331,10 +331,10 @@ impl Store {
                 worker: Mutex::new(Some(started.worker)),
             }),
             store_id,
-            startup_goal_event_rowid: None,
+            startup_goal_sequences: None,
         };
         let present = Arc::clone(&store.inner.goals_present);
-        store.startup_goal_event_rowid = store
+        store.startup_goal_sequences = store
             .call(Priority::Control, move |connection| {
                 let enabled: bool = connection.query_row(
                     "SELECT EXISTS(SELECT 1 FROM session_goals WHERE live=1)",
@@ -343,13 +343,20 @@ impl Store {
                 )?;
                 present.store(enabled, Ordering::Release);
                 if enabled {
-                    // Capture before recovery or scheduling can append events.
-                    connection
-                        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |row| {
-                            row.get(0)
+                    // Capture committed workspace boundaries before recovery or
+                    // scheduling appends events. Journal rows may be retired.
+                    let mut statement =
+                        connection.prepare_cached("SELECT id,next_sequence FROM workspaces")?;
+                    let sequences = statement
+                        .query_map([], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
+                        })?
+                        .map(|row| {
+                            let (id, sequence) = row?;
+                            Ok((parse_id::<WorkspaceId>(&id)?, sequence))
                         })
-                        .map(Some)
-                        .map_err(Into::into)
+                        .collect::<Result<HashMap<_, _>, SessionRuntimeError>>()?;
+                    Ok(Some(Arc::new(sequences)))
                 } else {
                     Ok(None)
                 }
@@ -362,19 +369,20 @@ impl Store {
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Option<EventCursor>, SessionRuntimeError> {
-        let Some(boundary) = self.startup_goal_event_rowid else {
+        let Some(sequences) = &self.startup_goal_sequences else {
             return Ok(None);
         };
+        let sequence = sequences.get(&workspace_id).copied().unwrap_or(0);
         let store_id = self.store_id;
         self.call(Priority::Control, move |connection| {
             ensure_workspace(connection, workspace_id)?;
-            let sequence = connection.query_row(
-                "SELECT sequence FROM events WHERE workspace_id=?1 AND rowid<=?2 ORDER BY sequence DESC LIMIT 1",
-                rusqlite::params![workspace_id.to_string(), boundary],
-                |row| row.get(0),
-            ).optional()?.unwrap_or(0);
-            Ok(Some(EventCursor { store_id, workspace_id, sequence }))
-        }).await
+            Ok(Some(EventCursor {
+                store_id,
+                workspace_id,
+                sequence,
+            }))
+        })
+        .await
     }
 
     pub(super) const fn store_id(&self) -> StoreId {
