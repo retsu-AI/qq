@@ -418,7 +418,9 @@ fn flush(
         row.to_ascii_lowercase().contains("bcrypt!")
             || row.to_ascii_lowercase().starts_with("bcrypt+")
     }) || batch.first().is_some_and(|row| {
-        row.starts_with("QQ_CDB_POLICY")
+        row.starts_with("QQ_CDB_EVENT_OPEN")
+            || row.starts_with("QQ_CDB_EVENT_RETURN")
+            || row.starts_with("QQ_CDB_POLICY")
             || row.starts_with("QQ_CDB_STOP")
             || row.starts_with("QQ_CDB_HIT")
             || row.starts_with("QQ_CDB_READY")
@@ -581,6 +583,22 @@ mod tests {
                 "bcrypt+0x41",
                 "QQ_CDB_HIT function=NtOpenEvent",
                 "QQ_CDB_HIT_COUNT count=2",
+            ]
+        );
+    }
+    #[test]
+    fn retains_selected_event_operation_without_crypto_stack() {
+        let bytes = b"QQ_CDB_EVENT_OPEN pid=1 tid=2 access=100002 name=\\KernelObjects\\selected-event\n00 00000001 00000002 ntdll!NtOpenEvent+0x4\nQQ_CDB_EVENT_RETURN pid=1 tid=2 status=c0000022\n01 00000003 00000004 ntdll!TppRegisterWait+0x2\n";
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_EVENT_OPEN pid=1 tid=2 access=100002 name=\\KernelObjects\\selected-event",
+                "ntdll!NtOpenEvent+0x4",
+                "QQ_CDB_EVENT_RETURN pid=1 tid=2 status=c0000022",
+                "ntdll!TppRegisterWait+0x2",
             ]
         );
     }
