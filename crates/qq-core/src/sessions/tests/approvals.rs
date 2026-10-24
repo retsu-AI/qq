@@ -2784,8 +2784,9 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         let start = now_ms();
         let epoch = super::goal_driver_soak::Epoch::new(start);
         let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+        let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
         options.approval_timeout = ordinary_wait;
         options.grant_authority = Some(Arc::new(Authority(goal_wait_ms)));
         let (reviewer, _release) = StubReviewer::held(ReviewVerdict::free(ReviewDecision::Approve));
@@ -2808,7 +2809,7 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
         )
         .await
         .unwrap();
-        let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+        let (workspace, _) = resolve_workspace(&runtime, &root).await;
         let created = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("session")

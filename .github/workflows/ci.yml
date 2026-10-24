@@ -449,11 +449,14 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_bounds_stalled_workspace_validation
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity
-      - name: Task interruption and client continuation
+      - name: Goal approval recovery
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: bash .github/scripts/test-exact.sh sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
+      - name: Live goal client reconnect
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          bash .github/scripts/test-exact.sh sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
           cargo test --locked -p qq --no-default-features --bin qq -- --list |
             tr -d '\r' | grep -Fx 'runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work: test'
           cargo test --locked -p qq --no-default-features --bin qq runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work -- --exact --nocapture
