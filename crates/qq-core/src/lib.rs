@@ -49,6 +49,7 @@ pub mod plan;
 mod runtime;
 mod sessions;
 mod task_git;
+mod task_git_helper_image;
 #[doc(hidden)]
 pub mod task_git_job;
 pub mod task_workspace;

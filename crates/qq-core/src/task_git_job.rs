@@ -1,6 +1,7 @@
 //! Private, credential-free commit jobs launched by the durable command worker.
 //! These records are trusted host input, never authority supplied by a model.
 pub use crate::task_git::{TaskGitCommit, TaskGitError, TaskGitLimits};
+pub use crate::task_git_helper_image::{HelperImageError, TaskGitHelperImage};
 use crate::{
     RunCancellation,
     command_owner::NativeDirectoryGrant,
