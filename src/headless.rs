@@ -7083,7 +7083,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(feature = "tool-fetch")]
     async fn explicit_root_host_flags_reach_auto_children_under_full_and_auto() {
         struct ChildFetchProvider {
             child: bool,
