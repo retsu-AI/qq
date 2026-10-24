@@ -206,21 +206,32 @@ mod probe {
                 "actual payload default DACL query incomplete: pinned wrapper rejected null/invalid data"
             ),
         }
-        let name = format!("Local\\qq-crypto-self-event-{}", std::process::id());
-        match winsafe::HEVENT::CreateEvent(None, false, false, Some(&name)) {
-            Ok(event) => {
-                println!("self-event default-DACL create succeeded: {name}");
-                let reopen = event
-                    .OpenEvent(
-                        winsafe::co::EVENT_RIGHTS::MODIFY_STATE
-                            | winsafe::co::EVENT_RIGHTS::SYNCHRONIZE,
-                        false,
-                        &name,
-                    )
-                    .map(|_| ());
-                println!("self-event default-DACL write/synchronize reopen: {reopen:?}");
+        match winsafe::HEVENT::CreateEvent(None, false, false, None) {
+            Ok(event) => println!(
+                "self-event unnamed create succeeded; signal={:?}",
+                event.SetEvent()
+            ),
+            Err(error) => println!("self-event unnamed create: {error:?}"),
+        }
+        for prefix in ["", "Local\\"] {
+            let name = format!("{prefix}qq-crypto-self-event-{}", std::process::id());
+            match winsafe::HEVENT::CreateEvent(None, false, false, Some(&name)) {
+                Ok(event) => {
+                    println!("self-event default-DACL create succeeded: {name}");
+                    let reopen = event
+                        .OpenEvent(
+                            winsafe::co::EVENT_RIGHTS::MODIFY_STATE
+                                | winsafe::co::EVENT_RIGHTS::SYNCHRONIZE,
+                            false,
+                            &name,
+                        )
+                        .map(|_| ());
+                    println!(
+                        "self-event name={name} default-DACL write/synchronize reopen: {reopen:?}"
+                    );
+                }
+                Err(error) => println!("self-event name={name} default-DACL create: {error:?}"),
             }
-            Err(error) => println!("self-event default-DACL create: {error:?}"),
         }
         if load_only {
             let system = PathBuf::from(manifest["system32"].as_str().ok_or_else(invalid)?);
