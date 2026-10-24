@@ -85,6 +85,8 @@ g
 sxe -c "$$><{}" cpr
 sxn bpe
 sxn ibp
+.childdbg 1
+.childdbg
 .printf "QQ_CDB_READY pid=%x\n", @$tpid
 g
 "#,
@@ -282,6 +284,14 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
 fn diagnostic(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     [
+        (
+            "processes created by the current process will be debugged",
+            "child-debugging-enabled",
+        ),
+        (
+            "processes created by the current process will not be debugged",
+            "child-debugging-disabled",
+        ),
         ("syntax error", "syntax"),
         ("couldn't resolve", "unresolved-symbol"),
         ("unable to resolve", "unresolved-symbol"),
@@ -372,7 +382,7 @@ mod tests {
     }
     #[test]
     fn records_error_classes_without_paths_commands_or_memory() {
-        let bytes = b"Syntax error at 'secret-command'\nCouldn't resolve private!Secret\nUnknown command: TOKEN_PRIVATE\nNo runnable debuggees\n";
+        let bytes = b"Syntax error at 'secret-command'\nCouldn't resolve private!Secret\nUnknown command: TOKEN_PRIVATE\nNo runnable debuggees\nProcesses created by the current process will be debugged\n";
         let output = Mutex::new(Vec::new());
         let (ready, _) = mpsc::sync_channel(1);
         collect(bytes.as_slice(), &output, &ready);
@@ -382,7 +392,8 @@ mod tests {
                 "QQ_CDB_DIAGNOSTIC class=syntax",
                 "QQ_CDB_DIAGNOSTIC class=unresolved-symbol",
                 "QQ_CDB_DIAGNOSTIC class=unknown-command",
-                "QQ_CDB_DIAGNOSTIC class=no-runnable-target"
+                "QQ_CDB_DIAGNOSTIC class=no-runnable-target",
+                "QQ_CDB_DIAGNOSTIC class=child-debugging-enabled"
             ]
         );
     }
