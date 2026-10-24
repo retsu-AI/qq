@@ -43,6 +43,22 @@ jobs:
               /usr/bin/otool -L "$prefix/bin/node"
             fi
           done
+      - name: Check native denied-execution errno syntax
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import json, subprocess
+          profiles = {
+              "default": "(version 1)(allow default)(deny process-exec)",
+              "numeric": "(version 1)(allow default)(deny process-exec (with errno 13))",
+              "symbolic": "(version 1)(allow default)(deny process-exec (with errno EACCES))",
+              "default-numeric": "(version 1)(deny default (with errno 13))",
+          }
+          for name, profile in profiles.items():
+              result = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, "/usr/bin/true"], capture_output=True, timeout=5)
+              print(json.dumps({"profile": name, "status": result.returncode, "stdout": result.stdout[:4096].decode(errors="replace"), "stderr": result.stderr[:4096].decode(errors="replace")}))
+              assert result.returncode != 0, "fixed command must remain denied"
+          PY
       - name: Require and execute actual cached dependency Auto integration
         if: ${{ !cancelled() }}
         run: |
