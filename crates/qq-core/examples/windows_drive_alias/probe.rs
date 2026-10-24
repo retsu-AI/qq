@@ -158,33 +158,72 @@ impl Drop for Mapping {
         }
     }
 }
-fn stage(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
+fn stage_selected(
+    source: &Path,
+    root: &Path,
+    name: &str,
+    selected: &[PathBuf],
+    max_bytes: u64,
+) -> io::Result<PathBuf> {
+    use std::os::windows::fs::MetadataExt as _;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut pending = selected.to_vec();
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    while let Some(relative) = pending.pop() {
+        count += 1;
+        if count > 65_536
+            || std::time::Instant::now() >= deadline
+            || relative.components().count() > 64
+        {
+            return Err(err(format!(
+                "{name} metadata traversal limit: entries={count}, bytes={bytes}"
+            )));
+        }
+        let path = source.join(&relative);
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_attributes() & 0x400 != 0 || (!metadata.is_file() && !metadata.is_dir()) {
+            return Err(err(format!(
+                "{name} unsupported alias/object: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(&path)? {
+                pending.push(relative.join(entry?.file_name()));
+                if pending.len() + count > 65_536 {
+                    return Err(err(format!("{name} metadata entry limit")));
+                }
+            }
+        } else {
+            use cap_primitives::fs::_WindowsByHandle as _;
+            let held = cap_std::fs::File::from_std(fs::File::open(&path)?);
+            if held.metadata()?.number_of_links() != Some(1) {
+                return Err(err(format!("{name} hardlinked file: {}", path.display())));
+            }
+            bytes = bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| err("SDK size overflow"))?;
+        }
+    }
+    println!(
+        "{name} selected source={} selections={selected:?} entries={count} bytes={bytes} byte_cap={max_bytes}",
+        source.display()
+    );
+    qq_core::task_workspace::stage_tool_inputs(
+        NativeDirectoryGrant::capture(source)?, &root.join(name), selected,
+        qq_core::task_workspace::TaskWorkspaceLimits { max_entries: 65_536, max_bytes },
+        std::time::Instant::now() + Duration::from_secs(60),
+    ).map(|grant| grant.path).map_err(|error| err(format!("{name} staging failed: source={} entries={count} bytes={bytes} byte_cap={max_bytes}: {error}", source.display())))
+}
+fn stage_node(root: &Path) -> io::Result<PathBuf> {
     let node =
         PathBuf::from(std::env::var_os("ProgramFiles").ok_or_else(|| err("ProgramFiles missing"))?)
             .join("nodejs")
             .canonicalize()?;
-    let rust_bin = NativeEnvironment::windows_toolchain_bins()
-        .into_iter()
-        .find(|p| p.join("cargo.exe").is_file() && p.join("rustc.exe").is_file())
-        .ok_or_else(|| err("installed direct Rust toolchain unavailable"))?;
-    let rust = rust_bin
-        .parent()
-        .ok_or_else(|| err("Rust toolchain parent missing"))?;
-    let copy = |source: &Path, name: &str, selected: &[PathBuf], max_bytes: u64| {
-        qq_core::task_workspace::stage_tool_inputs(
-            NativeDirectoryGrant::capture(source)?,
-            &root.join(name),
-            selected,
-            qq_core::task_workspace::TaskWorkspaceLimits {
-                max_entries: 65_536,
-                max_bytes,
-            },
-            std::time::Instant::now() + Duration::from_secs(60),
-        )
-        .map_err(err)
-    };
-    let node = copy(
+    stage_selected(
         &node,
+        root,
         "node-stage",
         &[
             "node.exe".into(),
@@ -193,14 +232,24 @@ fn stage(root: &Path) -> io::Result<(PathBuf, PathBuf)> {
             "node_modules/npm".into(),
         ],
         256 * 1024 * 1024,
-    )?;
-    let rust = copy(
-        rust,
+    )
+}
+fn stage_rust(root: &Path) -> io::Result<PathBuf> {
+    let bin = NativeEnvironment::windows_toolchain_bins()
+        .into_iter()
+        .find(|p| p.join("cargo.exe").is_file() && p.join("rustc.exe").is_file())
+        .ok_or_else(|| err("installed direct Rust toolchain unavailable"))?;
+    let source = bin
+        .parent()
+        .ok_or_else(|| err("Rust toolchain parent missing"))?;
+    stage_selected(
+        source,
+        root,
         "rust-stage",
         &["bin".into(), "lib".into()],
         1024 * 1024 * 1024,
-    )?;
-    Ok((node.path, rust.path.join("bin")))
+    )
+    .map(|root| root.join("bin"))
 }
 fn grant_sdk(root: &Path, user: &str, package: &str) -> io::Result<()> {
     use std::os::windows::fs::MetadataExt as _;
@@ -258,12 +307,13 @@ fn write_projects(task: &Path) -> io::Result<()> {
     fs::write(task.join("input-empty.txt"), b"")?;
     Ok(())
 }
-fn run_tools(root: &Path, label: &str, node: &Path, rust: &Path) -> io::Result<Vec<i32>> {
+fn run_tools(root: &Path, label: &str, node: &Path, rust: Option<&Path>) -> io::Result<Vec<i32>> {
     use std::os::windows::process::CommandExt as _;
     let task = root.join("task");
     let home = task.join("home");
     let system = system_image("cmd.exe")?;
-    let path = std::env::join_paths([node, rust, system.parent().unwrap()]).map_err(err)?;
+    let path = std::env::join_paths([Some(node), rust, system.parent()].into_iter().flatten())
+        .map_err(err)?;
     let mut statuses = Vec::new();
     for (name, text) in [
         ("node", "node realpath.js"),
@@ -278,6 +328,9 @@ fn run_tools(root: &Path, label: &str, node: &Path, rust: &Path) -> io::Result<V
             "cargo test --offline --manifest-path rust-proof/Cargo.toml",
         ),
     ] {
+        if name.starts_with("cargo-") && rust.is_none() {
+            continue;
+        }
         let mut cmd = Command::new(&system);
         cmd.raw_arg(format!("/D /S /C \"{text}\""));
         cmd.current_dir(&task)
@@ -296,8 +349,10 @@ fn run_tools(root: &Path, label: &str, node: &Path, rust: &Path) -> io::Result<V
             .env("TMP", home.join("tmp"))
             .env("CARGO_TARGET_DIR", task.join(format!("target-{label}")))
             .env("CARGO_HOME", home.join(".cargo"))
-            .env("RUSTUP_HOME", home.join(".rustup"))
-            .env("RUSTC", rust.join("rustc.exe"));
+            .env("RUSTUP_HOME", home.join(".rustup"));
+        if let Some(rust) = rust {
+            cmd.env("RUSTC", rust.join("rustc.exe"));
+        }
         let (code, out, error) = command(cmd, &task.join("input-empty.txt"))?;
         println!(
             "{label} {name}: exit={code:#x}; stdout={}; stderr={}",
@@ -363,20 +418,19 @@ pub(super) fn environment(root: &Path) -> io::Result<Vec<(OsString, OsString)>> 
             .ok_or_else(|| err("tool input path missing"))
     };
     let system = system_image("cmd.exe")?;
+    let mut paths = vec![
+        PathBuf::from(get("node")?),
+        system.parent().unwrap().to_owned(),
+    ];
+    if let Some(rust) = config["rust"].as_str() {
+        paths.insert(1, PathBuf::from(rust));
+    }
     Ok(vec![
-        (
-            "PATH".into(),
-            std::env::join_paths([
-                PathBuf::from(get("node")?),
-                PathBuf::from(get("rust")?),
-                system.parent().unwrap().to_owned(),
-            ])
-            .map_err(err)?,
-        ),
+        ("PATH".into(), std::env::join_paths(paths).map_err(err)?),
         ("COMSPEC".into(), system.into_os_string()),
     ])
 }
-pub(super) fn run(
+fn node_run(
     parent: &Path,
     user: &str,
     write_sid: &str,
@@ -410,14 +464,12 @@ pub(super) fn run(
         &sdk,
         &format!("D:P(A;OICI;FA;;;{user})(A;OICI;FRFX;;;{package})"),
     )?;
-    let (node, rust) = stage(&sdk)?;
-    grant_sdk(&node, user, package.as_string())?;
-    grant_sdk(
-        rust.parent()
-            .ok_or_else(|| err("staged Rust parent missing"))?,
-        user,
-        package.as_string(),
+    let node = stage_node(&sdk)?;
+    fs::write(
+        task.join("node-stage-path.json"),
+        serde_json::to_vec(&node)?,
     )?;
+    grant_sdk(&node, user, package.as_string())?;
     fs::copy(std::env::current_exe()?, task.join("owned-payload.exe"))?;
     fs::write(task.join("expected-write-sid.txt"), write_sid)?;
     fs::copy(
@@ -445,8 +497,7 @@ pub(super) fn run(
         set_acl(&root.join(name), &format!("D:P(A;;FA;;;{user}){rights}"))?;
     }
     write_projects(&task)?;
-    import_names(&task, &rust)?;
-    let host = run_tools(&root, "host", &node, &rust)?;
+    let host = run_tools(&root, "host", &node, None)?;
     if host.iter().any(|code| *code != 0) {
         return Err(err(format!(
             "same staged SDK host positive control failed: {host:?}"
@@ -459,7 +510,7 @@ pub(super) fn run(
     };
     fs::write(
         task.join("tool-paths.json"),
-        serde_json::to_vec(&serde_json::json!({"node":aliased(&node)?,"rust":aliased(&rust)?}))?,
+        serde_json::to_vec(&serde_json::json!({"node":aliased(&node)?,"rust":null}))?,
     )?;
     let control_ui = PrivateUi::create(
         &format!("qq-alias-control-{}", std::process::id()),
@@ -527,11 +578,107 @@ pub(super) fn run(
         || result["outside_owner_denied"] != true
         || result["root_write_denied"] != true
         || fs::read(root.join("outside.txt"))? != b"outside-original"
-        || result["tool_codes"] != serde_json::json!([0, 0, 0, 0, 0])
+        || result["tool_codes"] != serde_json::json!([0, 0, 0])
     {
         return Err(err("alias workflow or native negative control failed"));
     }
     Ok(())
+}
+fn cargo_run(
+    parent: &Path,
+    user: &str,
+    write_sid: &str,
+    package: &rappct::AppContainerSid,
+    rust: &Path,
+) -> io::Result<()> {
+    let root = parent.join("alias-root");
+    let task = root.join("task");
+    let node: PathBuf = serde_json::from_slice(&fs::read(task.join("node-stage-path.json"))?)?;
+    grant_sdk(
+        rust.parent().ok_or_else(|| err("Rust root missing"))?,
+        user,
+        package.as_string(),
+    )?;
+    import_names(&task, rust)?;
+    let host = run_tools(&root, "cargo-host", &node, Some(rust))?;
+    if host.iter().any(|code| *code != 0) {
+        return Err(err(format!(
+            "same staged Cargo host control failed: {host:?}"
+        )));
+    }
+    let mut mapping = Mapping::create(&root, &task.join("input-empty.txt"))?;
+    let alias = mapping.root();
+    let aliased = |path: &Path| -> io::Result<PathBuf> {
+        Ok(alias.join(path.strip_prefix(&root).map_err(err)?))
+    };
+    fs::write(
+        task.join("tool-paths.json"),
+        serde_json::to_vec(&serde_json::json!({"node":aliased(&node)?,"rust":aliased(rust)?}))?,
+    )?;
+    fs::write(root.join("outside.txt"), b"outside-original")?;
+    let control_ui = std::mem::ManuallyDrop::new(PrivateUi::create(
+        &format!("qq-cargo-control-{}", std::process::id()),
+        user,
+        user,
+        package.as_string(),
+    )?);
+    let outcome = (|| {
+        launch_lpac_as(&alias, "alias-control", None, &control_ui.path)?;
+        let control: serde_json::Value =
+            serde_json::from_slice(&fs::read(task.join("alias-control-result.json"))?)?;
+        if control["outside_write_allowed"] != true
+            || control["outside_dac_allowed"] != true
+            || control["outside_owner_allowed"] != true
+            || control["private_denied"] != true
+            || fs::read(root.join("outside.txt"))? != b"unexpected"
+        {
+            return Err(err("Cargo ordinary control failed"));
+        }
+        fs::write(root.join("outside.txt"), b"outside-original")?;
+        let ui = std::mem::ManuallyDrop::new(PrivateUi::create(
+            &format!("qq-cargo-{}", std::process::id()),
+            user,
+            write_sid,
+            package.as_string(),
+        )?);
+        launch_restricted_payload(&alias, write_sid, &ui.path, "alias")?;
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(task.join("alias-result.json"))?)?;
+        println!("independent Cargo alias result: {result}");
+        if [
+            "task_write",
+            "private_denied",
+            "outside_write_denied",
+            "outside_dac_denied",
+            "outside_owner_denied",
+            "root_write_denied",
+        ]
+        .iter()
+        .any(|key| result[*key] != true)
+            || result["tool_codes"] != serde_json::json!([0, 0, 0, 0, 0])
+            || fs::read(root.join("outside.txt"))? != b"outside-original"
+        {
+            return Err(err("Cargo alias workflow/negative control failed"));
+        }
+        Ok(())
+    })();
+    let cleanup = mapping.remove();
+    outcome?;
+    cleanup
+}
+pub(super) fn run(
+    parent: &Path,
+    user: &str,
+    write_sid: &str,
+    package: &rappct::AppContainerSid,
+) -> io::Result<()> {
+    let node = node_run(parent, user, write_sid, package);
+    println!("independent Node alias result: {node:?}");
+    let sdk = parent.join("alias-root").join("sdk");
+    let rust = stage_rust(&sdk).and_then(|bin| cargo_run(parent, user, write_sid, package, &bin));
+    println!("independent Cargo closure/workflow result: {rust:?}");
+    node?;
+    rust
 }
 pub(super) fn payload(root: &Path, mode: &str, package: &str) -> io::Result<()> {
     let token =
@@ -598,12 +745,8 @@ pub(super) fn payload(root: &Path, mode: &str, package: &str) -> io::Result<()> 
             .as_str()
             .ok_or_else(|| err("node path missing"))?,
     );
-    let rust = PathBuf::from(
-        config["rust"]
-            .as_str()
-            .ok_or_else(|| err("Rust path missing"))?,
-    );
-    let codes = run_tools(root, mode, &node, &rust)?;
+    let rust = config["rust"].as_str().map(PathBuf::from);
+    let codes = run_tools(root, mode, &node, rust.as_deref())?;
     fs::write(
         root.join(format!("task/{mode}-result.json")),
         serde_json::to_vec(
