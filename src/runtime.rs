@@ -3600,7 +3600,7 @@ fn task_workspace_policy(
                             selected.push(PathBuf::from(name));
                         }
                     }
-                    let grant = qq_core::task_workspace::stage_tool_inputs(
+                    let grant = qq_core::task_workspace::stage_node_tool_inputs(
                         qq_core::command_owner::NativeDirectoryGrant::capture(&node)?,
                         &destination,
                         &selected,

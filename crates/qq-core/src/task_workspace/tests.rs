@@ -1308,3 +1308,122 @@ fn installed_tool_input_cache_refuses_unmanifested_files_and_directories() {
         assert!(!fixture.destination.exists());
     }
 }
+
+fn node_sdk_fixture(fixture: &Fixture) -> Vec<PathBuf> {
+    let bin = fixture
+        .source
+        .path
+        .join("node_modules")
+        .join("npm")
+        .join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"node-image").unwrap();
+    for name in ["npm", "npx"] {
+        fs::write(
+            fixture.source.path.join(format!("{name}.cmd")),
+            b"original-wrapper",
+        )
+        .unwrap();
+        fs::write(bin.join(format!("{name}-cli.js")), b"CLI").unwrap();
+    }
+    vec![
+        "node.exe".into(),
+        "npm.cmd".into(),
+        "npx.cmd".into(),
+        PathBuf::from("node_modules").join("npm"),
+    ]
+}
+
+#[test]
+fn node_bootstraps_are_scoped_and_sealed_into_the_cache_identity() {
+    let fixture = Fixture::new();
+    let selected = node_sdk_fixture(&fixture);
+    let limits = TaskWorkspaceLimits {
+        max_entries: 32,
+        max_bytes: 4096,
+    };
+    let generic = stage_tool_inputs(
+        fixture.source.clone(),
+        &fixture.destination,
+        &selected,
+        limits,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let stage = || {
+        stage_node_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &selected,
+            limits,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+    };
+    let first = stage().unwrap();
+    assert_ne!(
+        generic.path, first.path,
+        "derived bootstraps must bind the cache identity"
+    );
+    assert_eq!(
+        fs::read(generic.path.join("npm.cmd")).unwrap(),
+        b"original-wrapper"
+    );
+    for name in ["npm", "npx"] {
+        let wrapper = fs::read_to_string(first.path.join(format!("{name}.cmd"))).unwrap();
+        assert!(wrapper.contains("\"%~dp0node.exe\" --preserve-symlinks --preserve-symlinks-main"));
+        assert!(wrapper.contains(&format!("\\bin\\{name}-cli.js\" %*")));
+        assert!(!wrapper.contains("NODE_OPTIONS"));
+        assert!(!wrapper.contains("CALL"));
+        assert!(wrapper.ends_with("exit /b %errorlevel%\r\n"));
+        assert_eq!(
+            fs::read(fixture.source.path.join(format!("{name}.cmd"))).unwrap(),
+            b"original-wrapper"
+        );
+    }
+    assert_eq!(stage().unwrap().path, first.path);
+    fs::write(first.path.join("npm.cmd"), b"tampered").unwrap();
+    assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+    assert!(!fixture.destination.exists());
+}
+
+#[test]
+fn node_bootstraps_enforce_final_byte_budget_and_require_sibling_cli() {
+    for missing_cli in [false, true] {
+        let fixture = Fixture::new();
+        let selected = node_sdk_fixture(&fixture);
+        if missing_cli {
+            fs::remove_file(
+                fixture
+                    .source
+                    .path
+                    .join("node_modules")
+                    .join("npm")
+                    .join("bin")
+                    .join("npx-cli.js"),
+            )
+            .unwrap();
+        }
+        let result = stage_node_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &selected,
+            TaskWorkspaceLimits {
+                max_entries: 32,
+                max_bytes: if missing_cli { 4096 } else { 128 },
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        if missing_cli {
+            assert!(matches!(result, Err(TaskWorkspaceError::InvalidInput(_))));
+        } else {
+            assert!(matches!(result, Err(TaskWorkspaceError::LimitExceeded)));
+        }
+        assert!(!fixture.destination.exists());
+        assert_eq!(
+            fs::read_dir(fixture.destination.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+}

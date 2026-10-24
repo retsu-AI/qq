@@ -69,6 +69,29 @@ pub fn stage_tool_inputs(
     limits: TaskWorkspaceLimits,
     deadline: std::time::Instant,
 ) -> Result<NativeDirectoryGrant, TaskWorkspaceError> {
+    stage_tool_inputs_inner(source, destination, selected, limits, deadline, false)
+}
+
+/// Stage selected Node SDK inputs with fixed npm/npx CLI bootstraps. The flags
+/// affect only the package-manager process, never a task's NODE_OPTIONS.
+pub fn stage_node_tool_inputs(
+    source: NativeDirectoryGrant,
+    destination: &Path,
+    selected: &[PathBuf],
+    limits: TaskWorkspaceLimits,
+    deadline: std::time::Instant,
+) -> Result<NativeDirectoryGrant, TaskWorkspaceError> {
+    stage_tool_inputs_inner(source, destination, selected, limits, deadline, true)
+}
+
+fn stage_tool_inputs_inner(
+    source: NativeDirectoryGrant,
+    destination: &Path,
+    selected: &[PathBuf],
+    limits: TaskWorkspaceLimits,
+    deadline: std::time::Instant,
+    node_bootstrap: bool,
+) -> Result<NativeDirectoryGrant, TaskWorkspaceError> {
     let stopped = || std::time::Instant::now() >= deadline;
     if stopped() {
         return Err(TaskWorkspaceError::Stopped);
@@ -131,20 +154,24 @@ pub fn stage_tool_inputs(
         directory: source,
         protected_pack_roots: Vec::new(),
     };
-    let imported = TaskWorkspace::import_until(&admission, destination, &files, limits, &stopped)?;
-    let mut digest = Sha256::new();
-    for (path, version) in &imported.baseline {
-        let name = path.as_os_str().as_encoded_bytes();
-        digest.update((name.len() as u64).to_le_bytes());
-        digest.update(name);
-        digest.update(version.sha256);
-        digest.update(version.executable.to_le_bytes());
-    }
-    let cached = parent.join(format!("sdk-{:x}", digest.finalize()));
+    let mut imported =
+        TaskWorkspace::import_until(&admission, destination, &files, limits, &stopped)?;
     let parent_root = at(parent, open_dir_ambient(parent))?;
     let staging_name = destination.file_name().expect("validated destination");
-    let cache_name = cached.file_name().expect("generated cache name");
     let installed = (|| {
+        if node_bootstrap {
+            imported.prepare_node_bootstraps(&stopped)?;
+        }
+        let mut digest = Sha256::new();
+        for (path, version) in &imported.baseline {
+            let name = path.as_os_str().as_encoded_bytes();
+            digest.update((name.len() as u64).to_le_bytes());
+            digest.update(name);
+            digest.update(version.sha256);
+            digest.update(version.executable.to_le_bytes());
+        }
+        let cached = parent.join(format!("sdk-{:x}", digest.finalize()));
+        let cache_name = cached.file_name().expect("generated cache name");
         if stopped() {
             return Err(TaskWorkspaceError::Stopped);
         }
@@ -232,6 +259,83 @@ pub fn stage_tool_inputs(
                 }),
             }
         }
+    }
+}
+
+impl TaskWorkspace {
+    fn prepare_node_bootstraps(
+        &mut self,
+        stopped: &impl Fn() -> bool,
+    ) -> Result<(), TaskWorkspaceError> {
+        let root = at(&self.grant.path, open_dir_ambient(&self.grant.path))?;
+        if at(&self.grant.path, NativeWorkspaceIdentity::held(&root))? != self.grant.identity {
+            return Err(TaskWorkspaceError::Changed(self.grant.path.clone()));
+        }
+        let mut total = 0u64;
+        for path in self.baseline.keys() {
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
+            }
+            let parent = at(path, file_parent(&root, path, false))?;
+            let metadata = at(
+                path,
+                parent.symlink_metadata(path.file_name().expect("imported file")),
+            )?;
+            check_file(path, &metadata)?;
+            total = total
+                .checked_add(metadata.len())
+                .ok_or(TaskWorkspaceError::LimitExceeded)?;
+        }
+        for name in ["npm", "npx"] {
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
+            }
+            let path = PathBuf::from(format!("{name}.cmd"));
+            if !self.baseline.contains_key(&path) {
+                continue;
+            }
+            let cli = PathBuf::from("node_modules")
+                .join("npm")
+                .join("bin")
+                .join(format!("{name}-cli.js"));
+            if !self.baseline.contains_key(&cli)
+                || !self.baseline.contains_key(Path::new("node.exe"))
+            {
+                return Err(TaskWorkspaceError::InvalidInput(
+                    "npm bootstrap needs selected sibling Node and CLI",
+                ));
+            }
+            let bytes = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%~dp0node.exe\" --preserve-symlinks --preserve-symlinks-main \"%~dp0node_modules\\npm\\bin\\{name}-cli.js\" %*\r\nexit /b %errorlevel%\r\n").into_bytes();
+            let before = read_file(&root, &path, self.limits.max_bytes)?
+                .ok_or_else(|| TaskWorkspaceError::Changed(path.clone()))?;
+            total = total
+                .checked_sub(before.bytes.len() as u64)
+                .and_then(|n| n.checked_add(bytes.len() as u64))
+                .ok_or(TaskWorkspaceError::LimitExceeded)?;
+            if total > self.limits.max_bytes {
+                return Err(TaskWorkspaceError::LimitExceeded);
+            }
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                ._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
+            let metadata = at(&path, root.symlink_metadata(&path))?;
+            let mut target = at(&path, root.open_with(&path, &options))?;
+            check_unchanged(&path, &metadata, &at(&path, target.metadata())?)?;
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
+            }
+            at(&path, target.set_len(0))?;
+            at(&path, target.write_all(&bytes))?;
+            at(&path, target.sync_all())?;
+            let after = read_file(&root, &path, self.limits.max_bytes)?
+                .ok_or_else(|| TaskWorkspaceError::Changed(path.clone()))?;
+            if after.bytes != bytes {
+                return Err(TaskWorkspaceError::Changed(path));
+            }
+            self.baseline.insert(path, after.version);
+        }
+        Ok(())
     }
 }
 

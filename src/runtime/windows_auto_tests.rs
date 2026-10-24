@@ -33,9 +33,10 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     .unwrap();
     fs::write(
         source.join("build.js"),
-        "require('fs').writeFileSync('node-built.json', JSON.stringify({answer: 42}));",
+        "const assert=require('assert');assert.deepStrictEqual(process.execArgv,[]);assert.strictEqual(process.env.NODE_OPTIONS,undefined);require('fs').writeFileSync('node-built.json', JSON.stringify({answer:require('./sibling.js')}));",
     )
     .unwrap();
+    fs::write(source.join("sibling.js"), "module.exports=42;").unwrap();
     fs::write(source.join("test.js"), "const fs=require('fs');require('assert').strictEqual(JSON.parse(fs.readFileSync('node-built.json')).answer,42);fs.writeFileSync('node-test-passed','yes');").unwrap();
     fs::create_dir(source.join("rust-proof")).unwrap();
     fs::create_dir(source.join("rust-proof/src")).unwrap();
@@ -45,15 +46,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     )
     .unwrap();
     fs::write(source.join("rust-proof/src/main.rs"), "fn main(){std::fs::write(\"rust-built-output\",b\"42\").unwrap();} #[test] fn answer(){assert_eq!(6*7,42);}").unwrap();
-
-    fs::create_dir(source.join("npm-preserve")).unwrap();
-    for name in ["package.json", "build.js", "test.js"] {
-        let content = fs::read_to_string(source.join(name))
-            .unwrap()
-            .replace("node-built.json", "node-built-preserve.json")
-            .replace("node-test-passed", "node-test-preserve-passed");
-        fs::write(source.join("npm-preserve").join(name), content).unwrap();
-    }
 
     let mut script = format!(
         "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
@@ -117,7 +109,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             "{command} >{name}.stdout 2>{name}.stderr\r\n>{name}.exit echo %errorlevel%\r\n"
         ));
     }
-    batch.push_str("set NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main\r\ncall npm --prefix npm-preserve run build --offline >npm-preserve-build.stdout 2>npm-preserve-build.stderr\r\n>npm-preserve-build.exit echo %errorlevel%\r\ncall npm --prefix npm-preserve test --offline >npm-preserve-test.stdout 2>npm-preserve-test.stderr\r\n>npm-preserve-test.exit echo %errorlevel%\r\nset NODE_OPTIONS=\r\nexit /b 0\r\n");
+    batch.push_str("exit /b 0\r\n");
     fs::write(source.join("sdk-workflow.cmd"), batch).unwrap();
     script.push_str(" & call sdk-workflow.cmd");
 
@@ -125,16 +117,13 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     // host setup failures must not be confused with sandbox admission failures.
     let control = fixture.path("host-sdk-control");
     fs::create_dir_all(control.join("rust-proof/src")).unwrap();
-    fs::create_dir(control.join("npm-preserve")).unwrap();
     for name in [
         "package.json",
         "build.js",
+        "sibling.js",
         "test.js",
         "sdk-workflow.cmd",
         "runtime-metadata.exe",
-        "npm-preserve/package.json",
-        "npm-preserve/build.js",
-        "npm-preserve/test.js",
         "rust-proof/Cargo.toml",
         "rust-proof/src/main.rs",
     ] {
@@ -160,11 +149,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     .expect("owned host SDK control must finish")
     .unwrap();
     log_sdk_results("host", &control, &commands);
-    log_sdk_results(
-        "host comparison",
-        &control,
-        &[("npm-preserve-build", ""), ("npm-preserve-test", "")],
-    );
     assert!(output.status.success(), "host SDK batch failed: {output:?}");
     for (name, _) in commands {
         assert_eq!(
@@ -346,11 +330,6 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     );
     assert!(!source.join(".qq/task-home").exists());
     log_sdk_results("Auto", &source, &commands);
-    log_sdk_results(
-        "Auto comparison",
-        &source,
-        &[("npm-preserve-build", ""), ("npm-preserve-test", "")],
-    );
     let sdk_write_error = fs::read_to_string(source.join("sdk-write-denied")).unwrap();
     assert!(
         matches!(sdk_write_error.as_str(), "EACCES" | "EPERM"),
