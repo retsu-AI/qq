@@ -115,8 +115,9 @@ mod probe {
             }
             let bin = cargo.parent().ok_or_else(invalid)?;
             let lib = bin.parent().ok_or_else(invalid)?.join("lib");
-            let system =
-                PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?).join("System32");
+            let system = PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?)
+                .join("System32")
+                .canonicalize()?;
             let mut pending = std::collections::VecDeque::from([cargo.clone(), rustc.clone()]);
             let mut images = BTreeSet::new();
             let mut rows = Vec::new();
@@ -137,7 +138,7 @@ mod probe {
                     }
                 };
                 for name in &names {
-                    let resolved = [
+                    let mut resolved = [
                         image.parent().ok_or_else(invalid)?,
                         bin,
                         lib.as_path(),
@@ -146,17 +147,16 @@ mod probe {
                     .into_iter()
                     .map(|dir| dir.join(name))
                     .find(|path| path.is_file());
-                    if let Some(path) = resolved.as_ref() {
+                    if let Some(path) = resolved.take() {
                         match path.canonicalize() {
-                            Ok(path) => pending.push_back(path),
+                            Ok(path) => { pending.push_back(path.clone()); resolved=Some(path); }
                             Err(error) => rows.push(serde_json::json!({"image":path,"metadata_incomplete":error.to_string()})),
                         }
                     }
                     rows.push(serde_json::json!({"image":image,"import":name,"resolved":resolved}));
                 }
             }
-            let mut manifest =
-                serde_json::json!({"cargo":cargo,"rustc":rustc,"images":images,"imports":rows});
+            let mut manifest = serde_json::json!({"cargo":cargo,"rustc":rustc,"system32":system,"images":images,"imports":rows});
             if serde_json::to_vec(&manifest)?.len() > 1024 * 1024 {
                 manifest["imports"] =
                     serde_json::json!([{"metadata_incomplete":"1MiB manifest bound reached"}]);
@@ -194,9 +194,10 @@ mod probe {
             token.privileges().map_err(io::Error::from)?.privileges()
         );
         if load_only {
-            let system = PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?)
-                .join("System32")
-                .canonicalize()?;
+            let system = PathBuf::from(manifest["system32"].as_str().ok_or_else(invalid)?);
+            if !system.is_absolute() {
+                return Err(invalid());
+            }
             let cargo = manifest["cargo"].as_str().ok_or_else(invalid)?;
             let rows = manifest["imports"].as_array().ok_or_else(invalid)?;
             if rows.len() > 32768 {
@@ -210,7 +211,7 @@ mod probe {
                 let Some(path) = row["resolved"].as_str() else {
                     continue;
                 };
-                let path = PathBuf::from(path).canonicalize()?;
+                let path = PathBuf::from(path);
                 if path.parent() == Some(system.as_path()) {
                     loaded.insert(path);
                 }
