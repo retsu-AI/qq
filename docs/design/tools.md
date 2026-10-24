@@ -12,6 +12,29 @@ tool layer that corrupts a checkout or loses history is a failure regardless
 of latency, but every safety mechanism here is chosen to avoid long-held
 locks, avoidable round trips, and interactive ceremony.
 
+## Scoped task Git operations
+
+Auto root tasks can commit through a fixed QQ helper owned by the independent
+command worker. The model supplies the commit message. The coordinator selects
+changed files, a private Git repository and `qq/task/<task-run>` branch. It
+captures the source commit before importing task bytes, retains an immutable
+import baseline across publication, and excludes unchanged user edits. An
+unborn or unresolved source HEAD leaves local file work available without
+commit authority. Source Git refs, configuration and index are not modified.
+
+The helper runs from a private pinned copy of QQ, with fixed Git plumbing,
+no hooks, filters, signing, credential helpers or transport. Per-call intent
+binds the source base, files and resulting commit before ref installation.
+Recovery observes that intent and installed ref before proceeding. A confirmed
+finished helper can recover its typed result from the matching private receipt
+when stdout was lost. Unconfirmed or lost worker execution remains fenced.
+
+This helper is trusted host code, rather than an arbitrary task command. It
+uses host filesystem/resource authority with a durable deadline and native
+process cleanup. Manifest, file and pack sizes are bounded, but these are not
+an operating-system peak-memory quota on Git. Sandboxed task commands retain
+their native filesystem and resource enforcement.
+
 ## Native filesystem restriction primitive
 
 Trusted embedding hosts can attach `NativeFilesystem` to a `NativeCommand`.

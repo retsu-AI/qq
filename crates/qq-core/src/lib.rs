@@ -109,7 +109,7 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
     SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
-    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy, TaskWorkspacePolicy,
+    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy, TaskHostingAuthorization, TaskHostingLoadFuture, TaskWorkspacePolicy,
     WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.

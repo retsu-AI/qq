@@ -10,6 +10,24 @@ pub type RuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<LoadedRuntime, RuntimeLoadError>> + Send + 'static>>;
 pub type WorkerRuntimeLoadFuture =
     Pin<Box<dyn Future<Output = Result<ModelSelection, RuntimeLoadError>> + Send + 'static>>;
+/// Host-selected destination and an ephemeral credential. Never serialize this
+/// value into a job, transcript, or command journal.
+#[derive(Debug, Clone)]
+pub struct TaskHostingAuthorization {
+    pub owner: String,
+    pub repository: String,
+    pub base_branch: String,
+    pub credential: qq_provider::SecretLiteral,
+}
+
+pub type TaskHostingLoadFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Option<TaskHostingAuthorization>, RuntimeLoadError>>
+            + Send
+            + 'static,
+    >,
+>;
+
 pub type SpawnModelValidationFuture =
     Pin<Box<dyn Future<Output = Result<(), RuntimeLoadError>> + Send + 'static>>;
 
@@ -127,6 +145,16 @@ impl LoadedRuntime {
 
 pub trait RuntimeLoader: Send + Sync + 'static {
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture;
+
+    /// Only the trusted application resolves hosting credentials. Embeddings
+    /// without a host policy grant no remote authority.
+    fn authorize_task_hosting(
+        &self,
+        workspace: crate::command_owner::NativeDirectoryGrant,
+    ) -> TaskHostingLoadFuture {
+        let _ = workspace;
+        Box::pin(std::future::ready(Ok(None)))
+    }
 
     /// Loads a runtime while reporting secret-free preparation progress and
     /// observing cooperative cancellation at phase boundaries. The default
