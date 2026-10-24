@@ -8,6 +8,8 @@ async fn installed_node_builds_and_tests_in_default_auto() {
     let home = root.path().canonicalize().unwrap();
     let workspace = home.join("workspace");
     let host_workspace = home.join("host-workspace");
+    let credential = home.join("outside-credential");
+    std::fs::write(&credential, b"owned private credential canary").unwrap();
     let package = json!({"name":"qq-node-proof","version":"1.0.0","private":true,"scripts":{"build":"node build.js","test":"node test.js"}});
     for directory in [&workspace, &host_workspace] {
         std::fs::create_dir(directory).unwrap();
@@ -20,6 +22,9 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
         std::fs::write(directory.join("spawn-probe.js"), r#"
 const cp=require('child_process'),fs=require('fs'),path=require('path');
+let privateCode='READ_ALLOWED';
+try{fs.readFileSync(__PRIVATE_CANARY__)}catch(error){privateCode=error.code}
+fs.writeFileSync('private-canary-proof.json',JSON.stringify({code:privateCode}));
 (async()=>{
 const probes=['direct','shell'].map(kind=>{
   const script=`require('fs').writeFileSync('child-${kind}.txt','yes')`;
@@ -52,7 +57,7 @@ for(const kind of ['async-absolute','async-path','async-npm-path']){
 fs.writeFileSync('node-spawn-probe.json',JSON.stringify(probes));
 console.log(JSON.stringify(probes));
 })().catch(error=>{console.error(error);process.exitCode=1});
-"#).unwrap();
+"#.replace("__PRIVATE_CANARY__", &serde_json::to_string(&credential).unwrap())).unwrap();
     }
     assert!(
         std::process::Command::new("git")
@@ -224,6 +229,15 @@ console.log(JSON.stringify(probes));
     let probes: Vec<Value> =
         serde_json::from_slice(&std::fs::read(workspace.join("node-spawn-probe.json")).unwrap())
             .unwrap();
+    let private_proof: Value = serde_json::from_slice(
+        &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(private_proof["code"], "EACCES");
+    assert_eq!(
+        std::fs::read(&credential).unwrap(),
+        b"owned private credential canary"
+    );
     assert_eq!(probes.len(), 5);
     for probe in probes {
         assert_eq!(probe["status"], 0, "{probe}");

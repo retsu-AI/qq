@@ -935,8 +935,10 @@ fn homebrew_openssl_config(directory: &Path, prefix: &Path) -> io::Result<Option
 }
 
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
+    // EACCES keeps denied PATH candidates denied while allowing exec-search
+    // implementations (including libuv) to continue to an admitted executable.
     let mut profile = String::from(
-        "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
+        "(version 1)\n(deny default (with errno 13))\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
     // Darwin uname() needs these two names in addition to the OS/hardware
     // names above; Node's OS bootstrap calls it even for ordinary npm scripts.
@@ -947,6 +949,13 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
     // the selected system shell. This grants one file, not its parent tree.
     profile.push_str("(allow file-read* (literal \"/private/var/select/sh\"))\n");
     let mut literal_metadata = std::collections::BTreeSet::new();
+    // Xcode checks this machine-wide license receipt while resolving its SDK.
+    literal_read(
+        &mut profile,
+        Path::new("/Library/Preferences/com.apple.dt.Xcode.plist"),
+        false,
+        &mut literal_metadata,
+    )?;
     // LibreSSL loads this OS-public configuration even for Cargo offline work.
     // User configuration and other files under /private/etc remain excluded.
     literal_read(
@@ -1067,6 +1076,7 @@ mod tests {
             NativeNetwork::Isolated,
         )
         .unwrap();
+        assert!(text.contains("(deny default (with errno 13))"));
         assert!(text.contains("(sysctl-name \"kern.hostname\")"));
         assert!(text.contains("(sysctl-name \"kern.version\")"));
         assert!(!text.contains("(sysctl-name-prefix \"kern.\")"));
@@ -1076,7 +1086,16 @@ mod tests {
             text.contains("(allow file-read* (literal \"/private/var/select/developer_dir\"))")
         );
         assert!(!text.contains("(subpath \"/private/var/select\")"));
-        for parent in ["/private/etc/ssl", "/private/etc", "/private"] {
+        assert!(text.contains(
+            "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))"
+        ));
+        for parent in [
+            "/Library/Preferences",
+            "/Library",
+            "/private/etc/ssl",
+            "/private/etc",
+            "/private",
+        ] {
             assert!(text.contains(&format!("(allow file-read-metadata (literal {parent:?}))")));
             assert!(!text.contains(&format!("(allow file-read* (literal {parent:?}))")));
             assert!(!text.contains(&format!("(subpath {parent:?})")));
