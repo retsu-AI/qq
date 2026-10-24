@@ -213,6 +213,7 @@ jobs:
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
+          bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job
           cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
       - name: Windows command and fleet resource bounds
         if: ${{ !cancelled() && runner.os == 'Windows' }}
@@ -226,8 +227,7 @@ jobs:
             tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs \
             tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers \
             tools::windows_owner::fleet::tests::budgeted_exit_notification_survives_a_dropped_wait \
-            tools::windows_owner::resources::tests::nested_cpu_rates_never_exceed_the_requested_machine_share \
-            tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job; do
+            tools::windows_owner::resources::tests::nested_cpu_rates_never_exceed_the_requested_machine_share; do
             bash .github/scripts/test-exact.sh "$selector" || status=1
           done
           exit "$status"

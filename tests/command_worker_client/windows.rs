@@ -52,7 +52,6 @@ fn payload_probe() {
     }
     let expected = rappct::SecurityCapabilitiesBuilder::new(token.package_sid.as_ref().unwrap())
         .with_named(&["registryRead"])
-        .lpac(true)
         .build()
         .unwrap();
     let mut expected_sids = expected
@@ -70,14 +69,10 @@ fn payload_probe() {
     actual_sids.sort();
     assert_eq!(actual_sids, expected_sids);
     assert_low_privilege_token();
-    // TokenIsLessPrivilegedAppContainer is reserved and the SDK maps an
-    // unsupported query to false. Verify the defining kernel behavior instead:
-    // AAP access is available to the ordinary control, and denied to LPAC.
+    // Windows-public AppContainer reads are allowed. The independent task
+    // write restrictor must still deny ambient writes and private reads.
     let aap = std::fs::read_to_string("aap-only-path").unwrap();
-    assert_eq!(
-        std::fs::read(&aap).unwrap_err().kind(),
-        std::io::ErrorKind::PermissionDenied
-    );
+    assert_eq!(std::fs::read(&aap).unwrap(), b"aap-visible");
     if mode != "blocked" {
         registry::assert_host_secret_denied();
     }

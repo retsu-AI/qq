@@ -1183,3 +1183,247 @@ fn detached_task_git_manifest_keeps_immutable_import_baseline_after_publication(
         Err(TaskWorkspaceError::Stopped)
     ));
 }
+
+#[test]
+fn installed_tool_inputs_are_bounded_independent_copies() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.path.join("npm")).unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"node-image").unwrap();
+    fs::write(fixture.source.path.join("npm/entry.js"), b"npm-entry").unwrap();
+    let grant = stage_tool_inputs(
+        fixture.source.clone(),
+        &fixture.destination,
+        &["node.exe".into(), "npm".into()],
+        TaskWorkspaceLimits {
+            max_entries: 8,
+            max_bytes: 64,
+        },
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"changed").unwrap();
+    assert_eq!(
+        fs::read(grant.path.join("node.exe")).unwrap(),
+        b"node-image"
+    );
+    assert_eq!(
+        fs::read(grant.path.join("npm/entry.js")).unwrap(),
+        b"npm-entry"
+    );
+}
+
+#[test]
+fn installed_tool_input_aliases_limits_and_deadlines_are_refused() {
+    for failure in ["hardlink", "entries", "bytes", "deadline"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+        if failure == "hardlink" {
+            fs::hard_link(
+                fixture.source.path.join("node.exe"),
+                fixture.source.path.join("alias"),
+            )
+            .unwrap();
+        }
+        let limits = TaskWorkspaceLimits {
+            max_entries: if failure == "entries" { 0 } else { 8 },
+            max_bytes: if failure == "bytes" { 1 } else { 64 },
+        };
+        let deadline = std::time::Instant::now()
+            + if failure == "deadline" {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_secs(5)
+            };
+        assert!(
+            stage_tool_inputs(
+                fixture.source.clone(),
+                &fixture.destination,
+                &["node.exe".into()],
+                limits,
+                deadline
+            )
+            .is_err(),
+            "{failure}"
+        );
+        assert!(
+            !fixture.destination.exists(),
+            "failed staging must not leave an admitted tree: {failure}"
+        );
+    }
+}
+
+#[test]
+fn installed_tool_inputs_reuse_only_verified_immutable_cache_bytes() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+    let stage = || {
+        stage_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &["node.exe".into()],
+            TaskWorkspaceLimits {
+                max_entries: 8,
+                max_bytes: 64,
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+    };
+    let first = stage().unwrap();
+    assert!(!fixture.destination.exists());
+    let second = stage().unwrap();
+    assert_eq!(first.path, second.path);
+    assert_eq!(first.identity, second.identity);
+    fs::write(first.path.join("node.exe"), b"tampered").unwrap();
+    assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+    assert!(!fixture.destination.exists());
+    assert_eq!(fs::read(first.path.join("node.exe")).unwrap(), b"tampered");
+}
+
+#[test]
+fn installed_tool_input_cache_refuses_unmanifested_files_and_directories() {
+    for extra in ["module.js", "empty-directory"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+        let stage = || {
+            stage_tool_inputs(
+                fixture.source.clone(),
+                &fixture.destination,
+                &["node.exe".into()],
+                TaskWorkspaceLimits {
+                    max_entries: 8,
+                    max_bytes: 64,
+                },
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+        };
+        let grant = stage().unwrap();
+        let unexpected = grant.path.join(extra);
+        if extra.ends_with(".js") {
+            fs::write(&unexpected, b"injected").unwrap();
+        } else {
+            fs::create_dir(&unexpected).unwrap();
+        }
+        assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+        assert!(unexpected.exists());
+        assert!(!fixture.destination.exists());
+    }
+}
+
+fn node_sdk_fixture(fixture: &Fixture) -> Vec<PathBuf> {
+    let bin = fixture
+        .source
+        .path
+        .join("node_modules")
+        .join("npm")
+        .join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"node-image").unwrap();
+    for name in ["npm", "npx"] {
+        fs::write(
+            fixture.source.path.join(format!("{name}.cmd")),
+            b"original-wrapper",
+        )
+        .unwrap();
+        fs::write(bin.join(format!("{name}-cli.js")), b"CLI").unwrap();
+    }
+    vec![
+        "node.exe".into(),
+        "npm.cmd".into(),
+        "npx.cmd".into(),
+        PathBuf::from("node_modules").join("npm"),
+    ]
+}
+
+#[test]
+fn node_bootstraps_are_scoped_and_sealed_into_the_cache_identity() {
+    let fixture = Fixture::new();
+    let selected = node_sdk_fixture(&fixture);
+    let limits = TaskWorkspaceLimits {
+        max_entries: 32,
+        max_bytes: 4096,
+    };
+    let generic = stage_tool_inputs(
+        fixture.source.clone(),
+        &fixture.destination,
+        &selected,
+        limits,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    let stage = || {
+        stage_node_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &selected,
+            limits,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+    };
+    let first = stage().unwrap();
+    assert_ne!(
+        generic.path, first.path,
+        "derived bootstraps must bind the cache identity"
+    );
+    assert_eq!(
+        fs::read(generic.path.join("npm.cmd")).unwrap(),
+        b"original-wrapper"
+    );
+    for name in ["npm", "npx"] {
+        let wrapper = fs::read_to_string(first.path.join(format!("{name}.cmd"))).unwrap();
+        assert!(wrapper.contains("\"%~dp0node.exe\" --preserve-symlinks --preserve-symlinks-main"));
+        assert!(wrapper.contains(&format!("\\bin\\{name}-cli.js\" %*")));
+        assert!(!wrapper.contains("NODE_OPTIONS"));
+        assert!(!wrapper.contains("CALL"));
+        assert!(wrapper.ends_with("exit /b %errorlevel%\r\n"));
+        assert_eq!(
+            fs::read(fixture.source.path.join(format!("{name}.cmd"))).unwrap(),
+            b"original-wrapper"
+        );
+    }
+    assert_eq!(stage().unwrap().path, first.path);
+    fs::write(first.path.join("npm.cmd"), b"tampered").unwrap();
+    assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+    assert!(!fixture.destination.exists());
+}
+
+#[test]
+fn node_bootstraps_enforce_final_byte_budget_and_require_sibling_cli() {
+    for missing_cli in [false, true] {
+        let fixture = Fixture::new();
+        let selected = node_sdk_fixture(&fixture);
+        if missing_cli {
+            fs::remove_file(
+                fixture
+                    .source
+                    .path
+                    .join("node_modules")
+                    .join("npm")
+                    .join("bin")
+                    .join("npx-cli.js"),
+            )
+            .unwrap();
+        }
+        let result = stage_node_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &selected,
+            TaskWorkspaceLimits {
+                max_entries: 32,
+                max_bytes: if missing_cli { 4096 } else { 128 },
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        if missing_cli {
+            assert!(matches!(result, Err(TaskWorkspaceError::InvalidInput(_))));
+        } else {
+            assert!(matches!(result, Err(TaskWorkspaceError::LimitExceeded)));
+        }
+        assert!(!fixture.destination.exists());
+        assert_eq!(
+            fs::read_dir(fixture.destination.parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+}

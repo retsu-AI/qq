@@ -198,6 +198,10 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "command_worker_client/task_git.rs"]
+mod task_git;
+
 #[cfg(target_os = "linux")]
 #[path = "command_worker_client/task_git.rs"]
 mod task_git;

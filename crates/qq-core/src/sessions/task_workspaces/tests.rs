@@ -63,6 +63,7 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
     .unwrap();
     std::fs::write(workspace.path().join("vendor/policy.md"), "agent edit").unwrap();
     let scope = NativeCommandScope {
+        executable_directories: Vec::new(),
         workspace: workspace.directory_grant(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -101,6 +102,8 @@ async fn open_session(
         let control = root.join("control");
         std::fs::create_dir(&control).unwrap();
         let policy = TaskWorkspacePolicy {
+            cargo_cache: None,
+            executable_directories: Vec::new(),
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,
@@ -1688,4 +1691,54 @@ async fn exercise_publication_cancellation_order(pause: PublicationPause) {
         std::fs::read_to_string(&tasks[0]).unwrap(),
         "updated attachment"
     );
+}
+
+#[test]
+fn installed_tool_inputs_reject_source_overlap_and_allow_sibling_tasks() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    for path in [
+        "control/sdk",
+        "control/task",
+        "rust/bin",
+        "rust/lib",
+        "dependencies/icu/lib",
+    ] {
+        std::fs::create_dir_all(root.join(path)).unwrap();
+    }
+    let policy = TaskWorkspacePolicy {
+        directory: NativeDirectoryGrant::capture(&root.join("control")).unwrap(),
+        read_only: [
+            "control/sdk",
+            "rust/bin",
+            "rust/lib",
+            "dependencies/icu/lib",
+        ]
+        .into_iter()
+        .map(|path| NativeDirectoryGrant::capture(&root.join(path)).unwrap())
+        .collect(),
+        executable_directories: vec![root.join("control/sdk"), root.join("rust/bin")],
+        cargo_cache: None,
+        resources: NativeResources::Host,
+        limits: TaskWorkspaceLimits {
+            max_entries: 128,
+            max_bytes: 4096,
+        },
+    };
+    assert!(validate_tool_roots(&policy, &root.join("control/task")).is_ok());
+    for source in [
+        "control/sdk",
+        "control/sdk/project",
+        "rust",
+        "rust/bin/project",
+        "rust/lib/project",
+        "dependencies/icu/lib",
+        "dependencies/icu/lib/project",
+        "dependencies",
+    ] {
+        assert!(
+            validate_tool_roots(&policy, &root.join(source)).is_err(),
+            "source {source} must not own installed inputs"
+        );
+    }
 }

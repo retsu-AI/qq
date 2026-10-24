@@ -171,6 +171,8 @@ async fn task_hosting_reauthorizes_after_preparation_before_native_submission() 
         options.task_workspaces = Some(TaskWorkspacePolicy {
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
+            executable_directories: vec![],
+            cargo_cache: None,
             resources: NativeResources::Host,
             limits: crate::task_workspace::TaskWorkspaceLimits {
                 max_entries: 128,

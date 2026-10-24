@@ -46,6 +46,7 @@ impl NativeCommandService for Recording {
 
 fn scope(path: &Path) -> NativeCommandScope {
     NativeCommandScope {
+        executable_directories: Vec::new(),
         workspace: NativeDirectoryGrant::capture(path).unwrap(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -375,4 +376,41 @@ async fn native_scope_goal_check_never_falls_back_to_host_execution() {
     assert!(!marker.exists(), "the host command executed before refusal");
     resources.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_scope_tool_search_roots_require_read_authority_and_survive_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    for name in ["work", "sdk"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let sdk = NativeDirectoryGrant::capture(&root.join("sdk")).unwrap();
+    let mut admitted = scope(&root.join("work"));
+    admitted.executable_directories = vec![sdk.path.clone()];
+    assert!(super::super::native_scope::NativeScopes::single(admitted.clone()).is_err());
+    admitted.read_only.push(sdk.clone());
+    assert!(super::super::native_scope::NativeScopes::single(admitted.clone()).is_ok());
+    let mut oversized = admitted.clone();
+    oversized.executable_directories = vec![sdk.path.clone(); 17];
+    assert!(super::super::native_scope::NativeScopes::single(oversized).is_err());
+    let database = root.join("sessions.sqlite3");
+    let store = Store::open(database.clone()).await.unwrap();
+    super::super::native_scope::load(&store, vec![admitted])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let store = Store::open(database).await.unwrap();
+    let restored = super::super::native_scope::load(&store, vec![])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored
+            .get(&root.join("work"))
+            .unwrap()
+            .executable_directories,
+        [sdk.path]
+    );
+    store.close().await.unwrap();
 }

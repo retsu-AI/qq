@@ -1,0 +1,62 @@
+name: Unix SDK native qualification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/unix-sdk-macos]
+
+permissions:
+  contents: read
+
+jobs:
+  macos-sdk:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Build real CLI and public cache prerequisites
+        run: cargo build --locked -p qq --no-default-features
+      - name: Check selected cache
+        run: |
+          cargo test --locked -p qq-core task_workspace::cargo::tests:: -- --nocapture
+      - name: Check installed toolchain resolver
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features runtime::unix_sdk::tests:: -- --nocapture
+      - name: Require and execute actual cached dependency Auto integration
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/sdk-tests.txt"
+          grep -Fx 'runtime::cargo::cached_public_dependency_builds_in_default_auto: test' "$RUNNER_TEMP/sdk-tests.txt"
+          cargo test --locked -p qq --no-default-features --test command_worker_client runtime::cargo::cached_public_dependency_builds_in_default_auto -- --ignored --exact --nocapture
+      - name: Preserve existing native containment checks
+        if: ${{ !cancelled() }}
+        run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1 --nocapture
+      - name: Require and execute actual installed Node build/test integration
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/node-sdk-tests.txt"
+          grep -Fx 'runtime::node::installed_node_builds_and_tests_in_default_auto: test' "$RUNNER_TEMP/node-sdk-tests.txt"
+          cargo test --locked -p qq --no-default-features --test command_worker_client runtime::node::installed_node_builds_and_tests_in_default_auto -- --ignored --exact --nocapture
+      - name: Require ordinary Auto publication checks and goal continuation
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/auto-runtime-tests.txt"
+          for selector in default_auto_cannot_overwrite_host_files_through_a_project_symlink default_auto_completion_check_uses_the_detached_native_boundary default_auto_goal_continuations_reuse_the_same_private_task_files; do
+            grep -Fx "runtime::$selector: test" "$RUNNER_TEMP/auto-runtime-tests.txt"
+          done
+          cargo test --locked -p qq --no-default-features --test command_worker_client runtime::default_auto_ -- --nocapture
+      - name: Require and execute actual task Git commit integration
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/task-git-tests.txt"
+          grep -Fx 'task_git::default_auto_edits_and_commits_without_host_git_mutation_or_approvals: test' "$RUNNER_TEMP/task-git-tests.txt"
+          cargo test --locked -p qq --no-default-features --test command_worker_client task_git::default_auto_edits_and_commits_without_host_git_mutation_or_approvals -- --exact --nocapture
+      - name: Lint native source
+        if: ${{ !cancelled() }}
+        run: cargo clippy --locked -p qq-core -p qq --all-targets --no-default-features -- -D warnings
