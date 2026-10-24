@@ -166,7 +166,7 @@ pub(super) fn prepare(
 
 pub(super) fn prepare_workspace_write(
     scope: &NativeFilesystem,
-    package: &AppContainerSid,
+    capability: &str,
     deadline: u64,
 ) -> io::Result<Vec<File>> {
     let NativeFilesystem::WorkspaceWrite {
@@ -187,7 +187,7 @@ pub(super) fn prepare_workspace_write(
             "writable authority is beneath a protected Windows directory",
         ));
     }
-    let sid: LocalBox<Sid> = package.as_string().parse()?;
+    let sid: LocalBox<Sid> = capability.parse()?;
     let lock = lock_security()?;
     let mut held = Vec::new();
     let mut count = 0;
@@ -422,7 +422,7 @@ fn walk_mode(
         )?
         .into_string()
         .map_err(|_| io::Error::other("native access list is not Unicode"))?;
-        // New objects need to inherit the package SID; the caller's default
+        // New objects need to inherit the granted SID; the caller's default
         // DACL need not contain it. Update only the held kernel object below,
         // rather than asking the file-object adapter to walk existing children.
         let inheritance = if metadata.is_dir() { "OICI" } else { "" };
@@ -506,7 +506,7 @@ mod tests {
             read_only: vec![NativeDirectoryGrant::capture(&root).unwrap()],
             read_write: vec![NativeDirectoryGrant::capture(&child).unwrap()],
         };
-        let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+        let package = super::super::legacy::capability_sid(&scope).unwrap();
         let error = prepare_workspace_write(&scope, &package, super::super::unix_ms() + 15_000)
             .unwrap_err();
         assert!(error.to_string().contains("beneath a protected"));

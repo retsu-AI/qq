@@ -2,6 +2,7 @@
 //! restricted-token model. This is not credential or network isolation.
 use super::{Packet, READY, access, arguments, unix_ms};
 use firehazard::{process, token};
+use sha2::{Digest as _, Sha256};
 use std::{
     fs::File,
     io::{self, Read as _, Write as _},
@@ -26,6 +27,32 @@ fn stage(operation: &'static str) -> impl FnOnce(firehazard::Error) -> io::Error
         let source = io::Error::from(error);
         io::Error::new(source.kind(), LaunchError { operation, source })
     }
+}
+
+pub(super) fn capability_sid(scope: &crate::command_owner::NativeFilesystem) -> io::Result<String> {
+    // AppContainer package SIDs are rejected by CreateRestrictedToken. This
+    // ordinary NT SID is object authority only; no Windows account is created.
+    // Include held root identities and policy in a versioned namespace so stale
+    // grants from a different workspace or policy cannot match this token.
+    let mut digest = Sha256::new();
+    digest.update(b"qq.windows.workspace-write.v1\0");
+    digest.update(access::identity(scope)?.as_bytes());
+    let digest = digest.finalize();
+    let word = |offset: usize| {
+        u32::from_le_bytes([
+            digest[offset],
+            digest[offset + 1],
+            digest[offset + 2],
+            digest[offset + 3],
+        ])
+    };
+    Ok(format!(
+        "S-1-5-21-{}-{}-{}-{}",
+        word(0),
+        word(4),
+        word(8),
+        word(12)
+    ))
 }
 
 fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
@@ -203,15 +230,14 @@ pub(super) fn execute(
     launch_cwd: &Path,
     cpu_rate: Option<u32>,
 ) -> io::Result<u8> {
-    let capability = rappct::derive_sid_from_name(&access::identity(&packet.filesystem)?)
-        .map_err(io::Error::other)?;
+    let capability = capability_sid(&packet.filesystem)?;
     let _held =
         access::prepare_workspace_write(&packet.filesystem, &capability, packet.not_after_ms)?;
     let mut packet = packet;
     packet.cwd = launch_cwd.to_owned();
     let child = launch(
         &packet,
-        capability.as_string(),
+        &capability,
         input.try_clone()?,
         File::from(std::io::stdout().as_handle().try_clone_to_owned()?),
         File::from(std::io::stderr().as_handle().try_clone_to_owned()?),
@@ -267,78 +293,28 @@ mod tests {
 
     #[test]
     fn restricted_token_api_accepts_the_production_sid_and_flag_combination() {
-        let base = firehazard::open_process_token(
-            firehazard::get_current_process(),
-            token::QUERY
-                | token::DUPLICATE
-                | token::ADJUST_DEFAULT
-                | token::ADJUST_PRIVILEGES
-                | token::ASSIGN_PRIMARY,
-        )
-        .unwrap();
-        let groups = base.groups().unwrap();
-        let logon = groups
-            .groups()
-            .iter()
-            .find(|group| {
-                group.attributes & firehazard::sid::group::LOGON_ID
-                    == firehazard::sid::group::LOGON_ID
-            })
-            .unwrap();
-        let package = rappct::derive_sid_from_name("qq.legacy.token-api-proof").unwrap();
-        let capability = firehazard::sid::convert_string_sid_to_sid_a(package.as_string()).unwrap();
-        let parsed_world = firehazard::sid::convert_string_sid_to_sid_a("S-1-1-0").unwrap();
-        let attributes = |sid| firehazard::sid::AndAttributes::new(sid, None);
-        let world = [attributes(firehazard::sid!(S - 1 - 1 - 0))];
-        let parsed = [attributes(parsed_world.as_sid_ptr())];
-        let logon_only = [attributes(logon.sid)];
-        let capability_only = [attributes(capability.as_sid_ptr())];
-        let production = [
-            attributes(capability.as_sid_ptr()),
-            attributes(logon.sid),
-            world[0],
-        ];
-        let combinations: &[(&str, &[firehazard::sid::AndAttributes<'_>])] = &[
-            ("macro-world", &world),
-            ("parsed-world", &parsed),
-            ("logon", &logon_only),
-            ("workspace", &capability_only),
-            ("production", &production),
-        ];
-        let flags = [
-            token::RestrictedFlags::default(),
-            token::DISABLE_MAX_PRIVILEGE,
-            token::LUA_TOKEN,
-            token::WRITE_RESTRICTED,
-            token::DISABLE_MAX_PRIVILEGE | token::LUA_TOKEN | token::WRITE_RESTRICTED,
-        ];
-        let mut production_accepted = false;
-        for (label, sids) in combinations {
-            assert!(sids.iter().all(|sid| u32::from(sid.attributes) == 0));
-            for (index, flags) in flags.iter().copied().enumerate() {
-                let result =
-                    firehazard::create_restricted_token(&base, flags, None, None, Some(sids));
-                println!(
-                    "legacy_token_api sids={label} count={} flags=0x{:x} result={:?}",
-                    sids.len(),
-                    u32::from(flags),
-                    result
-                        .as_ref()
-                        .map(|_| ())
-                        .map_err(|error| io::Error::from(*error)),
-                );
-                if *label == "production" && index == 4 {
-                    production_accepted = result.is_ok();
-                }
-                // Candidate handles are closed immediately. No candidate token
-                // can launch or impersonate a payload, including weaker controls.
-                drop(result);
-            }
-        }
-        assert!(
-            production_accepted,
-            "production restricted-token combination was refused; see bounded token API cases above"
-        );
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let scope = NativeFilesystem::WorkspaceWrite {
+            read_only: vec![],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        let ordinary = capability_sid(&scope).unwrap();
+        assert!(ordinary.starts_with("S-1-5-21-"));
+        assert_eq!(ordinary, capability_sid(&scope).unwrap());
+        let protected = root.join("protected");
+        std::fs::create_dir(&protected).unwrap();
+        let changed = NativeFilesystem::WorkspaceWrite {
+            read_only: vec![
+                crate::command_owner::NativeDirectoryGrant::capture(&protected).unwrap(),
+            ],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        assert_ne!(ordinary, capability_sid(&changed).unwrap());
+        // Exercise the production flags, logon/World entries, privilege policy
+        // and default DACL without launching or impersonating a process.
+        let valid = restricted_token(&ordinary).unwrap();
+        drop(valid);
     }
 
     #[test]
@@ -384,8 +360,7 @@ fn builds_and_runs_in_the_workspace() {
             read_only: vec![NativeDirectoryGrant::capture(&protected).unwrap()],
             read_write: vec![NativeDirectoryGrant::capture(&workspace).unwrap()],
         };
-        let capability =
-            rappct::derive_sid_from_name(&access::identity(&filesystem).unwrap()).unwrap();
+        let capability = capability_sid(&filesystem).unwrap();
         let deadline = unix_ms() + 120_000;
         let _held = access::prepare_workspace_write(&filesystem, &capability, deadline).unwrap();
         let script = format!(
@@ -431,7 +406,7 @@ fn builds_and_runs_in_the_workspace() {
         };
         let child = launch(
             &packet,
-            capability.as_string(),
+            &capability,
             File::open(stdin_path).unwrap(),
             File::create(root.join("stdout")).unwrap(),
             File::create(root.join("stderr")).unwrap(),
