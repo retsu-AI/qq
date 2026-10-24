@@ -197,14 +197,17 @@ source authority; cancellation, budgets and unknown-execution holds still apply.
 Unbound Full and Ask checks recover the original worker's terminal result without
 requiring a restricted scope; recovery never submits replacement execution.
 
-Linux Auto commands request enforced memory, process and CPU limits. Goal work
-retains its private tree across server restart without replaying the original
-command or resetting its goal budget. This integration does not yet qualify
-unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS kernel-quota execution remains
-unavailable and fails closed. Source
-symlinks are omitted and hardlinked regular inputs are refused. Scoped network
-and credential operations still require separate trusted adapters.
+Linux Auto commands request enforced memory, process and CPU limits. Windows
+uses AppContainer file/network restrictions and Job resource limits. macOS uses
+Seatbelt restrictions and sampled resource safeguards, rather than aggregate
+kernel quotas; detached-process limitations are described below. Import and SDK
+copy limits and storage-pressure checks do not provide hard per-task disk quotas.
+Goal work retains its private tree across server restart without replaying the
+original command or resetting its goal budget. Ordinary non-goal prompts start
+new task trees. Source symlinks are omitted and hardlinked regular inputs are
+refused. Public fetches use configured host grants; `task_commit`, `task_push`
+and `task_pr` use the trusted Git/hosting adapters described below. Payload
+commands retain isolated networking.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
@@ -240,9 +243,10 @@ be registered; an existing root's authority cannot be silently changed. Every
 child session uses the same store-owned restrictions regardless of its model
 profile or approval grants. Corrupt or empty stored scope records refuse startup.
 The metadata has a byte bound and the registry has a capacity bound. Store
-schema 60 prevents older runtimes from ignoring these restrictions. Scope
-retirement/reconfiguration and automatic task-workspace preparation are not yet
-implemented; this remains an opt-in host API, not qualified default Auto.
+schema 60 prevents older runtimes from ignoring these restrictions. Explicit
+embedding registrations cannot be reconfigured or retired in place. Normal
+server Auto sessions prepare isolated task workspaces and register their
+derived authority automatically through `TaskWorkspacePolicy`.
 
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
