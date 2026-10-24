@@ -32,7 +32,6 @@ use qq_protocol::{
 use qq_provider::{
     ContentBlock, Message, ModelRequest, Provider, ProviderErrorKind, ProviderEvent, Role, ToolSpec,
 };
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 mod approval;
@@ -2108,6 +2107,8 @@ mod tests {
     use futures_util::{StreamExt, stream};
     use qq_protocol::ReasoningKind;
     use qq_provider::{ProviderError, ProviderStream};
+
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -7624,11 +7625,11 @@ mod tests {
             !final_request.tools().is_empty(),
             "the final response keeps its tools declared"
         );
-        assert!(
-            final_request
-                .system()
-                .is_some_and(|system| system.contains(BUDGET_FINAL_RESPONSE_NOTICE))
+        assert_eq!(
+            final_request.messages().last(),
+            Some(&Message::user(BUDGET_FINAL_RESPONSE_NOTICE))
         );
+        assert_eq!(final_request.system(), requests[0].system());
         assert!(
             !final_request
                 .messages()

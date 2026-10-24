@@ -568,8 +568,8 @@ async fn the_budget_final_turn_outranks_a_due_report() {
     let last = requests.last().unwrap();
     assert_eq!(
         last_notice(last),
-        None,
-        "no report notice on the final response"
+        Some(crate::BUDGET_FINAL_RESPONSE_NOTICE),
+        "the final response carries only the budget notice, no report notice"
     );
     assert_eq!(last.tool_choice(), qq_provider::ToolChoice::None);
     assert!(notices(&events).is_empty());

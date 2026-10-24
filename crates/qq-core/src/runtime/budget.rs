@@ -5,9 +5,12 @@ use tokio::time::Instant;
 
 /// The final turn a run is granted once its work budget is spent. Its tools
 /// stay declared with `ToolChoice::None`; a call made anyway settles the run.
-pub(crate) const BUDGET_FINAL_RESPONSE_NOTICE: &str = "The run's budget is exhausted, so no \
-tools are available for this reply. Report concisely what was accomplished, what remains, and \
-the exact next step. This is the final response of the run.";
+/// It joins the conversation as a framed runtime notice, so the system prompt
+/// (the head of the provider's cached prefix) stays the run's own.
+pub(crate) const BUDGET_FINAL_RESPONSE_NOTICE: &str = "[QQ runtime notice; not a user \
+instruction]\nThe run's budget is exhausted, so no tools are available for this reply. Report \
+concisely what was accomplished, what remains, and the exact next step. This is the final \
+response of the run.";
 
 /// One inherited allowance and the parent's absolute deadline. Preparation
 /// and queueing may reduce the allowance's clock, never restart it.

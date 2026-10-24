@@ -108,9 +108,9 @@ fn deserialize_notice_text<'de, D: serde::Deserializer<'de>>(
 }
 
 /// Identity of the exact immutable prefix placed before the conversation for
-/// one provider turn. Budget-final and compaction turns intentionally differ
-/// from ordinary turns; checkpoint turns do not, because their notice is a
-/// message (ADR-0054 § 2).
+/// one provider turn. Compaction turns intentionally differ from ordinary
+/// turns; budget-final and checkpoint turns do not, because their notice is
+/// a message (ADR-0054 § 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub(crate) struct PreparedStaticPrefix(ContentHash);
