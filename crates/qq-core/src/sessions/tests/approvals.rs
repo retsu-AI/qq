@@ -100,10 +100,10 @@ async fn an_auto_parent_prevents_child_mode_changes_from_introducing_human_appro
         let child_id = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let event = harness.events.next().await.unwrap().unwrap();
-                if let SessionEvent::SessionCreated { session } = event.event {
-                    if session.parent_id == Some(harness.session_id) {
-                        break session.id;
-                    }
+                if let SessionEvent::SessionCreated { session } = event.event
+                    && session.parent_id == Some(harness.session_id)
+                {
+                    break session.id;
                 }
             }
         })
