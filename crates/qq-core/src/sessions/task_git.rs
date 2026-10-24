@@ -16,20 +16,32 @@ use crate::{
 /// may replace these. The Git image is admitted again against the task roots.
 #[derive(Debug, Clone)]
 pub struct TaskGitPolicy {
-    pub helper: PathBuf,
+    pub helper: crate::task_git_job::TaskGitHelperImage,
     pub git: PathBuf,
 }
 
 impl TaskGitPolicy {
     /// Call on a blocking worker during server composition.
-    pub fn from_process_env() -> Option<Self> {
-        let helper = std::env::current_exe().ok()?.canonicalize().ok()?;
+    pub fn from_process_env(
+        control: crate::command_owner::NativeDirectoryGrant,
+    ) -> Result<Option<Self>, crate::task_git_job::HelperImageError> {
         let name = if cfg!(windows) { "git.exe" } else { "git" };
-        let git = std::env::split_paths(&std::env::var_os("PATH")?)
+        let Some(path) = std::env::var_os("PATH") else {
+            return Ok(None);
+        };
+        let Some(git) = std::env::split_paths(&path)
             .filter(|path| path.is_absolute())
             .map(|path| path.join(name))
-            .find_map(|path| path.is_file().then(|| path.canonicalize().ok()).flatten())?;
-        Some(Self { helper, git })
+            .find_map(|path| path.is_file().then(|| path.canonicalize().ok()).flatten())
+        else {
+            return Ok(None);
+        };
+        let helper = crate::task_git_job::TaskGitHelperImage::capture(
+            &std::env::current_exe()?.canonicalize()?,
+            control,
+            std::time::Instant::now() + Duration::from_secs(30),
+        )?;
+        Ok(Some(Self { helper, git }))
     }
 }
 
@@ -120,7 +132,6 @@ impl TaskGitRunInput {
             Err(error) => return ToolOutput::refused(error.to_string()),
         };
         let control = job.control.clone();
-        let resources = self.task.scope.resources;
         let permit = tokio::select! {
             biased;
             () = cancellation.cancelled() => return ToolOutput::interrupted("task Git action cancelled before admission"),
@@ -130,11 +141,18 @@ impl TaskGitRunInput {
                 Err(_) => return ToolOutput::refused("filesystem workers unavailable"),
             },
         };
+        let helper_image = policy.helper.clone();
+        let helper_deadline = std::time::Instant::now()
+            + admission_deadline.saturating_duration_since(tokio::time::Instant::now());
         let mut saved = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            crate::task_git_job::save_job(&job)
+            let helper = helper_image
+                .validate(helper_deadline)
+                .map_err(|error| error.to_string())?;
+            let files = crate::task_git_job::save_job(&job).map_err(|error| error.to_string())?;
+            Ok::<_, String>((files, helper))
         });
-        let files = tokio::select! {
+        let (files, helper) = tokio::select! {
             biased;
             () = cancellation.cancelled() => {
                 saved.abort();
@@ -160,7 +178,7 @@ impl TaskGitRunInput {
             Err(error) => return ToolOutput::refused(error.to_string()),
         };
         let arguments = serde_json::json!({
-            "program":policy.helper,
+            "program":helper,
             "args":["_task-git",files.request],
         })
         .to_string();
@@ -169,7 +187,11 @@ impl TaskGitRunInput {
             environment,
             filesystem: NativeFilesystem::Host,
             network: NativeNetwork::Host,
-            resources,
+            // This fixed, pinned QQ operation runs as trusted coordinator code,
+            // rather than executing task code. Its parser bounds input/pack size
+            // and the durable worker owns its deadline and process cleanup.
+            // Task resource policies require a restricted payload filesystem.
+            resources: crate::command_owner::NativeResources::Host,
             workspace: control.path,
             workspace_identity: control.identity,
             tool: "exec".to_owned(),
