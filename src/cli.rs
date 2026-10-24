@@ -115,6 +115,12 @@ pub enum Command {
         allow_origins: Vec<String>,
     },
 
+    /// Run, inspect or stop the per-user QQ daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+
     /// Private native command worker, launched by the trusted host.
     #[command(name = "_command-owner", hide = true)]
     NativeWorker {
@@ -336,6 +342,37 @@ pub struct GoalTarget {
     /// Print compact JSON; otherwise JSON is pretty-printed.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon in the foreground, or in the background with --detach.
+    Run(DaemonRunArgs),
+    /// Report whether a daemon is running. Exits 1 when none is.
+    Status,
+    /// Stop the running daemon and wait for it to exit.
+    Stop,
+    /// Stop the running daemon, then start one from this binary in the background.
+    Restart(DaemonListenArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DaemonRunArgs {
+    /// Start the daemon as a background process and return once it serves.
+    #[arg(long)]
+    pub detach: bool,
+    #[command(flatten)]
+    pub listen: DaemonListenArgs,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DaemonListenArgs {
+    /// Loopback address to bind. Port 0 selects an available port.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    pub bind: SocketAddr,
+    /// Browser origin permitted to call the API cross-origin. Repeatable.
+    #[arg(long = "allow-origin", value_name = "ORIGIN")]
+    pub allow_origins: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1039,6 +1076,42 @@ mod tests {
             .command,
             Some(Command::Serve { allow_origins, .. }) if allow_origins.len() == 2
         ));
+    }
+
+    #[test]
+    fn parses_daemon_lifecycle_commands() {
+        let parse = |argv: &[&str]| Cli::try_parse_from(argv).unwrap().command;
+        assert!(matches!(
+            parse(&["qq", "daemon", "run"]),
+            Some(Command::Daemon {
+                command: DaemonCommand::Run(DaemonRunArgs { detach: false, listen })
+            }) if listen.bind == "127.0.0.1:0".parse().unwrap() && listen.allow_origins.is_empty()
+        ));
+        assert!(matches!(
+            parse(&["qq", "daemon", "run", "--detach", "--bind", "127.0.0.1:4711"]),
+            Some(Command::Daemon {
+                command: DaemonCommand::Run(DaemonRunArgs { detach: true, listen })
+            }) if listen.bind.port() == 4711
+        ));
+        assert!(matches!(
+            parse(&["qq", "daemon", "status"]),
+            Some(Command::Daemon {
+                command: DaemonCommand::Status
+            })
+        ));
+        assert!(matches!(
+            parse(&["qq", "daemon", "stop"]),
+            Some(Command::Daemon {
+                command: DaemonCommand::Stop
+            })
+        ));
+        assert!(matches!(
+            parse(&["qq", "daemon", "restart", "--allow-origin", "https://app.example.com"]),
+            Some(Command::Daemon {
+                command: DaemonCommand::Restart(listen)
+            }) if listen.allow_origins.len() == 1
+        ));
+        assert!(Cli::try_parse_from(["qq", "daemon", "status", "--detach"]).is_err());
     }
 
     #[test]

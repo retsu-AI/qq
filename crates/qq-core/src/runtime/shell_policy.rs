@@ -181,6 +181,14 @@ impl std::str::FromStr for ApprovedReadImage {
     }
 }
 
+/// The `FAMILY:SHA256` form [`ApprovedReadImage::from_str`] parses, so a
+/// host can hand its approvals to a process it starts.
+impl std::fmt::Display for ApprovedReadImage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.family.program(), self.sha256)
+    }
+}
+
 impl ApprovedReadImages {
     pub fn new(mut images: Vec<ApprovedReadImage>) -> Result<Self, ReadImageApprovalError> {
         if images.len() > 10 {
@@ -204,6 +212,11 @@ impl ApprovedReadImages {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// The approvals, sorted by family.
+    pub fn iter(&self) -> impl Iterator<Item = &ApprovedReadImage> {
+        self.entries.iter()
     }
 
     pub(crate) fn digest(&self) -> qq_protocol::ContentHash {
@@ -327,6 +340,10 @@ mod tests {
         let approval: ApprovedReadImage = format!("grep:{hash}").parse().unwrap();
         assert_eq!(approval.family, ReadImageFamily::Grep);
         assert_eq!(approval.contract, ReadImageContract::SelfContainedReadV1);
+        assert_eq!(
+            approval.to_string().parse::<ApprovedReadImage>().unwrap(),
+            approval
+        );
         assert!(ApprovedReadImages::default().is_empty());
         assert!(matches!(
             ApprovedReadImages::new(vec![approval.clone(); 2]),

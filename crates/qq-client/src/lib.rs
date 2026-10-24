@@ -318,6 +318,18 @@ impl SessionClient {
             .await
     }
 
+    /// Asks a daemon or `qq serve` to stop. The server answers before it
+    /// stops, naming itself so the caller can wait for that process to exit.
+    /// A server embedded in another client refuses with `404`.
+    pub async fn request_stop(&self) -> Result<qq_protocol::ServerInfo, ClientError> {
+        self.post_json(
+            qq_protocol::DAEMON_SHUTDOWN_PATH,
+            &serde_json::Value::Null,
+            MAX_ERROR_BODY_BYTES,
+        )
+        .await
+    }
+
     pub async fn events(
         &self,
         workspace_id: WorkspaceId,
@@ -1123,6 +1135,36 @@ mod tests {
             let page = self.0.clone();
             Box::pin(async move { Ok(page) })
         }
+    }
+
+    #[tokio::test]
+    async fn stop_requests_name_the_stopping_server_and_report_an_embedded_refusal() {
+        let directory = tempfile::tempdir().unwrap();
+        let identity =
+            qq_server::ServerIdentity::new(StoreId::from_bytes([0xAA; 16]), Some("test"));
+        let qq_server::ReserveOutcome::Reserved(reservation) = qq_server::reserve(
+            ServerOptions::new(ServerPaths::new(directory.path().join("state"))).with_stop_route(),
+        )
+        .await
+        .unwrap() else {
+            panic!("fixture must own its server");
+        };
+        let daemon = reservation
+            .start(Arc::new(CatalogHandler), identity)
+            .unwrap();
+        let client = SessionClient::new(daemon.connection().clone()).unwrap();
+        let stopping = client.request_stop().await.unwrap();
+        assert_eq!(&stopping, daemon.connection().server_info());
+        daemon.stop_requested().await;
+        daemon.shutdown().await.unwrap();
+
+        let (_embedded_directory, embedded) = start_test_server(Arc::new(CatalogHandler)).await;
+        let client = SessionClient::new(embedded.connection().clone()).unwrap();
+        assert!(matches!(
+            client.request_stop().await,
+            Err(ClientError::ServerMessage { status: 404, .. })
+        ));
+        embedded.shutdown().await.unwrap();
     }
 
     #[tokio::test]
