@@ -22,9 +22,11 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 mod access;
 mod arguments;
+mod desktop;
 mod directory;
 pub(super) mod fleet;
 mod resources;
+mod token;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
 
@@ -438,10 +440,23 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     let _grants = access::prepare(&packet.filesystem, &profile.sid, packet.not_after_ms)?;
     let cpu_rate_percent = resources::apply(packet.resources, packet.cpu_parent_percent)?;
     let capabilities = access::capabilities(&packet.filesystem, &profile.sid)?;
+    let write_sid = access::task_write_sid(&packet.filesystem)?;
+    let primary = token::create(&write_sid)?;
+    let ui_name = format!(
+        "qq-native-{}",
+        qq_protocol::ToolCallId::generate().map_err(io::Error::other)?
+    );
+    let ui = desktop::ProcessDesktop::create(
+        &ui_name,
+        &win_custody::current_user_sid_string()?,
+        &write_sid,
+        profile.sid.as_string(),
+    )?;
     let options = rappct::LaunchOptions {
         exe: packet.program.clone(),
         cmdline: Some(arguments::command_line(&packet.program, &packet.arguments)?),
         cwd: Some(launch_cwd.to_owned()),
+        desktop: Some(ui.path.clone().into()),
         env: Some(packet.environment),
         suspended: true,
         join_job: Some(rappct::JobLimits {
@@ -451,6 +466,8 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         }),
         ..Default::default()
     }
+    .try_with_primary_token(primary.as_handle())
+    .map_err(io::Error::other)?
     .try_with_stdio_inherit(
         Some(std::io::stdin().as_handle()),
         Some(std::io::stdout().as_handle()),
@@ -471,8 +488,10 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     }
     child.resume().map_err(io::Error::other)?;
     let code = child.wait(None).map_err(io::Error::other)?;
-    // Closing the AppContainer job terminates descendants before the helper
-    // exits. The worker independently awaits its own job's empty membership.
+    // Closing the AppContainer job terminates descendants. Private UI handles
+    // remain process-owned until this single-shot helper exits, including error
+    // paths; the worker independently proves the outer job empty before results
+    // and artifact publication. Never release UI from the long-lived worker.
     drop(child);
     std::process::exit(code as i32)
 }
