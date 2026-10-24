@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
@@ -35,6 +37,94 @@ jobs:
           cargo test --locked -p qq-core task_home_supplies_command_compatible_child_shell_selection -- --nocapture
           cargo test --locked -p qq-core native_scope_tool_search_roots_require_read_authority_and_survive_restart -- --nocapture
           cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::installed_toolchain_read_roots_refuse_junction_escapes -- --exact --nocapture
+      - name: Owned SDK ACL admission fails before the fixes
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          export QQ_ACL_SOURCE=crates/qq-core/src/tools/windows_owner/access.rs
+          trap 'git restore --source="$GITHUB_SHA" -- "$QQ_ACL_SOURCE"' EXIT
+          python - <<'PYCODE'
+          import os, pathlib, subprocess
+          path = pathlib.Path(os.environ["QQ_ACL_SOURCE"])
+          current = path.read_text()
+          marker = "#[cfg(test)]"
+          before = subprocess.check_output(["git", "show", "40f3a63b46d4227e9ae1d02a7369fa1fffde6499^:" + path.as_posix()], text=True)
+          path.write_text(before.split(marker, 1)[0] + marker + current.split(marker, 1)[1])
+          PYCODE
+          for test_name in public_read_only_inputs_need_no_acl_write_authority repeated_admission_reuses_authorized_cargo_style_hardlinks_without_acl_changes; do
+            log="$RUNNER_TEMP/qq-$test_name-before.log"
+            set +e
+            cargo test --locked -p qq-core "tools::windows_owner::access::tests::$test_name" -- --exact --nocapture 2>&1 | tee "$log"
+            result=${PIPESTATUS[0]}
+            set -e
+            test "$result" -ne 0
+            grep -F "$test_name" "$log"
+            grep -F 'panicked' "$log"
+            if [ "$test_name" = public_read_only_inputs_need_no_acl_write_authority ]; then
+              grep -F 'open native grant' "$log"
+              grep -F 'PermissionDenied' "$log"
+            else
+              grep -F 'aliased file' "$log"
+            fi
+          done
+          git restore --source="$GITHUB_SHA" -- "$QQ_ACL_SOURCE"
+          trap - EXIT
+      - name: Prepare bounded SDK diagnostic logs
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          git diff --exit-code HEAD -- crates/qq-core/src/tools/windows_owner/access.rs
+          mkdir -p "$RUNNER_TEMP/qq-sdk-diagnostics"
+          cat > "$RUNNER_TEMP/qq-sdk-bounded-log.py" <<'PYCODE'
+          import pathlib, sys
+          remaining = 131072
+          with pathlib.Path(sys.argv[1]).open("wb") as log:
+              while data := sys.stdin.buffer.read(4096):
+                  sys.stdout.buffer.write(data)
+                  sys.stdout.buffer.flush()
+                  log.write(data[:remaining])
+                  remaining = max(0, remaining - len(data))
+          PYCODE
+      - name: Owned MSVC input validation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_msvc:: -- --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/owned-metadata.log"
+      - name: Installed MSVC metadata
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          selector=runtime::windows_msvc::tests::installed_msvc_metadata_selects_real_bounded_inputs
+          cargo test --locked -p qq --no-default-features --bin qq -- --list --ignored | tr -d '\r' | grep -Fx "$selector: test"
+          cargo test --locked -p qq --no-default-features --bin qq "$selector" -- --exact --ignored --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/installed-metadata.log"
+      - name: Selected compiler environment recovery
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq-core command_owner::environment::tests::selected_msvc_environment_survives_scope_recovery_and_beats_git_linker -- --exact --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/environment.log"
+      - name: Public SDK read admission preserves its ACL
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq-core tools::windows_owner::access::tests::public_read_only_inputs_need_no_acl_write_authority -- --exact --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/public-read.log"
+      - name: Owned compiler hardlink reuse preserves its ACL
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq-core tools::windows_owner::access::tests::repeated_admission_reuses_authorized_cargo_style_hardlinks_without_acl_changes -- --exact --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/owned-hardlink.log"
+      - name: Outside hardlinks require both current authorities
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq-core tools::windows_owner::access::tests::aliased_writable_file_requires_both_current_package_and_task_permissions -- --exact --nocapture 2>&1 | python "$RUNNER_TEMP/qq-sdk-bounded-log.py" "$RUNNER_TEMP/qq-sdk-diagnostics/outside-hardlink.log"
+      - name: Upload early bounded SDK diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-sdk-diagnostics-${{ matrix.os }}
+          path: ${{ runner.temp }}/qq-sdk-diagnostics
+          retention-days: 3
+          if-no-files-found: error
       - name: Ordinary-user SDK staging and owned cache rights
         if: ${{ !cancelled() }}
         shell: bash
