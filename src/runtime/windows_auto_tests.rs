@@ -49,7 +49,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     .unwrap();
     fs::write(
         source.join("build.js"),
-        "const assert=require('assert');assert.deepStrictEqual(process.execArgv,[]);assert.strictEqual(process.env.NODE_OPTIONS,undefined);require('fs').writeFileSync('node-built.json', JSON.stringify({answer:require('./sibling.js')}));",
+        "const assert=require('assert');assert.deepStrictEqual(process.execArgv,[]);const runtime={node_options:process.env.NODE_OPTIONS??null,execArgv:process.execArgv};console.log(JSON.stringify(runtime));require('fs').writeFileSync('node-child-runtime.json',JSON.stringify(runtime));require('fs').writeFileSync('node-built.json', JSON.stringify({answer:require('./sibling.js')}));",
     )
     .unwrap();
     fs::write(source.join("sibling.js"), "module.exports=42;").unwrap();
@@ -63,10 +63,12 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     .unwrap();
     fs::write(source.join("rust-proof/src/main.rs"), "fn main(){std::fs::write(\"rust-built-output\",b\"42\").unwrap();} #[test] fn answer(){assert_eq!(6*7,42);}").unwrap();
 
-    let mut script = format!(
-        "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
-        secret.display()
-    );
+    let mut auto_commands = vec![
+        "echo task-output>\"result with spaces.txt\"".to_owned(),
+        format!("echo damage>\"{}\"", secret.display()),
+        "echo cache-retained>\".qq/task-home/cache-proof\"".to_owned(),
+        "echo task-command-ran".to_owned(),
+    ];
     for name in [
         "HOME",
         "USERPROFILE",
@@ -76,15 +78,17 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "APPDATA",
         "LOCALAPPDATA",
     ] {
-        script.push_str(&format!(" & echo private-{name}>\"%{name}%/proof-{name}\""));
+        auto_commands.push(format!("echo private-{name}>\"%{name}%/proof-{name}\""));
     }
     for (program, _) in &tool_versions {
-        script.push_str(&format!(" & {program} --version>\"{program}-version.txt\""));
+        auto_commands.push(format!(
+            "call {program} --version>\"{program}-version.txt\""
+        ));
     }
-    script.push_str(
-        " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
+    auto_commands.push(
+        "node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"".to_owned(),
     );
-    script.push_str(" & node -e \"const fs=require('fs'),p=require('path');try{fs.writeFileSync(p.join(p.dirname(process.execPath),'node_modules/npm/package.json'),'damage');fs.writeFileSync('sdk-write-denied','WRITE_ALLOWED')}catch(e){fs.writeFileSync('sdk-write-denied',e.code)}\"");
+    auto_commands.push("node -e \"const fs=require('fs'),p=require('path');try{fs.writeFileSync(p.join(p.dirname(process.execPath),'node_modules/npm/package.json'),'damage');fs.writeFileSync('sdk-write-denied','WRITE_ALLOWED')}catch(e){fs.writeFileSync('sdk-write-denied',e.code)}\"".to_owned());
     let metadata_image = std::env::current_exe()
         .unwrap()
         .parent()
@@ -100,6 +104,10 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         ),
         ("npm-build", "call npm run build --offline"),
         ("npm-test", "call npm test --offline"),
+        (
+            "node-caller-env",
+            r#"node -e "require('assert').strictEqual(process.env.NODE_OPTIONS,undefined);require('fs').writeFileSync('node-caller-env-clean','yes')""#,
+        ),
         (
             "cargo-build",
             "cargo build --offline --manifest-path rust-proof/Cargo.toml",
@@ -127,7 +135,13 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     }
     batch.push_str("exit /b 0\r\n");
     fs::write(source.join("sdk-workflow.cmd"), batch).unwrap();
-    script.push_str(" & call sdk-workflow.cmd");
+    auto_commands.push("call sdk-workflow.cmd".to_owned());
+    fs::write(
+        source.join("auto-workflow.cmd"),
+        format!("@echo off\r\n{}\r\n", auto_commands.join("\r\n")),
+    )
+    .unwrap();
+    let script = "call auto-workflow.cmd";
 
     // Prove the same owned batch and installed tools work without confinement;
     // host setup failures must not be confused with sandbox admission failures.
@@ -356,6 +370,17 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     );
     assert!(!source.join(".qq/task-home").exists());
     log_sdk_results("Auto", &source, &commands);
+    let child_runtime: Value =
+        serde_json::from_slice(&fs::read(source.join("node-child-runtime.json")).unwrap()).unwrap();
+    assert_eq!(
+        child_runtime["node_options"],
+        "--preserve-symlinks --preserve-symlinks-main"
+    );
+    assert_eq!(child_runtime["execArgv"], json!([]));
+    assert_eq!(
+        fs::read_to_string(source.join("node-caller-env-clean")).unwrap(),
+        "yes"
+    );
     let sdk_write_error = fs::read_to_string(source.join("sdk-write-denied")).unwrap();
     assert!(
         matches!(sdk_write_error.as_str(), "EACCES" | "EPERM"),

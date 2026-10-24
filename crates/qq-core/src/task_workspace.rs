@@ -73,7 +73,7 @@ pub fn stage_tool_inputs(
 }
 
 /// Stage selected Node SDK inputs with fixed npm/npx CLI bootstraps. The flags
-/// affect only the package-manager process, never a task's NODE_OPTIONS.
+/// affect the package-manager process tree; SETLOCAL restores the caller's environment.
 pub fn stage_node_tool_inputs(
     source: NativeDirectoryGrant,
     destination: &Path,
@@ -305,7 +305,7 @@ impl TaskWorkspace {
                     "npm bootstrap needs selected sibling Node and CLI",
                 ));
             }
-            let bytes = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"%~dp0node.exe\" --preserve-symlinks --preserve-symlinks-main \"%~dp0node_modules\\npm\\bin\\{name}-cli.js\" %*\r\nexit /b %errorlevel%\r\n").into_bytes();
+            let bytes = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\nset \"NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main\"\r\n\"%~dp0node.exe\" \"%~dp0node_modules\\npm\\bin\\{name}-cli.js\" %*\r\nexit /b %errorlevel%\r\n").into_bytes();
             let before = read_file(&root, &path, self.limits.max_bytes)?
                 .ok_or_else(|| TaskWorkspaceError::Changed(path.clone()))?;
             total = total

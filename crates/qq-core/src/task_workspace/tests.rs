@@ -1370,9 +1370,12 @@ fn node_bootstraps_are_scoped_and_sealed_into_the_cache_identity() {
     );
     for name in ["npm", "npx"] {
         let wrapper = fs::read_to_string(first.path.join(format!("{name}.cmd"))).unwrap();
-        assert!(wrapper.contains("\"%~dp0node.exe\" --preserve-symlinks --preserve-symlinks-main"));
+        assert!(wrapper.contains("\"%~dp0node.exe\" \"%~dp0node_modules"));
         assert!(wrapper.contains(&format!("\\bin\\{name}-cli.js\" %*")));
-        assert!(!wrapper.contains("NODE_OPTIONS"));
+        assert!(
+            wrapper
+                .contains("set \"NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main\"\r\n")
+        );
         assert!(!wrapper.contains("CALL"));
         assert!(wrapper.ends_with("exit /b %errorlevel%\r\n"));
         assert_eq!(
