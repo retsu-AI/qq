@@ -1,0 +1,57 @@
+name: Windows actual Cargo startup attribution
+on:
+  push:
+    branches: [test/windows-cargo-startup]
+permissions:
+  contents: read
+jobs:
+  cargo-startup:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-cargo-startup-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Build exact payload probes and durable worker
+        run: |
+          cargo build --locked -p qq-core --example windows_cargo_images --example command_owner
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked -p qq-core --example windows_cargo_images -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked -p qq --no-default-features --bin qq -- -D warnings
+          exit $LASTEXITCODE
+      - name: Exact installed default compiler dependency manifest and real Auto
+        run: |
+          $default = ((& rustup default) -split '\s+')[0]
+          if ($LASTEXITCODE -ne 0 -or $default -notmatch '^[A-Za-z0-9_.+-]+$') { throw 'Installed server default unavailable' }
+          $cargo = (& rustup which --toolchain $default cargo).Trim()
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $cargo)) { throw 'Selected Cargo unavailable' }
+          $rustc = (& rustup which --toolchain $default rustc).Trim()
+          if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $rustc)) { throw 'Selected rustc unavailable' }
+          Write-Host "Actual server-default toolchain=$default Cargo=$cargo rustc=$rustc"
+          $manifest = Join-Path $env:RUNNER_TEMP 'qq-exact-cargo-images.json'
+          & .\target\debug\examples\windows_cargo_images.exe --prepare $cargo $rustc | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Exact compiler PE metadata failed' }
+          $env:QQ_CARGO_IMAGES = $manifest
+          $artifacts = & cargo test --locked -p qq --no-default-features --bin qq --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $executables = @($artifacts | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'qq' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable })
+          if ($executables.Count -ne 1) { throw 'Expected one exact qq runtime test binary' }
+          # Remove only recognized Node install PATH entries before runtime
+          # composition, so unrelated SDK copying cannot mask Cargo startup.
+          $nodeRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'nodejs' }
+          $env:PATH = (($env:PATH -split ';') | Where-Object { $nodeRoots -inotcontains $_.TrimEnd('\') }) -join ';'
+          & $executables[0] runtime::windows_cargo_tests::installed_cargo_startup_through_real_auto_worker --exact --nocapture
+          exit $LASTEXITCODE

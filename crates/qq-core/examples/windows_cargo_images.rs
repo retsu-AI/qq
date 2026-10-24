@@ -1,0 +1,230 @@
+#![forbid(unsafe_code)]
+
+#[cfg(not(windows))]
+fn main() {}
+#[cfg(windows)]
+fn main() -> std::io::Result<()> {
+    probe::main()
+}
+#[cfg(windows)]
+mod probe {
+    use std::{
+        collections::BTreeSet,
+        fs,
+        io::{self, Read as _},
+        path::{Path, PathBuf},
+    };
+    fn invalid() -> io::Error {
+        io::Error::other("invalid or oversized PE metadata")
+    }
+    fn u16_at(bytes: &[u8], at: usize) -> io::Result<u16> {
+        Ok(u16::from_le_bytes(
+            bytes
+                .get(at..at + 2)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        ))
+    }
+    fn u32_at(bytes: &[u8], at: usize) -> io::Result<u32> {
+        Ok(u32::from_le_bytes(
+            bytes
+                .get(at..at + 4)
+                .ok_or_else(invalid)?
+                .try_into()
+                .map_err(|_| invalid())?,
+        ))
+    }
+    fn imports(path: &Path) -> io::Result<Vec<String>> {
+        let mut bytes = Vec::new();
+        fs::File::open(path)?
+            .take(128 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 128 * 1024 * 1024 || bytes.get(..2) != Some(b"MZ") {
+            return Err(invalid());
+        }
+        let pe = u32_at(&bytes, 0x3c)? as usize;
+        if bytes.get(pe..pe + 4) != Some(b"PE\0\0") {
+            return Err(invalid());
+        }
+        let count = u16_at(&bytes, pe + 6)? as usize;
+        if count > 96 {
+            return Err(invalid());
+        }
+        let optional = pe + 24;
+        let directories = match u16_at(&bytes, optional)? {
+            0x20b => optional + 112,
+            0x10b => optional + 96,
+            _ => return Err(invalid()),
+        };
+        let sections = optional + u16_at(&bytes, pe + 20)? as usize;
+        let resolve = |rva: u32| -> io::Result<usize> {
+            for n in 0..count {
+                let section = sections + n * 40;
+                let virtual_address = u32_at(&bytes, section + 12)?;
+                let size = u32_at(&bytes, section + 16)?;
+                if rva >= virtual_address && rva - virtual_address < size {
+                    let offset =
+                        (rva - virtual_address) as usize + u32_at(&bytes, section + 20)? as usize;
+                    if offset < bytes.len() {
+                        return Ok(offset);
+                    }
+                }
+            }
+            Err(invalid())
+        };
+        let import_rva = u32_at(&bytes, directories + 8)?;
+        if import_rva == 0 {
+            return Ok(Vec::new());
+        }
+        let start = resolve(import_rva)?;
+        let mut names = BTreeSet::new();
+        for n in 0..256 {
+            let descriptor = start + n * 20;
+            let name = u32_at(&bytes, descriptor + 12)?;
+            if name == 0 {
+                return Ok(names.into_iter().collect());
+            }
+            let offset = resolve(name)?;
+            let text = bytes
+                .get(offset..)
+                .ok_or_else(invalid)?
+                .iter()
+                .take(256)
+                .position(|b| *b == 0)
+                .ok_or_else(invalid)?;
+            let name = std::str::from_utf8(&bytes[offset..offset + text]).map_err(|_| invalid())?;
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return Err(invalid());
+            }
+            names.insert(name.to_owned());
+        }
+        Err(invalid())
+    }
+    pub fn main() -> io::Result<()> {
+        let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+        if args.first().is_some_and(|s| s == "--prepare") && args.len() == 3 {
+            let cargo = PathBuf::from(&args[1]).canonicalize()?;
+            let rustc = PathBuf::from(&args[2]).canonicalize()?;
+            if cargo.parent() != rustc.parent() {
+                return Err(invalid());
+            }
+            let bin = cargo.parent().ok_or_else(invalid)?;
+            let lib = bin.parent().ok_or_else(invalid)?.join("lib");
+            let system =
+                PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?).join("System32");
+            let mut pending = vec![cargo.clone(), rustc.clone()];
+            let mut images = BTreeSet::new();
+            let mut rows = Vec::new();
+            while let Some(image) = pending.pop() {
+                if !images.insert(image.clone()) {
+                    continue;
+                }
+                if images.len() > 128 {
+                    return Err(invalid());
+                }
+                let names = imports(&image)?;
+                for name in &names {
+                    let resolved = [
+                        image.parent().ok_or_else(invalid)?,
+                        bin,
+                        lib.as_path(),
+                        system.as_path(),
+                    ]
+                    .into_iter()
+                    .map(|dir| dir.join(name))
+                    .find(|path| path.is_file());
+                    if let Some(path) = resolved.as_ref() {
+                        pending.push(path.canonicalize()?);
+                    }
+                    rows.push(serde_json::json!({"image":image,"import":name,"resolved":resolved}));
+                }
+            }
+            println!(
+                "{}",
+                serde_json::json!({"cargo":cargo,"rustc":rustc,"images":images,"imports":rows})
+            );
+            return Ok(());
+        }
+        if args.len() != 1 {
+            return Err(invalid());
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&args[0])?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > 1024 * 1024 {
+            return Err(invalid());
+        }
+        let manifest: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let state = rappct::token::query_current_process_token().map_err(io::Error::other)?;
+        let token = firehazard::open_process_token(
+            firehazard::get_current_process(),
+            firehazard::token::QUERY,
+        )
+        .map_err(io::Error::from)?;
+        println!(
+            "actual image-probe token: appcontainer={} lpac_telemetry={} restrictors={} integrity={:?} privileges={:?}",
+            state.is_appcontainer,
+            state.is_lpac,
+            token
+                .restricted_sids()
+                .map_err(io::Error::from)?
+                .group_count(),
+            token.integrity_level().map_err(io::Error::from)?,
+            token.privileges().map_err(io::Error::from)?.privileges()
+        );
+        let images = manifest["images"].as_array().ok_or_else(invalid)?;
+        if images.len() > 128 {
+            return Err(invalid());
+        }
+        for image in images {
+            let path = image.as_str().ok_or_else(invalid)?;
+            for (name, rights) in [
+                ("READ_DATA", 1),
+                ("EXECUTE", 0x20),
+                ("READ_ATTRIBUTES", 0x80),
+            ] {
+                use std::os::windows::fs::OpenOptionsExt as _;
+                let result = fs::File::options()
+                    .access_mode(rights)
+                    .share_mode(7)
+                    .open(path)
+                    .map(|_| ())
+                    .map_err(|e| (e.raw_os_error(), e.kind()));
+                println!("exact-image path={path} access={name} result={result:?}");
+            }
+            let mapped = winsafe::HFILE::CreateFile(
+                path,
+                winsafe::co::GENERIC::READ,
+                Some(
+                    winsafe::co::FILE_SHARE::READ
+                        | winsafe::co::FILE_SHARE::WRITE
+                        | winsafe::co::FILE_SHARE::DELETE,
+                ),
+                None,
+                winsafe::co::DISPOSITION::OPEN_EXISTING,
+                winsafe::co::FILE_ATTRIBUTE::NORMAL,
+                None,
+                None,
+                None,
+            )
+            .and_then(|(file, _)| {
+                file.CreateFileMapping(
+                    None,
+                    winsafe::co::PAGE::READONLY,
+                    Some(winsafe::co::SEC::IMAGE),
+                    None,
+                    None,
+                )
+                .map(|_| ())
+            });
+            println!("exact-image path={path} SEC_IMAGE={mapped:?}");
+        }
+        Ok(())
+    }
+}

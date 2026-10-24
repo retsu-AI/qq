@@ -9998,3 +9998,7 @@ mod tests {
 #[cfg(all(test, windows))]
 #[path = "runtime/windows_auto_tests.rs"]
 mod windows_auto_tests;
+
+#[cfg(all(test, windows))]
+#[path = "runtime/windows_cargo_tests.rs"]
+mod windows_cargo_tests;
