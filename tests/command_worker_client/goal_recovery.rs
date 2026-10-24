@@ -101,7 +101,7 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
     let mut command = configured_cli(root.path(), &workspace, &config);
     command.arg("run");
     if !auto {
-        command.args(["--approval", "full"]);
+        command.args(["--approval", "full", "--goal-check-approval", "for-goal"]);
     }
     let mut original = command
         .args([
@@ -111,8 +111,6 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
             "produce the fixture artifact exactly once and verify it",
             "--check",
             &checker,
-            "--goal-check-approval",
-            "for-goal",
             "--goal-max-runs",
             &max_runs.to_string(),
             "--goal-deadline",
@@ -162,6 +160,13 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
     let original_goal: GoalSnapshot = serde_json::from_str(&payload).unwrap();
     assert_eq!(original_goal.budget.max_goal_runs, max_runs);
     assert_eq!(original_goal.status, GoalStatus::Active);
+    if auto {
+        assert_eq!(
+            original_goal.check_authorization,
+            Some(qq_protocol::GoalCheckAuthorization::TaskScoped),
+            "default Auto derives contained check authority without explicit consent"
+        );
+    }
     let private = if auto {
         let record: String = db
             .query_row(
@@ -449,6 +454,21 @@ async fn exercise_goal(max_runs: u32, auto: bool) {
         String::from_utf8_lossy(&stopped.stderr)
     );
     worker.stop().await;
+    if auto {
+        let db = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let approvals: u64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE json_extract(envelope_json, '$.event.type') = 'tool_approval_requested'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(approvals, 0, "Auto recovery must never request approval");
+    }
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();
