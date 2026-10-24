@@ -56,6 +56,189 @@ impl TaskWorkspaceSource {
     }
 }
 
+/// Copy server-selected installed-tool inputs into a fresh, private host directory.
+/// The caller supplies installation identity and fixed relative selections; model
+/// output must never choose them. The returned root is for read-only admission,
+/// not task publication. Content-keyed installation reuses identical inputs
+/// across server restarts. Existing import checks refuse aliases and enforce the
+/// entry, byte and preparation-deadline bounds on every copied file.
+pub fn stage_tool_inputs(
+    source: NativeDirectoryGrant,
+    destination: &Path,
+    selected: &[PathBuf],
+    limits: TaskWorkspaceLimits,
+    deadline: std::time::Instant,
+) -> Result<NativeDirectoryGrant, TaskWorkspaceError> {
+    let stopped = || std::time::Instant::now() >= deadline;
+    if stopped() {
+        return Err(TaskWorkspaceError::Stopped);
+    }
+    if limits.max_entries == 0 || limits.max_entries > 65_536 || limits.max_bytes == 0 {
+        return Err(TaskWorkspaceError::InvalidInput(
+            "invalid tool input limits",
+        ));
+    }
+    if selected.len() > limits.max_entries {
+        return Err(TaskWorkspaceError::LimitExceeded);
+    }
+    let root = at(&source.path, open_dir_ambient(&source.path))?;
+    if at(&source.path, NativeWorkspaceIdentity::held(&root))? != source.identity {
+        return Err(TaskWorkspaceError::Changed(source.path));
+    }
+    let mut pending = selected.to_vec();
+    let mut files = Vec::new();
+    let mut entries = BTreeSet::new();
+    while let Some(path) = pending.pop() {
+        if stopped() {
+            return Err(TaskWorkspaceError::Stopped);
+        }
+        validate_path(&path)?;
+        if !entries.insert(path.clone()) {
+            return Err(TaskWorkspaceError::InvalidInput("duplicate tool input"));
+        }
+        if entries.len() > limits.max_entries || path.components().count() > 64 {
+            return Err(TaskWorkspaceError::LimitExceeded);
+        }
+        let parent = at(&path, file_parent(&root, &path, false))?;
+        let name = path.file_name().expect("validated path");
+        let metadata = at(&path, parent.symlink_metadata(name))?;
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let directory = at(&path, open_dir(&parent, Path::new(name)))?;
+            for entry in at(&path, directory.entries())? {
+                let entry = at(&path, entry)?;
+                if pending.len() + entries.len() >= limits.max_entries {
+                    return Err(TaskWorkspaceError::LimitExceeded);
+                }
+                pending.push(path.join(entry.file_name()));
+            }
+        } else {
+            check_file(&path, &metadata)?;
+            files.push(path);
+        }
+    }
+    let parent = destination
+        .parent()
+        .ok_or(TaskWorkspaceError::InvalidInput(
+            "tool destination needs a private parent",
+        ))?;
+    crate::storage::check_path_blocking(parent, limits.max_bytes).map_err(|error| {
+        TaskWorkspaceError::Io {
+            path: parent.to_owned(),
+            source: io::Error::other(error),
+        }
+    })?;
+    let admission = TaskWorkspaceSource {
+        directory: source,
+        protected_pack_roots: Vec::new(),
+    };
+    let imported = TaskWorkspace::import_until(&admission, destination, &files, limits, &stopped)?;
+    let mut digest = Sha256::new();
+    for (path, version) in &imported.baseline {
+        let name = path.as_os_str().as_encoded_bytes();
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name);
+        digest.update(version.sha256);
+        digest.update(version.executable.to_le_bytes());
+    }
+    let cached = parent.join(format!("sdk-{:x}", digest.finalize()));
+    let parent_root = at(parent, open_dir_ambient(parent))?;
+    let staging_name = destination.file_name().expect("validated destination");
+    let cache_name = cached.file_name().expect("generated cache name");
+    let installed = (|| {
+        if stopped() {
+            return Err(TaskWorkspaceError::Stopped);
+        }
+        match parent_root.rename(staging_name, &parent_root, cache_name) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                // An earlier server prepared the identical content. Revalidate
+                // every byte through held no-follow handles before reuse.
+                let existing = at(&cached, open_dir(&parent_root, Path::new(cache_name)))?;
+                let expected_entries: BTreeSet<_> = imported
+                    .baseline
+                    .keys()
+                    .flat_map(|path| {
+                        path.ancestors()
+                            .filter(|path| !path.as_os_str().is_empty())
+                            .map(Path::to_owned)
+                    })
+                    .collect();
+                let mut directories = vec![(
+                    PathBuf::new(),
+                    existing
+                        .try_clone()
+                        .map_err(|source| TaskWorkspaceError::Io {
+                            path: cached.clone(),
+                            source,
+                        })?,
+                )];
+                let mut observed = 0usize;
+                while let Some((prefix, directory)) = directories.pop() {
+                    if stopped() {
+                        return Err(TaskWorkspaceError::Stopped);
+                    }
+                    for entry in at(&cached, directory.entries())? {
+                        if stopped() {
+                            return Err(TaskWorkspaceError::Stopped);
+                        }
+                        let entry = at(&cached, entry)?;
+                        let path = prefix.join(entry.file_name());
+                        observed += 1;
+                        if observed > limits.max_entries || !expected_entries.contains(&path) {
+                            return Err(TaskWorkspaceError::Changed(cached.join(path)));
+                        }
+                        let metadata = at(&path, directory.symlink_metadata(entry.file_name()))?;
+                        if metadata.is_dir() {
+                            directories.push((
+                                path,
+                                at(&cached, open_dir(&directory, Path::new(&entry.file_name())))?,
+                            ));
+                        } else {
+                            check_file(&path, &metadata)?;
+                        }
+                    }
+                }
+                for (path, expected) in &imported.baseline {
+                    if stopped() {
+                        return Err(TaskWorkspaceError::Stopped);
+                    }
+                    let snapshot = read_file(&existing, path, limits.max_bytes)?
+                        .ok_or_else(|| TaskWorkspaceError::Changed(cached.join(path)))?;
+                    if snapshot.version != *expected {
+                        return Err(TaskWorkspaceError::Changed(cached.join(path)));
+                    }
+                }
+                at(destination, parent_root.remove_dir_all(staging_name))?;
+            }
+            Err(error) => return at(&cached, Err(error)),
+        }
+        at(&cached, NativeDirectoryGrant::capture(&cached))
+    })();
+    match installed {
+        Ok(grant) => Ok(grant),
+        Err(failure) => {
+            // Remove only our new temporary tree, never an existing cache.
+            match parent_root.remove_dir_all(staging_name) {
+                Ok(()) => Err(failure),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Err(failure),
+                Err(source) => Err(TaskWorkspaceError::Cleanup {
+                    failure: Box::new(failure),
+                    source,
+                }),
+            }
+        }
+    }
+}
+
+fn open_dir_ambient(path: &Path) -> io::Result<Dir> {
+    Dir::open_ambient_dir(path, cap_std::ambient_authority())
+}
+
 /// A persistent detached tree. Dropping this handle does not delete task work.
 /// Serialized records carry source-write authority: restore them only from
 /// trusted host storage outside the writable task tree.
@@ -899,3 +1082,7 @@ fn at<T>(path: &Path, result: io::Result<T>) -> Result<T, TaskWorkspaceError> {
 
 #[cfg(test)]
 mod tests;
+
+#[path = "task_workspace_cargo.rs"]
+mod cargo;
+pub(crate) use cargo::seed_cargo_cache;

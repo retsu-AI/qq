@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     let mut session_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
     session_options.native_scopes.push(NativeCommandScope {
+        executable_directories: Vec::new(),
         workspace: detached.directory_grant(),
         read_only: vec![],
         network: NativeNetwork::Isolated,

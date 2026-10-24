@@ -38,6 +38,7 @@ async fn blocking<T: Send + 'static>(
 pub(super) struct Journal(Arc<JournalState>);
 struct JournalState {
     store_id: StoreId,
+    storage_path: PathBuf,
     serial: Arc<tokio::sync::Semaphore>,
     connection: Mutex<Option<Connection>>,
     lock: Mutex<Option<File>>,
@@ -215,6 +216,7 @@ impl Journal {
         )?;
         Ok(Self(Arc::new(JournalState {
             store_id,
+            storage_path: directory,
             serial: Arc::new(tokio::sync::Semaphore::new(1)),
             connection: Mutex::new(Some(connection)),
             lock: Mutex::new(Some(lock)),
@@ -223,6 +225,10 @@ impl Journal {
             #[cfg(test)]
             cleanup: Mutex::new(None),
         })))
+    }
+
+    pub(super) fn storage_path(&self) -> &Path {
+        &self.0.storage_path
     }
 
     pub(super) fn store_id(&self) -> StoreId {

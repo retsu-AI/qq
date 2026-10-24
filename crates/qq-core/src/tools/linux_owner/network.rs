@@ -1,5 +1,8 @@
 //! Private IP networking plus denial of host pathname Unix sockets.
-use landlock::{AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, Scope};
+use landlock::{
+    AccessFs, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, Scope,
+};
 use std::io;
 
 pub(super) fn prepare() -> io::Result<()> {
@@ -48,14 +51,21 @@ fn enforce_policy(policy: Policy) -> io::Result<()> {
 struct Unavailable(#[source] landlock::RulesetError);
 
 fn ruleset(pathnames: bool) -> io::Result<landlock::RulesetCreated> {
+    let root = std::fs::File::open("/")?;
     let create = || {
         let mut ruleset = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::Refer)?
             .scope(Scope::AbstractUnixSocket | Scope::Signal)?;
         if pathnames {
             ruleset = ruleset.handle_access(AccessFs::ResolveUnix)?;
         }
-        ruleset.create()
+        // REFER is implicitly denied by every Landlock layer, even when not
+        // handled. Keep this network-only layer neutral: the separate filesystem
+        // ruleset continues to decide which directories may exchange files.
+        ruleset
+            .create()?
+            .add_rule(PathBeneath::new(&root, AccessFs::Refer))
     };
     create().map_err(|error| io::Error::new(io::ErrorKind::Unsupported, Unavailable(error)))
 }
@@ -179,5 +189,91 @@ mod tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod refer_tests {
+    use super::*;
+    use landlock::{ABI, Access as _};
+    use std::{fs, path::PathBuf, process::Command};
+
+    #[test]
+    fn refer_probe() {
+        let Some(root) = std::env::var_os("QQ_REFER_TASK") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let policy = if std::env::var_os("QQ_REFER_LEGACY").is_some() {
+            Policy::ConnectedPairs(ruleset(false).unwrap())
+        } else {
+            policy().unwrap()
+        };
+        enforce_policy(policy).unwrap();
+        let access = AccessFs::from_all(ABI::V6)
+            & !(AccessFs::MakeChar | AccessFs::MakeBlock | AccessFs::IoctlDev);
+        let status = Ruleset::default()
+            .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::from_all(ABI::V6))
+            .unwrap()
+            .create()
+            .unwrap()
+            .add_rule(PathBeneath::new(fs::File::open(&root).unwrap(), access))
+            .unwrap()
+            .restrict_self()
+            .unwrap();
+        assert_eq!(status.ruleset, RulesetStatus::FullyEnforced);
+        fs::rename(root.join("from/item"), root.join("to/item"))
+            .expect("network guard must preserve authorized cross-directory rename");
+        fs::hard_link(root.join("to/item"), root.join("from/link"))
+            .expect("network guard must preserve authorized cross-directory hard links");
+        assert_eq!(fs::read(root.join("from/link")).unwrap(), b"task bytes");
+        let outside = root.parent().unwrap().join("outside");
+        assert!(fs::read(outside.join("private")).is_err());
+        assert!(fs::rename(root.join("to/item"), outside.join("escaped")).is_err());
+        assert!(
+            std::os::unix::net::UnixStream::connect(root.join("host.sock")).is_err(),
+            "network layer must still deny host pathname sockets inside a filesystem grant"
+        );
+        println!("refer-policy-ok");
+    }
+
+    #[test]
+    fn network_guard_preserves_file_moves_without_widening_filesystem_or_socket_authority() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        fs::create_dir(root.join("outside")).unwrap();
+        fs::write(root.join("outside/private"), b"private bytes").unwrap();
+        for legacy in [false, true] {
+            let task = root.join(if legacy { "legacy" } else { "current" });
+            fs::create_dir_all(task.join("from")).unwrap();
+            fs::create_dir(task.join("to")).unwrap();
+            fs::write(task.join("from/item"), b"task bytes").unwrap();
+            // Ordinary filesystem and socket positive controls precede confinement.
+            fs::rename(task.join("from/item"), task.join("to/host-control")).unwrap();
+            fs::rename(task.join("to/host-control"), task.join("from/item")).unwrap();
+            let listener = std::os::unix::net::UnixListener::bind(task.join("host.sock")).unwrap();
+            assert!(std::os::unix::net::UnixStream::connect(task.join("host.sock")).is_ok());
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "tools::linux_owner::network::refer_tests::refer_probe",
+                    "--nocapture",
+                ])
+                .env("QQ_REFER_TASK", &task);
+            if legacy {
+                command.env("QQ_REFER_LEGACY", "1");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "legacy={legacy}: {output:?}");
+            assert!(String::from_utf8_lossy(&output.stdout).contains("refer-policy-ok"));
+            assert_eq!(
+                fs::read(root.join("outside/private")).unwrap(),
+                b"private bytes"
+            );
+            assert!(!root.join("outside/escaped").exists());
+            drop(listener);
+        }
     }
 }

@@ -477,7 +477,7 @@ pub(super) async fn run_shell(
     #[cfg(target_os = "macos")]
     if child.owns_payload_group() {
         // The guardian has its own group. Its private exit receipt proves
-        // payload cleanup; killing this group would destroy that guardian.
+        // owned payload-group cleanup; killing this group destroys the guardian.
         guard.disarm();
     }
     #[cfg(all(test, unix))]
@@ -687,6 +687,12 @@ pub(super) async fn run_shell(
     let outcome = match outcome {
         ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
         outcome => outcome,
+    };
+    #[cfg(target_os = "macos")]
+    let hint = if child.resource_stopped() {
+        Some("native resource safeguard stopped the command group".to_owned())
+    } else {
+        hint
     };
     let elapsed = started.elapsed();
     let mut result = async {

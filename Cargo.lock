@@ -3,6 +3,28 @@
 version = 4
 
 [[package]]
+name = "abibool"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bd30f59e066010fda3421085177545205e1fd063de54700e9c7a6ceffad2e5e"
+
+[[package]]
+name = "abistr"
+version = "0.2.0-rc3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7de73941ad2564b82f4ac974b9df97f7033adf8773074cbb24cb1d358519f52"
+dependencies = [
+ "abistr-macros",
+ "widestring",
+]
+
+[[package]]
+name = "abistr-macros"
+version = "0.2.0-rc3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8aeb952f369a5255b28bd4d57984d84edc2d3b5ee72c93427b47b703e1df8e15"
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -891,6 +913,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "bytemuck"
+version = "1.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+dependencies = [
+ "bytemuck_derive",
+]
+
+[[package]]
+name = "bytemuck_derive"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a1f896587b6f2c069c73d2f0913e2d590c3990285cd2f0b6aa02b786b4c679c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "byteorder"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1445,6 +1487,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "firehazard"
+version = "0.0.0-2022-09-10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a01f8c1e1290ea4badd56d72f940f177674ed0bbd4cecaa9e23a6af2da3aceb0"
+dependencies = [
+ "abibool",
+ "abistr",
+ "bytemuck",
+ "winapi",
+]
+
+[[package]]
+name = "firehazard"
+version = "0.0.0-2022-09-10"
+source = "git+https://github.com/MaulingMonkey/firehazard?rev=1b5818d8fa6c489addb8cbb133a62ab917cc1715#1b5818d8fa6c489addb8cbb133a62ab917cc1715"
+dependencies = [
+ "abibool",
+ "abistr",
+ "bytemuck",
+ "ialloc",
+ "lazy_static",
+ "valrow",
+ "winapi",
+ "winresult",
+]
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1951,6 +2020,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ialloc"
+version = "0.0.0-2025-05-02"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d748bc70ac287b9df12961c029f1470d672cc92b9af3bdc30787bb487ee709a2"
+dependencies = [
+ "bytemuck",
+ "lazy_static",
+ "mcom",
+ "winapi",
+ "winresult",
+]
+
+[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2290,6 +2372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2432,6 +2523,15 @@ name = "maybe-owned"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
+
+[[package]]
+name = "mcom"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "767f64f47d8c33a82c408dbeeca24dc51e5793f11498dabf4d8a77d7bddb768c"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "memchr"
@@ -2904,10 +3004,12 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "directories",
+ "firehazard 0.0.0-2022-09-10 (git+https://github.com/MaulingMonkey/firehazard?rev=1b5818d8fa6c489addb8cbb133a62ab917cc1715)",
  "futures-core",
  "futures-util",
  "getrandom 0.3.4",
  "hmac 0.12.1",
+ "libproc",
  "nix 0.31.3",
  "qq-auth",
  "qq-client",
@@ -3011,6 +3113,8 @@ dependencies = [
  "crossbeam-channel",
  "directories",
  "dunce",
+ "firehazard 0.0.0-2022-09-10 (registry+https://github.com/rust-lang/crates.io-index)",
+ "firehazard 0.0.0-2022-09-10 (git+https://github.com/MaulingMonkey/firehazard?rev=1b5818d8fa6c489addb8cbb133a62ab917cc1715)",
  "fs4",
  "futures-core",
  "futures-util",
@@ -3036,6 +3140,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "toml_edit",
  "tracing",
  "tree-sitter",
  "tree-sitter-bash",
@@ -3044,6 +3149,7 @@ dependencies = [
  "win32job",
  "winapi-util",
  "windows-permissions",
+ "winsafe",
 ]
 
 [[package]]
@@ -3331,7 +3437,7 @@ dependencies = [
 [[package]]
 name = "rappct"
 version = "0.14.0"
-source = "git+https://github.com/cpjet64/rappct?rev=c02f9dd960645522009da3827a79bdc99f50c9c1#c02f9dd960645522009da3827a79bdc99f50c9c1"
+source = "git+https://github.com/retsu-AI/rappct?rev=4f3449402a6cad646374404043cf90df4e090939#4f3449402a6cad646374404043cf90df4e090939"
 dependencies = [
  "thiserror 2.0.19",
  "windows 0.62.2",
@@ -4007,6 +4113,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+
+[[package]]
 name = "sse-stream"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4651,6 +4763,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "valrow"
+version = "0.0.0-2024-02-13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6770d2ca655a839425b904c2103b14e309e8e3fed329d33eb0e00bc25620d57b"
+
+[[package]]
 name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4865,6 +4983,12 @@ checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "win-custody"
@@ -5323,6 +5447,24 @@ checksum = "7d6f32a0ff4a9f6f01231eb2059cc85479330739333e0e58cadf03b6af2cca10"
 dependencies = [
  "cfg-if",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "winresult"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fe1d4015321f3df114e73ccc695d62c1566b33b0a2d03d553b7dd65dc11f58d"
+dependencies = [
+ "winresult-types",
+]
+
+[[package]]
+name = "winresult-types"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7314fd4ed99b7cc41081400f5d072919967e7382d358bc9e7d72bdd1955e1e8"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]

@@ -54,6 +54,10 @@ use crate::{
     },
 };
 
+#[cfg(unix)]
+#[path = "runtime/unix_sdk.rs"]
+mod unix_sdk;
+
 const MAX_MODEL_OPTIONS: usize = 4_096;
 const MAX_DISCOVERY_PROVIDERS: usize = 4;
 
@@ -3125,10 +3129,8 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Enable ordinary Auto containment only after its native backend is
-        // qualified. Other platforms retain their existing permission behavior
-        // until their adapters implement the same resource contract.
-        #[cfg(target_os = "linux")]
+        // Native policy retains kernel limits or explicit sampled safeguards.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3439,6 +3441,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 pub enum RuntimeHandlerError {
     #[error(transparent)]
     TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
@@ -3451,7 +3454,37 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(windows)]
+fn windows_toolchain_read_roots(bin: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let denied = || {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "installed toolchain input escapes its admitted root",
+        )
+    };
+    let toolchain = bin.parent().ok_or_else(denied)?;
+    let name = toolchain.file_name().ok_or_else(denied)?;
+    let toolchains = toolchain.parent().ok_or_else(denied)?;
+    let home = toolchains.parent().ok_or_else(denied)?.canonicalize()?;
+    let expected = home.join("toolchains").join(name);
+    if toolchains.canonicalize()? != home.join("toolchains")
+        || toolchain.canonicalize()? != expected
+        || bin.canonicalize()? != expected.join("bin")
+    {
+        return Err(denied());
+    }
+    let mut roots = vec![expected.join("bin")];
+    let lib = toolchain.join("lib");
+    if lib.is_dir() {
+        if lib.canonicalize()? != expected.join("lib") {
+            return Err(denied());
+        }
+        roots.push(expected.join("lib"));
+    }
+    Ok(roots)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
@@ -3465,19 +3498,10 @@ fn task_workspace_policy(
         }
         builder.create(directory)?;
         let directory = directory.canonicalize()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = std::fs::metadata(&directory)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "task control directory must be private and owned by this user",
-                ));
-            }
-        }
+        let directory_grant =
+            qq_core::command_owner::NativeDirectoryGrant::capture_private(&directory)?;
         let mut read_only = std::collections::BTreeSet::new();
+        let mut executable_directories = Vec::new();
         #[cfg(unix)]
         for candidate in [
             "/usr/bin",
@@ -3491,6 +3515,7 @@ fn task_workspace_policy(
             "/lib64",
             "/nix/store",
             "/System/Library",
+            "/System/Cryptexes/OS",
             "/Library/Developer/CommandLineTools",
         ] {
             match std::fs::canonicalize(candidate) {
@@ -3501,12 +3526,101 @@ fn task_workspace_policy(
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(unix)]
+        {
+            let roots = unix_sdk::discover(&directory)?;
+            if let Some(bin) = roots.first() {
+                executable_directories.push(bin.clone());
+            }
+            read_only.extend(roots);
+        }
+        let cargo_cache = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                    .map(|home| PathBuf::from(home).join(".cargo"))
+            })
+            .filter(|home| home.is_absolute() && home.join("registry").is_dir())
+            .map(|home| qq_core::command_owner::NativeDirectoryGrant::capture(&home))
+            .transpose()?;
+        #[cfg(windows)]
+        read_only.insert(std::fs::canonicalize(
+            std::env::var_os("SYSTEMROOT")
+                .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable"))?,
+        )?);
+        #[cfg(windows)]
+        {
+            // Admit installed compiler inputs, never the global Cargo home,
+            // credentials, or hardlinked rustup proxy directory.
+            for bin in qq_core::command_owner::NativeEnvironment::windows_toolchain_bins()
+                .into_iter()
+                .take(15)
+            {
+                if !bin.join("cargo.exe").is_file() || !bin.join("rustc.exe").is_file() {
+                    continue;
+                }
+                let roots = windows_toolchain_read_roots(&bin)?;
+                executable_directories.push(roots[0].clone());
+                read_only.extend(roots);
+            }
+            // A PATH entry alone must not authorize an arbitrary parent tree.
+            // Recognize the standard Node installation beneath Program Files.
+            for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+                let Some(program_files) = std::env::var_os(variable) else {
+                    continue;
+                };
+                let program_files = PathBuf::from(program_files);
+                let node = program_files.join("nodejs");
+                if !node.join("node.exe").is_file() {
+                    continue;
+                }
+                let node = node.canonicalize()?;
+                if !node.starts_with(program_files.canonicalize()?) {
+                    continue;
+                }
+                if std::env::var_os("PATH").is_some_and(|path| {
+                    std::env::split_paths(&path)
+                        .any(|entry| entry.canonicalize().is_ok_and(|entry| entry == node))
+                }) {
+                    // The installed tree is readable to ordinary users, but
+                    // they cannot change Program Files ACLs. Copy only selected
+                    // SDK inputs once per server into its own private storage.
+                    let destination = directory.join(format!(
+                        "sdk-node-{}",
+                        qq_protocol::SessionId::generate().map_err(std::io::Error::other)?
+                    ));
+                    let mut selected = vec![PathBuf::from("node.exe")];
+                    for name in ["npm.cmd", "npx.cmd", "node_modules/npm"] {
+                        if node.join(name).exists() {
+                            selected.push(PathBuf::from(name));
+                        }
+                    }
+                    let grant = qq_core::task_workspace::stage_tool_inputs(
+                        qq_core::command_owner::NativeDirectoryGrant::capture(&node)?,
+                        &destination,
+                        &selected,
+                        qq_core::task_workspace::TaskWorkspaceLimits {
+                            max_entries: 16_384,
+                            max_bytes: 256 * 1024 * 1024,
+                        },
+                        std::time::Instant::now() + std::time::Duration::from_secs(30),
+                    )
+                    .map_err(std::io::Error::other)?;
+                    executable_directories.push(grant.path.clone());
+                    read_only.insert(grant.path);
+                    break;
+                }
+            }
+        }
         Ok(qq_core::TaskWorkspacePolicy {
-            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
+            cargo_cache,
+            executable_directories,
+            directory: directory_grant,
             read_only: read_only
                 .into_iter()
                 .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
                 .collect::<Result<_, _>>()?,
+            #[cfg(target_os = "linux")]
             resources: qq_core::command_owner::NativeResources::Limited {
                 limits: qq_core::command_owner::NativeResourceLimits {
                     memory_bytes: 4 * 1024 * 1024 * 1024,
@@ -3516,6 +3630,17 @@ fn task_workspace_policy(
                         .saturating_mul(1000)
                         .min(1_000_000),
                 },
+            },
+            #[cfg(windows)]
+            resources: qq_core::command_owner::NativeResources::Committed {
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_processes: 512,
+                cpu_percent: 90,
+            },
+            #[cfg(target_os = "macos")]
+            resources: qq_core::command_owner::NativeResources::Guarded {
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_tasks: 512,
             },
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
@@ -9957,3 +10082,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "runtime/windows_auto_tests.rs"]
+mod windows_auto_tests;

@@ -205,25 +205,57 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
+      - name: Windows restricted payload boundary
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
+          bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job
+          cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Windows command and fleet resource bounds
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          # Exercise every independent kernel bound even if another one fails.
+          # Keep the failing job status: this is diagnostic coverage, not a pass.
+          status=0
+          for selector in \
+            tools::windows_owner::fleet::tests::memory_budget_is_rounded_down_and_retained_by_the_kernel \
+            tools::windows_owner::fleet::tests::aggregate_memory_limit_applies_across_independent_command_jobs \
+            tools::windows_owner::fleet::tests::aggregate_process_limit_refuses_new_commands_without_killing_peers \
+            tools::windows_owner::fleet::tests::budgeted_exit_notification_survives_a_dropped_wait \
+            tools::windows_owner::resources::tests::nested_cpu_rates_never_exceed_the_requested_machine_share; do
+            bash .github/scripts/test-exact.sh "$selector" || status=1
+          done
+          exit "$status"
+      - name: Windows default Auto integration
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          cargo build --locked -p qq-core --example command_owner
+          cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output: test'
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
       - name: Native ownership, cancellation and durable observations
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           cargo build --locked -p qq-core --example command_owner
           cargo build --locked -p qq-server --example command_owner_launcher
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
-            cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
-          fi
           if [[ "$RUNNER_OS" == "macOS" ]]; then
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::resource_admission_requires_restricted_filesystem_authority
             cargo test --locked -p qq --no-default-features --test command_worker_client macos:: -- --test-threads=1
             bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_launcher_cannot_replace_the_trusted_helper
+            bash .github/scripts/test-exact.sh tools::macos_owner::tests::interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::helper_preparation_waits_for_readiness_and_remains_cancellable
             bash .github/scripts/test-exact.sh tools::macos_owner::tests::unreleased_exited_helper_is_reaped_when_group_kill_would_be_denied
           fi
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_refuses_low_disk_space_before_launch
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_every_writable_root
+          bash .github/scripts/test-exact.sh command_owner::tests::scoped_command_checks_disk_space_on_the_worker_journal
           bash .github/scripts/test-exact.sh command_owner::tests::native_restrictions_never_fall_back_to_an_unrestricted_platform_launcher
           bash .github/scripts/test-exact.sh command_owner::tests::the_journal_has_one_owner_and_rejects_id_reuse
           bash .github/scripts/test-exact.sh command_owner::tests::dropping_admission_waiter_does_not_abandon_a_committed_command
@@ -272,6 +304,8 @@ jobs:
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::native_grant_validates_the_opened_object_before_acl_changes
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_walk_cannot_follow_a_retargeted_ancestor_junction
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_updates_serialize_across_helper_processes
+          bash .github/scripts/test-exact.sh tools::windows_owner::tests::helper_image_retries_after_storage_pressure_and_reuses_only_success
+          bash .github/scripts/test-exact.sh tools::windows_owner::tests::helper_image_concurrent_initialization_keeps_one_complete_copy
       - name: macOS sandbox failure diagnostics
         if: failure() && runner.os == 'macOS'
         shell: bash
@@ -372,6 +406,7 @@ jobs:
           fi
           cargo run --locked -p qq-core --example embed
       - name: Persisted native task authority
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh sessions::task_workspaces::tests::publication_delivers_new_ignored_files_without_generated_directories
@@ -395,13 +430,17 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity
       - name: Private command transport and worker process
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh command_owner::tests::an_authorized_native_command_is_observed_by_a_new_connection qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::an_unavailable_owner_is_not_advertised_as_healthy qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::private_command_routes_authenticate_before_parsing_or_cancelling qq-server
           bash .github/scripts/test-exact.sh command_owner::tests::saturated_completion_waits_do_not_block_command_cancellation qq-server
-          cargo test --locked -p qq --no-default-features --test command_owner_process --test command_worker_client
+          cargo test --locked -p qq --no-default-features --test command_owner_process
+          # Platform payload suites have their own steps above. Exercise the
+          # common durable worker path without repeating those same probes.
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --skip windows:: --skip macos::
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' > "$RUNNER_TEMP/qq-windows-tests.txt"
             for name in restricted_payload_can_start_an_equally_restricted_descendant restricted_files_are_enforced_by_the_real_worker restricted_network_is_enforced_by_the_real_worker native_arguments_survive_worker_transport native_stdin_follows_the_authorization_prefix overlapping_grants_retain_writable_task_authority native_shell_retains_its_task_working_directory native_profile_does_not_expose_host_local_appdata cancelling_a_restricted_command_drains_its_job_and_keeps_output linked_files_are_refused_before_the_payload_runs; do
@@ -412,7 +451,7 @@ jobs:
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
               grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/qq-macos-tests.txt"
-            for name in payload_cannot_leave_the_owned_process_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes; do
+            for name in spawn_attributes_preserve_seatbelt_outside_the_owned_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes guarded_commands_complete_and_resource_pressure_stops_the_owned_group; do
               grep -Fx "macos::$name: test" "$RUNNER_TEMP/qq-macos-tests.txt"
             done
           fi
