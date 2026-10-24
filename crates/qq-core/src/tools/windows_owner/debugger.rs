@@ -72,7 +72,7 @@ gc
             &main_script,
             &format!(
                 r#".sympath {}
-sxe bpe
+sxn bpe
 sxn ibp
 sx
 bu ntdll!RtlSetLastWin32Error ".echo QQ_CDB_HIT function=RtlSetLastWin32Error; .if (@ecx != 0) {{r ecx; kn 12}}; gc"
