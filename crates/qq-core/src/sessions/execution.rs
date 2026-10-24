@@ -73,6 +73,7 @@ impl ToolGate for CompactionRunGate {
 /// a child session uses the user key instead, so its compaction only misses
 /// the cache. The golden tests hold the two derivations equal.
 fn session_prompt_prefix_key(
+    inner: &SessionRuntimeInner,
     claimed: &ClaimedRun,
     loaded: &LoadedRuntime,
 ) -> crate::plan::PromptPrefixKey {
@@ -83,7 +84,7 @@ fn session_prompt_prefix_key(
             spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
             search_history: true,
             update_goal: claimed.goal.is_some(),
-            task_git: false,
+            task_git: super::TaskGitRunInput::offered(inner, claimed),
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
@@ -419,7 +420,7 @@ async fn prepare_execution(
                 },
                 None,
             )
-            .summarizer(session_prompt_prefix_key(claimed, loaded))
+            .summarizer(session_prompt_prefix_key(inner, claimed, loaded))
             .with_max_output_tokens(context::summarizer_output_tokens(
                 loaded.resolved_model().max_output_tokens,
                 loaded.resolved_model().context_window,
@@ -571,6 +572,16 @@ async fn prepare_execution(
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
     .with_inherited_effects(inherited_effects);
+    if !internal {
+        capabilities = capabilities.with_task_git(resources.task.get().and_then(|task| {
+            super::TaskGitRunInput::new(
+                Arc::clone(inner),
+                claimed,
+                Arc::clone(task),
+                resources.tools.clone(),
+            )
+        }));
+    }
     if claimed
         .goal
         .as_ref()
