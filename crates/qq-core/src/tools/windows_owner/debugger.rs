@@ -69,6 +69,8 @@ gc
                 r#"bu ntdll!RtlSetLastWin32Error ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS Win32=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
 bu ntdll!RtlNtStatusToDosError ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS NtStatus=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
 bu ntdll!NtOpenEvent "$$><{}"
+.printf "QQ_CDB_BREAKPOINTS pid=%x\n", @$tpid
+bl
 .printf "QQ_CDB_READY pid=%x\n", @$tpid
 g
 "#,
@@ -79,7 +81,8 @@ g
             &main_script,
             &format!(
                 r#".sympath srv*{}*https://msdl.microsoft.com/download/symbols
-sxe -c "$$><{}" ibp
+sxe -c "$$><{}" cpr
+sxn bpe
 $$><{}
 "#,
                 root.join("cdb-symbols").display(),
@@ -239,6 +242,17 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
             continue;
         }
         let text = String::from_utf8_lossy(&line).trim().to_owned();
+        if let Some(code) = text.split("exception - code ").nth(1) {
+            let code = code
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .take(8)
+                .collect::<String>();
+            if !code.is_empty() {
+                flush(&mut batch, output, &mut count, &mut bytes);
+                batch.push(format!("QQ_CDB_EXCEPTION code={code}"));
+            }
+        }
         if text.starts_with("QQ_CDB_READY") {
             let _ = ready.try_send(());
         }
@@ -273,9 +287,12 @@ fn flush(
     let relevant = batch.iter().any(|row| {
         row.to_ascii_lowercase().contains("bcrypt!")
             || row.to_ascii_lowercase().starts_with("bcrypt+")
-    }) || batch
-        .first()
-        .is_some_and(|row| row.starts_with("QQ_CDB_READY") || row.starts_with("QQ_CDB_DIAGNOSTIC"));
+    }) || batch.first().is_some_and(|row| {
+        row.starts_with("QQ_CDB_READY")
+            || row.starts_with("QQ_CDB_DIAGNOSTIC")
+            || row.starts_with("QQ_CDB_EXCEPTION")
+            || row.starts_with("QQ_CDB_BREAKPOINTS")
+    });
     if relevant && let Ok(mut rows) = output.lock() {
         for row in batch.drain(..) {
             if *count < 128 && *bytes + row.len() <= 65536 {
@@ -306,6 +323,22 @@ mod tests {
                 "QQ_CDB_STATUS NtStatus=c0000034",
                 "bcrypt+0x41",
                 "QQ_CDB_READY"
+            ]
+        );
+    }
+    #[test]
+    fn retains_bounded_stop_and_breakpoint_metadata_without_raw_columns() {
+        let bytes = b"QQ_CDB_BREAKPOINTS pid=123\n0 e Disable Clear 00007ff0 ntdll!RtlSetLastWin32Error\n(123.456): Break instruction exception - code 80000003 (first chance) PRIVATE\nQQ_CDB_READY pid=123\n";
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_BREAKPOINTS pid=123",
+                "ntdll!RtlSetLastWin32Error",
+                "QQ_CDB_EXCEPTION code=80000003",
+                "QQ_CDB_READY pid=123"
             ]
         );
     }
