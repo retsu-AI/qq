@@ -108,6 +108,7 @@ mod tests {
         )
         .unwrap();
         let receipt = ExecutionContextReceipt::V2(ExecutionContextProof {
+            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: ToolCallId::generate().unwrap(),
                 arguments_sha256: ContentHash::from_bytes([1; 32]),
@@ -179,6 +180,7 @@ mod tests {
             executable_sha256: ContentHash::from_bytes([8; 32]),
         };
         let mut proof = ExecutionContextProof {
+            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: id,
                 arguments_sha256: arguments_digest("exec", arguments).unwrap(),
@@ -376,7 +378,9 @@ pub fn validate_process_evidence(
     let Some(arguments) = arguments.filter(|value| value.len() <= 256 * 1024) else {
         return Status::MissingArguments;
     };
-    if arguments.len() > 64 * 1024 || arguments_digest(tool, arguments).is_none() {
+    if (arguments.len() > 64 * 1024 && !super::super::task_git::is_tool(tool))
+        || arguments_digest(tool, arguments).is_none()
+    {
         return Status::InvalidArguments;
     }
     let Some(receipt) = receipt else {

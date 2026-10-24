@@ -94,7 +94,8 @@ async fn command_cannot_read_its_supervisors_control_descriptors() {
     let (mut worker, connection) = start(&root.path().join("owner")).await;
     let id = ToolCallId::generate().unwrap();
     let request = NativeCommand {
-        environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
+                task_git_call: None,
+environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id, workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(&(std::fs::canonicalize(workspace.path()).unwrap())).unwrap(),
         workspace: std::fs::canonicalize(workspace.path()).unwrap(), tool: "exec".to_owned(),
         arguments: serde_json::json!({"program": std::env::current_exe().unwrap(), "args": ["--exact", "linux_custody::fixture_supervisor_privacy", "--nocapture", "--skip", format!("qq-custody-{id}")]}).to_string(),
@@ -161,6 +162,7 @@ async fn exercise_ending(ending: Ending) {
     let listener = tokio::net::UnixListener::bind(workspace.path().join(&marker)).unwrap();
     let (mut worker, connection) = start(&directory).await;
     let request = NativeCommand {
+        task_git_call: None,
         environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(

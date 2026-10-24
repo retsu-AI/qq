@@ -851,6 +851,7 @@ async fn native_check_real_linux_result_survives_coordinator_loss_without_reexec
         .unwrap();
     owner
         .submit(NativeCommand {
+            task_git_call: None,
             id,
             workspace: workspace.clone(),
             workspace_identity: policy.workspace.identity,
