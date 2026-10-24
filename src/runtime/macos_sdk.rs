@@ -153,6 +153,45 @@ fn inputs(
                 image.parent().ok_or_else(denied)?.join(relative)
             } else if let Some(relative) = name.strip_prefix("@executable_path/") {
                 bin.join(relative)
+            } else if let Some(relative) = name.strip_prefix("@rpath/") {
+                let relative = Path::new(relative);
+                if relative.as_os_str().is_empty()
+                    || relative
+                        .components()
+                        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    return Err(denied_input(
+                        "library run-path suffix is not normal",
+                        relative,
+                    ));
+                }
+                // Homebrew's Node imports libnode through @rpath. Inspect only
+                // files inside its already-admitted formula lib or the current
+                // admitted library's directory, never environment search paths.
+                let mut found = None;
+                for root in [
+                    version.join("lib"),
+                    image.parent().ok_or_else(denied)?.to_owned(),
+                ] {
+                    if root == bin {
+                        continue;
+                    }
+                    let candidate = root.join(relative);
+                    if candidate.try_exists()? {
+                        let canonical = candidate.canonicalize()?;
+                        if !canonical.starts_with(&root) {
+                            return Err(denied_input(
+                                "library run-path alias escapes its root",
+                                &candidate,
+                            ));
+                        }
+                        found = Some(canonical);
+                        break;
+                    }
+                }
+                found.ok_or_else(|| {
+                    denied_input("library run-path input is missing", Path::new(name))
+                })?
             } else {
                 PathBuf::from(name)
             };
