@@ -28,6 +28,7 @@ import { closeGoalPanel, openGoalDialog } from "../lib/goal-ui";
 import { toast } from "../lib/toast";
 import type { GoalSnapshot, ProjectState, Transcript } from "../lib/types";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { Panel } from "./Panel";
 
 export const TONE_CLASSES: Record<GoalTone, string> = {
   active: "bg-accent-soft text-accent",
@@ -73,8 +74,9 @@ export function GoalPanel({
     });
 
   return (
-    <aside
-      aria-label="Goal"
+    <Panel
+      label="Goal"
+      close={closeGoalPanel}
       className="animate-slide-in flex w-[min(420px,40vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(420px,85%)] max-[1100px]:shadow-2xl"
     >
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line pl-4 pr-2">
@@ -269,7 +271,7 @@ export function GoalPanel({
           stay.
         </ConfirmDialog>
       )}
-    </aside>
+    </Panel>
   );
 }
 

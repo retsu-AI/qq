@@ -2,6 +2,21 @@
 
 A Windows desktop app for QQ: Tauri v2 shell, React + TypeScript + Tailwind UI.
 
+Android/iOS preparation lives on `feat/mobile`, based on `feat/desktop-app`.
+The UI remains shared. Mobile pairing and live remote connections are unavailable
+until maintainers merge S2 enrollment (ADR-0015) and S4 TLS; the mobile welcome
+screen explains this. No engine, token import or host filesystem controls run
+from the mobile UI. Native command exclusion and mobile builds are separate M2
+work; these UI capabilities alone are not a native security boundary.
+
+For a credential-free phone preview, run `pnpm dev` and open
+`/tests/render.html?demo&platform=android` (or `platform=ios`) at 375×812.
+Omit `platform` for the desktop fixture at 1280×800. The native app obtains its
+platform from `client_platform` before React mounts; viewport size never grants
+capabilities. Check the session drawer, Goal/Changes sheets, dialogs, composer
+and touch controls. A shorter preview viewport can simulate keyboard space,
+but device keyboard and notch behavior still need native-device verification.
+
 The app is a client of the same user-scoped QQ server the `qq` TUI and CLI use,
 so sessions, configuration, and credentials are shared. When no server is
 running it starts `qq serve --exit-on-stdin-close` and supervises it.

@@ -3,6 +3,7 @@ import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, Copy, Minus, PanelLeft, Square, X } from "lucide-react";
 import { Logo } from "./Logo";
+import { platform } from "../lib/platform";
 
 export type MenuItem =
   | {
@@ -11,6 +12,7 @@ export type MenuItem =
       onSelect: () => void;
       disabled?: boolean;
       checked?: boolean;
+      desktopOnly?: boolean;
     }
   | "separator";
 
@@ -43,6 +45,7 @@ export function TitleBar({
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
+    if (platform.mobile) return;
     void appWindow.isMaximized().then(setMaximized);
     const stop = appWindow.onResized(() => {
       void appWindow.isMaximized().then(setMaximized);
@@ -51,6 +54,20 @@ export function TitleBar({
       void stop.then((unlisten) => unlisten());
     };
   }, []);
+
+  if (platform.mobile) return (
+    <header className="mobile-titlebar flex shrink-0 items-center border-b border-line bg-sidebar">
+      <BarButton label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+        onClick={toggleSidebar} pressed={sidebarOpen}>
+        <PanelLeft className="h-5 w-5" />
+      </BarButton>
+      <Logo className="mx-2 h-5 w-5" />
+      <div className="flex-1" />
+      <MenuBar menus={menus.map((menu) => ({
+        ...menu, items: menu.items.filter((item) => item === "separator" || !item.desktopOnly),
+      }))} />
+    </header>
+  );
 
   return (
     <header

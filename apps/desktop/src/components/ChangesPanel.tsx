@@ -5,6 +5,8 @@ import { openInEditor } from "../lib/editor";
 import type { FileChange } from "../lib/changes";
 import { CopyButton } from "./CodeBlock";
 import { Diff } from "./Diff";
+import { platform } from "../lib/platform";
+import { Panel } from "./Panel";
 
 /** The files this session's edits changed, each with its diffs. */
 export function ChangesPanel({
@@ -30,8 +32,9 @@ export function ChangesPanel({
     });
 
   return (
-    <aside
-      aria-label="Changes"
+    <Panel
+      label="Changes"
+      close={close}
       // Beside the conversation on wide windows, over it on narrow ones.
       className="animate-slide-in flex w-[min(460px,42vw)] min-w-[300px] shrink-0 flex-col border-l border-line bg-sidebar max-[1100px]:absolute max-[1100px]:inset-y-0 max-[1100px]:right-0 max-[1100px]:z-20 max-[1100px]:w-[min(460px,85%)] max-[1100px]:shadow-2xl"
     >
@@ -112,7 +115,7 @@ export function ChangesPanel({
                       −{file.removed}
                     </span>
                   </button>
-                  <button
+                  {platform.features.editor && <button
                     type="button"
                     onClick={() => void openInEditor(projectId, file.path)}
                     aria-label={`Open ${name} in editor`}
@@ -120,7 +123,7 @@ export function ChangesPanel({
                     className="flex h-6 items-center rounded-md px-1.5 text-muted opacity-0 hover:bg-active hover:text-fg focus-visible:opacity-100 group-hover/file:opacity-100"
                   >
                     <Code2 className="h-3.5 w-3.5" />
-                  </button>
+                  </button>}
                   <CopyButton
                     text={file.path}
                     label="Copy path"
@@ -145,6 +148,6 @@ export function ChangesPanel({
           })}
         </ul>
       )}
-    </aside>
+    </Panel>
   );
 }

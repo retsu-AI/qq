@@ -13,7 +13,8 @@ import {
   usePreferences,
   zoom,
 } from "./lib/preferences";
-import { Sidebar } from "./components/Sidebar";
+import { Navigation } from "./components/Navigation";
+import { platform } from "./lib/platform";
 import { ToastView } from "./components/ToastView";
 import { WorktreeDialog } from "./components/WorktreeDialog";
 import {
@@ -46,6 +47,7 @@ interface Place {
 }
 
 function readSidebar(): boolean {
+  if (platform.mobile) return false;
   try {
     return localStorage.getItem(SIDEBAR_KEY) !== "hidden";
   } catch {
@@ -80,7 +82,8 @@ export function App() {
 
   useEffect(() => {
     applyPreferences(getPreferences());
-    void api.setNotificationsEnabled(getPreferences().notifications);
+    if (platform.features.nativeNotifications)
+      void api.setNotificationsEnabled(getPreferences().notifications);
   }, []);
 
   /** Shows the sidebar if hidden and focuses its search. */
@@ -183,16 +186,16 @@ export function App() {
       } else if (key === "0") {
         handled();
         zoom(0);
-      } else if (key === "o" && !event.shiftKey) {
+      } else if (key === "o" && !event.shiftKey && platform.features.localProjects) {
         handled();
         void pickProject();
       } else if (key === "n" && !event.shiftKey && project) {
         handled();
         newSession();
-      } else if (key === "n" && event.shiftKey && project) {
+      } else if (key === "n" && event.shiftKey && project && platform.features.worktrees) {
         handled();
         showWorktreeDialog(project.project_id);
-      } else if (key === "e" && event.shiftKey && project) {
+      } else if (key === "e" && event.shiftKey && project && platform.features.editor) {
         handled();
         void openInEditor(project.project_id);
       } else if (key === "d" && event.shiftKey) {
@@ -225,17 +228,20 @@ export function App() {
         },
         {
           label: "New worktree session…",
+          desktopOnly: true,
           shortcut: "Ctrl Shift N",
           onSelect: () => project && showWorktreeDialog(project.project_id),
           disabled: !project,
         },
         {
           label: "Open project…",
+          desktopOnly: true,
           shortcut: "Ctrl O",
           onSelect: () => void pickProject(),
         },
         {
           label: "Open in editor",
+          desktopOnly: true,
           shortcut: "Ctrl Shift E",
           onSelect: () => project && void openInEditor(project.project_id),
           disabled: !project,
@@ -248,7 +254,7 @@ export function App() {
           disabled: !project,
         },
         "separator",
-        { label: "Model providers…", onSelect: () => showProviders(true) },
+        { label: "Model providers…", desktopOnly: true, onSelect: () => showProviders(true) },
         {
           label: "Settings…",
           shortcut: "Ctrl ,",
@@ -257,6 +263,7 @@ export function App() {
         "separator",
         {
           label: "Exit",
+          desktopOnly: true,
           shortcut: "Alt F4",
           onSelect: () => void getCurrentWindow().close(),
         },
@@ -367,13 +374,13 @@ export function App() {
         forward={canForward ? () => go(1) : null}
       />
       <div className="flex min-h-0 flex-1">
-        {sidebarOpen && (
-          <Sidebar
-            app={app}
-            project={project}
-            openSettings={() => setSettingsOpen(true)}
-          />
-        )}
+        <Navigation
+          open={sidebarOpen}
+          close={() => setSidebarOpen(false)}
+          app={app}
+          project={project}
+          openSettings={() => setSettingsOpen(true)}
+        />
         <main className="relative flex min-w-0 flex-1 flex-col">
           {app.error && (
             <div className="flex shrink-0 items-center gap-3 border-b border-line bg-danger-soft px-4 py-2 text-[13px] text-danger">
@@ -396,7 +403,7 @@ export function App() {
           )}
         </main>
       </div>
-      {app.providersOpen && <Providers />}
+      {platform.features.hostConfiguration && app.providersOpen && <Providers />}
       {settingsOpen && (
         <Settings project={project} close={() => setSettingsOpen(false)} />
       )}
@@ -408,7 +415,7 @@ export function App() {
         />
       )}
       {aboutOpen && <About close={() => setAboutOpen(false)} />}
-      {worktreeProject && (
+      {platform.features.worktrees && worktreeProject && (
         <WorktreeDialog project={worktreeProject} close={hideWorktreeDialog} />
       )}
       <ToastView />

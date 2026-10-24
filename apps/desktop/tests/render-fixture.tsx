@@ -3,7 +3,9 @@ import { createRoot } from "react-dom/client";
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import { Sidebar } from "../src/components/Sidebar";
+import { Navigation } from "../src/components/Navigation";
+import { configurePlatform, platform, watchMobileViewport } from "../src/lib/platform";
+import { PanelLeft } from "lucide-react";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import type { Item, ProjectState } from "../src/lib/types";
@@ -12,6 +14,9 @@ import { openGoalDialog } from "../src/lib/goal-ui";
 import { showWorktreeDialog } from "../src/lib/worktree-dialog";
 import { showProviders, start } from "../src/lib/store";
 import "../src/styles.css";
+
+configurePlatform(new URLSearchParams(location.search).get("platform") ?? "desktop");
+watchMobileViewport();
 
 const count = Math.min(
   8192,
@@ -304,6 +309,7 @@ if (new URLSearchParams(location.search).has("approval"))
     },
   });
 function Fixture() {
+  const [navigationOpen, setNavigationOpen] = useState(!platform.mobile);
   const [commands, setCommands] = useState<string[]>([]);
   const [measurement, setMeasurement] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -382,8 +388,8 @@ function Fixture() {
   return (
     <>
       <div className="flex h-full">
-        <Sidebar
-          openSettings={() => undefined}
+        <Navigation open={navigationOpen} close={() => setNavigationOpen(false)}
+          openSettings={() => setSettingsOpen(true)}
           app={{
             open: [
               {
@@ -399,6 +405,12 @@ function Fixture() {
           project={project}
         />
         <main className="flex min-w-0 flex-1 flex-col">
+          {platform.mobile && <header className="mobile-titlebar flex shrink-0 items-center border-b border-line bg-sidebar">
+            <button aria-label="Show sidebar" onClick={() => setNavigationOpen(true)} className="flex items-center justify-center">
+              <PanelLeft className="h-5 w-5" />
+            </button>
+            <span className="px-2">QQ</span>
+          </header>}
           {baseline ? (
             <div data-baseline className="overflow-y-auto p-6">
               <Suspense fallback="Loading baseline">

@@ -2,8 +2,19 @@ import { FolderOpen, FolderGit2, KeyRound } from "lucide-react";
 import { openProject, pickProject, showProviders } from "../lib/store";
 import type { ProjectInfo } from "../lib/types";
 import { Logo } from "./Logo";
+import { platform } from "../lib/platform";
 
 export function Welcome({ recents }: { recents: ProjectInfo[] }) {
+  if (platform.mobile) return (
+    <div className="flex flex-1 items-center justify-center p-6">
+      <div className="max-w-md">
+        <Logo className="mb-6 h-10 w-10" />
+        <h1 className="text-[22px] font-semibold">QQ on your phone</h1>
+        <p className="mt-3 text-muted">Connect to QQ running on your computer.
+          Pairing will be available after secure device enrollment and TLS support land in the engine.</p>
+      </div>
+    </div>
+  );
   return (
     <div className="flex flex-1 items-center justify-center p-10">
       <div className="w-full max-w-md">
