@@ -119,6 +119,24 @@ fn roots(
     let sdk = sdk.canonicalize()?;
     let bin = clang.parent().ok_or_else(denied)?.to_owned();
     let developer_bin = developer.join("usr/bin").canonicalize()?;
+    let installation = if developer
+        .file_name()
+        .is_some_and(|name| name == "Developer")
+        && developer
+            .parent()
+            .is_some_and(|parent| parent.file_name().is_some_and(|name| name == "Contents"))
+    {
+        developer.parent().ok_or_else(denied)?
+    } else {
+        developer
+    };
+    if installation.canonicalize()? != installation
+        || !installation.is_dir()
+        || installation.starts_with(control)
+        || control.starts_with(installation)
+    {
+        return Err(denied());
+    }
     if !clang.is_file()
         || [&bin, &developer_bin, &sdk].iter().any(|root| {
             !root.is_dir()
@@ -131,17 +149,47 @@ fn roots(
     }
     Ok(super::macos_sdk::Inputs {
         executable_directories: vec![bin.clone(), developer_bin.clone()],
-        // xcrun opens the selected developer directory and its internal
-        // metadata while finding tools/SDKs. Keep that public installation
+        // xcrun opens the selected application's Info.plist and shared
+        // frameworks while finding tools/SDKs. Keep that public installation
         // readable as a unit; unrelated applications and user files stay out.
         // Native scopes require an exact read grant for each PATH entry.
-        read_only: vec![developer.to_owned(), bin, developer_bin],
+        read_only: vec![installation.to_owned(), bin, developer_bin],
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_command_line_tools_do_not_admit_their_parent() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let developer = base.join("Library/Developer/CommandLineTools");
+        let bin = developer.join("usr/bin");
+        let sdk = developer.join("SDKs/MacOSX.sdk");
+        let control = base.join("control");
+        for directory in [&bin, &sdk, &control] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let clang = bin.join("clang");
+        std::fs::write(&clang, b"compiler").unwrap();
+        let selected =
+            validate_developer(&developer, &base.join("Applications"), &developer, &control)
+                .unwrap();
+        let inputs = roots(&selected, &clang, &sdk, &control).unwrap();
+        assert!(inputs.read_only.contains(&developer));
+        assert!(
+            !inputs
+                .read_only
+                .contains(&developer.parent().unwrap().to_owned())
+        );
+        assert!(
+            inputs
+                .executable_directories
+                .iter()
+                .all(|path| inputs.read_only.contains(path))
+        );
+    }
     #[test]
     fn selected_apple_inputs_exclude_other_installations_and_private_roots() {
         let fixture = tempfile::tempdir().unwrap();
@@ -185,9 +233,19 @@ mod tests {
                 .all(|path| inputs.read_only.contains(path)),
             "native scopes require explicit read grants for every executable directory"
         );
-        assert!(inputs.read_only.contains(&developer));
+        let contents = developer.parent().unwrap();
+        assert!(inputs.read_only.contains(&contents.to_owned()));
         assert_eq!(inputs.read_only.len(), 3);
         assert!(!inputs.read_only.contains(&applications));
+        let sibling_control = contents.join("private-control");
+        std::fs::create_dir(&sibling_control).unwrap();
+        assert_eq!(
+            roots(&selected, &clang, &sdk, &sibling_control)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
         std::fs::remove_dir(developer.join("usr/lib")).unwrap();
         assert_eq!(
             roots(&selected, &clang, &sdk, &control)

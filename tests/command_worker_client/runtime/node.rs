@@ -19,7 +19,8 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         .unwrap();
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
         std::fs::write(directory.join("spawn-probe.js"), r#"
-const cp=require('child_process'),fs=require('fs');
+const cp=require('child_process'),fs=require('fs'),path=require('path');
+(async()=>{
 const probes=['direct','shell'].map(kind=>{
   const script=`require('fs').writeFileSync('child-${kind}.txt','yes')`;
   const file=kind==='direct'?process.execPath:'/bin/sh';
@@ -28,8 +29,29 @@ const probes=['direct','shell'].map(kind=>{
   const error=result.error?{code:result.error.code,errno:result.error.errno,syscall:result.error.syscall,message:result.error.message}:null;
   return {kind,status:result.status,signal:result.signal,error};
 });
+const paths=[];
+for(let current=process.cwd();;current=path.dirname(current)){
+  paths.push(path.join(current,'node_modules','.bin'));
+  if(path.dirname(current)===current)break;
+}
+paths.push(process.env.PATH);
+for(const kind of ['async-absolute','async-path','async-npm-path']){
+  const file=kind==='async-absolute'?'/bin/sh':'sh';
+  const env=kind==='async-npm-path'?{...process.env,PATH:paths.join(path.delimiter)}:process.env;
+  const result=await new Promise(resolve=>{
+    const failed=error=>resolve({kind,status:null,signal:null,error:{code:error.code,errno:error.errno,syscall:error.syscall,message:error.message}});
+    try{
+      const child=cp.spawn(file,['-c',"node -e \"require('fs').writeFileSync('child-async.txt','yes')\""],{cwd:process.cwd(),env,stdio:'inherit',detached:false,signal:AbortSignal.timeout(5000)});
+      child.once('error',failed);
+      child.once('close',(status,signal)=>resolve({kind,status,signal,error:null}));
+    }catch(error){failed(error)}
+  });
+  console.log(JSON.stringify(result));
+  probes.push(result);
+}
 fs.writeFileSync('node-spawn-probe.json',JSON.stringify(probes));
 console.log(JSON.stringify(probes));
+})().catch(error=>{console.error(error);process.exitCode=1});
 "#).unwrap();
     }
     assert!(
@@ -202,7 +224,7 @@ console.log(JSON.stringify(probes));
     let probes: Vec<Value> =
         serde_json::from_slice(&std::fs::read(workspace.join("node-spawn-probe.json")).unwrap())
             .unwrap();
-    assert_eq!(probes.len(), 2);
+    assert_eq!(probes.len(), 5);
     for probe in probes {
         assert_eq!(probe["status"], 0, "{probe}");
         assert!(probe["signal"].is_null(), "{probe}");
