@@ -52,7 +52,9 @@ project files may not.
 Set `QQ_HOME` to an absolute directory to keep a separate QQ instance's
 user configuration in `<QQ_HOME>/config` and its sessions, trust records and
 credential metadata in `<QQ_HOME>/data`. Diagnostic logs also use
-`<QQ_HOME>/data/logs`. This is useful for isolated instances and testing; it
+`<QQ_HOME>/data/logs`; server discovery and coordination use
+`<QQ_HOME>/data/runtime`, so separate homes do not attach to each other's server.
+This is useful for isolated instances and testing; it
 does not change the workspace, managed policy, OS keyring or shell permissions.
 An empty or relative `QQ_HOME` is an error. Without it, platform paths stay
 unchanged.

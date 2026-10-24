@@ -181,8 +181,19 @@ impl ServerPaths {
         }
     }
 
-    /// Resolves the current user's runtime directory, with a data-local fallback.
+    /// Uses QQ_HOME/data/runtime when set, otherwise the user's platform runtime directory.
     pub fn for_user() -> Result<Self, ServerError> {
+        Self::for_user_with_home(std::env::var_os("QQ_HOME").as_deref())
+    }
+
+    fn for_user_with_home(home: Option<&std::ffi::OsStr>) -> Result<Self, ServerError> {
+        if let Some(home) = home {
+            let root = Path::new(home);
+            if home.is_empty() || !root.is_absolute() {
+                return Err(ServerError::InvalidHome);
+            }
+            return Ok(Self::new(root.join("data").join("runtime")));
+        }
         let project =
             ProjectDirs::from("dev", "qq", "qq").ok_or(ServerError::StateDirectoryUnavailable)?;
         let directory = project
@@ -1656,6 +1667,8 @@ fn sync_directory(_path: &Path) -> Result<(), ServerError> {
 
 #[derive(Debug, Error)]
 pub enum ServerError {
+    #[error("QQ_HOME must be a nonempty absolute path")]
+    InvalidHome,
     #[error("could not determine the user-scoped server state directory")]
     StateDirectoryUnavailable,
     #[error("non-loopback server bind address is not supported: {0}")]
@@ -1717,6 +1730,79 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn qq_home_rejects_empty_and_relative_server_roots() {
+        for home in ["", "relative", "./relative"] {
+            assert!(
+                matches!(
+                    ServerPaths::for_user_with_home(Some(std::ffi::OsStr::new(home))),
+                    Err(ServerError::InvalidHome)
+                ),
+                "{home:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_qq_home_preserves_standard_server_paths() {
+        let project = ProjectDirs::from("dev", "qq", "qq").unwrap();
+        let expected = project
+            .runtime_dir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project.data_local_dir().join("runtime"));
+        assert_eq!(
+            ServerPaths::for_user_with_home(None).unwrap(),
+            ServerPaths::new(expected)
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_qq_homes_have_separate_server_discovery_and_coordination() {
+        let directory = TestDirectory::new();
+        let home_a = directory.root.join("home-a");
+        let home_b = directory.root.join("home-b");
+        let a = ServerPaths::for_user_with_home(Some(home_a.as_os_str())).unwrap();
+        let b = ServerPaths::for_user_with_home(Some(home_b.as_os_str())).unwrap();
+        // Establish isolation before touching any server state, including on
+        // a build without QQ_HOME support: never reserve the real user path.
+        assert_eq!(a.directory(), home_a.join("data").join("runtime"));
+        assert_eq!(b.directory(), home_b.join("data").join("runtime"));
+        assert_ne!(a, b);
+        let first = start_test_server(a.clone(), unavailable_handler()).await;
+        assert_eq!(
+            discover_at(&a).await.unwrap().as_ref(),
+            Some(first.connection())
+        );
+        assert!(discover_at(&b).await.unwrap().is_none());
+        let ReserveOutcome::Reserved(second) =
+            reserve(ServerOptions::new(b.clone())).await.unwrap()
+        else {
+            panic!("the second home must claim its own filesystem lock");
+        };
+        let second = second
+            .start(
+                unavailable_handler(),
+                ServerIdentity::new(StoreId::from_bytes([0xAB; 16]), None),
+            )
+            .unwrap();
+        assert_ne!(first.connection(), second.connection());
+        assert_eq!(
+            discover_at(&a).await.unwrap().as_ref(),
+            Some(first.connection())
+        );
+        assert_eq!(
+            discover_at(&b).await.unwrap().as_ref(),
+            Some(second.connection())
+        );
+        let ReserveOutcome::Existing(found) = reserve(ServerOptions::new(a.clone())).await.unwrap()
+        else {
+            panic!("the first home must still coordinate with its own server");
+        };
+        assert_eq!(&found, first.connection());
+        second.shutdown().await.unwrap();
+        first.shutdown().await.unwrap();
+    }
 
     static NEXT_TEST_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 

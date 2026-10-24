@@ -203,6 +203,9 @@ jobs:
           bash .github/scripts/test-exact.sh tests::qq_home_selects_auth_metadata_in_the_shared_data_directory qq-auth
           bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_auth_roots qq-auth
           bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_auth_metadata_paths qq-auth
+          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_server_roots qq-server
+          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_server_paths qq-server
+          bash .github/scripts/test-exact.sh tests::distinct_qq_homes_have_separate_server_discovery_and_coordination qq-server
       - name: Native core Clippy
         if: ${{ !cancelled() }}
         shell: bash
