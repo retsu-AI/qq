@@ -197,7 +197,7 @@ mod refer_tests {
         let policy = if std::env::var_os("QQ_REFER_LEGACY").is_some() {
             Policy::ConnectedPairs(ruleset(false).unwrap())
         } else {
-            Policy::Pathnames(ruleset(true).unwrap())
+            policy().unwrap()
         };
         enforce_policy(policy).unwrap();
         let access = AccessFs::from_all(ABI::V6)
