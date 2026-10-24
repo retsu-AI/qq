@@ -15,6 +15,8 @@ use std::{
 
 #[path = "task_git_commit.rs"]
 mod commit;
+#[path = "task_git_hosting.rs"]
+pub(crate) mod hosting;
 #[path = "task_git_program.rs"]
 mod program;
 use program::GitProgram;
