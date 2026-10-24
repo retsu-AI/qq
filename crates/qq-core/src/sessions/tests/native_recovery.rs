@@ -1026,6 +1026,10 @@ async fn reserve_check_for_native_recovery(store: &Store, path: &Path) -> Claime
     let store_id = store.store_id();
     store
         .call_write(Priority::Control, move |connection| {
+            connection.execute(
+                "UPDATE sessions SET approval_mode='full' WHERE id=?1",
+                [session.to_string()],
+            )?;
             let transaction = store::begin_unit(connection)?;
             let mut goal = crate::sessions::goals::set(
                 &transaction,
@@ -1101,7 +1105,8 @@ async fn newly_unknown_native_work_refuses_an_already_reserved_check_start() {
                     store_id,
                     &check,
                     check.check_deadline.unwrap().0,
-                    true
+                    true,
+                    false
                 )?,
                 crate::sessions::goal_check::Start::Waiting
             ));
@@ -1150,6 +1155,7 @@ async fn late_check_result_preserves_goal_and_human_acknowledgment(failed_placeh
                 &captured,
                 captured.check_deadline.unwrap().0,
                 true,
+                false,
             )? {
                 crate::sessions::goal_check::Start::Started(_, Some(id)) => Ok(id),
                 _ => Err(SessionRuntimeError::CONSTRAINT),
