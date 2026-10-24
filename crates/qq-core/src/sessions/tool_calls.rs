@@ -555,8 +555,19 @@ pub(super) fn insert_seed_grants(
         if value.is_empty() || value.len() > MAX_GRANT_BYTES {
             continue;
         }
+        // An explicit trusted seed supersedes a reviewer's exact-call row.
+        // Promotion adds no row and must still work at the grant cap.
+        if transaction.execute(
+            "UPDATE session_grants SET source='human', run_id=NULL, created_at_ms=?4
+             WHERE session_id=?1 AND kind=?2 AND value=?3
+               AND source IN ('delegate', 'jev')",
+            params![session_id.to_string(), kind, value, now],
+        )? != 0
+        {
+            continue;
+        }
         if remaining == 0 {
-            break;
+            continue;
         }
         let inserted = transaction.execute(
             "INSERT OR IGNORE INTO session_grants(
