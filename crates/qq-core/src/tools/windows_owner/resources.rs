@@ -92,18 +92,15 @@ mod tests {
         assert!(child_cpu_rate(1, Some(0)).is_err());
         assert!(child_cpu_rate(101, None).is_err());
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
     #[test]
     fn sampled_safeguards_are_refused_before_creating_a_job() {
-        let error = apply(NativeResources::Guarded {
-            memory_bytes: 1024,
-            max_tasks: 2,
-        })
+        let error = apply(
+            NativeResources::Guarded {
+                memory_bytes: 1024,
+                max_tasks: 2,
+            },
+            None,
+        )
         .unwrap_err();
         assert!(error.to_string().contains("unavailable on Windows"));
     }
