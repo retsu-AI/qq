@@ -4485,3 +4485,271 @@ async fn explicit_session_grants_are_bounded_idempotent_and_durable() {
     assert!(child_grants.tools.is_empty());
     runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+#[cfg(feature = "tool-fetch")]
+async fn write_children_inherit_only_human_grants_and_keep_internal_review() {
+    for (human_host, revoke_parent) in [(true, false), (false, false), (true, true)] {
+        let (reviewer, consulted) =
+            StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Deny {
+                reason: "stop before network dispatch".into(),
+            }));
+        let (release_child, pending_child) = oneshot::channel();
+        let child: Arc<dyn Provider> = Arc::new(GatedApprovalProvider {
+            inner: ApprovalProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                turn: StdMutex::new(0),
+                tool: "fetch",
+                arguments: r#"{"url":"https://docs.invalid/page"}"#,
+                tool_turns: 1,
+                usage: None,
+            },
+            release: StdMutex::new(Some(pending_child)),
+        });
+        let (mut harness, _) = write_child_harness(
+            child,
+            vec![(
+                "spawn_agent",
+                r#"{"task":"read approved docs","model":"test/child","authority":"write"}"#.into(),
+            )],
+            Some(reviewer),
+            ApprovalMode::Auto,
+        )
+        .await;
+        let parent_id = harness.session_id;
+        harness
+            .runtime
+            .seed_session_grants(
+                parent_id,
+                WorkspaceGrantSeed {
+                    tools: vec!["write_file".into()],
+                    shell_prefixes: vec!["cargo test".into()],
+                    hosts: if human_host {
+                        vec!["docs.invalid".into()]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            )
+            .await
+            .unwrap();
+        harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                // Historical reviewer authority must remain exact and local.
+                connection.execute(
+                    "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
+                 VALUES (?1,'shell_prefix','npm install',0,'delegate')",
+                    [parent_id.to_string()],
+                )?;
+                connection.execute(
+                    "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
+                 VALUES (?1,'host','reviewer.invalid',0,'delegate')",
+                    [parent_id.to_string()],
+                )?;
+                if !human_host {
+                    connection.execute(
+                        "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
+                     VALUES (?1,'host','docs.invalid',0,'delegate')",
+                        [parent_id.to_string()],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let run_id = submit_prompt_to(&harness.runtime, parent_id, "delegate docs").await;
+        let mut observed = Vec::new();
+        let child_id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = harness.events.next().await.unwrap().unwrap();
+                let child_id = match &event.event {
+                    SessionEvent::SessionCreated { session }
+                        if session.parent_id == Some(parent_id) =>
+                    {
+                        Some(session.id)
+                    }
+                    _ => None,
+                };
+                observed.push(event);
+                if let Some(child_id) = child_id {
+                    break child_id;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        if revoke_parent {
+            harness.runtime.inner.store.call(Priority::Control, move |connection| {
+                connection.execute(
+                    "DELETE FROM session_grants WHERE session_id=?1 AND kind='host' AND value='docs.invalid'",
+                    [parent_id.to_string()],
+                )?;
+                Ok(())
+            }).await.unwrap();
+        }
+        release_child.send(()).unwrap();
+        observed.extend(collect_until_run_finished(&mut harness.events, run_id).await);
+        let policy = harness
+            .runtime
+            .inner
+            .store
+            .tool_approval_policy(child_id)
+            .await
+            .unwrap();
+        assert!(policy.supervised);
+        assert_eq!(policy.mode, ApprovalMode::Auto);
+        assert_eq!(
+            policy.grants.tools,
+            ["write_file".to_owned()].into_iter().collect()
+        );
+        assert_eq!(policy.grants.shell_prefixes, ["cargo test"]);
+        assert!(policy.grants.delegate.commands.is_empty());
+        assert!(policy.grants.delegate.hosts.is_empty());
+        assert_eq!(
+            policy.grants.hosts,
+            if human_host {
+                vec!["docs.invalid"]
+            } else {
+                Vec::new()
+            }
+        );
+        assert_eq!(
+            consulted.lock().unwrap().len(),
+            usize::from(human_host && !revoke_parent),
+            "only explicit human authority may reach child supervision"
+        );
+        assert_no_human_permission_request(&observed);
+        assert!(!observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "fetch")));
+        assert!(observed.iter().any(|event| matches!(&event.event,
+            SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch" && tool_call.state == ToolCallState::Denied)));
+        if revoke_parent {
+            assert!(observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch"
+                    && tool_call.result.as_deref().is_some_and(|result| result.contains("parent_permission_required")))));
+        }
+        assert_eq!(
+            observed
+                .iter()
+                .filter(|event| matches!(
+                    &event.event,
+                    SessionEvent::ToolApprovalResolved {
+                        resolution: ApprovalResolution::DeniedByReviewer,
+                        ..
+                    }
+                ))
+                .count(),
+            usize::from(human_host && !revoke_parent)
+        );
+        harness.runtime.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn explicit_seed_promotes_delegate_collisions_even_at_the_grant_cap() {
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            for (source, prefix) in [("delegate", "cargo test"), ("jev", "npm install")] {
+                connection.execute(
+                    "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source,run_id)
+                 VALUES (?1,'shell_prefix',?2,0,?3,?4)",
+                    params![
+                        session_id.to_string(),
+                        prefix,
+                        source,
+                        RunId::from_bytes([1; 16]).to_string()
+                    ],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    runtime
+        .seed_session_grants(
+            session_id,
+            WorkspaceGrantSeed {
+                tools: (0..MAX_SESSION_GRANTS)
+                    .map(|n| format!("tool-{n}"))
+                    .collect(),
+                ..WorkspaceGrantSeed::default()
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .seed_session_grants(
+            session_id,
+            WorkspaceGrantSeed {
+                // A rejected new row must not hide a later colliding row at capacity.
+                shell_prefixes: vec!["overflow".into(), "cargo test".into(), "npm install".into()],
+                ..WorkspaceGrantSeed::default()
+            },
+        )
+        .await
+        .unwrap();
+    runtime.close().await.unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let (_, grants, _) = runtime
+        .inner
+        .store
+        .approval_policy(session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        grants
+            .shell_prefixes
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>(),
+        ["cargo test".to_owned(), "npm install".to_owned()]
+            .into_iter()
+            .collect()
+    );
+    assert!(grants.delegate.commands.is_empty());
+    for command in ["cargo test package", "npm install package"] {
+        assert!(matches!(
+            approval::evaluate(
+                ApprovalMode::Auto,
+                "shell",
+                &approval::ToolClass::Shell {
+                    command: command.into(),
+                    cwd: None,
+                    read_only: false,
+                },
+                &grants
+            ),
+            approval::PolicyDecision::Execute
+        ));
+    }
+    let rows = runtime.inner.store.call(Priority::Control, move |connection| {
+        let count: u32 = connection.query_row("SELECT COUNT(*) FROM session_grants WHERE session_id=?1", [session_id.to_string()], |row| row.get(0))?;
+        let promoted: u32 = connection.query_row("SELECT COUNT(*) FROM session_grants WHERE session_id=?1 AND kind='shell_prefix' AND source='human' AND run_id IS NULL", [session_id.to_string()], |row| row.get(0))?;
+        Ok((count, promoted))
+    }).await.unwrap();
+    assert_eq!(rows, (MAX_SESSION_GRANTS, 2));
+    runtime.close().await.unwrap();
+}
