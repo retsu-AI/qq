@@ -128,6 +128,19 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
+            // Keep child-shell discovery in the frozen environment. Without
+            // COMSPEC, cmd synthesizes its verbatim launch image path, which
+            // ordinary batch-script subprocesses may not accept.
+            if let Some(shell) = self.get("COMSPEC").or_else(|| {
+                self.get("SYSTEMROOT").map(|root| {
+                    std::path::PathBuf::from(root)
+                        .join("System32")
+                        .join("cmd.exe")
+                        .into_os_string()
+                })
+            }) {
+                values.push(("COMSPEC".to_owned(), shell));
+            }
             // Ordinary Windows tools append slash-separated names to these
             // values. Keep verbatim syntax only when DOS paths change identity.
             for (_, value) in &mut values {
