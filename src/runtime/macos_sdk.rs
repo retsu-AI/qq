@@ -24,13 +24,11 @@ pub(super) fn discover(control: &Path) -> io::Result<Inputs> {
         return Ok(Inputs::default());
     };
     let selected = selected.canonicalize()?;
-    for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
-        let image = prefix.join("bin/node");
-        if !image.is_file() || image.canonicalize()? != selected {
-            continue;
-        }
-        let deadline = Instant::now() + std::time::Duration::from_secs(5);
-        return inputs(prefix, &selected, control, deadline, |image, deadline| {
+    discover_selected(
+        &[Path::new("/opt/homebrew"), Path::new("/usr/local")],
+        &selected,
+        control,
+        |image, deadline| {
             let mut command = std::process::Command::new("/usr/bin/otool");
             command
                 .arg("-L")
@@ -39,7 +37,26 @@ pub(super) fn discover(control: &Path) -> io::Result<Inputs> {
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin");
             super::unix_sdk::query_until(command, deadline)
-        });
+        },
+    )
+}
+
+fn discover_selected(
+    prefixes: &[&Path],
+    selected: &Path,
+    control: &Path,
+    metadata: impl FnMut(&Path, Instant) -> io::Result<Option<Vec<u8>>>,
+) -> io::Result<Inputs> {
+    for prefix in prefixes {
+        let image = prefix.join("bin/node");
+        if !image.is_file() || image.canonicalize()? != selected {
+            continue;
+        }
+        if !selected.starts_with(prefix.join("Cellar")) {
+            continue;
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        return inputs(prefix, selected, control, deadline, metadata);
     }
     Ok(Inputs::default())
 }
@@ -241,6 +258,21 @@ fn inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unsupported_node_installations_do_not_prevent_runtime_startup() {
+        let fixture = tempfile::tempdir().unwrap();
+        let prefix = fixture.path().canonicalize().unwrap();
+        std::fs::create_dir(prefix.join("bin")).unwrap();
+        std::fs::create_dir(prefix.join("control")).unwrap();
+        let image = prefix.join("bin/node");
+        std::fs::write(&image, b"standalone Node").unwrap();
+        let inputs = discover_selected(&[&prefix], &image, &prefix.join("control"), |_, _| {
+            panic!("unsupported installations must not be inspected")
+        })
+        .unwrap();
+        assert!(inputs.executable_directories.is_empty());
+        assert!(inputs.read_only.is_empty());
+    }
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let fixture = tempfile::tempdir().unwrap();
         let prefix = fixture.path().canonicalize().unwrap();
@@ -257,7 +289,9 @@ mod tests {
     #[test]
     fn selected_node_admits_only_its_concrete_runtime_inputs() {
         let (_fixture, prefix, image, library) = fixture();
-        let result = inputs(&prefix, &image, &prefix.join("control"), Instant::now() + std::time::Duration::from_secs(5), |path, _| {
+        std::fs::create_dir(prefix.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&image, prefix.join("bin/node")).unwrap();
+        let result = discover_selected(&[&prefix], &image, &prefix.join("control"), |path, _| {
             Ok(Some(if path == image { format!("node:\n\t{} (compatibility version 1.0.0, current version 1.0.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)\n", library.display()).into_bytes() } else { b"library:\n".to_vec() }))
         }).unwrap();
         assert_eq!(result.executable_directories, [image.parent().unwrap()]);
