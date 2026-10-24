@@ -71,6 +71,7 @@ httpdate = "1"
 ignore = "0.4"
 keyring = "4"
 libproc = "0.14.11"
+sysctl = "0.7.1"
 qq-auth = { path = "crates/qq-auth" }
 qq-client = { path = "crates/qq-client" }
 qq-config = { path = "crates/qq-config" }
@@ -116,6 +117,8 @@ tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
 dunce = "1.0.5"
 win-custody = "0.1.1"
+winsafe = { version = "0.0.29", default-features = false }
+firehazard = "=0.0.0-2022-09-10"
 windows-permissions = "0.2.4"
 winapi-util = "0.1"
 subc-jobobject = "0.2.2"
@@ -218,10 +221,11 @@ rusqlite.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-nix = { workspace = true, features = ["event"] }
+libproc.workspace = true
+nix = { workspace = true, features = ["event", "process", "signal"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 rappct.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true
-winsafe = { version = "0.0.29", default-features = false, features = ["advapi"] }
+winsafe = { workspace = true, features = ["advapi"] }
