@@ -163,11 +163,10 @@ impl TaskGit {
         });
         let mut received = 0;
         let mut result = Vec::new();
-        let mut failure: Option<TaskGitError> = None;
         #[cfg(windows)]
-        {
-            failure = admission.err();
-        }
+        let mut failure = admission.err();
+        #[cfg(not(windows))]
+        let mut failure: Option<TaskGitError> = None;
         #[cfg(windows)]
         let mut job_stopped = false;
         let mut status = None;
