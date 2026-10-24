@@ -150,6 +150,19 @@ impl NativeEnvironment {
                     home.join("AppData/Local").into_os_string(),
                 ),
             ]);
+            // Keep child-shell discovery in the frozen environment. Without
+            // COMSPEC, cmd synthesizes its verbatim launch image path, which
+            // ordinary batch-script subprocesses may not accept.
+            if let Some(shell) = self.get("COMSPEC").or_else(|| {
+                self.get("SYSTEMROOT").map(|root| {
+                    std::path::PathBuf::from(root)
+                        .join("System32")
+                        .join("cmd.exe")
+                        .into_os_string()
+                })
+            }) {
+                values.push(("COMSPEC".to_owned(), shell));
+            }
             // Ordinary Windows tools append slash-separated names to these
             // values. Keep verbatim syntax only when DOS paths change identity.
             for (_, value) in &mut values {
@@ -450,6 +463,31 @@ mod tests {
             ("LOCALAPPDATA", home.join("AppData/Local")),
         ] {
             assert_eq!(environment.get(name), Some(path.into_os_string()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_home_supplies_command_compatible_child_shell_selection() {
+        for captured in [
+            vec![("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows"))],
+            vec![
+                ("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows")),
+                (
+                    "COMSPEC".to_owned(),
+                    OsString::from(r"\\?\C:\Windows\System32\cmd.exe"),
+                ),
+            ],
+        ] {
+            let environment = NativeEnvironment::from_values(captured)
+                .unwrap()
+                .with_task_home(std::path::Path::new(r"C:\private-task"))
+                .unwrap();
+            assert_eq!(
+                environment.get("COMSPEC"),
+                Some(OsString::from(r"C:\Windows\System32\cmd.exe")),
+                "Windows child shells need DOS-compatible COMSPEC"
+            );
         }
     }
 

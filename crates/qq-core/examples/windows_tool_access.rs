@@ -7,7 +7,11 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> std::io::Result<()> {
-    probe::run()
+    if std::env::args().nth(1).as_deref() == Some("--payload-metadata") {
+        probe::payload_metadata()
+    } else {
+        probe::run()
+    }
 }
 
 #[cfg(windows)]
@@ -28,6 +32,49 @@ mod probe {
 
     fn err(error: impl std::fmt::Debug) -> io::Error {
         io::Error::other(format!("{error:?}"))
+    }
+
+    pub fn payload_metadata() -> io::Result<()> {
+        let token = firehazard::open_process_token(
+            firehazard::get_current_process(),
+            firehazard::token::QUERY,
+        )
+        .map_err(err)?;
+        describe_token("actual-payload", &token, false, None)?;
+        println!(
+            "actual-payload privileges={:?}",
+            token.privileges().map_err(err)?.privileges()
+        );
+        println!(
+            "actual-payload restrictors={}",
+            token.restricted_sids().map_err(err)?.group_count()
+        );
+        let cwd = std::env::current_dir()?;
+        let root = cwd
+            .ancestors()
+            .last()
+            .ok_or_else(|| err("task root unavailable"))?;
+        for path in [root, cwd.as_path()] {
+            for (name, rights) in [
+                ("READ_ATTRIBUTES", 0x80),
+                ("READ_CONTROL", READ_CONTROL),
+                ("TRAVERSE", 0x20),
+            ] {
+                let result = OpenOptions::new()
+                    .access_mode(rights)
+                    .share_mode(7)
+                    .custom_flags(0x0200_0000)
+                    .open(path);
+                println!(
+                    "actual-payload path={} access={name} result={:?}",
+                    path.display(),
+                    result
+                        .map(|_| ())
+                        .map_err(|error| (error.raw_os_error(), error.kind()))
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn run() -> io::Result<()> {
