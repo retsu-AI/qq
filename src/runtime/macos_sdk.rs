@@ -51,6 +51,13 @@ fn denied() -> io::Error {
     )
 }
 
+fn denied_input(stage: &str, input: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("installed Node {stage}: {}", input.display()),
+    )
+}
+
 fn inputs(
     prefix: &Path,
     image: &Path,
@@ -59,10 +66,15 @@ fn inputs(
     mut metadata: impl FnMut(&Path, Instant) -> io::Result<Option<Vec<u8>>>,
 ) -> io::Result<Inputs> {
     if !control.is_absolute() || control.canonicalize()? != control {
-        return Err(denied());
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "installed Node metadata requires a canonical private control directory",
+        ));
     }
     let cellar = prefix.join("Cellar");
-    let suffix = image.strip_prefix(&cellar).map_err(|_| denied())?;
+    let suffix = image
+        .strip_prefix(&cellar)
+        .map_err(|_| denied_input("image is outside its Cellar", image))?;
     let components = suffix.iter().collect::<Vec<_>>();
     if components.len() != 4
         || components[2] != "bin"
@@ -78,7 +90,10 @@ fn inputs(
         || image.canonicalize()? != image
         || !image.is_file()
     {
-        return Err(denied());
+        return Err(denied_input(
+            "image has a redirected or unsupported formula layout",
+            image,
+        ));
     }
     let bin = image.parent().ok_or_else(denied)?.to_owned();
     let version = bin.parent().ok_or_else(denied)?;
@@ -89,7 +104,10 @@ fn inputs(
                 || root.starts_with(control)
                 || control.starts_with(&root)
             {
-                return Err(denied());
+                return Err(denied_input(
+                    "runtime root is redirected or overlaps control",
+                    &root,
+                ));
             }
             roots.insert(root);
         }
@@ -100,7 +118,10 @@ fn inputs(
     if npm.is_dir() {
         let npm = npm.canonicalize()?;
         if !npm.starts_with(&cellar) && npm != prefix.join("lib/node_modules/npm") {
-            return Err(denied());
+            return Err(denied_input(
+                "npm package escapes its conventional root",
+                &npm,
+            ));
         }
         roots.insert(npm);
     }
@@ -144,15 +165,18 @@ fn inputs(
                 continue;
             }
             if !dependency.is_absolute() {
-                return Err(denied());
+                return Err(denied_input(
+                    "library install name is unsupported",
+                    &dependency,
+                ));
             }
             let dependency = dependency.canonicalize()?;
             if !dependency.starts_with(&cellar) || !dependency.is_file() {
-                return Err(denied());
+                return Err(denied_input("library escapes its Cellar", &dependency));
             }
             let root = dependency.parent().ok_or_else(denied)?.to_owned();
             if root.starts_with(control) || control.starts_with(&root) {
-                return Err(denied());
+                return Err(denied_input("library root overlaps control", &root));
             }
             roots.insert(root);
             if !seen.contains(&dependency) && !pending.contains(&dependency) {
@@ -163,11 +187,11 @@ fn inputs(
             }
         }
     }
-    if roots
+    if let Some(root) = roots
         .iter()
-        .any(|root| root.starts_with(control) || control.starts_with(root))
+        .find(|root| root.starts_with(control) || control.starts_with(root))
     {
-        return Err(denied());
+        return Err(denied_input("runtime root overlaps control", root));
     }
     Ok(Inputs {
         executable_directories: vec![bin],
@@ -235,6 +259,35 @@ mod tests {
             io::ErrorKind::PermissionDenied
         );
         assert_eq!(std::fs::read(&secret).unwrap(), b"private");
+    }
+
+    #[test]
+    fn unsupported_library_errors_identify_the_actual_install_name() {
+        let (_fixture, prefix, image, _) = fixture();
+        let name = "@rpath/libnode.127.dylib";
+        let error = inputs(
+            &prefix,
+            &image,
+            &prefix.join("control"),
+            Instant::now() + std::time::Duration::from_secs(5),
+            |_, _| {
+                Ok(Some(
+                    format!(
+                        "node:\n\t{name} (compatibility version 1.0.0, current version 1.0.0)\n"
+                    )
+                    .into_bytes(),
+                ))
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("library install name is unsupported")
+        );
+        assert!(error.to_string().contains(name));
     }
 
     #[test]
