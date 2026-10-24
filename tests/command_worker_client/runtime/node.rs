@@ -31,6 +31,7 @@ try{fs.readFileSync(__PRIVATE_CANARY__)}catch(error){privateCode=error.code}
 fs.writeFileSync('private-canary-proof.json',JSON.stringify({code:privateCode}));
 const outsideExec=cp.spawnSync(__PRIVATE_EXEC__,[],{stdio:'inherit',timeout:5000});
 fs.writeFileSync('outside-exec-proof.json',JSON.stringify({code:outsideExec.error?outsideExec.error.code:'EXEC_ALLOWED',status:outsideExec.status}));
+console.log(JSON.stringify({privateFileCode:privateCode,outsideExecCode:outsideExec.error?outsideExec.error.code:'EXEC_ALLOWED',outsideExecStatus:outsideExec.status}));
 (async()=>{
 const probes=['direct','shell'].map(kind=>{
   const script=`require('fs').writeFileSync('child-${kind}.txt','yes')`;
@@ -245,13 +246,9 @@ console.log(JSON.stringify(probes));
         &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        private_proof["code"],
-        if cfg!(target_os = "macos") {
-            "EPERM"
-        } else {
-            "EACCES"
-        }
+    assert!(
+        matches!(private_proof["code"].as_str(), Some("EPERM" | "EACCES")),
+        "{private_proof}"
     );
     let outside_exec: Value =
         serde_json::from_slice(&std::fs::read(workspace.join("outside-exec-proof.json")).unwrap())

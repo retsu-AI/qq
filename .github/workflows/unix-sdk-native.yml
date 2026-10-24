@@ -43,6 +43,15 @@ jobs:
               /usr/bin/otool -L "$prefix/bin/node"
             fi
           done
+          python3 - <<'PY'
+          import json, os
+          for path in ["/System/Library/PrivateFrameworks/MobileDevice.framework", "/Library/Apple/System/Library"]:
+              try:
+                  metadata = os.stat(path)
+                  print(json.dumps({"path": path, "canonical": os.path.realpath(path), "mode": metadata.st_mode, "owner": metadata.st_uid}))
+              except OSError as error:
+                  print(json.dumps({"path": path, "error": error.errno}))
+          PY
       - name: Check native denied-execution errno syntax
         if: ${{ !cancelled() }}
         run: |
