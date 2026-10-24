@@ -5741,6 +5741,7 @@ fn goal_form_creates_with_defaults_and_separate_check_consent() {
         budget,
         expected,
         replace,
+        ..
     } = &request.command
     else {
         panic!("set goal")
@@ -5796,6 +5797,7 @@ fn goal_form_edits_stopped_goals_without_resuming_or_replacing_them() {
         assert_eq!(
             request.command,
             SessionCommand::SetGoal {
+                check_approval: None,
                 session_id: session,
                 objective: goal.objective.clone(),
                 check: goal.check.clone(),

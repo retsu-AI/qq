@@ -1550,6 +1550,14 @@ fn current_goal_commands_receipts_and_origins_match_goldens() {
             "objective":goal.objective,"budget":goal.budget}),
         ),
         (
+            "command_set_goal_with_check_approval",
+            0x65,
+            serde_json::json!({"type":"set_goal","session_id":session_id,
+            "objective":goal.objective,"budget":goal.budget,
+            "check":{"command":"cargo test -p billing","timeout_ms":1000},
+            "check_approval":"once"}),
+        ),
+        (
             "command_goal_approve_once",
             0x63,
             serde_json::json!({"type":"goal_control","session_id":session_id,
