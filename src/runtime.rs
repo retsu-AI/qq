@@ -3983,7 +3983,6 @@ impl RuntimeBuildError {
 
 #[cfg(test)]
 mod tests {
-    mod continuation;
     #[test]
     fn extracted_mcp_cache_failure_keeps_its_server_classification() {
         let error = super::RuntimeBuildError::from(qq_harness::McpBuildError::CacheUnavailable);
@@ -9930,4 +9929,5 @@ mod tests {
             digest(&bearer, ResponsesBodyShape::Codex)
         );
     }
+    mod continuation;
 }
