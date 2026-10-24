@@ -30,6 +30,7 @@ mod workspace_identity;
 pub use environment::NativeEnvironment;
 pub use workspace_identity::NativeWorkspaceIdentity;
 mod observer;
+mod task_git_result;
 pub(crate) use observer::observe;
 
 pub(crate) fn lost_output(output: &str) -> ToolOutput {
@@ -175,6 +176,8 @@ pub struct NativeCommand {
 pub struct NativeTaskGitCall {
     pub tool: String,
     pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::task_git_job::TaskGitJobReference>,
 }
 
 impl NativeTaskGitCall {
@@ -465,6 +468,19 @@ impl CommandOwner {
             .resources
             .validate()
             .map_err(|_| CommandOwnerError::Invalid)?;
+        if let Some(call) = request.task_git_call.as_ref()
+            && let Some(reference) = &call.job
+            && (call.tool != "task_commit"
+                || !reference.matches_launch(
+                    request.id,
+                    &request.workspace,
+                    request.workspace_identity,
+                    &request.tool,
+                    &request.arguments,
+                ))
+        {
+            return Err(CommandOwnerError::Invalid);
+        }
         let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = request.identity()?;
         if encoded.len() > MAX_REQUEST_BYTES {
@@ -739,14 +755,14 @@ impl CommandOwner {
         {
             output = output.expired_before_capture(&tool, started.elapsed());
         }
-        if let Some(call) = task_git_call
+        if let Some(call) = task_git_call.as_ref()
             && let Some(receipt) = output.execution_context.as_mut()
         {
             receipt
-                .bind_task_git(request.id, &launch_arguments, &call)
+                .bind_task_git(request.id, &launch_arguments, call)
                 .map_err(|_| CommandOwnerError::Invalid)?;
         }
-        Ok(output)
+        Ok(task_git_result::reconcile(output, task_git_call).await)
     }
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {
