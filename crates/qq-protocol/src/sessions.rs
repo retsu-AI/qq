@@ -287,9 +287,9 @@ pub enum ApprovalMode {
     /// Every non-read action needs a fresh explicit human approval. Stored
     /// grants and reviewer models never authorize calls in this mode.
     Ask,
-    /// Default: edits and safe shell run without prompting; only dangerous
-    /// shell commands (deletion, privilege escalation, force-push, piped
-    /// installers) require approval.
+    /// Default: permitted actions run without human approval prompts.
+    /// Actions outside the task's authority are denied; internal write-child
+    /// supervision cannot grant additional authority.
     #[default]
     Auto,
     /// Every tool call proceeds without approval prompts within execution boundaries.
@@ -540,6 +540,9 @@ pub enum SessionCommand {
         objective: String,
         #[serde(default)]
         check: Option<crate::GoalCheck>,
+        /// Apply explicit check consent in the same transaction that admits the goal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        check_approval: Option<crate::GoalCheckScope>,
         budget: Box<crate::GoalBudget>,
         #[serde(default)]
         expected: Option<crate::GoalIdentity>,
@@ -4454,7 +4457,8 @@ mod tests {
         // supervision out of the public approval modes.
         // Version 38 adds store-qualified workspace discovery.
         // Version 39 includes unresolved approval details in session snapshots.
-        assert_eq!(crate::PROTOCOL_VERSION, 39);
+        // Version 40 distinguishes task-scoped Auto check authority from consent.
+        assert_eq!(crate::PROTOCOL_VERSION, 40);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

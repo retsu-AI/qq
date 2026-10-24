@@ -206,7 +206,7 @@ fn retained_goal_records_still_decode() {
 }
 
 #[test]
-fn headless_goal_final_records_preserve_explicit_check_authority() {
+fn headless_goal_final_records_preserve_check_authority() {
     for (name, authorization, status, audits) in [
         (
             "goal_check_pending",
@@ -231,6 +231,12 @@ fn headless_goal_final_records_preserve_explicit_check_authority() {
         (
             "goal_check_for_goal",
             qq_protocol::GoalCheckAuthorization::ForGoal,
+            GoalStatus::Achieved,
+            2,
+        ),
+        (
+            "goal_check_task_scoped",
+            qq_protocol::GoalCheckAuthorization::TaskScoped,
             GoalStatus::Achieved,
             2,
         ),

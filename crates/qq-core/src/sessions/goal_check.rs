@@ -670,10 +670,77 @@ pub(super) fn queue(
 }
 
 pub(super) enum Start {
+    Policy(GoalCheckPolicyError),
     Expired,
     Waiting,
     Started(Vec<SessionEventEnvelope>, Option<ToolCallId>),
     Stop,
+}
+
+pub(super) fn check_scope_required(
+    connection: &Connection,
+    session: SessionId,
+    authorization: Option<qq_protocol::GoalCheckAuthorization>,
+    native: bool,
+    task_workspaces: bool,
+) -> Result<Option<bool>, SessionRuntimeError> {
+    let current = load_tool_approval_policy(connection, session)?;
+    if current.mode == ApprovalMode::ReadOnly
+        || current
+            .ancestors
+            .iter()
+            .any(|(mode, _)| *mode == ApprovalMode::ReadOnly)
+    {
+        return Ok(None);
+    }
+    let automatic = current.mode == ApprovalMode::Auto
+        || current
+            .ancestors
+            .iter()
+            .any(|(mode, _)| *mode == ApprovalMode::Auto);
+    let scoped =
+        automatic || authorization == Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
+    if scoped && (!goals::auto_check_authority(connection, session)? || !native || !task_workspaces)
+    {
+        return Ok(None);
+    }
+    Ok(Some(scoped))
+}
+
+pub(super) fn execution_scope_required(
+    connection: &Connection,
+    claimed: &ClaimedRun,
+    native: bool,
+    task_workspaces: bool,
+) -> Result<Option<bool>, SessionRuntimeError> {
+    let Some(current) = goals::load_live(connection, claimed.identity.session_id)? else {
+        return Ok(None);
+    };
+    if claimed.goal.as_ref().is_none_or(|captured| {
+        captured.goal_id != current.goal_id || captured.revision != current.revision
+    }) || current.status != qq_protocol::GoalStatus::Active
+        || current.pending_run_id != Some(claimed.identity.run_id)
+        || run_cancel_requested(connection, claimed.identity.run_id)?
+    {
+        return Ok(None);
+    }
+    let captured = claimed
+        .goal
+        .as_ref()
+        .and_then(|goal| goal.check_authorization);
+    let authorization =
+        if current.check_authorization == Some(qq_protocol::GoalCheckAuthorization::TaskScoped) {
+            current.check_authorization
+        } else {
+            captured
+        };
+    check_scope_required(
+        connection,
+        claimed.identity.session_id,
+        authorization,
+        native,
+        task_workspaces,
+    )
 }
 
 pub(super) fn try_start(
@@ -682,6 +749,7 @@ pub(super) fn try_start(
     claimed: &ClaimedRun,
     deadline_ms: u64,
     native: bool,
+    task_workspaces: bool,
 ) -> Result<Start, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -712,10 +780,22 @@ pub(super) fn try_start(
         Some(
             qq_protocol::GoalCheckAuthorization::Once
                 | qq_protocol::GoalCheckAuthorization::ForGoal
+                | qq_protocol::GoalCheckAuthorization::TaskScoped
         )
     ) || goal.counters.audits >= goals::MAX_GOAL_AUDITS
     {
         return Ok(Start::Stop);
+    }
+    if check_scope_required(
+        &transaction,
+        claimed.identity.session_id,
+        goal.check_authorization,
+        native,
+        task_workspaces,
+    )?
+    .is_none()
+    {
+        return Ok(Start::Policy(GoalCheckPolicyError::Unavailable));
     }
     let busy:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM sessions s WHERE s.workspace_id=?1
         AND (s.active_run_id IS NOT NULL OR (s.preparing_run_id IS NOT NULL AND s.preparing_run_id!=?2 AND EXISTS(SELECT 1 FROM runs preparing WHERE preparing.id=s.preparing_run_id AND preparing.kind!='goal_check'))))
@@ -779,7 +859,7 @@ pub(super) fn try_start(
     Ok(Start::Started(events, call))
 }
 
-enum Completion {
+pub(super) enum Completion {
     Process(ProcessResult),
     Policy(GoalCheckPolicyError),
     Forbidden,
@@ -807,7 +887,7 @@ fn finish(
     Ok(events)
 }
 
-fn finish_in_transaction(
+pub(super) fn finish_in_transaction(
     transaction: &Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
@@ -930,12 +1010,26 @@ fn finish_in_transaction(
                     Some(
                         qq_protocol::GoalCheckAuthorization::Once
                             | qq_protocol::GoalCheckAuthorization::ForGoal
+                            | qq_protocol::GoalCheckAuthorization::TaskScoped
                     )
                 )
             {
+                let current = load_tool_approval_policy(transaction, goal.session_id)?;
+                let automatic = current.mode == ApprovalMode::Auto
+                    || current
+                        .ancestors
+                        .iter()
+                        .any(|(mode, _)| *mode == ApprovalMode::Auto);
                 goal.status = qq_protocol::GoalStatus::Paused {
                     reason: qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                        cause: if automatic {
+                            qq_protocol::GoalNeedsUser::Configuration {
+                                message: "completion check authorization has been consumed"
+                                    .to_owned(),
+                            }
+                        } else {
+                            qq_protocol::GoalNeedsUser::CheckApproval
+                        },
                     },
                 };
             } else if let Completion::Process(result) = &completion {
@@ -1064,13 +1158,22 @@ pub(super) async fn execute(
         }
         let claim = claimed.clone();
         let native = inner.native_commands.is_some();
+        let task_workspaces = inner.task_workspaces.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
-                try_start(connection, store_id, &claim, deadline_ms, native)
+                try_start(
+                    connection,
+                    store_id,
+                    &claim,
+                    deadline_ms,
+                    native,
+                    task_workspaces,
+                )
             })
             .await;
         match started {
+            Ok(Start::Policy(error)) => break Completion::Policy(error),
             Ok(Start::Expired) => {
                 break Completion::Process(ProcessResult {
                     outcome: ProcessOutcome::TimedOut,
@@ -1100,6 +1203,18 @@ pub(super) async fn execute(
                 }
                 let cancelled = RunCancellation::new();
                 let process = async {
+                    let claim = claimed.clone();
+                    let scope = inner
+                        .store
+                        .call(Priority::AwaitControl, move |connection| {
+                            execution_scope_required(connection, &claim, native, task_workspaces)
+                        })
+                        .await;
+                    if !matches!(scope, Ok(Some(_)))
+                        || (call.is_none() && matches!(scope, Ok(Some(true))))
+                    {
+                        return Err(ProcessError::ScopedExecutionUnavailable);
+                    }
                     if let Some(call) = call {
                         Ok(native::run(
                             &inner,

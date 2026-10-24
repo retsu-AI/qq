@@ -60,7 +60,11 @@ pub enum GoalCheckAuthorization {
     Pending,
     Once,
     Consumed,
+    /// Explicit consent to run this goal's check.
     ForGoal,
+    /// Derived Auto authority for this exact check inside the task boundary.
+    /// This never authorizes host execution, including after recovery.
+    TaskScoped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

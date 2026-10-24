@@ -60,12 +60,15 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 39
+PROTOCOL_VERSION = 40
 ```
 
 Descriptor 16 adds sorted workspace-relative configured pack roots to the
 compiled authority identity; descriptor 15 and earlier retain their original
 encoding and digest domains.
+
+Version 40 adds task-scoped Auto goal-check authority, distinct from explicit
+consent to execute a goal check.
 
 Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
 can discover registered roots without interpreting server paths locally;
@@ -156,7 +159,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permission grants.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v39/`; the `v17`–`v38` directories are
+`crates/qq-protocol/tests/fixtures/v40/`; the `v17`–`v39` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -2234,7 +2237,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v39/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v40/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.
