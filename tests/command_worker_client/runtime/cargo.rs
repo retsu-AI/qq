@@ -29,6 +29,18 @@ async fn cached_public_dependency_builds_in_default_auto() {
     let home = root.path().canonicalize().unwrap();
     let workspace = home.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
+    // The server has an ordinary conventional installation in its isolated
+    // home; CARGO_HOME below supplies cache data, not an executable authority.
+    let installed_rustup = original_home.join(".cargo/bin/rustup");
+    if installed_rustup.is_file() {
+        std::fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+        std::fs::copy(installed_rustup, home.join(".cargo/bin/rustup")).unwrap();
+    } else {
+        assert!(
+            cfg!(target_os = "linux"),
+            "native Mac qualification requires its conventional installed Rustup image"
+        );
+    }
     assert!(
         std::process::Command::new("git")
             .args(["-c", "init.templateDir=", "init", "-q", "--template="])

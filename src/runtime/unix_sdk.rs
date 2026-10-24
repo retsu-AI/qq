@@ -16,7 +16,7 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
     };
-    let cargo = std::env::var_os("CARGO_HOME")
+    let configured_cargo = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".cargo"));
     let rustup = std::env::var_os("RUSTUP_HOME")
@@ -24,7 +24,7 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
         .unwrap_or_else(|| home.join(".rustup"));
     // A relative server setting resolves through its launch directory, which
     // may be a project. It must not authorize a Host metadata executable.
-    if !home.is_absolute() || !cargo.is_absolute() || !rustup.is_absolute() {
+    if !home.is_absolute() || !configured_cargo.is_absolute() || !rustup.is_absolute() {
         return Ok(Vec::new());
     }
     if !control.is_absolute() {
@@ -33,11 +33,14 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
             "SDK metadata requires absolute private control storage",
         ));
     }
+    // Cache configuration does not select a Host executable. Resolve only the
+    // server user's conventional image, without redirecting its parent roots.
+    let home = home.canonicalize()?;
+    let cargo = home.join(".cargo");
     let image = cargo.join("bin/rustup");
     if !image.is_file() {
         return Ok(Vec::new());
     }
-    let cargo = cargo.canonicalize()?;
     let rustup = rustup.canonicalize()?;
     let image = image.canonicalize()?;
     if image != cargo.join("bin/rustup") || image.starts_with(control) {
