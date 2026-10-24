@@ -611,11 +611,16 @@ mod reconciliation_tests {
 
     #[tokio::test]
     async fn task_git_reconciles_persisted_commit_after_helper_loses_stdout() {
-        let (_root, job) = super::tests::fixture();
-        let files = save_job(&job).unwrap();
-        // This is the precise state after durable effect/receipt persistence,
-        // before the helper has printed any stdout. No effect may be repeated.
-        let receipt = execute_job_at(&files.request, 0).unwrap();
+        let (_root, job, files, receipt) = tokio::task::spawn_blocking(|| {
+            let (root, job) = super::tests::fixture();
+            let files = save_job(&job).unwrap();
+            // This is the precise state after durable effect/receipt persistence,
+            // before the helper has printed stdout. No effect may be repeated.
+            let receipt = execute_job_at(&files.request, 0).unwrap();
+            (root, job, files, receipt)
+        })
+        .await
+        .unwrap();
         let TaskGitJobResult::Committed { commit } = &receipt.result else {
             panic!("fixture must commit")
         };
