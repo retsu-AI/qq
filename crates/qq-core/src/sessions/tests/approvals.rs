@@ -2758,7 +2758,7 @@ async fn a_blocked_host_never_reaches_the_delegate_even_when_one_would_approve()
 }
 
 #[tokio::test]
-async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
+async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions() {
     struct Authority(u64);
     impl WorkspaceGrantAuthority for Authority {
         fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
@@ -2793,7 +2793,7 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
             options.approval_reviewer = Some(reviewer);
         }
         let runtime = SessionRuntime::open(
-            options,
+            options.clone(),
             Arc::new(ApprovalLoader {
                 requests: Arc::clone(&requests),
                 tool: "__test_mutate",
@@ -2867,6 +2867,120 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
                 ..
             }
         )));
+        let cursor = snapshot.cursor;
+        runtime.close().await.unwrap();
+        drop(runtime);
+
+        // Reopen the durable state with enough approval time to inspect and
+        // explicitly deny a fresh action, without racing another timeout.
+        options.approval_timeout = None;
+        options.approval_reviewer = None;
+        options.grant_authority = Some(Arc::new(Authority(300_000)));
+        let runtime = SessionRuntime::open(
+            options,
+            Arc::new(ApprovalLoader {
+                requests: Arc::clone(&requests),
+                tool: "__test_mutate",
+                arguments: "{}",
+                tool_turns: 1,
+                delegate: approval::ApprovalDelegate::Off,
+            }),
+        )
+        .await
+        .unwrap();
+        let reopened = runtime
+            .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 8))
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.focused.unwrap().goal.as_deref(),
+            Some(goal.as_ref())
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id: workspace,
+                after: cursor,
+            })
+            .unwrap();
+        let command_id = CommandId::generate().unwrap();
+        let resume = SessionCommand::GoalControl {
+            session_id,
+            expected: qq_protocol::GoalIdentity {
+                goal_id: goal.goal_id,
+                revision: goal.revision,
+            },
+            action: qq_protocol::GoalControl::Resume,
+        };
+        let resumed = runtime.command(command_id, resume.clone()).await;
+        if expire_goal {
+            assert!(
+                matches!(resumed, Err(SessionRuntimeError::GoalBudgetSpent)),
+                "{resumed:?}"
+            );
+            let after = runtime
+                .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 8))
+                .await
+                .unwrap();
+            assert_eq!(after.focused.unwrap().goal.as_deref(), Some(goal.as_ref()));
+            assert_eq!(requests.lock().unwrap().len(), 1);
+        } else {
+            let resumed = resumed.unwrap();
+            assert_eq!(runtime.command(command_id, resume).await.unwrap(), resumed);
+            let CommandOutcome::GoalUpdated { goal: active, .. } = resumed.outcome else {
+                panic!("resume goal")
+            };
+            assert_eq!(active.goal_id, goal.goal_id);
+            assert_eq!(active.budget, goal.budget);
+            assert_eq!(active.counters.usage, goal.counters.usage);
+            assert_eq!(active.counters.runs, goal.counters.runs);
+            let (before, fresh) = collect_until_approval_requested(&mut events).await;
+            assert_ne!(
+                fresh.id, call.id,
+                "resume must ask for a new action, not replay the denied call"
+            );
+            assert!(
+                !before
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+            );
+            respond_approval(&runtime, fresh.run_id, fresh.id, ApprovalDecision::Deny)
+                .await
+                .unwrap();
+            let after = collect_through_finished(&mut events).await;
+            assert!(
+                !after
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+            );
+            let snapshot = runtime
+                .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 8))
+                .await
+                .unwrap();
+            let focused = snapshot.focused.unwrap();
+            assert_eq!(
+                focused.runs.len(),
+                2,
+                "one successor despite replayed resume command"
+            );
+            let successor = focused
+                .runs
+                .iter()
+                .find(|run| run.id == fresh.run_id)
+                .unwrap();
+            assert_eq!(
+                successor.goal,
+                Some(qq_protocol::GoalIdentity {
+                    goal_id: goal.goal_id,
+                    revision: active.revision
+                })
+            );
+            assert!(
+                matches!(successor.origin, Some(qq_protocol::RunOrigin::Goal { goal_id, revision }) if goal_id == goal.goal_id && revision == active.revision)
+            );
+            assert_eq!(focused.goal.as_ref().unwrap().goal_id, goal.goal_id);
+            assert_eq!(focused.goal.as_ref().unwrap().budget, goal.budget);
+        }
         runtime.shutdown().await.unwrap();
     }
 }
