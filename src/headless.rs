@@ -570,7 +570,8 @@ pub async fn run_goal(
                             if goal.status!=qq_protocol::GoalStatus::Active {
                                 interrupt_armed = false;
                                 let (settled, through) = settle_goal(sessions, &handle, expected).await?;
-                                final_goal = Some((settled, through.sequence, None));
+                                let forced = final_goal.as_ref().and_then(|(_, _, forced)| *forced);
+                                final_goal = Some((settled, through.sequence, forced));
                             }
                             if final_goal.is_none() {
                                 for session in sessions.approval_sessions(handle.workspace_id, handle.session_id).await.map_err(|error| Failure::harness(error.to_string()))? {
@@ -653,6 +654,19 @@ pub async fn run_goal(
                                     .map_err(|error| Failure::harness(error.to_string()))?,
                                 None => true,
                             } => {}
+                        SessionEvent::ToolApprovalEscalated { tool_call_id, .. }
+                            if final_goal.is_none() => {
+                            if let Some(run_id) = envelope.run_id
+                                && sessions.goal_owns_run(handle.session_id, expected, run_id).await
+                                    .map_err(|error| Failure::harness(error.to_string()))?
+                            {
+                                // A recovered delegated hold did not arm the
+                                // live request's deferred deny. Once the reviewer
+                                // passes or times out, supply the unattended answer.
+                                respond_approval(sessions, run_id, *tool_call_id,
+                                    ApprovalDecision::Deny, stderr).await;
+                            }
+                        }
                         SessionEvent::ToolApprovalRequested { tool_call, question: Some(_), .. } => {
                             // The core validates held-question ownership before stopping.
                             let id = CommandId::generate()
@@ -5137,7 +5151,17 @@ mod tests {
                     let durable = fixture.sessions.snapshot(SnapshotRequest::new(
                         handle.workspace_id, Some(handle.session_id), 1, 16,
                     )).await.unwrap().focused.unwrap();
-                    assert_eq!(durable.summary.active_run_id, None);
+                    if action == "replace" {
+                        if let Some(run) = durable.summary.active_run_id {
+                            assert_ne!(run, root, "the old family must have drained");
+                            let replacement = fixture.sessions.run_snapshot(handle.workspace_id, handle.session_id, run).await.unwrap();
+                            assert!(matches!(replacement.origin,
+                                Some(qq_protocol::RunOrigin::Goal { goal_id, .. })
+                                if goal_id == durable.goal.as_ref().unwrap().goal_id));
+                        }
+                    } else {
+                        assert_eq!(durable.summary.active_run_id, None, "{action}");
+                    }
                     if action == "clear" {
                         assert!(durable.goal.is_none());
                     } else {
@@ -5145,8 +5169,9 @@ mod tests {
                         if action == "replace" {
                             assert_ne!(final_goal.goal_id, expected.goal_id);
                             assert_eq!(final_goal.objective, "replacement must survive");
+                        } else {
+                            assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
                         }
-                        assert!(fixture.sessions.goal_pending_runs(handle.session_id, goal_identity(&final_goal)).await.unwrap().is_empty());
                     }
                     let mut finished = Vec::new();
                     while finished.len() < 2 {
@@ -8078,6 +8103,111 @@ mod tests {
             1,
             "recovering a finished task must not send another provider request"
         );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn foreground_goal_denies_a_reviewers_escalation_without_waiting_for_approval_timeout() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        let fixture = Fixture {
+            sessions,
+            workspace,
+            _directory: directory,
+        };
+        let mut opts = options(&fixture.workspace);
+        opts.approval = HeadlessApproval::Auto;
+        opts.reviewer_configured = true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = tokio::time::timeout(
+            REVIEWER_DENY_GRACE / 2,
+            run_goal(
+                &fixture.sessions,
+                opts,
+                goal_request(),
+                std::future::pending(),
+                &mut stdout,
+                &mut stderr,
+            ),
+        )
+        .await
+        .expect("the reviewer has passed; no human is attached to this goal");
+        assert_eq!(code, 8, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        let terminal = records.last().unwrap();
+        let workspace = serde_json::from_value(terminal["workspace_id"].clone()).unwrap();
+        let session = serde_json::from_value(terminal["goal"]["session_id"].clone()).unwrap();
+        let body = recovery_snapshot(&fixture.sessions, workspace, session)
+            .await
+            .unwrap()
+            .focused
+            .unwrap();
+        assert_eq!(body.tool_calls.len(), 2);
+        assert!(
+            body.tool_calls
+                .iter()
+                .all(|call| call.state == ToolCallState::Denied)
+        );
+        fixture.sessions.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_interrupt_keeps_its_exit_status_when_delivery_history_expires() {
+        struct EnteredProvider(Arc<tokio::sync::Notify>);
+        impl Provider for EnteredProvider {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                self.0.notify_one();
+                Box::pin(stream::pending())
+            }
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let fixture = fixture({
+            let entered = entered.clone();
+            move || EnteredProvider(entered.clone())
+        })
+        .await;
+        let mut opts = options(&fixture.workspace);
+        let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
+            .await
+            .unwrap();
+        opts.session = Some(handle.session_id);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let interrupted = async {
+            // Retire the initial backlog before the foreground subscription is
+            // first polled, as if the CLI was descheduled during startup.
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async {
+                    entered.notified().await;
+                    retire_delivery_history(&fixture).await;
+                });
+            });
+        };
+        let code = run_goal(
+            &fixture.sessions,
+            opts,
+            goal_request(),
+            interrupted,
+            &mut stdout,
+            &mut stderr,
+        )
+        .await;
+        assert_eq!(code, 130, "{}", String::from_utf8_lossy(&stderr));
+        let records = parse_records(&String::from_utf8(stdout).unwrap());
+        assert_eq!(records.last().unwrap()["status"], "interrupted");
         fixture.sessions.close().await.unwrap();
     }
 
