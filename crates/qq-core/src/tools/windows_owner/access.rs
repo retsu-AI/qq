@@ -22,11 +22,14 @@ struct AccessError {
 }
 fn at<T>(path: &Path, operation: &'static str, result: io::Result<T>) -> io::Result<T> {
     result.map_err(|source| {
-        io::Error::other(AccessError {
-            operation,
-            path: path.to_owned(),
-            source,
-        })
+        io::Error::new(
+            source.kind(),
+            AccessError {
+                operation,
+                path: path.to_owned(),
+                source,
+            },
+        )
     })
 }
 
@@ -154,14 +157,24 @@ pub(super) fn prepare(
         .chain(read_only.iter().map(|grant| (grant, false)))
     {
         let system_read = !writable && system_read(grant, system.as_deref());
-        let root = open(&grant.path, !system_read)?;
+        let (root, baseline_read) = match open(&grant.path, !system_read) {
+            Ok(root) => (root, system_read),
+            Err(error) if !writable && error.kind() == io::ErrorKind::PermissionDenied => {
+                // Installed public SDKs may be readable without allowing this
+                // user to edit their ACLs. Keep their existing AppContainer
+                // access, never manufacture additional authority or retry a
+                // writable grant with fewer rights.
+                (open(&grant.path, false)?, true)
+            }
+            Err(error) => return Err(error),
+        };
         validate_root(grant, &root)?;
         // AppContainer's OS baseline already grants access to Windows system images.
         // Do not recursively change system ACLs or request administrator setup.
 
         // A duplicate read grant is already covered by the private writable
         // package. Validate its held root above, but add no shared authority.
-        if !system_read && (writable || !writable_root(grant, read_write)) {
+        if !baseline_read && (writable || !writable_root(grant, read_write)) {
             let shared_read;
             let sid = if writable {
                 &package_sid
@@ -438,6 +451,84 @@ mod tests {
             SecurityInformation::Dacl,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn public_read_only_inputs_need_no_acl_write_authority() {
+        struct RestoreAcl {
+            file: File,
+            original: LocalBox<SecurityDescriptor>,
+        }
+        impl Drop for RestoreAcl {
+            fn drop(&mut self) {
+                let _ = SetSecurityInfo(
+                    &mut self.file,
+                    SeObjectType::SE_KERNEL_OBJECT,
+                    SecurityInformation::Dacl,
+                    None,
+                    None,
+                    self.original.dacl(),
+                    None,
+                );
+            }
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("public-sdk");
+        std::fs::create_dir(&root).unwrap();
+        let grant = NativeDirectoryGrant::capture(&root).unwrap();
+        let file = open(&root, true).unwrap();
+        let mut restore = RestoreAcl {
+            original: acl(&file),
+            file,
+        };
+        let user = win_custody::current_user_sid_string().unwrap();
+        // Owner Rights removes the owner's implicit WRITE_DAC. All grants
+        // affect this fixture only, and the retained handle restores its ACL.
+        let public: LocalBox<SecurityDescriptor> =
+            format!("D:P(D;;WD;;;{user})(A;;RC;;;OW)(A;;FA;;;{user})(A;;FRFX;;;AC)")
+                .parse()
+                .unwrap();
+        SetSecurityInfo(
+            &mut restore.file,
+            SeObjectType::SE_KERNEL_OBJECT,
+            SecurityInformation::Dacl,
+            None,
+            None,
+            public.dacl(),
+            None,
+        )
+        .unwrap();
+        assert!(open(&root, true).is_err());
+        let encoded_acl = || {
+            ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &acl(&restore.file),
+                SecurityInformation::Dacl,
+            )
+            .unwrap()
+            .into_string()
+            .unwrap()
+        };
+        let before = encoded_acl();
+        let scope = NativeFilesystem::Restricted {
+            read_only: vec![grant.clone()],
+            read_write: vec![],
+        };
+        let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+        let held = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
+        assert_eq!(held.len(), 1);
+        validate_root(&grant, &held[0]).unwrap();
+        assert_eq!(encoded_acl(), before, "public SDK ACL must stay unchanged");
+        let writable = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![grant],
+        };
+        assert_eq!(
+            prepare(&writable, &package, super::super::unix_ms() + 15_000)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+            "a writable grant cannot fall back to public read authority"
+        );
     }
 
     #[test]
