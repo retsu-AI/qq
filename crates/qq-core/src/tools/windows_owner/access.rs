@@ -278,6 +278,31 @@ fn lock_acl(
     }
 }
 
+fn has_access(
+    security: &SecurityDescriptor,
+    sid: &Sid,
+    mask: u32,
+    directory: bool,
+) -> io::Result<bool> {
+    let dacl = security
+        .dacl()
+        .ok_or_else(|| io::Error::other("native file grant has no discretionary access list"))?;
+    Ok((0..dacl.len())
+        .filter_map(|index| dacl.get_ace(index))
+        .any(|entry| {
+            entry.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE
+                && entry.sid() == Some(sid)
+                && entry.mask().bits() & mask == mask
+                && !entry
+                    .flags()
+                    .intersects(AceFlags::InheritOnly | AceFlags::NoPropagateInherit)
+                && (!directory
+                    || entry
+                        .flags()
+                        .contains(AceFlags::ObjectInherit | AceFlags::ContainerInherit))
+        }))
+}
+
 fn walk(
     path: &Path,
     mut file: File,
@@ -296,17 +321,51 @@ fn walk(
     let info = winapi_util::file::information(&file)?;
     let metadata = file.metadata()?;
     if info.file_attributes() & 0x400 != 0
-        || (!metadata.is_dir() && (!metadata.is_file() || info.number_of_links() != 1))
+        || (!metadata.is_dir() && (!metadata.is_file() || info.number_of_links() == 0))
     {
-        return Err(io::Error::other(
-            "native file grant contains a reparse point or aliased file",
-        ));
+        return at(
+            path,
+            "validate native grant object",
+            Err(io::Error::other(
+                "native file grant contains a reparse point or aliased file",
+            )),
+        );
     }
     let updating = at(
         path,
         "lock native grant ACL",
         lock_acl(&info, deadline, lock_security),
     )?;
+    let mask = if writable {
+        READ_WRITE_EXECUTE_DELETE
+    } else {
+        READ_EXECUTE
+    };
+    if metadata.is_file() && info.number_of_links() > 1 {
+        let security = at(
+            path,
+            "read native grant ACL",
+            GetSecurityInfo(
+                &file,
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl,
+            ),
+        )?;
+        // Cargo can hardlink objects within its private target tree. Reuse only
+        // existing authority: adding even one missing ACE would grant every alias.
+        for &sid in sids {
+            if !has_access(&security, sid, mask, false)? {
+                return at(
+                    path,
+                    "validate native grant aliases",
+                    Err(io::Error::other(
+                        "native file grant contains a reparse point or aliased file",
+                    )),
+                );
+            }
+        }
+        return Ok(());
+    }
     for &sid in sids {
         let security = at(
             path,
@@ -317,29 +376,7 @@ fn walk(
                 SecurityInformation::Dacl,
             ),
         )?;
-        let dacl = security.dacl().ok_or_else(|| {
-            io::Error::other("native file grant has no discretionary access list")
-        })?;
-        let mask = if writable {
-            READ_WRITE_EXECUTE_DELETE
-        } else {
-            READ_EXECUTE
-        };
-        if !(0..dacl.len())
-            .filter_map(|index| dacl.get_ace(index))
-            .any(|entry| {
-                entry.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE
-                    && entry.sid() == Some(sid)
-                    && entry.mask().bits() & mask == mask
-                    && !entry
-                        .flags()
-                        .intersects(AceFlags::InheritOnly | AceFlags::NoPropagateInherit)
-                    && (!metadata.is_dir()
-                        || entry
-                            .flags()
-                            .contains(AceFlags::ObjectInherit | AceFlags::ContainerInherit))
-            })
-        {
+        if !has_access(&security, sid, mask, metadata.is_dir())? {
             let mut encoded = ConvertSecurityDescriptorToStringSecurityDescriptor(
                 &security,
                 SecurityInformation::Dacl,
@@ -664,6 +701,92 @@ mod tests {
                 .to_string()
                 .contains("native directory authority changed")
         );
+    }
+
+    fn access_list(path: &Path) -> String {
+        ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &acl(&open(path, true).unwrap()),
+            SecurityInformation::Dacl,
+        )
+        .unwrap()
+        .into_string()
+        .unwrap()
+    }
+
+    #[test]
+    fn repeated_admission_reuses_authorized_cargo_style_hardlinks_without_acl_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let task = temporary.path().join("task");
+        let deps = task.join("target").join("debug").join("deps");
+        let incremental = task.join("target").join("debug").join("incremental");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::create_dir_all(&incremental).unwrap();
+        let object = deps.join("task-proof.rcgu.o");
+        std::fs::write(&object, b"owned compiler object").unwrap();
+        let scope = NativeFilesystem::Restricted {
+            read_only: Vec::new(),
+            read_write: vec![NativeDirectoryGrant::capture(&task).unwrap()],
+        };
+        let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+        prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
+        let before = access_list(&object);
+        let alias = incremental.join("task-proof.rcgu.o");
+        std::fs::hard_link(&object, &alias).unwrap();
+        assert_eq!(
+            winapi_util::file::information(&open(&object, true).unwrap())
+                .unwrap()
+                .number_of_links(),
+            2
+        );
+        prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap();
+        assert_eq!(access_list(&object), before);
+        assert_eq!(access_list(&alias), before);
+        assert_eq!(std::fs::read(&alias).unwrap(), b"owned compiler object");
+    }
+
+    #[test]
+    fn aliased_writable_file_requires_both_current_package_and_task_permissions() {
+        for package_only in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            let task = temporary.path().join("task");
+            std::fs::create_dir(&task).unwrap();
+            let outside = temporary.path().join("outside");
+            std::fs::write(&outside, b"host bytes").unwrap();
+            let scope = NativeFilesystem::Restricted {
+                read_only: Vec::new(),
+                read_write: vec![NativeDirectoryGrant::capture(&task).unwrap()],
+            };
+            let package = rappct::derive_sid_from_name(&identity(&scope).unwrap()).unwrap();
+            let package_sid: LocalBox<Sid> = package.as_string().parse().unwrap();
+            let write_sid: LocalBox<Sid> = task_write_sid(&scope).unwrap().parse().unwrap();
+            let one_sid = if package_only {
+                &package_sid
+            } else {
+                &write_sid
+            };
+            walk(
+                &outside,
+                open(&outside, true).unwrap(),
+                true,
+                &[one_sid],
+                &mut 0,
+                super::super::unix_ms() + 15_000,
+                &lock_security().unwrap(),
+            )
+            .unwrap();
+            let before = access_list(&outside);
+            let alias = task.join("outside-alias");
+            std::fs::hard_link(&outside, &alias).unwrap();
+            let error = prepare(&scope, &package, super::super::unix_ms() + 15_000).unwrap_err();
+            assert!(error.to_string().contains("aliased file"), "{error}");
+            assert!(error.to_string().contains("outside-alias"), "{error}");
+            assert_eq!(
+                access_list(&outside),
+                before,
+                "missing rights must never be added through an alias"
+            );
+            assert_eq!(std::fs::read(&outside).unwrap(), b"host bytes");
+        }
     }
 
     #[test]

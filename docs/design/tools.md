@@ -1494,10 +1494,14 @@ entry, reused across tasks, rather than one package entry per task. Writable
 roots retain task-specific package authority. A root listed as both readable and
 writable uses only its private package authority; both supplied root identities
 are still validated. Writable grants are applied before overlapping read-only
-grants. Non-system hardlinks and reparse points are refused. Directory grants
-are inherited by newly created objects. Grants update the held kernel object
-without requesting a recursive file-object ACL update; each existing object
-must pass the held-handle checks independently. Handles request only metadata
+grants. Reparse points and hardlinks needing new ACL rights are refused.
+Already fully task-authorized regular hardlinks are reused without ACL changes.
+If a read-only SDK ACL cannot be changed, its held identity and existing OS
+sandbox access are retained; writable grants never use this fallback.
+Directory grants are inherited by newly created objects. Grants update the held
+kernel object without requesting a recursive file-object ACL update; each
+existing object must pass the held-handle checks independently. Handles request
+only metadata
 and ACL rights, preserving the workspace's existing no-delete pins. Windows loader
 access uses the AppContainer OS baseline; its per-package profile storage remains
 available. ACL authority follows objects rather than current pathnames, so
