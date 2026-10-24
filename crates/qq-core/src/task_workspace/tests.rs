@@ -1147,3 +1147,128 @@ fn detached_task_workspace_rejects_filesystem_ancestor_aliases() {
     assert!(!destination.exists());
     assert_eq!(fs::read_dir(&nested).unwrap().count(), 0);
 }
+
+#[test]
+fn installed_tool_inputs_are_bounded_independent_copies() {
+    let fixture = Fixture::new();
+    fs::create_dir(fixture.source.path.join("npm")).unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"node-image").unwrap();
+    fs::write(fixture.source.path.join("npm/entry.js"), b"npm-entry").unwrap();
+    let grant = stage_tool_inputs(
+        fixture.source.clone(),
+        &fixture.destination,
+        &["node.exe".into(), "npm".into()],
+        TaskWorkspaceLimits {
+            max_entries: 8,
+            max_bytes: 64,
+        },
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+    .unwrap();
+    fs::write(fixture.source.path.join("node.exe"), b"changed").unwrap();
+    assert_eq!(
+        fs::read(grant.path.join("node.exe")).unwrap(),
+        b"node-image"
+    );
+    assert_eq!(
+        fs::read(grant.path.join("npm/entry.js")).unwrap(),
+        b"npm-entry"
+    );
+}
+
+#[test]
+fn installed_tool_input_aliases_limits_and_deadlines_are_refused() {
+    for failure in ["hardlink", "entries", "bytes", "deadline"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+        if failure == "hardlink" {
+            fs::hard_link(
+                fixture.source.path.join("node.exe"),
+                fixture.source.path.join("alias"),
+            )
+            .unwrap();
+        }
+        let limits = TaskWorkspaceLimits {
+            max_entries: if failure == "entries" { 0 } else { 8 },
+            max_bytes: if failure == "bytes" { 1 } else { 64 },
+        };
+        let deadline = std::time::Instant::now()
+            + if failure == "deadline" {
+                std::time::Duration::ZERO
+            } else {
+                std::time::Duration::from_secs(5)
+            };
+        assert!(
+            stage_tool_inputs(
+                fixture.source.clone(),
+                &fixture.destination,
+                &["node.exe".into()],
+                limits,
+                deadline
+            )
+            .is_err(),
+            "{failure}"
+        );
+        assert!(
+            !fixture.destination.exists(),
+            "failed staging must not leave an admitted tree: {failure}"
+        );
+    }
+}
+
+#[test]
+fn installed_tool_inputs_reuse_only_verified_immutable_cache_bytes() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+    let stage = || {
+        stage_tool_inputs(
+            fixture.source.clone(),
+            &fixture.destination,
+            &["node.exe".into()],
+            TaskWorkspaceLimits {
+                max_entries: 8,
+                max_bytes: 64,
+            },
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        )
+    };
+    let first = stage().unwrap();
+    assert!(!fixture.destination.exists());
+    let second = stage().unwrap();
+    assert_eq!(first.path, second.path);
+    assert_eq!(first.identity, second.identity);
+    fs::write(first.path.join("node.exe"), b"tampered").unwrap();
+    assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+    assert!(!fixture.destination.exists());
+    assert_eq!(fs::read(first.path.join("node.exe")).unwrap(), b"tampered");
+}
+
+#[test]
+fn installed_tool_input_cache_refuses_unmanifested_files_and_directories() {
+    for extra in ["module.js", "empty-directory"] {
+        let fixture = Fixture::new();
+        fs::write(fixture.source.path.join("node.exe"), b"image").unwrap();
+        let stage = || {
+            stage_tool_inputs(
+                fixture.source.clone(),
+                &fixture.destination,
+                &["node.exe".into()],
+                TaskWorkspaceLimits {
+                    max_entries: 8,
+                    max_bytes: 64,
+                },
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+        };
+        let grant = stage().unwrap();
+        let unexpected = grant.path.join(extra);
+        if extra.ends_with(".js") {
+            fs::write(&unexpected, b"injected").unwrap();
+        } else {
+            fs::create_dir(&unexpected).unwrap();
+        }
+        assert!(matches!(stage(), Err(TaskWorkspaceError::Changed(_))));
+        assert!(unexpected.exists());
+        assert!(!fixture.destination.exists());
+    }
+}

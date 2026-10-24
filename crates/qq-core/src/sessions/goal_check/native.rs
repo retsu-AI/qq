@@ -243,6 +243,11 @@ async fn run_inner(
         Some(home) => environment.with_task_home(&home)?,
         None => environment,
     };
+    let environment = environment.with_executable_directories(
+        scope
+            .as_ref()
+            .map_or(&[], |scope| scope.executable_directories.as_slice()),
+    )?;
     let request = NativeCommand {
         id,
         workspace: scope.as_ref().map_or_else(
@@ -458,6 +463,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().canonicalize().unwrap();
         let scope = Arc::new(crate::command_owner::NativeCommandScope {
+            executable_directories: Vec::new(),
             workspace: crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap(),
             read_only: vec![],
             network: crate::command_owner::NativeNetwork::Isolated,

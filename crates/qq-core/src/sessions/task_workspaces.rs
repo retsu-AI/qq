@@ -41,6 +41,7 @@ static PUBLICATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)
 pub struct TaskWorkspacePolicy {
     pub directory: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
+    pub executable_directories: Vec<PathBuf>,
     pub resources: NativeResources,
     pub limits: TaskWorkspaceLimits,
 }
@@ -489,6 +490,7 @@ pub(super) async fn prepare(
                     &is_stopped,
                 )?;
                 let scope = NativeCommandScope {
+                    executable_directories: policy.executable_directories.clone(),
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
                     network: NativeNetwork::Isolated,
@@ -505,6 +507,7 @@ pub(super) async fn prepare(
         // A persisted tree retains work, not a permanent grant. Reapply the
         // trusted host's current limits and readable roots on each admission.
         record.scope.read_only = policy.read_only;
+        record.scope.executable_directories = policy.executable_directories;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
         record.workspace.apply_limits(policy.limits)?;

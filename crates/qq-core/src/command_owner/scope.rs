@@ -16,6 +16,9 @@ use super::{
 pub struct NativeCommandScope {
     pub workspace: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
+    /// Trusted executable search roots, each also admitted read-only.
+    #[serde(default)]
+    pub executable_directories: Vec<std::path::PathBuf>,
     pub network: NativeNetwork,
     pub resources: NativeResources,
 }

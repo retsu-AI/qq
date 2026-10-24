@@ -26,6 +26,26 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
+    fs::write(
+        source.join("package.json"),
+        r#"{"private":true,"scripts":{"build":"node build.js","test":"node test.js"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        source.join("build.js"),
+        "require('fs').writeFileSync('node-built.json', JSON.stringify({answer: 42}));",
+    )
+    .unwrap();
+    fs::write(source.join("test.js"), "const fs=require('fs');require('assert').strictEqual(JSON.parse(fs.readFileSync('node-built.json')).answer,42);fs.writeFileSync('node-test-passed','yes');").unwrap();
+    fs::create_dir(source.join("rust-proof")).unwrap();
+    fs::create_dir(source.join("rust-proof/src")).unwrap();
+    fs::write(
+        source.join("rust-proof/Cargo.toml"),
+        "[package]\nname='task-proof'\nversion='0.1.0'\nedition='2024'\n",
+    )
+    .unwrap();
+    fs::write(source.join("rust-proof/src/main.rs"), "fn main(){std::fs::write(\"rust-built-output\",b\"42\").unwrap();} #[test] fn answer(){assert_eq!(6*7,42);}").unwrap();
+
     let mut script = format!(
         "echo task-output>\"result with spaces.txt\" & echo damage>\"{}\" & echo cache-retained>\".qq/task-home/cache-proof\" & echo task-command-ran",
         secret.display()
@@ -47,6 +67,8 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     script.push_str(
         " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
     );
+    script.push_str(" & node -e \"const fs=require('fs'),p=require('path');try{fs.writeFileSync(p.join(p.dirname(process.execPath),'node_modules/npm/package.json'),'damage');fs.writeFileSync('sdk-write-denied','WRITE_ALLOWED')}catch(e){fs.writeFileSync('sdk-write-denied',e.code)}\"");
+    script.push_str(" & call npm run build --offline >npm-build.stdout 2>npm-build.stderr & call npm test --offline >npm-test.stdout 2>npm-test.stderr & cargo build --offline --manifest-path rust-proof/Cargo.toml >cargo-build.stdout 2>cargo-build.stderr & cargo test --offline --manifest-path rust-proof/Cargo.toml >cargo-test.stdout 2>cargo-test.stderr & rust-proof\\target\\debug\\task-proof.exe");
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
@@ -88,7 +110,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     ));
     // This is the same production constructor used by open_owned; only the
     // service transport is local to this fixture. The native owner, helper,
-    // LPAC token, jobs, persistence and publication are real.
+    // AppContainer token, jobs, persistence and publication are real.
     let handler = RuntimeHandler::open_with_commands(factory, None, Some(owner.clone()))
         .await
         .unwrap();
@@ -191,6 +213,34 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
+    for name in ["npm-build", "npm-test", "cargo-build", "cargo-test"] {
+        eprintln!(
+            "{name}: stdout={:?}; stderr={:?}",
+            fs::read_to_string(source.join(format!("{name}.stdout"))),
+            fs::read_to_string(source.join(format!("{name}.stderr")))
+        );
+    }
+    let sdk_write_error = fs::read_to_string(source.join("sdk-write-denied")).unwrap();
+    assert!(
+        matches!(sdk_write_error.as_str(), "EACCES" | "EPERM"),
+        "shared SDK must be readable but not writable: {sdk_write_error}"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("node-test-passed")).unwrap(),
+        "yes",
+        "npm must build and test using private task configuration"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("rust-built-output")).unwrap(),
+        "42",
+        "Cargo must build and execute its artifact"
+    );
+    assert!(
+        fs::read_to_string(source.join("cargo-test.stdout"))
+            .unwrap()
+            .contains("test result: ok."),
+        "Cargo must execute tests"
+    );
     for (program, expected) in &tool_versions {
         assert_eq!(
             fs::read_to_string(source.join(format!("{program}-version.txt")))
@@ -268,4 +318,41 @@ fn response(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
                 .into_bytes(),
         ],
     )
+}
+
+#[test]
+fn installed_toolchain_read_roots_refuse_junction_escapes() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().to_owned();
+    let toolchain = root.join("rustup/toolchains/selected");
+    let bin = toolchain.join("bin");
+    let lib = toolchain.join("lib");
+    let outside = root.join("private-outside");
+    for directory in [&bin, &lib, &outside] {
+        fs::create_dir_all(directory).unwrap();
+    }
+    fs::write(outside.join("credential-canary"), "private bytes").unwrap();
+    assert_eq!(
+        windows_toolchain_read_roots(&bin).unwrap(),
+        [bin.canonicalize().unwrap(), lib.canonicalize().unwrap()]
+    );
+    for target in [&bin, &lib] {
+        let saved = target.with_extension("saved");
+        fs::rename(target, &saved).unwrap();
+        let created = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(target)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+        let error = windows_toolchain_read_roots(&bin).unwrap_err();
+        fs::remove_dir(target).unwrap();
+        fs::rename(&saved, target).unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+    assert_eq!(
+        fs::read_to_string(outside.join("credential-canary")).unwrap(),
+        "private bytes"
+    );
 }

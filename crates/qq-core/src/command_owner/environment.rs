@@ -55,6 +55,23 @@ impl NativeEnvironment {
         Self::from_values(values)
     }
 
+    /// Installed Rust toolchains explicitly present on the server's PATH.
+    /// Tasks invoke their real binaries rather than the global rustup proxies,
+    /// whose configuration and hardlinked images stay outside task authority.
+    #[cfg(windows)]
+    pub fn windows_toolchain_bins() -> Vec<std::path::PathBuf> {
+        let home = std::env::var_os("RUSTUP_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .map(|home| std::path::PathBuf::from(home).join(".rustup"))
+            });
+        match (std::env::var_os("PATH"), home) {
+            (Some(path), Some(home)) => toolchain_bins_from(&path, &home),
+            _ => Vec::new(),
+        }
+    }
+
     /// Build a bounded snapshot from explicit native values. Debug output omits values.
     pub fn from_values(
         values: impl IntoIterator<Item = (String, OsString)>,
@@ -130,6 +147,32 @@ impl NativeEnvironment {
         Ok(self)
     }
 
+    /// Prefix only executable directories supplied by the admitted native scope.
+    pub(crate) fn with_executable_directories(
+        mut self,
+        directories: &[std::path::PathBuf],
+    ) -> Result<Self, CommandOwnerError> {
+        if directories.is_empty() {
+            return Ok(self);
+        }
+        if directories.len() > 16 {
+            return Err(CommandOwnerError::Invalid);
+        }
+        let old = self.get("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            directories
+                .iter()
+                .cloned()
+                .chain(std::env::split_paths(&old)),
+        )
+        .map_err(|_| CommandOwnerError::Invalid)?;
+        self.0.retain(|(name, _)| !same_name(name, "PATH"));
+        self.0
+            .extend(Self::from_values([("PATH".to_owned(), path)])?.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
         if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
             return Err(CommandOwnerError::Invalid);
@@ -182,6 +225,32 @@ impl NativeEnvironment {
     }
 }
 
+#[cfg(windows)]
+fn toolchain_bins_from(path: &std::ffi::OsStr, home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    use std::path::Component;
+    if !home.is_absolute() {
+        return Vec::new();
+    }
+    let mut bins = Vec::new();
+    for candidate in std::env::split_paths(path) {
+        let Ok(relative) = candidate.strip_prefix(home) else {
+            continue;
+        };
+        let components = relative.components().collect::<Vec<_>>();
+        if matches!(components.as_slice(),
+            [Component::Normal(tools), Component::Normal(_), Component::Normal(bin)]
+            if tools.eq_ignore_ascii_case("toolchains") && bin.eq_ignore_ascii_case("bin"))
+            && !bins.contains(&candidate)
+        {
+            bins.push(candidate);
+            if bins.len() == 16 {
+                break;
+            }
+        }
+    }
+    bins
+}
+
 fn same_name(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         a.eq_ignore_ascii_case(b)
@@ -193,6 +262,54 @@ fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_tool_search_paths_precede_captured_path_without_host_mutation() {
+        let old = std::env::join_paths([std::path::PathBuf::from("old-bin")]).unwrap();
+        let environment = NativeEnvironment::from_values([("PATH".into(), old)]).unwrap();
+        let prefixed = environment
+            .with_executable_directories(&["sdk-bin".into()])
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(&prefixed.get("PATH").unwrap()).collect::<Vec<_>>(),
+            [std::path::PathBuf::from("sdk-bin"), "old-bin".into()]
+        );
+        assert!(
+            NativeEnvironment::from_values([])
+                .unwrap()
+                .with_executable_directories(&vec!["bin".into(); 17])
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn toolchain_inputs_never_include_proxy_home_or_arbitrary_path_parents() {
+        use std::path::Path;
+        let home = Path::new(r"C:\Users\operator\.rustup");
+        let admitted = home.join(r"toolchains\stable-host\bin");
+        let path = std::env::join_paths([
+            Path::new(r"C:\Users\operator\.cargo\bin"),
+            Path::new(r"C:\Users\operator"),
+            home,
+            &home.join(r"toolchains\stable-host\lib"),
+            &home.join(r"toolchains\stable-host\bin\private"),
+            &home.join(r"toolchains\..\bin"),
+            &admitted,
+            &admitted,
+        ])
+        .unwrap();
+        assert_eq!(toolchain_bins_from(&path, home), [admitted]);
+        assert!(toolchain_bins_from(&path, Path::new("relative-home")).is_empty());
+        let many = std::env::join_paths(
+            (0..20).map(|index| home.join(format!(r"toolchains\version-{index}\bin"))),
+        )
+        .unwrap();
+        let bounded = toolchain_bins_from(&many, home);
+        assert_eq!(bounded.len(), 16);
+        assert_eq!(bounded[0], home.join(r"toolchains\version-0\bin"));
+        assert_eq!(bounded[15], home.join(r"toolchains\version-15\bin"));
+    }
 
     fn value(bytes: Vec<u8>) -> Value {
         if cfg!(unix) {
