@@ -68,7 +68,6 @@ impl TaskGitHelperImage {
             qq_protocol::ToolCallId::generate().map_err(io::Error::other)?
         );
         root.root().create_dir(&temporary)?;
-        let staging = open_dir(root.root(), Path::new(&temporary))?;
         let executable = if cfg!(windows) { "qq.exe" } else { "qq" };
         let mut options = OpenOptions::new();
         options
@@ -76,6 +75,7 @@ impl TaskGitHelperImage {
             .create_new(true)
             ._cap_fs_ext_follow(cap_primitives::fs::FollowSymlinks::No);
         let captured = (|| {
+            let staging = open_dir(root.root(), Path::new(&temporary))?;
             let mut output = staging.open_with(executable, &options)?;
             let digest = stream(&mut input, Some(&mut output), before.len(), deadline)?;
             check_unchanged(&before, &input.metadata()?)?;
@@ -88,6 +88,11 @@ impl TaskGitHelperImage {
                 staging.open(".")?.sync_all()?;
             }
             drop(output);
+            // cap-primitives intentionally denies delete-sharing on directory
+            // handles on Windows. Release the copied tree before renaming it;
+            // the private parent still anchors publication and we reopen and
+            // verify the complete cache below.
+            drop(staging);
             let cache = format!(
                 "task-git-helper-{}",
                 qq_protocol::ContentHash::from_bytes(digest)
@@ -133,7 +138,6 @@ impl TaskGitHelperImage {
                 identity: identity(&metadata)?,
             })
         })();
-        drop(staging);
         // The renamed winner is not at this name. Only our unpublished staging
         // directory may be removed; an existing cache is never replaced/deleted.
         match root.root().remove_dir_all(&temporary) {
@@ -385,6 +389,22 @@ mod tests {
             b"\x7fELForiginal"
         );
         assert_eq!(fs::read_dir(control).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_git_helper_captures_the_running_windows_image() {
+        let temporary = tempfile::tempdir().unwrap();
+        let control = NativeDirectoryGrant::capture(temporary.path()).unwrap();
+        let source = std::env::current_exe().unwrap();
+        let deadline = || Instant::now() + Duration::from_secs(30);
+        let first = TaskGitHelperImage::capture(&source, control.clone(), deadline()).unwrap();
+        let cached = first.validate(deadline()).unwrap();
+        let second = TaskGitHelperImage::capture(&source, control, deadline()).unwrap();
+        assert_eq!(cached, second.validate(deadline()).unwrap());
+        assert_eq!(first.identity, second.identity);
+        assert_ne!(cached, source);
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 1);
     }
 
     #[test]
