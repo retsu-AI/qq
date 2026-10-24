@@ -6089,9 +6089,9 @@ mod tests {
         );
     }
 
-    /// Host patterns are granted before dispatch; Auto never opens a hold.
+    /// Public fetch needs no per-host grant; legacy flags never add a hold.
     #[tokio::test]
-    async fn allow_host_grants_fetch_before_dispatch() {
+    async fn auto_fetch_dispatches_public_hosts_with_or_without_host_flags() {
         let fixture = fixture(|| FetchingProvider {
             turn: Mutex::new(0),
         })
@@ -6125,7 +6125,7 @@ mod tests {
             finished[0]["result"]
         );
 
-        // Without the allowlist, Auto denies without requesting approval.
+        // Without the allowlist, Auto still dispatches public research.
         let bare = self::fixture(|| FetchingProvider {
             turn: Mutex::new(0),
         })
@@ -6147,7 +6147,22 @@ mod tests {
         }));
         let calls = finished_tool_calls(&records);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["state"], "denied");
+        assert_eq!(calls[0]["state"], "failed");
+        assert!(
+            calls[0]["result"]
+                .as_str()
+                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
+            "{}",
+            calls[0]["result"]
+        );
+        assert!(
+            event_records(&records)
+                .iter()
+                .any(
+                    |record| record["envelope"]["event"]["type"] == "tool_call_started"
+                        && record["envelope"]["event"]["tool_call"]["name"] == "fetch"
+                )
+        );
     }
 
     /// A question with nobody to answer it ends the run at the question with
@@ -7326,7 +7341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_root_host_flags_reach_auto_children_under_full_and_auto() {
+    async fn auto_children_fetch_public_hosts_but_explicit_managed_denies_prevent_dispatch() {
         struct ChildFetchProvider {
             child: bool,
             first: Mutex<bool>,
@@ -7364,9 +7379,12 @@ mod tests {
                 ]))
             }
         }
-        struct ChildFetchLoader;
+        struct ChildFetchLoader {
+            deny_host: bool,
+        }
         impl RuntimeLoader for ChildFetchLoader {
             fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                let deny_host = self.deny_host;
                 Box::pin(async move {
                     let runtime = Runtime::new(
                         ChildFetchProvider {
@@ -7377,6 +7395,14 @@ mod tests {
                         256,
                     )
                     .unwrap()
+                    .with_network_policy(qq_core::NetworkPolicy {
+                        deny_hosts: if deny_host {
+                            Arc::from(["docs.invalid".to_owned()])
+                        } else {
+                            Arc::from([])
+                        },
+                        allow_private_for_tests: false,
+                    })
                     .with_spawn_model_routes(vec!["test/child".into()])
                     .with_delegation(qq_protocol::DelegationRoster {
                         roster: Vec::new(),
@@ -7399,7 +7425,12 @@ mod tests {
                 })
             }
         }
-        for approval in [HeadlessApproval::Full, HeadlessApproval::Auto] {
+        for (approval, deny_host) in [
+            (HeadlessApproval::Full, false),
+            (HeadlessApproval::Auto, false),
+            (HeadlessApproval::Full, true),
+            (HeadlessApproval::Auto, true),
+        ] {
             let directory = tempfile::tempdir().unwrap();
             let root = std::fs::canonicalize(directory.path()).unwrap();
             let workspace = root.join("work");
@@ -7410,9 +7441,12 @@ mod tests {
             runtime_options.approval_reviewer =
                 Some(Arc::new(DenyChildFetch(Arc::clone(&consulted))));
             let fixture = Fixture {
-                sessions: SessionRuntime::open(runtime_options, Arc::new(ChildFetchLoader))
-                    .await
-                    .unwrap(),
+                sessions: SessionRuntime::open(
+                    runtime_options,
+                    Arc::new(ChildFetchLoader { deny_host }),
+                )
+                .await
+                .unwrap(),
                 workspace,
                 _directory: directory,
             };
@@ -7436,30 +7470,50 @@ mod tests {
             assert_eq!(child["approval_mode"], "auto");
             assert_eq!(
                 consulted.load(std::sync::atomic::Ordering::SeqCst),
-                1,
-                "{approval:?}: explicit host authority must reach mandatory child review: {stdout}"
+                0,
+                "{approval:?}: public research never needs a reviewer: {stdout}"
             );
-            assert!(
-                events.iter().any(|record| {
+            let fetch = events
+                .iter()
+                .find_map(|record| {
                     let envelope = &record["envelope"];
                     let event = &envelope["event"];
-                    envelope["session_id"] == child["id"]
-                        && event["type"] == "tool_approval_resolved"
-                        && event["resolution"] == "denied_by_reviewer"
-                        && event["tool_call"]["name"] == "fetch"
-                        && event["tool_call"]["state"] == "denied"
-                }),
+                    (envelope["session_id"] == child["id"]
+                        && event["type"] == "tool_call_finished"
+                        && event["tool_call"]["name"] == "fetch")
+                        .then(|| event["tool_call"].clone())
+                })
+                .expect("the child fetch settles");
+            assert_eq!(
+                fetch["state"],
+                if deny_host { "denied" } else { "failed" },
                 "{stdout}"
             );
             assert!(
-                !events.iter().any(|record| {
-                    let event = &record["envelope"]["event"];
-                    (event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch")
-                        || (event["type"] == "tool_approval_requested"
-                            && event["delegated"] != true)
-                        || event["type"] == "tool_approval_escalated"
-                }),
-                "reviewer denial must prevent network dispatch without human fallback: {stdout}"
+                fetch["result"]
+                    .as_str()
+                    .is_some_and(|result| result.contains(if deny_host {
+                        "denied by managed policy"
+                    } else {
+                        "could not resolve docs.invalid"
+                    })),
+                "{stdout}"
+            );
+            let started = events.iter().any(|record| {
+                let event = &record["envelope"]["event"];
+                event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch"
+            });
+            assert_eq!(
+                started, !deny_host,
+                "managed denies precede dispatch even with host flags: {stdout}"
+            );
+            assert!(
+                !events
+                    .iter()
+                    .any(|record| record["envelope"]["event"]["type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("tool_approval_"))),
+                "{stdout}"
             );
             assert!(
                 events.iter().any(|record| {

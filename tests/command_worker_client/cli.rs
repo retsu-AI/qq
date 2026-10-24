@@ -74,39 +74,6 @@ impl Worker {
         }
         panic!("the real CLI must create an independently owned command worker");
     }
-    pub(super) fn resource_root(&self) -> std::path::PathBuf {
-        use std::os::fd::AsRawFd as _;
-        let info = std::fs::read_to_string(format!(
-            "/proc/self/fdinfo/{}",
-            self.0.get_ref().as_raw_fd()
-        ))
-        .unwrap();
-        let pid: u32 = info
-            .lines()
-            .find_map(|line| line.strip_prefix("Pid:"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let membership = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
-        let relative = membership
-            .lines()
-            .find_map(|line| line.strip_prefix("0::/"))
-            .unwrap();
-        let supervisor = Path::new("/sys/fs/cgroup").join(relative);
-        assert_eq!(supervisor.file_name().unwrap(), "supervisor");
-        let scope = supervisor.parent().unwrap();
-        assert!(
-            scope
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .starts_with("qq-worker-")
-        );
-        scope.join("tasks")
-    }
-
     pub(super) async fn stop(&self) {
         rustix::process::pidfd_send_signal(self.0.get_ref(), rustix::process::Signal::TERM)
             .unwrap();
