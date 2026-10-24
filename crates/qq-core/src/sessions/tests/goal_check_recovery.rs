@@ -1070,7 +1070,8 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
     let store = Store::open(database.clone()).await.unwrap();
     let (mut claim, _) = pending_check(&store, &path, OWNER).await;
     let session = claim.identity.session_id;
-    claim.goal.as_mut().unwrap().check_authorization = Some(Authorization::TaskScoped);
+    Arc::make_mut(claim.goal.as_mut().unwrap()).check_authorization =
+        Some(Authorization::TaskScoped);
     store
         .call_write(Priority::Control, move |connection| {
             let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
@@ -1126,7 +1127,8 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
             let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
             goal.check_authorization = Some(Authorization::ForGoal);
             crate::sessions::goals::save(connection, &goal)?;
-            claim.goal.as_mut().unwrap().check_authorization = Some(Authorization::ForGoal);
+            Arc::make_mut(claim.goal.as_mut().unwrap()).check_authorization =
+                Some(Authorization::ForGoal);
             connection.execute(
                 "UPDATE sessions SET approval_mode='full' WHERE id=?1",
                 [session.to_string()],
@@ -1177,7 +1179,7 @@ async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_app
     let path = directory.path().canonicalize().unwrap();
     let store = Store::open(path.join("sessions.sqlite3")).await.unwrap();
     let mut claim = queued_check(&store, &path).await;
-    claim.goal.as_mut().unwrap().check_authorization =
+    Arc::make_mut(claim.goal.as_mut().unwrap()).check_authorization =
         Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
     let session = claim.identity.session_id;
     let store_id = store.store_id();
@@ -1232,4 +1234,61 @@ async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_app
         .await
         .unwrap();
     store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn consumed_once_check_never_requests_human_approval_in_auto() {
+    for (mode, automatic) in [("auto", true), ("ask", false), ("full", false)] {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().canonicalize().unwrap();
+        let store = Store::open(path.join("sessions.sqlite3")).await.unwrap();
+        let claim = queued_check(&store, &path).await;
+        let session = claim.identity.session_id;
+        let store_id = store.store_id();
+        store
+            .call_write(Priority::Control, move |connection| {
+                let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+                goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::Consumed);
+                crate::sessions::goals::save(connection, &goal)?;
+                connection.execute(
+                    "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                    params![session.to_string(), mode],
+                )?;
+                let transaction = store::begin_unit(connection)?;
+                crate::sessions::goal_check::finish_in_transaction(
+                    &transaction,
+                    store_id,
+                    &claim,
+                    crate::sessions::goal_check::Completion::Stopped,
+                    claim.check_deadline.unwrap().0,
+                    SettlementCause::Executor,
+                )?;
+                let goal = crate::sessions::goals::load_live(&transaction, session)?.unwrap();
+                assert_eq!(
+                    goal.check_authorization,
+                    Some(qq_protocol::GoalCheckAuthorization::Consumed),
+                    "settlement must not grant a second check"
+                );
+                let qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser { cause },
+                } = goal.status
+                else {
+                    panic!("consumed authorization must stop further execution");
+                };
+                if automatic {
+                    assert!(matches!(
+                        cause,
+                        qq_protocol::GoalNeedsUser::Configuration { .. }
+                    ));
+                } else {
+                    assert_eq!(cause, qq_protocol::GoalNeedsUser::CheckApproval);
+                }
+                assert!(goal.pending_run_id.is_none());
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+    }
 }
