@@ -77,21 +77,24 @@ g
                 open_script.display()
             ),
         )?;
+        fs::create_dir_all(root.join("cdb-symbols"))?;
         write_new(
             &main_script,
             &format!(
-                r#".sympath srv*{}*https://msdl.microsoft.com/download/symbols
+                r#".sympath {}
 sxe -c "$$><{}" cpr
 sxn bpe
 sxn ibp
-$$><{}
+.printf "QQ_CDB_READY pid=%x\n", @$tpid
+g
 "#,
                 root.join("cdb-symbols").display(),
-                child_script.display(),
                 child_script.display()
             ),
         )?;
         let mut child = Command::new(exe)
+            .env_remove("_NT_SYMBOL_PATH")
+            .env_remove("_NT_ALT_SYMBOL_PATH")
             .args([
                 "-p",
                 &pid.to_string(),
@@ -257,12 +260,9 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
         if text.starts_with("QQ_CDB_READY") {
             let _ = ready.try_send(());
         }
-        if text.contains("Syntax error")
-            || text.contains("Couldn't resolve")
-            || text.contains("Unable to insert breakpoint")
-        {
+        if let Some(class) = diagnostic(&text) {
             flush(&mut batch, output, &mut count, &mut bytes);
-            batch.push(format!("QQ_CDB_DIAGNOSTIC {text}"));
+            batch.push(format!("QQ_CDB_DIAGNOSTIC class={class}"));
         } else if text.starts_with("QQ_CDB_") {
             flush(&mut batch, output, &mut count, &mut bytes);
             batch.push(text);
@@ -278,6 +278,26 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
         line.clear();
     }
     flush(&mut batch, output, &mut count, &mut bytes);
+}
+fn diagnostic(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    [
+        ("syntax error", "syntax"),
+        ("couldn't resolve", "unresolved-symbol"),
+        ("unable to resolve", "unresolved-symbol"),
+        ("couldn't find", "missing-symbol"),
+        ("symbol could not be found", "missing-symbol"),
+        ("unable to insert breakpoint", "breakpoint-insertion"),
+        ("symbol file could not be found", "missing-symbol-file"),
+        ("no runnable debuggees", "no-runnable-target"),
+        ("unknown command", "unknown-command"),
+        ("unrecognized command", "unknown-command"),
+        ("command is not valid", "invalid-command-state"),
+        ("memory access error", "memory-access"),
+        ("could not read", "read-error"),
+    ]
+    .into_iter()
+    .find_map(|(needle, class)| lower.contains(needle).then_some(class))
 }
 fn flush(
     batch: &mut Vec<String>,
@@ -304,6 +324,13 @@ fn flush(
         }
     }
     batch.clear();
+}
+
+fn note(status: &Mutex<fs::File>, row: &str) {
+    if let Ok(mut file) = status.lock() {
+        let _ = writeln!(file, "{row}");
+        let _ = file.flush();
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +371,22 @@ mod tests {
         );
     }
     #[test]
+    fn records_error_classes_without_paths_commands_or_memory() {
+        let bytes = b"Syntax error at 'secret-command'\nCouldn't resolve private!Secret\nUnknown command: TOKEN_PRIVATE\nNo runnable debuggees\n";
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_DIAGNOSTIC class=syntax",
+                "QQ_CDB_DIAGNOSTIC class=unresolved-symbol",
+                "QQ_CDB_DIAGNOSTIC class=unknown-command",
+                "QQ_CDB_DIAGNOSTIC class=no-runnable-target"
+            ]
+        );
+    }
+    #[test]
     fn continues_draining_after_bounded_selected_output() {
         let mut bytes = Vec::new();
         for _ in 0..512 {
@@ -359,12 +402,5 @@ mod tests {
         let rows = output.lock().unwrap();
         assert_eq!(rows.len(), 128);
         assert!(rows.iter().map(String::len).sum::<usize>() <= 65536);
-    }
-}
-
-fn note(status: &Mutex<fs::File>, row: &str) {
-    if let Ok(mut file) = status.lock() {
-        let _ = writeln!(file, "{row}");
-        let _ = file.flush();
     }
 }
