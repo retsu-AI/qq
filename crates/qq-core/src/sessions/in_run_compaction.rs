@@ -401,7 +401,11 @@ async fn compact_in_run(
         // The compaction run is settled before the loop's backoff, so a retry
         // never stacks a second running row; if that write fails the runtime
         // is marked failed and the next attempt returns `Unavailable`.
-        Err(crate::runtime::SummarizeError::RejectedBeforeWork { kind, message }) => {
+        Err(crate::runtime::SummarizeError::RejectedBeforeWork {
+            kind,
+            message,
+            retry_after,
+        }) => {
             let mut accounting = observed_accounting.snapshot();
             if !accounting.saw_turn {
                 accounting.usage = Some(TokenUsage::default());
@@ -434,6 +438,7 @@ async fn compact_in_run(
                 Error::SummarizerUnavailable {
                     kind,
                     message,
+                    retry_after,
                     usage,
                     estimated_cost_usd_nanos,
                 }
@@ -441,7 +446,11 @@ async fn compact_in_run(
                 Error::SummarizerFailed(message)
             });
         }
-        Err(crate::runtime::SummarizeError::Transient { kind, message }) => {
+        Err(crate::runtime::SummarizeError::Transient {
+            kind,
+            message,
+            retry_after,
+        }) => {
             settle_failed_with(
                 inner,
                 &compaction,
@@ -454,6 +463,7 @@ async fn compact_in_run(
             return Err(Error::SummarizerUnavailable {
                 kind,
                 message,
+                retry_after,
                 usage: None,
                 estimated_cost_usd_nanos: None,
             });

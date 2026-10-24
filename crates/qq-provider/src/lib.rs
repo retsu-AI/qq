@@ -32,7 +32,7 @@ pub use compiler::{
     ResponsesBodyShape,
 };
 pub use credentials::{SecretLiteral, SecretRef};
-pub use http::AttemptPolicy;
+pub use http::{AttemptPolicy, TurnRecoveryPolicy};
 pub use model::{
     ContentBlock, IncompleteReason, Message, ModelRequest, ProviderError, ProviderErrorKind,
     ProviderEvent, ProviderUsage, Role, ToolChoice, ToolSpec,

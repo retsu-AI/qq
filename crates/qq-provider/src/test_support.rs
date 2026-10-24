@@ -134,6 +134,23 @@ impl LoopbackServer {
         Self::respond_sequence(vec![(status, content_type, chunks)])
     }
 
+    /// One response with explicit headers, for server-directed retry advice.
+    pub fn respond_with_headers(
+        status: u16,
+        content_type: &'static str,
+        headers: &[(&str, &str)],
+        body: impl Into<String>,
+    ) -> Self {
+        Self::respond_sequence_and_headers(
+            vec![(status, Some(content_type), vec![body.into().into_bytes()])],
+            Duration::from_secs(5),
+            headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        )
+    }
+
     /// Serves several responses on one listener and captures each request.
     pub fn respond_sequence(responses: Vec<LoopbackResponse>) -> Self {
         Self::respond_sequence_with_timeout(responses, Duration::from_secs(5))
@@ -143,6 +160,14 @@ impl LoopbackServer {
     pub fn respond_sequence_with_timeout(
         responses: Vec<LoopbackResponse>,
         timeout: Duration,
+    ) -> Self {
+        Self::respond_sequence_and_headers(responses, timeout, Vec::new())
+    }
+
+    fn respond_sequence_and_headers(
+        responses: Vec<LoopbackResponse>,
+        timeout: Duration,
+        headers: Vec<(String, String)>,
     ) -> Self {
         assert!(
             !responses.is_empty(),
@@ -170,9 +195,13 @@ impl LoopbackServer {
                 let content_type_header = content_type
                     .map(|value| format!("Content-Type: {value}\r\n"))
                     .unwrap_or_default();
+                let extra_headers = headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect::<String>();
                 let content_length = chunks.iter().map(Vec::len).sum::<usize>();
                 let head = format!(
-                    "HTTP/1.1 {status} {reason}\r\n{content_type_header}Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
+                    "HTTP/1.1 {status} {reason}\r\n{content_type_header}{extra_headers}Content-Length: {content_length}\r\nConnection: close\r\n\r\n"
                 );
                 stream
                     .write_all(head.as_bytes())

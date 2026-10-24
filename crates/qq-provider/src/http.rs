@@ -31,14 +31,62 @@ const RETRY_AFTER_CAP: Duration = Duration::from_secs(60);
 /// Anthropic's overloaded status; not in `http::StatusCode`'s named set.
 const OVERLOADED: u16 = 529;
 
+/// Fleet-safe backoff between runtime turn continuations. HTTP attempts have
+/// a separate ledger; this policy never changes their count or task authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnRecoveryPolicy {
+    base_delay: Duration,
+    max_delay: Duration,
+}
+
+impl Default for TurnRecoveryPolicy {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(2), Duration::from_secs(60))
+    }
+}
+
+impl TurnRecoveryPolicy {
+    #[must_use]
+    pub fn new(base_delay: Duration, max_delay: Duration) -> Self {
+        Self {
+            base_delay,
+            max_delay: max_delay.max(base_delay),
+        }
+    }
+
+    /// Equal jitter between half the exponential delay and its cap.
+    #[must_use]
+    pub fn delay(self, attempt: u16) -> Duration {
+        self.delay_after(attempt, None)
+    }
+
+    /// Cooldown is a floor, capped consistently with HTTP advice. Jitter is
+    /// added above it so a shared Retry-After does not synchronize a fleet.
+    #[must_use]
+    pub fn delay_after(self, attempt: u16, retry_after: Option<Duration>) -> Duration {
+        self.delay_with(attempt, retry_after, random_u32())
+    }
+
+    fn delay_with(self, attempt: u16, retry_after: Option<Duration>, random: u32) -> Duration {
+        let cap = self
+            .base_delay
+            .saturating_mul(1_u32 << u32::from(attempt.saturating_sub(1)).min(31))
+            .min(self.max_delay);
+        let half = cap / 2;
+        let floor = half.max(retry_after.unwrap_or_default().min(RETRY_AFTER_CAP));
+        floor.saturating_add(full_jitter(cap - half, random))
+    }
+}
+
 /// The single retry owner for one compiled provider.
 ///
 /// Every send a logical request may cost — a rejected or failed HTTP exchange
 /// before any body arrives, or an SSE stream that ends or fails before it has
 /// yielded one semantic event — draws from the same attempt count and time
 /// budget. Once a stream has yielded an event the request is never resent:
-/// a retry could duplicate output the caller has already seen. Nothing above
-/// the provider retries a turn.
+/// a retry could duplicate output the caller has already seen. The runtime
+/// can continue a committed partial turn separately; cooldown advice survives
+/// the handoff when this request's ledger stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttemptPolicy {
     max_attempts: u32,
@@ -253,6 +301,15 @@ pub(crate) fn note_attempts(error: ProviderError, attempts: u32) -> ProviderErro
         ProviderError::Api { status, message } => ProviderError::Api {
             status,
             message: message + &suffix,
+        },
+        ProviderError::RetryAfter {
+            status,
+            message,
+            retry_after,
+        } => ProviderError::RetryAfter {
+            status,
+            message: message + &suffix,
+            retry_after,
         },
         ProviderError::ResponseFailed { kind, message } => ProviderError::ResponseFailed {
             kind,
@@ -482,6 +539,7 @@ pub(crate) struct HttpResponse {
 
 pub(crate) struct HttpRejection {
     status: StatusCode,
+    retry_after: Option<Duration>,
     body: Vec<u8>,
     redactions: Arc<[String]>,
     /// Sends spent before this rejection was final, for the failure message.
@@ -622,6 +680,7 @@ impl HttpExchange {
             let retry_after = retry_after_delay(response.headers());
             let body = read_error_body(response).await;
             let rejection = HttpRejection {
+                retry_after,
                 status,
                 body,
                 redactions,
@@ -660,6 +719,10 @@ impl HttpResponse {
 }
 
 impl HttpRejection {
+    pub(crate) const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
     pub(crate) fn status(&self) -> StatusCode {
         self.status
     }
@@ -1211,6 +1274,44 @@ mod tests {
         assert_eq!(free.begin_attempt(), 4);
         assert_eq!(free.next_delay_with(None, 0), None);
     }
+    #[test]
+    fn turn_recovery_jitter_preserves_cooldown_and_exponential_bounds() {
+        let policy = TurnRecoveryPolicy::new(Duration::from_secs(4), Duration::from_secs(32));
+        for (attempt, seconds) in [(0, 4), (1, 4), (2, 8), (3, 16), (4, 32), (u16::MAX, 32)] {
+            let cap = Duration::from_secs(seconds);
+            assert_eq!(policy.delay_with(attempt, None, 0), cap / 2);
+            let last = policy.delay_with(attempt, None, u32::MAX);
+            assert!(last > cap / 2 && last <= cap);
+            for random in [0, 1, u32::MAX / 2, u32::MAX] {
+                let delay = policy.delay_with(attempt, None, random);
+                assert!(delay >= cap / 2 && delay <= cap);
+            }
+        }
+        assert_eq!(
+            policy.delay_with(1, Some(Duration::from_secs(60)), 0),
+            Duration::from_secs(60)
+        );
+        let delayed = policy.delay_with(1, Some(Duration::from_secs(60)), u32::MAX);
+        assert!(delayed > Duration::from_secs(60) && delayed <= Duration::from_secs(62));
+        assert_eq!(
+            policy.delay_with(1, Some(Duration::from_secs(600)), 0),
+            Duration::from_secs(60)
+        );
+        let disabled = TurnRecoveryPolicy::new(Duration::ZERO, Duration::ZERO);
+        assert_eq!(disabled.delay_with(1, None, u32::MAX), Duration::ZERO);
+        assert_eq!(
+            disabled.delay_with(1, Some(Duration::from_secs(5)), u32::MAX),
+            Duration::from_secs(5)
+        );
+        assert!(
+            TurnRecoveryPolicy::new(Duration::MAX, Duration::ZERO).delay_with(
+                u16::MAX,
+                None,
+                u32::MAX
+            ) <= Duration::MAX
+        );
+    }
+
     #[test]
     fn full_jitter_spans_zero_through_delay() {
         let delay = Duration::from_millis(1_000);

@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::{
     ProviderError, ProviderErrorKind, ProviderUsage,
-    http::{HttpRejection, note_attempts},
+    http::{HttpRejection, is_retryable_status, note_attempts},
     sanitize::sanitize_message,
 };
 
@@ -169,7 +169,15 @@ pub(crate) fn api_error<E: DeserializeOwned>(
         };
     }
 
-    note_attempts(ProviderError::Api { status, message }, rejection.attempts())
+    let error = match rejection.retry_after() {
+        Some(retry_after) if is_retryable_status(rejection.status()) => ProviderError::RetryAfter {
+            status,
+            message,
+            retry_after,
+        },
+        _ => ProviderError::Api { status, message },
+    };
+    note_attempts(error, rejection.attempts())
 }
 
 /// Message-text detection of context-window overflow for providers that
