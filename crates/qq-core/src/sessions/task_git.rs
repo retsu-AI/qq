@@ -107,11 +107,10 @@ impl TaskGitRunInput {
         if let Err(error) = self.admit(call).await {
             return ToolOutput::refused(error.to_string());
         }
-        let (operation, credential) = match request {
-            TaskGitRequest::Commit { message } => (
-                crate::task_git_job::TaskGitJobOperation::Commit { message },
-                None,
-            ),
+        let operation = match request {
+            TaskGitRequest::Commit { message } => {
+                crate::task_git_job::TaskGitJobOperation::Commit { message }
+            }
             request => {
                 let source = match self.task.source_grant() {
                     Ok(source) => source,
@@ -140,7 +139,7 @@ impl TaskGitRunInput {
                     Ok(target) => target,
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
-                let operation = match request {
+                match request {
                     TaskGitRequest::Push => {
                         crate::task_git_job::TaskGitJobOperation::Push { target }
                     }
@@ -152,8 +151,14 @@ impl TaskGitRunInput {
                         }
                     }
                     TaskGitRequest::Commit { .. } => unreachable!("commit handled above"),
-                };
-                (operation, Some(authorization.credential))
+                }
+            }
+        };
+        let hosting_target = match &operation {
+            crate::task_git_job::TaskGitJobOperation::Commit { .. } => None,
+            crate::task_git_job::TaskGitJobOperation::Push { target }
+            | crate::task_git_job::TaskGitJobOperation::PullRequest { target, .. } => {
+                Some(target.clone())
             }
         };
         let job = match self
@@ -210,6 +215,38 @@ impl TaskGitRunInput {
                 Ok(Err(error)) => return ToolOutput::refused(error.to_string()),
                 Err(error) => return ToolOutput::refused(error.to_string()),
             },
+        };
+        // Preparing the private request may await filesystem work. A saved
+        // intent does not retain a hosting grant or a credential indefinitely.
+        let credential = if let Some(target) = hosting_target {
+            let source = match self.task.source_grant() {
+                Ok(source) => source,
+                Err(error) => return ToolOutput::refused(error.to_string()),
+            };
+            let authorized = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return ToolOutput::interrupted("task hosting cancelled before submission"),
+                () = tokio::time::sleep_until(admission_deadline) => return ToolOutput::interrupted("task hosting expired before submission"),
+                authorized = self.inner.loader.authorize_task_hosting(source) => authorized,
+            };
+            let authorization = match authorized {
+                Ok(Some(authorization)) => authorization,
+                Ok(None) => {
+                    return ToolOutput::refused(
+                        "task hosting authority was revoked during preparation",
+                    );
+                }
+                Err(error) => return ToolOutput::refused(error.to_string()),
+            };
+            if authorization.owner != target.owner()
+                || authorization.repository != target.repository()
+                || authorization.base_branch != target.base_branch()
+            {
+                return ToolOutput::refused("task hosting destination changed during preparation");
+            }
+            Some(authorization.credential)
+        } else {
+            None
         };
         if let Err(error) = self.admit(call).await {
             return ToolOutput::refused(error.to_string());
