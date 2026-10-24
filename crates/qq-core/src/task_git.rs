@@ -133,17 +133,60 @@ pub(crate) enum TaskGitPrepared {
 }
 
 impl TaskGit {
+    /// Repeatable read performed before importing task bytes or running a model.
+    pub(crate) fn capture_base(
+        program: &Path,
+        source: &NativeDirectoryGrant,
+        control: &NativeDirectoryGrant,
+        operation: &Operation,
+    ) -> Result<Option<String>, TaskGitError> {
+        operation.check()?;
+        let roots = TaskGitRoots {
+            source: source.clone(),
+            control: control.clone(),
+            task: control.clone(),
+        };
+        let program = match GitProgram::capture(program, &roots) {
+            Ok(program) => program,
+            Err(TaskGitError::Invalid("workspace has no Git checkout marker")) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let git = Self {
+            program,
+            repository: control.clone(),
+            source: source.clone(),
+            task: control.clone(),
+            branch: String::new(),
+            base: String::new(),
+            prefix: PathBuf::new(),
+            limits: TaskGitLimits {
+                max_entries: 1,
+                max_bytes: 1,
+                max_pack_bytes: 1,
+            },
+            worker_owned: operation.worker_owned,
+        };
+        git.text(
+            &source.path,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+            operation,
+        )
+        .and_then(oid)
+        .map(Some)
+    }
+
     pub(crate) async fn prepare(
         program: PathBuf,
         roots: TaskGitRoots,
         task: qq_protocol::RunId,
+        base: String,
         limits: TaskGitLimits,
         operation: Operation,
     ) -> Result<Self, TaskGitError> {
         let permit = operation.permit().await?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            Self::prepare_blocking(program, roots, task, limits, operation)
+            Self::prepare_blocking(program, roots, task, base, limits, operation)
         })
         .await?
     }
@@ -152,6 +195,7 @@ impl TaskGit {
         program: &Path,
         roots: &TaskGitRoots,
         task: qq_protocol::RunId,
+        base: String,
         limits: TaskGitLimits,
     ) -> Result<Option<Self>, TaskGitError> {
         held(&roots.control)?;
@@ -170,7 +214,7 @@ impl TaskGit {
             source: roots.source.clone(),
             task: roots.task.clone(),
             branch: format!("refs/heads/qq/task/{task}"),
-            base: String::new(),
+            base: oid(base)?,
             prefix: PathBuf::new(),
             limits,
             worker_owned: true,
@@ -187,6 +231,7 @@ impl TaskGit {
         program: PathBuf,
         roots: TaskGitRoots,
         task: qq_protocol::RunId,
+        base: String,
         limits: TaskGitLimits,
         operation: Operation,
     ) -> Result<Self, TaskGitError> {
@@ -227,7 +272,7 @@ impl TaskGit {
             source,
             task: execution,
             branch: format!("refs/heads/qq/task/{task}"),
-            base: String::new(),
+            base: oid(base)?,
             prefix: PathBuf::new(),
             limits,
             worker_owned: operation.worker_owned,
@@ -310,11 +355,6 @@ impl TaskGit {
                     .map_err(|_| TaskGitError::Invalid("workspace is outside its Git top-level"))?
                     .to_path_buf();
                 validate_prefix(&git.prefix)?;
-                git.base = oid(git.text(
-                    &git.source.path,
-                    &["rev-parse", "--verify", "HEAD^{commit}"],
-                    &operation,
-                )?)?;
                 let common = PathBuf::from(git.text(
                     &git.source.path,
                     &["rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -542,7 +582,14 @@ impl TaskGit {
             &["rev-parse", "--verify", &self.branch],
             &operation,
         )?)?;
-        self.text(&self.repository.path, &["read-tree", &old], &operation)?;
+        // The manifest is cumulative against immutable import bytes. Rebuild
+        // from the task-start base so reverted edits disappear without
+        // accidentally committing unrelated pre-existing dirty source bytes.
+        self.text(
+            &self.repository.path,
+            &["read-tree", &self.base],
+            &operation,
+        )?;
         let mut selected = BTreeSet::new();
         let mut updates = Vec::new();
         let mut blobs = Vec::new();
@@ -652,6 +699,7 @@ impl TaskGit {
     fn validate_saved(&self, saved: &Self) -> Result<(), TaskGitError> {
         if self.program != saved.program
             || self.branch != saved.branch
+            || self.base != saved.base
             || self.limits != saved.limits
             || self.task.path != saved.task.path
             || self.task.identity != saved.task.identity
@@ -741,7 +789,7 @@ pub(crate) fn held(grant: &NativeDirectoryGrant) -> Result<Workspace, TaskGitErr
     }
     Ok(directory)
 }
-fn oid(value: String) -> Result<String, TaskGitError> {
+pub(crate) fn oid(value: String) -> Result<String, TaskGitError> {
     if matches!(value.len(), 40 | 64)
         && value
             .bytes()
