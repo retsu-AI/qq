@@ -1,0 +1,13 @@
+{
+  "command_id": "7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 2
+  },
+  "outcome": {
+    "type": "side_question_already_finished",
+    "side_question_id": "04040404040404040404040404040404",
+    "state": "completed"
+  }
+}

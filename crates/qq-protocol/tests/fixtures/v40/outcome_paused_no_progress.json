@@ -1,0 +1,9 @@
+{
+  "type": "paused",
+  "pause": {
+    "reason": "no_progress",
+    "turn_ordinal": 515,
+    "slices": 2,
+    "calls": 514
+  }
+}
