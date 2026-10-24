@@ -38,6 +38,7 @@ mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
+mod task_git;
 
 use std::sync::Mutex as StdMutex;
 
