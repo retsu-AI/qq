@@ -494,6 +494,8 @@ pub type PublishedEventStream =
 
 #[derive(Clone)]
 pub struct SessionRuntimeOptions {
+    /// Fixed host programs for root-task Git operations through the command worker.
+    pub task_git: Option<super::task_git::TaskGitPolicy>,
     /// Import Auto work into private task trees and publish after teardown.
     /// Native commands must enforce the returned task scope or refuse execution.
     pub task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
@@ -554,6 +556,7 @@ impl SessionRuntimeOptions {
             native_commands: None,
             native_scopes: Vec::new(),
             task_workspaces: None,
+            task_git: None,
             max_active_runs: 8,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
@@ -591,6 +594,7 @@ pub struct SessionRuntime {
 }
 
 pub(super) struct SessionRuntimeInner {
+    pub(super) task_git: Option<super::task_git::TaskGitPolicy>,
     pub(super) task_workspaces: Option<super::task_workspaces::TaskWorkspacePolicy>,
     pub(super) native_scopes: Option<Arc<super::native_scope::NativeScopes>>,
     pub(super) store: Store,
@@ -803,6 +807,7 @@ impl SessionRuntime {
         });
         let inner = Arc::new(SessionRuntimeInner {
             task_workspaces: options.task_workspaces,
+            task_git: options.task_git,
             native_scopes,
             native_ack,
             native_recovery: std::sync::OnceLock::new(),

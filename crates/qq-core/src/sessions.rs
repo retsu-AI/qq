@@ -84,7 +84,10 @@ mod snapshots;
 mod store;
 mod streaming;
 mod subagents;
+mod task_git;
 mod task_workspaces;
+pub use task_git::TaskGitPolicy;
+pub(crate) use task_git::TaskGitRunInput;
 #[cfg(test)]
 mod tests;
 pub use task_workspaces::TaskWorkspacePolicy;

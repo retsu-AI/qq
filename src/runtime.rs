@@ -3131,6 +3131,12 @@ impl RuntimeHandler {
                     .map_err(RuntimeHandlerError::TaskPreparation)??,
             );
         }
+        if options.task_workspaces.is_some() && native_commands.is_some() {
+            options.task_git =
+                tokio::task::spawn_blocking(qq_core::sessions::TaskGitPolicy::from_process_env)
+                    .await
+                    .map_err(RuntimeHandlerError::TaskPreparation)?;
+        }
         options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
