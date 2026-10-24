@@ -547,10 +547,14 @@ async fn duration_cancels_read_only_and_mutating_external_calls() {
             ApprovalMode::Full,
         )
         .await;
-        let run_id = harness.submit("call the host", 500).await;
+        let run_id = harness.submit("call the host", 60_000).await;
         tokio::time::timeout(Duration::from_secs(2), entered.notified())
             .await
             .unwrap();
+        // The call must enter before its duration expires, even on a loaded CI host.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(60_001)).await;
+        tokio::time::resume();
         let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
         assert!(matches!(finished_outcome(&observed, run_id),
             Some(RunOutcome::BudgetExhausted { exhaustion }) if exhaustion.limit == BudgetLimitKind::Duration

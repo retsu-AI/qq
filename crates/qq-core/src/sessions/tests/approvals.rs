@@ -3716,13 +3716,15 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
             })))
         }
     }
-    for (ordinary_wait, goal_wait_ms, deadline_ms, delegate) in [
-        (None, 50, 10_000, false),
-        (Some(Duration::from_millis(10)), 500, 10_000, false),
-        (None, 5000, 1000, false),
-        (None, 50, 10_000, true),
-        (None, 5000, 1000, true),
+    for (ordinary_wait, goal_wait_ms, expire_goal, delegate) in [
+        (None, 50, false, false),
+        (Some(Duration::from_millis(10)), 500, false, false),
+        (None, 300_000, true, false),
+        (None, 50, false, true),
+        (None, 300_000, true, true),
     ] {
+        let start = now_ms();
+        let epoch = super::goal_driver_soak::Epoch::new(start);
         let directory = TempDir::new().unwrap();
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
@@ -3764,13 +3766,21 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
                 CommandId::generate().unwrap(),
                 serde_json::from_value(serde_json::json!({
                     "type":"set_goal","session_id":session_id,"objective":"ask before mutation",
-                    "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+deadline_ms}
+                    "budget":{"max_goal_runs":2,"deadline_ms":start+60_000}
                 }))
                 .unwrap(),
             )
             .await
             .unwrap();
         let (_, call) = collect_until_approval_requested(&mut events).await;
+        if expire_goal {
+            // Expire only after the actual approval exists. A slow provider or
+            // store must not exhaust the fixture deadline before reaching it.
+            tokio::time::pause();
+            epoch.advance(start + 60_001);
+            tokio::time::advance(Duration::from_millis(60_001)).await;
+            tokio::time::resume();
+        }
         let observed = collect_through_finished(&mut events).await;
         assert!(
             !observed
