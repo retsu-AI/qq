@@ -83,6 +83,7 @@ fn session_prompt_prefix_key(
             spawn_agent: claimed.depth < delegation.max_depth.min(MAX_CHILD_DEPTH),
             search_history: true,
             update_goal: claimed.goal.is_some(),
+            task_git: false,
             read_tool_result: true,
             load_skill: user,
             read_only: claimed.approval_mode == ApprovalMode::ReadOnly,
