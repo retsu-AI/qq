@@ -876,6 +876,10 @@ impl CompiledAgentPlan {
             ToolHost::UpdateGoal,
             EffectClass::ReadOnly,
         ));
+        static_tools.extend(
+            tools::task_git::specs()
+                .map(|spec| StaticTool::new(spec, ToolHost::TaskGit, EffectClass::Mutating)),
+        );
         static_tools.push(StaticTool::new(
             read_tool_result_spec(),
             ToolHost::ReadToolResult,
@@ -1087,6 +1091,7 @@ impl CompiledAgentPlan {
                 spawn_agent: true,
                 search_history: true,
                 update_goal: false,
+                task_git: false,
                 read_tool_result: true,
                 load_skill: true,
                 read_only: false,

@@ -66,6 +66,8 @@ pub struct TaskWorkspace {
     source: NativeDirectoryGrant,
     protected_pack_roots: Vec<PathBuf>,
     baseline: BTreeMap<PathBuf, FileVersion>,
+    #[serde(default)]
+    git_baseline: Option<BTreeMap<PathBuf, FileVersion>>,
     limits: TaskWorkspaceLimits,
 }
 
@@ -273,6 +275,7 @@ impl TaskWorkspace {
                 source: source.clone(),
                 protected_pack_roots,
                 baseline,
+                git_baseline: None,
                 limits,
             })
         })();
@@ -314,8 +317,75 @@ impl TaskWorkspace {
         Ok(())
     }
 
+    /// Called only during new task admission, before any payload can write.
+    pub(crate) fn enable_git_baseline(&mut self) {
+        self.git_baseline = Some(self.baseline.clone());
+    }
+
+    /// Cumulative task changes; publication never advances this import baseline.
+    pub(crate) fn changed_git_paths_until(
+        &self,
+        candidates: &[PathBuf],
+        stopped: &dyn Fn() -> bool,
+    ) -> Result<Vec<PathBuf>, TaskWorkspaceError> {
+        let baseline = self
+            .git_baseline
+            .as_ref()
+            .ok_or(TaskWorkspaceError::InvalidInput(
+                "task has no initial Git baseline",
+            ))?;
+        let protected = self
+            .protected_pack_roots
+            .iter()
+            .map(|path| self.grant.path.join(path))
+            .collect::<Vec<_>>();
+        let task = at(
+            &self.grant.path,
+            Workspace::open(&self.grant.path)
+                .and_then(|root| root.with_protected_pack_roots(&protected)),
+        )?;
+        if at(&self.grant.path, NativeWorkspaceIdentity::held(task.root()))? != self.grant.identity
+        {
+            return Err(TaskWorkspaceError::Changed(self.grant.path.clone()));
+        }
+        let selected = baseline
+            .keys()
+            .chain(candidates)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if selected.len() > self.limits.max_entries {
+            return Err(TaskWorkspaceError::LimitExceeded);
+        }
+        let mut remaining = self.limits.max_bytes;
+        let mut changed = Vec::new();
+        for path in selected {
+            if stopped() {
+                return Err(TaskWorkspaceError::Stopped);
+            }
+            validate_path(&path)?;
+            if task
+                .check_write_path(&path.to_string_lossy(), &path)
+                .is_err()
+            {
+                continue;
+            }
+            let after = read_file(task.root(), &path, remaining)?;
+            if let Some(file) = &after {
+                remaining -= file.bytes.len() as u64;
+            }
+            if after.as_ref().map(|file| &file.version) != baseline.get(&path) {
+                changed.push(path);
+            }
+        }
+        Ok(changed)
+    }
+
     pub(crate) fn input_paths(&self) -> impl Iterator<Item = &PathBuf> {
         self.baseline.keys()
+    }
+
+    pub(crate) fn protected_pack_roots(&self) -> &[PathBuf] {
+        &self.protected_pack_roots
     }
 
     /// Re-admission may tighten protections, but never forgets the protections

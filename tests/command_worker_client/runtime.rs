@@ -181,6 +181,12 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_sc
         assert_eq!(
             std::fs::read_dir(data.join("task-workspaces"))
                 .unwrap()
+                .filter(|entry| entry.as_ref().is_ok_and(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.parse::<qq_protocol::RunId>().is_ok())
+                }))
                 .count(),
             2,
             "a goal shares one work tree across runs; verification gets a fresh copy"

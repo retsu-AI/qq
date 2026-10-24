@@ -84,7 +84,10 @@ mod snapshots;
 mod store;
 mod streaming;
 mod subagents;
+mod task_git;
 mod task_workspaces;
+pub use task_git::TaskGitPolicy;
+pub(crate) use task_git::TaskGitRunInput;
 #[cfg(test)]
 mod tests;
 pub use task_workspaces::TaskWorkspacePolicy;
@@ -100,8 +103,8 @@ pub use runtime::{
     RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest, ReviewSpend,
     ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress, RuntimeLoadRequest,
     RuntimeLoadStage, RuntimeLoader, SessionEventStream, SessionRuntime, SessionRuntimeError,
-    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed,
+    SessionRuntimeOptions, SlashCommandError, SpawnModelValidationFuture, TaskHostingAuthorization,
+    TaskHostingLoadFuture, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed,
 };
 pub use snapshots::run_cost;
 pub use store::STORE_SCHEMA_VERSION;

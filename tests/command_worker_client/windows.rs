@@ -320,7 +320,8 @@ fn request(workspace: &Path, mode: &str, aap: &Path) -> NativeCommand {
     std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
     let system = std::fs::canonicalize(std::env::var_os("SYSTEMROOT").unwrap()).unwrap();
     NativeCommand {
-        id: ToolCallId::generate().unwrap(),
+                task_git_call: None,
+id: ToolCallId::generate().unwrap(),
         workspace_identity:qq_core::command_owner::NativeWorkspaceIdentity::capture(&workspace).unwrap(),
         workspace:workspace.clone(),
         tool:"exec".to_owned(),

@@ -636,7 +636,8 @@ pub(crate) async fn execute_with_images(
                     return ToolOutput::refused(error.to_string());
                 }
                 let request = crate::command_owner::NativeCommand {
-                    environment,
+                                        task_git_call: None,
+environment,
                     network: scope.as_ref().map_or(crate::command_owner::NativeNetwork::Host, |scope| scope.network),
                     resources: scope.as_ref().map_or(crate::command_owner::NativeResources::Host, |scope| scope.resources),
                     filesystem: scope.as_ref().map_or(crate::command_owner::NativeFilesystem::Host, |scope| scope.filesystem()),

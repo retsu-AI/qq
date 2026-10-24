@@ -30,6 +30,7 @@ mod workspace_identity;
 pub use environment::NativeEnvironment;
 pub use workspace_identity::NativeWorkspaceIdentity;
 mod observer;
+mod task_git_result;
 pub(crate) use observer::observe;
 
 pub(crate) fn lost_output(output: &str) -> ToolOutput {
@@ -158,11 +159,31 @@ pub struct NativeCommand {
     pub workspace_identity: NativeWorkspaceIdentity,
     pub tool: String,
     pub arguments: String,
+    /// Trusted logical task call served by this fixed exec launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_git_call: Option<NativeTaskGitCall>,
     pub shell_policy: ShellPolicy,
     pub approved_images: Vec<ApprovedReadImage>,
     /// Absolute task deadline, captured by the admitting host. Reconnecting
     /// cannot grant a fresh duration. The owner converts it to a monotonic wait.
     pub not_after_ms: Option<u64>,
+}
+
+/// Logical model arguments, never a program, destination, or credential grant.
+/// Only the trusted TaskGit bridge may construct this binding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTaskGitCall {
+    pub tool: String,
+    pub arguments: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<crate::task_git_job::TaskGitJobReference>,
+}
+
+impl NativeTaskGitCall {
+    fn valid(&self) -> bool {
+        crate::tools::task_git::parse(&self.tool, &self.arguments).is_ok()
+    }
 }
 
 impl NativeCommand {
@@ -423,6 +444,10 @@ impl CommandOwner {
         request.approved_images = images.entries().to_vec();
         if !request.workspace.is_absolute()
             || !matches!(request.tool.as_str(), "shell" | "exec")
+            || request
+                .task_git_call
+                .as_ref()
+                .is_some_and(|call| request.tool != "exec" || !call.valid())
             || request.arguments.len() > 64 * 1024
             || crate::tools::process_context::arguments_digest(&request.tool, &request.arguments)
                 .is_none()
@@ -443,6 +468,19 @@ impl CommandOwner {
             .resources
             .validate()
             .map_err(|_| CommandOwnerError::Invalid)?;
+        if let Some(call) = request.task_git_call.as_ref()
+            && let Some(reference) = &call.job
+            && !reference.matches_launch(
+                request.id,
+                &request.workspace,
+                request.workspace_identity,
+                &request.tool,
+                &request.arguments,
+                &call.tool,
+            )
+        {
+            return Err(CommandOwnerError::Invalid);
+        }
         let task_deadline = request.not_after_ms.map(monotonic_deadline).transpose()?;
         let encoded = request.identity()?;
         if encoded.len() > MAX_REQUEST_BYTES {
@@ -598,6 +636,8 @@ impl CommandOwner {
         use tracing::Instrument as _;
         let started = tokio::time::Instant::now();
         let tool = request.tool.clone();
+        let task_git_call = request.task_git_call.clone();
+        let launch_arguments = request.arguments.clone();
         let path = request.workspace;
         let expected_workspace = request.workspace_identity;
         let restricted = matches!(&request.filesystem, NativeFilesystem::Restricted { .. });
@@ -727,7 +767,14 @@ impl CommandOwner {
         {
             output = output.expired_before_capture(&tool, started.elapsed());
         }
-        Ok(output)
+        if let Some(call) = task_git_call.as_ref()
+            && let Some(receipt) = output.execution_context.as_mut()
+        {
+            receipt
+                .bind_task_git(request.id, &launch_arguments, call)
+                .map_err(|_| CommandOwnerError::Invalid)?;
+        }
+        Ok(task_git_result::reconcile(output, task_git_call).await)
     }
 
     pub async fn snapshot(&self, id: ToolCallId) -> Result<CommandSnapshot, CommandOwnerError> {

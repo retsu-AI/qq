@@ -38,6 +38,7 @@ mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
+mod task_git;
 
 use std::sync::Mutex as StdMutex;
 
@@ -1478,6 +1479,7 @@ async fn approval_harness_with_clocks(
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
             task_workspaces: None,
+            task_git: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),

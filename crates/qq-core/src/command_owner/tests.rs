@@ -564,6 +564,7 @@ async fn owned_commands_preserve_signal_and_numeric_exit_statuses() {
 
 fn command(path: &Path, id: ToolCallId, script: &str) -> NativeCommand {
     NativeCommand {
+        task_git_call: None,
         environment: crate::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         // Existing fixture roots may be reached through macOS's /var alias.
@@ -2791,4 +2792,84 @@ async fn observer_started_during_admission_keeps_tracking_the_command() {
     let result = result.expect("a live admission must retain its observer");
     assert_eq!(result.status, CommandStatus::Finished);
     assert!(result.result.unwrap().text().contains("admission-observed"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn task_git_native_binding_preserves_launch_and_logical_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let logical = NativeTaskGitCall {
+        job: None,
+        tool: "task_commit".into(),
+        arguments: r#"{"message":"literal ; not a shell command"}"#.into(),
+    };
+    let mut request = command(root.path(), id, "unused");
+    request.tool = "exec".into();
+    request.arguments =
+        serde_json::json!({"program":"/bin/sh","args":["-c","printf once >> counter"]}).to_string();
+    request.task_git_call = Some(logical.clone());
+    owner.submit(request.clone()).await.unwrap();
+    let terminal = wait_finished(&owner, id, 0).await;
+    assert!(!terminal.result.as_ref().unwrap().0.is_error);
+    let receipt = terminal.process.unwrap().into_context();
+    assert!(receipt.bound_to(id, &logical.tool, &logical.arguments));
+    assert!(!receipt.bound_to(id, "exec", &request.arguments));
+    assert!(!receipt.bound_to(
+        ToolCallId::generate().unwrap(),
+        &logical.tool,
+        &logical.arguments
+    ));
+    assert!(!receipt.bound_to(id, "task_push", "{}"));
+    assert!(!receipt.bound_to(id, "task_commit", r#"{"message":"changed"}"#));
+    assert_eq!(
+        receipt.facts().arguments_sha256,
+        crate::tools::process_context::arguments_digest("exec", &request.arguments).unwrap()
+    );
+    assert!(receipt.is_work());
+    assert_ne!(receipt.facts().pid, 0);
+    let mut raw = receipt.clone();
+    let ExecutionContextReceipt::V2(proof) = raw.as_mut() else {
+        panic!("native launches require V2 proof")
+    };
+    proof.task_git = None;
+    assert!(raw.bound_to(id, "exec", &request.arguments));
+    assert!(!raw.bound_to(id, &logical.tool, &logical.arguments));
+    assert!(
+        raw.bind_task_git(id, r#"{"program":"/bin/false","args":[]}"#, &logical)
+            .is_err()
+    );
+    assert!(raw.bind_task_git(id, &request.arguments, &logical).is_ok());
+    assert_eq!(raw, receipt);
+    owner.submit(request.clone()).await.unwrap();
+    let mut changed = request.clone();
+    changed.arguments =
+        serde_json::json!({"program":"/bin/sh","args":["-c","printf twice >> counter"]})
+            .to_string();
+    assert!(matches!(
+        owner.submit(changed).await,
+        Err(CommandOwnerError::Conflict)
+    ));
+    let mut changed = request.clone();
+    changed.task_git_call.as_mut().unwrap().arguments = r#"{"message":"changed"}"#.into();
+    assert!(matches!(
+        owner.submit(changed).await,
+        Err(CommandOwnerError::Conflict)
+    ));
+    request.id = ToolCallId::generate().unwrap();
+    request.task_git_call.as_mut().unwrap().arguments =
+        r#"{"message":"x","program":"unexpected"}"#.into();
+    assert!(matches!(
+        owner.submit(request.clone()).await,
+        Err(CommandOwnerError::Invalid)
+    ));
+    assert!(matches!(
+        owner.snapshot(request.id).await,
+        Err(CommandOwnerError::NotFound)
+    ));
+    owner.shutdown().await.unwrap();
+    assert_eq!(std::fs::read(root.path().join("counter")).unwrap(), b"once");
 }

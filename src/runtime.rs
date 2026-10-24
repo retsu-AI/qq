@@ -1,5 +1,8 @@
 //! Application configuration to model-runtime composition.
 
+#[path = "runtime/task_hosting.rs"]
+mod task_hosting;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
@@ -2360,6 +2363,13 @@ pub(crate) fn aws_profile_configured(profile: &str) -> bool {
 }
 
 impl RuntimeLoader for RuntimeFactory {
+    fn authorize_task_hosting(
+        &self,
+        workspace: qq_core::command_owner::NativeDirectoryGrant,
+    ) -> qq_core::TaskHostingLoadFuture {
+        self.load_task_hosting(workspace)
+    }
+
     fn resolve_worker_model(
         &self,
         workspace: String,
@@ -3131,6 +3141,16 @@ impl RuntimeHandler {
                     .map_err(RuntimeHandlerError::TaskPreparation)??,
             );
         }
+        if let Some(policy) = options.task_workspaces.as_ref()
+            && native_commands.is_some()
+        {
+            let control = policy.directory.clone();
+            options.task_git = tokio::task::spawn_blocking(move || {
+                qq_core::TaskGitPolicy::from_process_env(control)
+            })
+            .await
+            .map_err(RuntimeHandlerError::TaskPreparation)??;
+        }
         options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
@@ -3418,6 +3438,8 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[error(transparent)]
+    TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),

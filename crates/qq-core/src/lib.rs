@@ -48,6 +48,10 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+mod task_git;
+mod task_git_helper_image;
+#[doc(hidden)]
+pub mod task_git_job;
 pub mod task_workspace;
 mod tools;
 
@@ -105,8 +109,9 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
     SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
-    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy,
+    TaskHostingAuthorization, TaskHostingLoadFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
+    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
 /// Detects changed paths between bounded workspace scans.
@@ -715,6 +720,7 @@ pub(crate) struct RunCapabilities {
     /// direct runs have no durable history to search.
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
+    task_git: Option<Arc<sessions::TaskGitRunInput>>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
     /// Stored complete tool outputs for `read_tool_result`. Session runs
@@ -769,6 +775,7 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
+            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -836,6 +843,11 @@ impl RunCapabilities {
 
     pub(crate) fn with_goal(mut self, goal: Option<sessions::GoalRunInput>) -> Self {
         self.goal = goal;
+        self
+    }
+
+    pub(crate) fn with_task_git(mut self, input: Option<sessions::TaskGitRunInput>) -> Self {
+        self.task_git = input.map(Arc::new);
         self
     }
 
@@ -933,6 +945,7 @@ impl RunCapabilities {
             pricing: None,
             history: None,
             goal: None,
+            task_git: None,
             goal_spend_tracking: false,
             goal_paid: None,
             spills: None,
@@ -2485,6 +2498,7 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
+                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -3028,6 +3042,7 @@ mod tests {
                 spawn_agent: false,
                 search_history: false,
                 update_goal: false,
+                task_git: false,
                 read_tool_result: false,
                 load_skill: true,
                 read_only: false,
@@ -10408,6 +10423,85 @@ mod tests {
             std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "before"
         );
+    }
+
+    #[tokio::test]
+    async fn task_git_without_session_capability_never_reaches_approval_or_execution() {
+        struct NoApproval;
+        impl ToolGate for NoApproval {
+            fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
+                panic!("unavailable task operation reached approval: {}", call.name);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            TurnScript {
+                turns: vec![
+                    vec![
+                        ("task_commit", r#"{"message":"task"}"#.into()),
+                        ("task_push", "{}".into()),
+                        ("task_pr", r#"{"title":"task","body":"body"}"#.into()),
+                    ],
+                    Vec::new(),
+                ],
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = directory.path().canonicalize().unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![Message::user("commit the task")],
+                RunCancellation::new(),
+                Arc::new(NoApproval),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::user(None),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    RuntimeEvent::ToolCallUnexecuted { .. }
+                        | RuntimeEvent::ToolCallFinished { is_error: true, .. }
+                ))
+                .count(),
+            3,
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::ToolCallFinished {
+                is_error: false,
+                ..
+            }
+        )));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert!(
+                tool_names(request)
+                    .iter()
+                    .all(|name| !matches!(*name, "task_commit" | "task_push" | "task_pr"))
+            );
+        }
     }
 
     #[tokio::test]

@@ -32,6 +32,36 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    if let Some(request) = cli::task_git_request() {
+        return match request.map_err(io::Error::other).and_then(|path| {
+            qq_core::task_git_job::execute_job_with_token(
+                &path,
+                std::env::var(qq_core::task_git_job::HOSTING_TOKEN_ENV)
+                    .ok()
+                    .map(qq_provider::SecretLiteral::new),
+            )
+            .map_err(io::Error::other)
+        }) {
+            Ok(receipt) => {
+                match serde_json::to_string(&receipt) {
+                    Ok(encoded) => println!("{encoded}"),
+                    Err(error) => {
+                        eprintln!("task Git receipt: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                if receipt.result.is_success() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => {
+                eprintln!("task Git job: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         return match std::env::args_os()
@@ -571,6 +601,7 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
             runtime::RuntimeHandlerError::NativeCommands(error) => harness(error.to_string()),
+            runtime::RuntimeHandlerError::TaskGitHelper(error) => harness(error.to_string()),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             runtime::RuntimeHandlerError::TaskPreparation(error) => harness(error.to_string()),
         })?;

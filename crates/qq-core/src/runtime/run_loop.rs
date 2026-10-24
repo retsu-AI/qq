@@ -161,6 +161,7 @@ struct RunEnvironment {
     spawner: Option<Arc<dyn SubagentSpawner>>,
     history: Option<Arc<dyn HistorySearcher>>,
     goal: Option<sessions::GoalRunInput>,
+    task_git: Option<Arc<sessions::TaskGitRunInput>>,
     goal_spend_tracking: bool,
     goal_paid: Option<sessions::GoalPaidInput>,
     spills: Option<Arc<dyn runtime::SpillReader>>,
@@ -516,6 +517,7 @@ impl plan::CompiledAgentPlan {
                        pricing,
                        history,
                        goal,
+                       task_git,
                        goal_spend_tracking,
                        goal_paid,
                        spills,
@@ -679,6 +681,7 @@ impl plan::CompiledAgentPlan {
                                spawn_agent: spawner.is_some(),
                                search_history: history.is_some(),
                                update_goal: goal.is_some(),
+                               task_git: task_git.is_some(),
                                read_tool_result: spills.is_some(),
                                load_skill: allow_guidance,
                                read_only,
@@ -873,7 +876,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, task_git, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
         });
                }
     }
@@ -3007,7 +3010,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<ToolOutcomes>> + Send + '_ {
         stream! {
                     let Self { env, steering, run, .. } = self;
-                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
+                    let RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal, task_git, spills, audit_hook, tool_tasks, output: _, limits, deadline, base_specs, static_filter, .. } = env;
                     let limits = *limits;
                     let workspace = &plan.workspace;
                     let catalog = &plan.catalog;
@@ -3041,6 +3044,7 @@ impl RunState {
                         // parent's whole remainder, so overlapping children could
                         // overspend it, and those runs keep blocking spawns.
                         let detach_spawns = !bounded_child_spend;
+                        let task_git_deadline = run.budget.deadline();
                         let execute_one = |call: RuntimeToolCall,
                                            output: Option<
                             tokio::sync::mpsc::Sender<String>,
@@ -3055,6 +3059,7 @@ impl RunState {
                             let spawner = spawner.clone();
                             let tool_tasks = tool_tasks.clone();
                             let history = history.clone();
+                            let task_git = task_git.clone();
                             let spills = spills.clone();
                             let delegation = Arc::clone(delegation);
                             let shell_policy = Arc::clone(shell_policy);
@@ -3095,6 +3100,10 @@ impl RunState {
                                     });
                                 let result = match call.rejection.clone().or_else(|| strict_refusal.map(runtime::CallRejection::Runtime)) {
                                     Some(error) => tools::ToolOutput::verbatim_error(error.into_message()),
+                                    None if host == Some(catalog::ToolHost::TaskGit) => match &task_git {
+                                        Some(input) => input.execute(&call, &cancelled, task_git_deadline).await,
+                                        None => tools::ToolOutput::refused("task Git operations are unavailable in this run"),
+                                    },
                                     // spawn_agent dispatches to the session layer. A
                                     // run without a spawner rejects the call outright:
                                     // the declaration is already absent there, but a
@@ -3353,7 +3362,7 @@ impl RunState {
                         let overlaps = |call: &RuntimeToolCall| {
                             !(bounded_child_spend && catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::SpawnAgent))
                             && !catalog.lookup(&call.name).is_some_and(|entry| {
-                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::SelectTools)
+                                matches!(entry.host, catalog::ToolHost::WaitAgents | catalog::ToolHost::CancelAgent | catalog::ToolHost::UpdateGoal | catalog::ToolHost::TaskGit | catalog::ToolHost::SelectTools)
                             })
                             && matches!(
                                 approval::classify(call.effect, &call.name, &call.arguments, network_policy),
@@ -3434,7 +3443,15 @@ impl RunState {
                                 tokio::select! {
                                     biased;
                                     () = interrupt => None,
-                                    decision = gate.resolve(call) => Some(decision),
+                                    decision = async {
+                                        if catalog.lookup(&call.name).is_some_and(|entry| entry.host == catalog::ToolHost::TaskGit) {
+                                            // Session capability revalidates task authority; this
+                                            // route never becomes a generic approval request.
+                                            GateDecision::Execute
+                                        } else {
+                                            gate.resolve(call).await
+                                        }
+                                    } => Some(decision),
                                 }
                             };
                             let Some(decision) = decision else {
