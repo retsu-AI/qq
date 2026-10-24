@@ -8941,6 +8941,22 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                 );
                 assert_eq!(goal.revision, 1);
                 assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
+                if authorization == "task_scoped" {
+                    runtime
+                        .command(
+                            CommandId::generate().unwrap(),
+                            SessionCommand::GoalControl {
+                                session_id,
+                                expected: qq_protocol::GoalIdentity {
+                                    goal_id: goal.goal_id,
+                                    revision: goal.revision,
+                                },
+                                action: qq_protocol::GoalControl::Pause,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
             }
         }
         if matches!(expected, "unavailable" | "denied" | "forbidden") {
@@ -8953,7 +8969,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                 "refused checks must not leave a paused goal requiring consent"
             );
         }
-        runtime.shutdown().await.unwrap();
         drop(held);
+        runtime.shutdown().await.unwrap();
     }
 }

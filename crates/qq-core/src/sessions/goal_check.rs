@@ -1014,9 +1014,22 @@ pub(super) fn finish_in_transaction(
                     )
                 )
             {
+                let current = load_tool_approval_policy(transaction, goal.session_id)?;
+                let automatic = current.mode == ApprovalMode::Auto
+                    || current
+                        .ancestors
+                        .iter()
+                        .any(|(mode, _)| *mode == ApprovalMode::Auto);
                 goal.status = qq_protocol::GoalStatus::Paused {
                     reason: qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                        cause: if automatic {
+                            qq_protocol::GoalNeedsUser::Configuration {
+                                message: "completion check authorization has been consumed"
+                                    .to_owned(),
+                            }
+                        } else {
+                            qq_protocol::GoalNeedsUser::CheckApproval
+                        },
                     },
                 };
             } else if let Completion::Process(result) = &completion {
