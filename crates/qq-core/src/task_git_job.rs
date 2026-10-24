@@ -625,6 +625,12 @@ mod reconciliation_tests {
             panic!("fixture must commit")
         };
         let reference = files.reference.clone().unwrap();
+        let failing_helper = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .map(|root| root.join("false"))
+            .find(|path| path.is_file())
+            .unwrap()
+            .canonicalize()
+            .unwrap();
         let owner = CommandOwner::open(
             job.control.path.join("worker"),
             "unknown",
@@ -638,7 +644,7 @@ mod reconciliation_tests {
             workspace_identity: job.control.identity,
             tool: "exec".into(),
             arguments:
-                serde_json::json!({"program":"/bin/false","args":["_task-git",files.request]})
+                serde_json::json!({"program":failing_helper,"args":["_task-git",files.request]})
                     .to_string(),
             task_git_call: Some(NativeTaskGitCall {
                 tool: "task_commit".into(),
@@ -683,7 +689,7 @@ mod reconciliation_tests {
         let next = save_job(&next_job).unwrap();
         absent.id = next_job.call;
         absent.arguments =
-            serde_json::json!({"program":"/bin/false","args":["_task-git",next.request]})
+            serde_json::json!({"program":failing_helper,"args":["_task-git",next.request]})
                 .to_string();
         absent.task_git_call.as_mut().unwrap().job = next.reference;
         owner.submit(absent.clone()).await.unwrap();
@@ -714,7 +720,7 @@ mod reconciliation_tests {
         .unwrap();
         let mut mismatch = request.clone();
         mismatch.id = mismatched_job.call;
-        mismatch.arguments = serde_json::json!({"program":"/bin/false","args":["_task-git",mismatched_files.request]}).to_string();
+        mismatch.arguments = serde_json::json!({"program":failing_helper,"args":["_task-git",mismatched_files.request]}).to_string();
         mismatch.task_git_call.as_mut().unwrap().job = mismatched_files.reference;
         owner.submit(mismatch.clone()).await.unwrap();
         assert!(
