@@ -216,12 +216,7 @@ struct SpawnedProbe(nix::unistd::Pid);
 impl Drop for SpawnedProbe {
     fn drop(&mut self) {
         let _ = nix::sys::signal::kill(self.0, nix::sys::signal::Signal::SIGKILL);
-        loop {
-            match nix::sys::wait::waitpid(self.0, None) {
-                Err(nix::errno::Errno::EINTR) => continue,
-                _ => break,
-            }
-        }
+        while let Err(nix::errno::Errno::EINTR) = nix::sys::wait::waitpid(self.0, None) {}
     }
 }
 
