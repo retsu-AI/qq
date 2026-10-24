@@ -1,0 +1,53 @@
+name: Windows SDK workflow qualification
+on:
+  push:
+    branches: [test/windows-sdk-workflow]
+permissions:
+  contents: read
+jobs:
+  production-worker:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: command-owner-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Native production Clippy
+        shell: bash
+        run: |
+          cargo clippy --locked -p qq-core --all-targets -- -D warnings
+          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+      - name: Bounded SDK inputs and scoped PATH
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq-core installed_tool_input -- --nocapture
+          cargo test --locked -p qq-core admitted_tool_search_paths_precede_captured_path_without_host_mutation -- --nocapture
+          cargo test --locked -p qq-core native_scope_tool_search_roots_require_read_authority_and_survive_restart -- --nocapture
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::installed_toolchain_read_roots_refuse_junction_escapes -- --exact --nocapture
+      - name: Ordinary-user SDK staging and owned cache rights
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo run --locked -p qq-core --example windows_tool_access
+      - name: Build actual helper fixture
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo build --locked -p qq-core --example command_owner
+      - name: Actual Windows worker boundary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' | grep -Fx 'windows::arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker: test'
+          cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Actual Auto npm and Cargo build test and artifact execution
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output: test'
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
