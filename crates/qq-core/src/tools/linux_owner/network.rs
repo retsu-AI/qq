@@ -1,5 +1,8 @@
 //! Private IP networking plus denial of host pathname Unix sockets.
-use landlock::{AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetStatus, Scope};
+use landlock::{
+    AccessFs, CompatLevel, Compatible, PathBeneath, Ruleset, RulesetAttr, RulesetCreatedAttr,
+    RulesetStatus, Scope,
+};
 use std::io;
 
 pub(super) fn prepare() -> io::Result<()> {
@@ -48,14 +51,21 @@ fn enforce_policy(policy: Policy) -> io::Result<()> {
 struct Unavailable(#[source] landlock::RulesetError);
 
 fn ruleset(pathnames: bool) -> io::Result<landlock::RulesetCreated> {
+    let root = std::fs::File::open("/")?;
     let create = || {
         let mut ruleset = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
+            .handle_access(AccessFs::Refer)?
             .scope(Scope::AbstractUnixSocket | Scope::Signal)?;
         if pathnames {
             ruleset = ruleset.handle_access(AccessFs::ResolveUnix)?;
         }
-        ruleset.create()
+        // REFER is implicitly denied by every Landlock layer, even when not
+        // handled. Keep this network-only layer neutral: the separate filesystem
+        // ruleset continues to decide which directories may exchange files.
+        ruleset
+            .create()?
+            .add_rule(PathBeneath::new(&root, AccessFs::Refer))
     };
     create().map_err(|error| io::Error::new(io::ErrorKind::Unsupported, Unavailable(error)))
 }
@@ -185,7 +195,7 @@ mod tests {
 #[cfg(test)]
 mod refer_tests {
     use super::*;
-    use landlock::{ABI, Access as _, PathBeneath, RulesetCreatedAttr as _};
+    use landlock::{ABI, Access as _};
     use std::{fs, path::PathBuf, process::Command};
 
     #[test]
