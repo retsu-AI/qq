@@ -1,5 +1,5 @@
 //! Sample the payload group whose waitable leader the guardian pins.
-//! Payloads cannot change group under the native profile. Samples are safeguards, never quota receipts.
+//! Detached descendants are outside these samples. Safeguards are not aggregate quotas.
 use crate::command_owner::NativeResources;
 use libproc::{
     bsd_info::BSDInfo,

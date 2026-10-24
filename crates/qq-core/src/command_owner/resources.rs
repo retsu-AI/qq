@@ -31,7 +31,8 @@ pub enum NativeResources {
     },
     /// Sampled safeguards, not kernel quotas. Commands run at background priority;
     /// their owned group is stopped when sampled footprint or task count exceeds
-    /// these thresholds. Sampling can overshoot and excludes charged file cache.
+    /// these thresholds. Detached descendants are outside the sampled group.
+    /// Sampling can overshoot and excludes charged file cache.
     Guarded {
         memory_bytes: u64,
         max_tasks: u32,

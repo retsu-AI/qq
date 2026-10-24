@@ -477,7 +477,7 @@ pub(super) async fn run_shell(
     #[cfg(target_os = "macos")]
     if child.owns_payload_group() {
         // The guardian has its own group. Its private exit receipt proves
-        // payload cleanup; killing this group would destroy that guardian.
+        // owned payload-group cleanup; killing this group destroys the guardian.
         guard.disarm();
     }
     #[cfg(all(test, unix))]

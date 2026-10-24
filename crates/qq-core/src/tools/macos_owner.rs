@@ -1,5 +1,6 @@
 //! macOS launch isolation. The guardian stays outside the payload group and
-//! retains its waitable leader until every member stops, even after owner loss.
+//! retains its waitable leader until its owned group stops, even after owner loss.
+//! Detached descendants retain Seatbelt restrictions but are outside group cleanup.
 use super::{
     dispatch::{ToolCancellation, ToolTaskLease},
     process_context::NativeExecution,
@@ -268,7 +269,7 @@ impl Child {
             let pid = rustix::process::Pid::from_raw(i32::try_from(pid).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("invalid guardian pid"))?;
             // Use the OS clock, independently of simulated task-budget clocks.
-            // A timed-out guardian keeps custody; dropping this observer only
+            // A timed-out guardian keeps the owned group; dropping this observer only
             // closes its channel, never kills it before cleanup finishes.
             super::native_exit::confirm(move || {
                 rustix::process::waitid(
@@ -292,7 +293,7 @@ impl Child {
         let status = self.inner.wait().await?;
         if !status.success() {
             return Err(io::Error::other(format!(
-                "native guardian exited without confirming payload cleanup: {status}"
+                "native guardian exited without confirming owned-group cleanup: {status}"
             )));
         }
         if self.reported.is_none() {
@@ -306,7 +307,7 @@ impl Child {
                     .await?;
                 if count == 0 {
                     return Err(io::Error::other(
-                        "native guardian omitted its cleanup result",
+                        "native guardian omitted its owned-group cleanup result",
                     ));
                 }
                 // Keep partial reads on the Child: cancelling a wait must not
@@ -630,7 +631,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
             break;
         }
         // The observer has a bounded cleanup wait. If the OS cannot yet prove
-        // exit, this small guardian keeps custody after that observer leaves.
+        // group exit, this guardian retains that group after the observer leaves.
         std::thread::park_timeout(std::time::Duration::from_millis(10));
     }
     // Serialize disarming against the liveness thread before the only reap.

@@ -33,7 +33,7 @@ and open PRs before editing; retain compatible work already underway.
 | Outcome | Implementation boundary | Proof before calling it fixed |
 | --- | --- | --- |
 | One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
-| Shell and built-ins enforce that contract | Core tool dispatch/process ownership and native execution adapters. Deliver an enforced Linux path first, then macOS/Windows against the same contract below. Delete obsolete paths as each replacement is proven. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination leaves no descendants; test the deadline with a shortened limit or controlled clock. |
+| Shell and built-ins enforce that contract | Core tool dispatch/process ownership and native execution adapters. Deliver an enforced Linux path first, then macOS/Windows against the same contract below. Delete obsolete paths as each replacement is proven. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
 | The task survives interruption | `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
 | Tools tell the truth and edits preserve work | `src/runtime.rs` model discovery/admission; core edit tools. Advertise and validate against the same discovery snapshot; fresh availability failures remain recoverable. Preserve atomic edit semantics. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
 | Compaction preserves obligations | Finish/reconcile [#371](https://github.com/retsu-AI/qq/pull/371) before overlapping its runtime work; then test retained constraints and recovery. | Early user constraints beyond the record cap, later corrections, repeated compaction and a failed summary retain the effective task; retries do not duplicate tool effects. |
@@ -71,10 +71,13 @@ plan with this one instead of maintaining a second work queue.
 - Enforce file and network boundaries against symlinks, existing hardlinks,
   inherited descriptors, host Unix sockets and cross-session access. A Linux
   PID namespace needs its own procfs. Do not label a fallback sandboxed when
-  it lacks any required boundary. Control memory/process/CPU limits and reap
-  descendants even after daemonization or owner failure. Prove these properties
-  on each supported native backend; a watchdog or process group alone is not
-  proof. An unavailable backend must not silently run an unattended sandbox
+  it lacks any required boundary. Apply the backend’s supported resource safeguards and cleanup on
+  cancellation, deadlines and owner failure. On macOS, inherited per-process
+  limits and sampled owned-group safeguards do not provide aggregate quotas,
+  and a new process group or session can outlive group cleanup while retaining
+  Seatbelt restrictions. Prove file/network containment and the stated cleanup
+  boundary independently; do not label process-group cleanup complete descendant
+  custody. An unavailable backend must not silently run an unattended sandbox
   request on the host.
 - Keep external MCP servers explicitly trusted and outside any shell-isolation
   claim; their advertised tools still pass QQ's grant checks. Preserve event
@@ -90,8 +93,8 @@ new child write authority must never ship ahead of their containment.
 Each PR's acceptance
 covers only capabilities it actually delivers. Backend enablement requires
 its native tests for permitted operations, denied paths/egress, credential and
-cross-session isolation, aliases/links/sockets, resource exhaustion and complete
-teardown. Mocks test admission; they do not qualify OS containment. Use finite
+cross-session isolation, aliases/links/sockets, resource safeguards and the
+backend’s stated teardown boundary. Mocks test admission; they do not qualify OS containment. Use finite
 fixtures and event-driven deadlines, not 24-hour or multi-day soaks. Other
 platforms can follow without blocking unrelated deterministic core fixes.
 
