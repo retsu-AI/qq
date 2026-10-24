@@ -108,10 +108,18 @@ impl NativeEnvironment {
         mut self,
         home: &std::path::Path,
     ) -> Result<Self, CommandOwnerError> {
-        let overrides = vec![
+        let mut overrides = vec![
             ("HOME".to_owned(), home.as_os_str().to_owned()),
             ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
         ];
+        // Cargo otherwise resolves its default from the private HOME/profile.
+        // Replace an explicitly admitted override without consuming a new slot.
+        if self.get("CARGO_HOME").is_some() {
+            overrides.push((
+                "CARGO_HOME".to_owned(),
+                home.join(".cargo").into_os_string(),
+            ));
+        }
         #[cfg(windows)]
         let overrides = {
             let mut values = overrides;
@@ -159,18 +167,14 @@ impl NativeEnvironment {
             return Err(CommandOwnerError::Invalid);
         }
         let old = self.get("PATH").unwrap_or_default();
-        let directories = directories.iter().map(|path| {
-            // Command processors and SDK batch scripts need ordinary DOS paths
-            // when that spelling preserves identity. Scope grants stay canonical.
-            #[cfg(windows)]
-            {
-                dunce::simplified(path).to_owned()
-            }
-            #[cfg(not(windows))]
-            {
-                path.clone()
-            }
-        });
+        // Command processors and SDK batch scripts need ordinary DOS paths
+        // when that spelling preserves identity. Scope grants stay canonical.
+        #[cfg(windows)]
+        let directories = directories
+            .iter()
+            .map(|path| dunce::simplified(path).to_owned());
+        #[cfg(not(windows))]
+        let directories = directories.iter().cloned();
         let path = std::env::join_paths(directories.chain(std::env::split_paths(&old)))
             .map_err(|_| CommandOwnerError::Invalid)?;
         self.0.retain(|(name, _)| !same_name(name, "PATH"));
@@ -407,12 +411,20 @@ mod tests {
         let snapshot = NativeEnvironment::from_values(
             crate::BASE_ENV
                 .iter()
-                .map(|name| ((*name).to_owned(), OsString::from("host-value"))),
+                .map(|name| ((*name).to_owned(), OsString::from("host-value")))
+                .chain([(
+                    "CARGO_HOME".to_owned(),
+                    OsString::from("private-host-cargo"),
+                )]),
         )
         .unwrap();
         let home = std::path::Path::new("private-task-home");
         let environment = snapshot.with_task_home(home).unwrap();
         assert_eq!(environment.get("HOME"), Some(home.into()));
+        assert_eq!(
+            environment.get("CARGO_HOME"),
+            Some(home.join(".cargo").into())
+        );
         assert_eq!(environment.get("TMPDIR"), Some(home.join("tmp").into()));
         assert_eq!(environment.get("PATH"), Some("host-value".into()));
         #[cfg(windows)]

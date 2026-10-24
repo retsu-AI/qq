@@ -343,6 +343,7 @@ async fn persist_detached_check_scope(
         let control = root.join("task-control");
         std::fs::create_dir(&control).unwrap();
         (record, crate::sessions::TaskWorkspacePolicy {
+            cargo_cache: None,
             executable_directories: Vec::new(), directory: NativeDirectoryGrant::capture(&control).unwrap(), read_only: vec![], resources: NativeResources::Host, limits })
     }).await.unwrap();
     let run = claim.identity.run_id;

@@ -1012,3 +1012,7 @@ fn at<T>(path: &Path, result: io::Result<T>) -> Result<T, TaskWorkspaceError> {
 
 #[cfg(test)]
 mod tests;
+
+#[path = "task_workspace_cargo.rs"]
+mod cargo;
+pub(crate) use cargo::seed_cargo_cache;

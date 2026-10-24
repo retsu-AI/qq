@@ -51,6 +51,10 @@ use crate::{
     },
 };
 
+#[cfg(any(target_os = "linux", all(target_os = "macos", test)))]
+#[path = "runtime/unix_sdk.rs"]
+mod unix_sdk;
+
 const MAX_MODEL_OPTIONS: usize = 4_096;
 const MAX_DISCOVERY_PROVIDERS: usize = 4;
 
@@ -3474,10 +3478,7 @@ fn task_workspace_policy(
         let directory_grant =
             qq_core::command_owner::NativeDirectoryGrant::capture_private(&directory)?;
         let mut read_only = std::collections::BTreeSet::new();
-        #[cfg(windows)]
         let mut executable_directories = Vec::new();
-        #[cfg(not(windows))]
-        let executable_directories = Vec::new();
         #[cfg(unix)]
         for candidate in [
             "/usr/bin",
@@ -3501,6 +3502,23 @@ fn task_workspace_policy(
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(target_os = "linux")]
+        {
+            let roots = unix_sdk::discover(&directory)?;
+            if let Some(bin) = roots.first() {
+                executable_directories.push(bin.clone());
+            }
+            read_only.extend(roots);
+        }
+        let cargo_cache = std::env::var_os("CARGO_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                    .map(|home| PathBuf::from(home).join(".cargo"))
+            })
+            .filter(|home| home.is_absolute() && home.join("registry").is_dir())
+            .map(|home| qq_core::command_owner::NativeDirectoryGrant::capture(&home))
+            .transpose()?;
         #[cfg(windows)]
         read_only.insert(std::fs::canonicalize(
             std::env::var_os("SYSTEMROOT")
@@ -3571,6 +3589,7 @@ fn task_workspace_policy(
             }
         }
         Ok(qq_core::TaskWorkspacePolicy {
+            cargo_cache,
             executable_directories,
             directory: directory_grant,
             read_only: read_only
