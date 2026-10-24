@@ -52,11 +52,11 @@ crates/qq-provider/src/http.rs	2030	fn serve_scripted_with_auth(	thread::sleep(d
 crates/qq-provider/src/test_support.rs	185	pub fn respond_sequence_with_timeout(	thread::sleep(Duration::from_millis(1));
 crates/qq-provider/src/test_support.rs	223	fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {	thread::sleep(Duration::from_millis(5));
 crates/qq-tui/src/terminal/tests.rs	455	async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {	tokio::time::sleep(FRAME_INTERVAL).await;
-src/headless.rs	5777	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	5794	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	6571	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
-src/headless.rs	7693	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
-src/headless.rs	7815	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
+src/headless.rs	5785	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	5768	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	6562	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
+src/headless.rs	7684	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
+src/headless.rs	7806	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
 src/runtime.rs	4616	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
 src/runtime.rs	9026	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
 src/runtime.rs	9036	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
