@@ -64,6 +64,13 @@ root, which makes Linux reject further user-namespace creation and prevents
 regaining mount authority to undo read-only mounts. Setup failures return a
 bounded refusal before the payload starts.
 
+Linux startup retains namespace identity capture through cancellation or deadline
+expiry, with at most two seconds of extra identity-handshake time for cleanup.
+The grace never authorizes payload execution: an expired request is refused
+before releasing the gate. Once identity is pinned, setup and refusal reporting
+remain interruptible. A helper that never supplies
+its identity leaves cleanup unconfirmed and stops further worker admission.
+
 This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
 restrictions are available, an additional Landlock rule denies host socket
 connections. Otherwise a seccomp filter denies creation of addressable Unix
