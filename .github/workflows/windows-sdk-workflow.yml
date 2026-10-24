@@ -61,6 +61,28 @@ jobs:
         run: |
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' | grep -Fx 'windows::arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker: test'
           cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Host compiler image dependencies
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $rustup = Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe'
+          $reader = Join-Path $env:ProgramFiles 'LLVM\bin\llvm-readobj.exe'
+          $control = Join-Path $env:RUNNER_TEMP 'qq-compiler-metadata'
+          New-Item -ItemType Directory -Force -Path $control | Out-Null
+          Set-Location -LiteralPath $control
+          if (!(Test-Path -LiteralPath $rustup) -or !(Test-Path -LiteralPath $reader)) {
+            Write-Output 'Trusted Rustup or LLVM PE metadata tool unavailable; actual Auto assertions remain mandatory.'
+            exit 0
+          }
+          foreach ($tool in @('cargo', 'rustc')) {
+            $image = & $rustup which $tool
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $image)) {
+              throw "Installed $tool image metadata unavailable"
+            }
+            Write-Output "Compiler image: $image"
+            & $reader --coff-imports $image | Select-Object -First 256
+            if ($LASTEXITCODE -ne 0) { throw "PE metadata failed for $tool" }
+          }
       - name: Actual Auto npm and Cargo build test and artifact execution
         if: ${{ !cancelled() }}
         shell: bash

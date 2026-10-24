@@ -429,6 +429,31 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn task_home_supplies_command_compatible_child_shell_selection() {
+        for captured in [
+            vec![("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows"))],
+            vec![
+                ("SYSTEMROOT".to_owned(), OsString::from(r"\\?\C:\Windows")),
+                (
+                    "COMSPEC".to_owned(),
+                    OsString::from(r"\\?\C:\Windows\System32\cmd.exe"),
+                ),
+            ],
+        ] {
+            let environment = NativeEnvironment::from_values(captured)
+                .unwrap()
+                .with_task_home(std::path::Path::new(r"C:\private-task"))
+                .unwrap();
+            assert_eq!(
+                environment.get("COMSPEC"),
+                Some(OsString::from(r"C:\Windows\System32\cmd.exe")),
+                "Windows child shells need DOS-compatible COMSPEC"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_task_home_supports_shell_profile_paths_and_called_batches() {
         use std::{fs, os::windows::process::CommandExt as _, path::Path, process::Command};
 
