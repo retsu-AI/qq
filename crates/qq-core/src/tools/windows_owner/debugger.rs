@@ -83,6 +83,7 @@ g
                 r#".sympath srv*{}*https://msdl.microsoft.com/download/symbols
 sxe -c "$$><{}" cpr
 sxn bpe
+sxn ibp
 $$><{}
 "#,
                 root.join("cdb-symbols").display(),
