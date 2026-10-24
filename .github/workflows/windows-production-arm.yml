@@ -1,0 +1,37 @@
+name: Windows production worker ARM
+on:
+  push:
+    branches: [test/windows-production-arm]
+permissions:
+  contents: read
+jobs:
+  production-worker:
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: command-owner-windows-11-arm
+          cache-on-failure: true
+      - name: Native production Clippy
+        shell: bash
+        run: |
+          cargo clippy --locked -p qq-core --all-targets -- -D warnings
+          cargo clippy --locked -p qq --no-default-features --bin qq --test command_worker_client -- -D warnings
+      - name: Build actual helper fixture
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: cargo build --locked -p qq-core --example command_owner
+      - name: Actual Windows worker boundary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' | grep -Fx 'windows::arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker: test'
+          cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Actual default Auto session
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output: test'
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
