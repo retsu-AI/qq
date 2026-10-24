@@ -109,8 +109,9 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
     SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
-    SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy, TaskWorkspacePolicy,
-    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    SlashCommandError, SpawnModelValidationFuture, TaskGitPolicy, TaskHostingAuthorization,
+    TaskHostingLoadFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture, WorkspaceGrantAuthority,
+    WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
 /// Detects changed paths between bounded workspace scans.
