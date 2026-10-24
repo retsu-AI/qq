@@ -4458,7 +4458,7 @@ mod tests {
         // Version 38 adds store-qualified workspace discovery.
         // Version 39 includes unresolved approval details in session snapshots.
         // Version 40 distinguishes task-scoped Auto check authority from consent.
-        assert_eq!(crate::PROTOCOL_VERSION, 39);
+        assert_eq!(crate::PROTOCOL_VERSION, 40);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

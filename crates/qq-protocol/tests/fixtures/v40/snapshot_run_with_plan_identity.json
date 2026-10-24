@@ -1,0 +1,40 @@
+{
+  "id": "04040404040404040404040404040404",
+  "session_id": "03030303030303030303030303030303",
+  "status": "completed",
+  "outcome": {
+    "type": "completed"
+  },
+  "prompt_identity": {
+    "version": 7,
+    "instruction_hash": "0101010101010101010101010101010101010101010101010101010101010101",
+    "system_prompt_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+    "tool_schema_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+    "catalog_digest": "0909090909090909090909090909090909090909090909090909090909090909",
+    "exposure": "full"
+  },
+  "resolved_model": {
+    "version": 2,
+    "route": "openai/gpt-5.6",
+    "provider_model": "gpt-5.6",
+    "max_output_tokens": 4096,
+    "context_window": 400000,
+    "output_token_control": "native",
+    "generation": {
+      "reasoning_effort": "native"
+    },
+    "prompt_cache": {
+      "control": "unsupported",
+      "cache_read_usage": true,
+      "cache_write_usage": false
+    }
+  },
+  "plan": {
+    "profile": "review",
+    "descriptor_version": 2,
+    "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credential_epoch": 3
+  },
+  "context_tokens": 1200,
+  "estimated_cost_usd_nanos": 42
+}
