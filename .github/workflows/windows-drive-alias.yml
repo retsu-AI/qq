@@ -1,0 +1,35 @@
+name: Windows owned-drive alias proof
+on:
+  push:
+    branches: [test/windows-drive-alias]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  alias-proof:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-owned-alias-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Check inherited bounded pipe and job tests
+        run: cargo test --locked -p qq-core --example windows_drive_alias
+      - name: Compile native fixture
+        run: cargo build --locked -p qq-core --example windows_drive_alias
+      - name: Lint native fixture
+        run: cargo clippy --locked -p qq-core --example windows_drive_alias -- -D warnings
+      - name: Compare host and AppContainer tools through owned alias
+        run: .\target\debug\examples\windows_drive_alias.exe
