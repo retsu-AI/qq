@@ -283,6 +283,10 @@ async fn installed_cargo_startup_through_real_auto_worker() {
             .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
         "Auto must not request approval"
     );
+    eprintln!(
+        "DIAGNOSTIC ordinary AppContainer control: task WRITE_RESTRICTED omitted, not production containment"
+    );
+    log_results("CONTROL", &source, &commands);
     assert_eq!(fs::read_to_string(secret).unwrap(), "host bytes");
     assert_eq!(
         fs::read_to_string(source.join("task-write.txt"))

@@ -1,7 +1,7 @@
-name: Windows actual Cargo startup attribution
+name: Windows ordinary AppContainer Cargo control
 on:
   push:
-    branches: [test/windows-cargo-startup]
+    branches: [test/windows-cargo-ac-control]
 permissions:
   contents: read
 jobs:

@@ -1,3 +1,4 @@
+//! DIAGNOSTIC ONLY: ordinary AppContainer positive control, not task-write containment.
 //! A write-only restricting SID composes with LPAC's read and network boundary.
 use firehazard_sid as fh;
 use std::io;
@@ -27,21 +28,14 @@ pub(super) fn create(task: &str) -> io::Result<fh::token::OwnedHandle> {
         "parse task write SID",
         fh::convert_string_sid_to_sid_w(task),
     )?;
-    let restricting = [fh::sid::AndAttributes::new(&sid, None)];
     let token = at(
         "restrict task writes",
-        fh::create_restricted_token(
-            &host,
-            fh::token::DISABLE_MAX_PRIVILEGE | fh::token::WRITE_RESTRICTED,
-            None,
-            None,
-            Some(&restricting),
-        ),
+        fh::create_restricted_token(&host, fh::token::DISABLE_MAX_PRIVILEGE, None, None, None),
     )?;
     let actual = at("query task restricting SID", token.restricted_sids())?;
-    if actual.group_count() != 1 || !fh::equal_sid(actual.groups()[0].sid, (&sid).into()) {
+    if actual.group_count() != 0 {
         return Err(io::Error::other(
-            "task token must have exactly its own write restricting SID",
+            "diagnostic AppContainer control must have no write restricting SID",
         ));
     }
     // New process/thread/IPC objects also need the restricting SID for writes.
