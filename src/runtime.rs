@@ -3125,10 +3125,9 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Enable ordinary Auto containment only after its native backend is
-        // qualified. Other platforms retain their existing permission behavior
-        // until their adapters implement the same resource contract.
-        #[cfg(target_os = "linux")]
+        // Native backends share task ownership and publication; resource units
+        // retain each backend's kernel accounting semantics.
+        #[cfg(any(target_os = "linux", windows))]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3441,6 +3440,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 pub enum RuntimeHandlerError {
     #[error(transparent)]
     TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
+    #[cfg(any(target_os = "linux", windows))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
@@ -3453,7 +3453,7 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
@@ -3467,18 +3467,8 @@ fn task_workspace_policy(
         }
         builder.create(directory)?;
         let directory = directory.canonicalize()?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let metadata = std::fs::metadata(&directory)?;
-            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
-            {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "task control directory must be private and owned by this user",
-                ));
-            }
-        }
+        let directory_grant =
+            qq_core::command_owner::NativeDirectoryGrant::capture_private(&directory)?;
         let mut read_only = std::collections::BTreeSet::new();
         #[cfg(unix)]
         for candidate in [
@@ -3503,12 +3493,18 @@ fn task_workspace_policy(
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(windows)]
+        read_only.insert(std::fs::canonicalize(
+            std::env::var_os("SYSTEMROOT")
+                .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable"))?,
+        )?);
         Ok(qq_core::TaskWorkspacePolicy {
-            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
+            directory: directory_grant,
             read_only: read_only
                 .into_iter()
                 .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
                 .collect::<Result<_, _>>()?,
+            #[cfg(target_os = "linux")]
             resources: qq_core::command_owner::NativeResources::Limited {
                 limits: qq_core::command_owner::NativeResourceLimits {
                     memory_bytes: 4 * 1024 * 1024 * 1024,
@@ -3518,6 +3514,12 @@ fn task_workspace_policy(
                         .saturating_mul(1000)
                         .min(1_000_000),
                 },
+            },
+            #[cfg(windows)]
+            resources: qq_core::command_owner::NativeResources::Committed {
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_processes: 512,
+                cpu_percent: 90,
             },
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
@@ -9959,3 +9961,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "runtime/windows_auto_tests.rs"]
+mod windows_auto_tests;

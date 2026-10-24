@@ -313,12 +313,14 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         CommandOwner, CommandStatus, NativeCommand, NativeEnvironment, NativeWorkspaceIdentity,
     };
     use std::io::Write as _;
+    #[derive(Debug)]
     enum Completion {
         Finish,
         Cancel,
         Shutdown,
     }
     for completion in [Completion::Finish, Completion::Cancel, Completion::Shutdown] {
+        eprintln!("recovery fixture {completion:?}: starting");
         let cancel = !matches!(completion, Completion::Finish);
         let directory = tempfile::tempdir().unwrap();
         let database = directory
@@ -383,6 +385,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             assert_ne!(observed.status, CommandStatus::Finished);
             version = observed.version;
         }
+        eprintln!("recovery fixture {completion:?}: original command ready");
         store
             .command(
                 CommandId::generate().unwrap(),
@@ -408,6 +411,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         )
         .await
         .unwrap();
+        eprintln!("recovery fixture {completion:?}: store reopened");
         let mut barrier =
             Box::pin(reopened.await_recovered_commands(
                 claimed.identity.workspace_id,
@@ -437,6 +441,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             ),
             "observation alone cannot consume steering"
         );
+        eprintln!("recovery fixture {completion:?}: issuing completion");
         let queued = if cancel {
             if matches!(completion, Completion::Shutdown) {
                 reopened.shutdown().await.unwrap();
@@ -480,6 +485,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             begin_read.write_all(b"begin\n").unwrap();
             Some(run_id)
         };
+        eprintln!("recovery fixture {completion:?}: awaiting worker completion");
         let mut version = 0;
         loop {
             let observed = match owner.wait(id, version).await {
@@ -492,6 +498,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             }
             version = observed.version;
         }
+        eprintln!("recovery fixture {completion:?}: worker completed");
         drop(gate);
         assert_eq!(
             live,
@@ -500,6 +507,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
         );
         wait_for_recovery(&reopened, run).await;
         barrier.await.unwrap();
+        eprintln!("recovery fixture {completion:?}: recovery barrier completed");
         let superseded: (u64,u64) = reopened.inner.store.call(Priority::Control, move |connection| {
             Ok((connection.query_row("SELECT COUNT(*) FROM messages WHERE run_id=?1 AND steering=1 AND state='queued'", [run.to_string()], |row| row.get(0))?,
                 connection.query_row("SELECT COUNT(*) FROM events WHERE json_extract(envelope_json,'$.run_id')=?1 AND json_extract(envelope_json,'$.event.type')='steering_superseded'", [run.to_string()], |row| row.get(0))?))
@@ -542,6 +550,7 @@ async fn reopening_observes_a_still_running_command_until_its_original_result_is
             reopened.shutdown().await.unwrap();
         }
         owner.shutdown().await.unwrap();
+        eprintln!("recovery fixture {completion:?}: shutdown completed");
         assert_eq!(
             std::fs::read_to_string(workspace.join("counter")).unwrap(),
             "once"

@@ -105,13 +105,41 @@ impl NativeEnvironment {
         mut self,
         home: &std::path::Path,
     ) -> Result<Self, CommandOwnerError> {
-        self.0
-            .retain(|(name, _)| !same_name(name, "HOME") && !same_name(name, "TMPDIR"));
-        let overrides = Self::from_values([
+        let overrides = vec![
             ("HOME".to_owned(), home.as_os_str().to_owned()),
             ("TMPDIR".to_owned(), home.join("tmp").into_os_string()),
-        ])?;
-        self.0.extend(overrides.0);
+        ];
+        #[cfg(windows)]
+        let overrides = {
+            let mut values = overrides;
+            values.extend([
+                ("USERPROFILE".to_owned(), home.as_os_str().to_owned()),
+                ("TEMP".to_owned(), home.join("tmp").into_os_string()),
+                ("TMP".to_owned(), home.join("tmp").into_os_string()),
+                (
+                    "APPDATA".to_owned(),
+                    home.join("AppData/Roaming").into_os_string(),
+                ),
+                (
+                    "LOCALAPPDATA".to_owned(),
+                    home.join("AppData/Local").into_os_string(),
+                ),
+            ]);
+            // Ordinary Windows tools append slash-separated names to these
+            // values. Keep verbatim syntax only when DOS paths change identity.
+            for (_, value) in &mut values {
+                *value = dunce::simplified(std::path::Path::new(value))
+                    .as_os_str()
+                    .to_owned();
+            }
+            values
+        };
+        self.0.retain(|(name, _)| {
+            !overrides
+                .iter()
+                .any(|(replacement, _)| same_name(name, replacement))
+        });
+        self.0.extend(Self::from_values(overrides)?.0);
         self.normalize()?;
         Ok(self)
     }
@@ -227,6 +255,152 @@ mod tests {
         assert!(
             NativeEnvironment::capture(&vec!["UNSET".to_owned(); crate::MAX_SHELL_ENV_NAMES + 1])
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn task_home_replaces_host_profile_and_scratch_values() {
+        let snapshot = NativeEnvironment::from_values(
+            crate::BASE_ENV
+                .iter()
+                .map(|name| ((*name).to_owned(), OsString::from("host-value"))),
+        )
+        .unwrap();
+        let home = std::path::Path::new("private-task-home");
+        let environment = snapshot.with_task_home(home).unwrap();
+        assert_eq!(environment.get("HOME"), Some(home.into()));
+        assert_eq!(environment.get("TMPDIR"), Some(home.join("tmp").into()));
+        assert_eq!(environment.get("PATH"), Some("host-value".into()));
+        #[cfg(windows)]
+        for (name, path) in [
+            ("USERPROFILE", home.to_path_buf()),
+            ("TEMP", home.join("tmp")),
+            ("TMP", home.join("tmp")),
+            ("APPDATA", home.join("AppData/Roaming")),
+            ("LOCALAPPDATA", home.join("AppData/Local")),
+        ] {
+            assert_eq!(environment.get(name), Some(path.into_os_string()));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_supports_shell_profile_paths_and_called_batches() {
+        use std::{fs, os::windows::process::CommandExt as _, path::Path, process::Command};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("task space 日本語");
+        let home = workspace.join("profile space 日本語");
+        for directory in ["tmp", "AppData/Local", "AppData/Roaming"] {
+            fs::create_dir_all(home.join(directory)).unwrap();
+        }
+        let canonical = home.canonicalize().unwrap();
+        assert!(matches!(
+            canonical.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+        ));
+        assert!(matches!(
+            home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        ));
+        let variables = [
+            ("HOME", ""),
+            ("USERPROFILE", ""),
+            ("TMPDIR", "tmp"),
+            ("TEMP", "tmp"),
+            ("TMP", "tmp"),
+            ("APPDATA", "AppData/Roaming"),
+            ("LOCALAPPDATA", "AppData/Local"),
+        ];
+        let exercise = |label: &str, task_home: &Path, prefix: &str| {
+            let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+            let environment = NativeEnvironment::from_values([
+                ("SYSTEMROOT".to_owned(), system.clone()),
+                (
+                    "PATH".to_owned(),
+                    Path::new(&system).join("System32").into_os_string(),
+                ),
+            ])
+            .unwrap()
+            .with_task_home(task_home)
+            .unwrap();
+            let mut script = prefix.to_owned();
+            for (name, _) in variables {
+                script.push_str(&format!(
+                    ">\"%{name}%/proof-{name}-{label}\" echo private-{name} & "
+                ));
+            }
+            fs::write(
+                workspace.join(format!("owned {label}.cmd")),
+                format!("@echo off\r\n>called-{label}.txt echo called-batch\r\nexit /b 0\r\n"),
+            )
+            .unwrap();
+            script.push_str(&format!("call \"owned {label}.cmd\""));
+            let raw = format!("/D /S /C \"{script}\"");
+            eprintln!("{label} raw cmd arguments: {raw:?}");
+            let program = Path::new(&system).join("System32").join("cmd.exe");
+            eprintln!("{label} cmd program: {program:?}");
+            let mut command = Command::new(program);
+            command.env_clear().current_dir(&workspace).raw_arg(raw);
+            for (name, _) in &environment.0 {
+                command.env(name, environment.get(name).unwrap());
+            }
+            let output = command.output().unwrap();
+            let proofs = variables.map(|(name, directory)| {
+                let content =
+                    fs::read_to_string(home.join(directory).join(format!("proof-{name}-{label}")))
+                        .map(|content| content.trim().to_owned());
+                (name, content)
+            });
+            let called = fs::read_to_string(workspace.join(format!("called-{label}.txt")));
+            eprintln!(
+                "{label} profile results: {proofs:?}; called batch: {called:?}; shell: {output:?}"
+            );
+            output.status.success()
+                && output.stderr.is_empty()
+                && proofs.iter().all(|(name, result)| {
+                    result
+                        .as_deref()
+                        .is_ok_and(|value| value == format!("private-{name}"))
+                })
+                && called
+                    .as_deref()
+                    .is_ok_and(|value| value.trim() == "called-batch")
+        };
+        assert!(
+            exercise("dos-echo", &home, "echo fixture-control & "),
+            "ordinary DOS task home must validate the echo-first shell fixture",
+        );
+        assert!(
+            exercise("canonical", &canonical, "echo fixture-regression & "),
+            "canonical task home must support ordinary shell path suffixes and called batches",
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_task_home_preserves_extended_only_names() {
+        let long = format!(r"\\?\C:\{}", "a".repeat(300));
+        for path in [r"\\?\C:\task.", r"\\?\C:\task ", r"\\?\C:\NUL\task", &long] {
+            let home = std::path::Path::new(path);
+            let environment = NativeEnvironment::from_values([])
+                .unwrap()
+                .with_task_home(home)
+                .unwrap();
+            assert_eq!(environment.get("HOME"), Some(home.into()));
+            assert_eq!(environment.get("TMP"), Some(home.join("tmp").into()));
+        }
+        // A child path can need verbatim semantics even when HOME does not.
+        let home = std::path::PathBuf::from(format!(r"\\?\C:\{}", "a".repeat(245)));
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_task_home(&home)
+            .unwrap();
+        assert_eq!(
+            environment.get("APPDATA"),
+            Some(home.join("AppData/Roaming").into()),
         );
     }
 

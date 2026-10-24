@@ -77,15 +77,17 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux, the binary creates detached task scopes for ordinary Auto runs and
+On Linux and Windows, the binary creates detached task scopes for ordinary Auto runs and
 their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-is enabled on Linux first. Other platforms retain their existing permission
-behavior until macOS resource limits and Windows containment are implemented
-and qualified. Authorized network egress, credential brokering, per-task aggregate
+uses kernel resource limits on Linux and committed-memory/process jobs with a
+payload CPU cap on Windows. Windows defaults to 4 GiB committed memory,
+512 processes (including the helper) and 90% of all logical processors for the
+payload tree. macOS default Auto containment remains unfinished. Authorized
+network egress, credential brokering, per-task aggregate
 resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
@@ -134,7 +136,11 @@ directories and copying each bounded file chunk. Interrupted imports remove
 their partial private tree before settlement. Restored goal trees adopt the
 current host's file/byte ceilings; a tighter ceiling can refuse publication
 while retaining the private edits.
-Commands receive a private home/temp directory, explicit
+Commands receive a private home/temp directory. On Windows, `HOME` and
+`USERPROFILE` point to that directory, `TMPDIR`/`TEMP`/`TMP` point to its `tmp`
+subdirectory, and `APPDATA`/`LOCALAPPDATA` point to its private `AppData/Roaming`
+and `AppData/Local` subdirectories. These values replace captured host profile
+paths before dispatch. Commands also receive explicit
 system read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
@@ -178,8 +184,8 @@ Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution and
-default Windows Auto containment remain unavailable and fail closed. Source
+non-goal task continuation is unfinished. macOS limited-resource execution
+remains unavailable and fails closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
 
@@ -292,10 +298,26 @@ cleanup after exit and cancellation. Positive qualification requires a supported
 kernel and working user-manager delegation. Refusal tests cover unavailable
 delegation separately; they do not prove successful containment.
 
+On Windows, budgeted commands also share a per-owner kernel job envelope. It
+uses 75% of the smaller available physical-memory/commit budget at first use,
+4,096 active processes and a 90% CPU hard cap. The worker itself and Host-resource
+commands stay outside it. Every suspended helper joins this shared job before
+its independent command job, so cancelling one command preserves its peers.
+Per-command CPU rates account for the parent's allocation and never round above
+the requested machine share. Each budgeted command keeps one native exit wait,
+bounded by the worker's active-command limit, outside Tokio's blocking I/O pool.
+Native memory/process tests exercise independent commands sharing the envelope,
+capacity reuse and cleanup; exit-wait coverage includes dropped observation.
+
 ### Disk-space safeguard
 
-Restricted native commands check available space before launch and once per
-second while running. Below a 512 MiB free-space reserve, the independent
+Restricted native commands check available space on every declared writable
+root and the worker journal before launch and once per second while running.
+Checks also include the native helper's temporary storage on macOS/Windows and Windows' AppContainer
+profile storage, which can be on a different disk from task files. Each sampling
+pass batches its filesystem queries outside Tokio workers. Copying a trusted
+helper requires the reserve plus the image size; the macOS copy is bounded even
+if its source changes during preparation. Below a 512 MiB free-space reserve, the independent
 worker cancels the command, waits for native cleanup, and retains its captured
 output and stop reason. This continues while the coordinator is disconnected.
 The session runtime also stops private task work under disk pressure. Import
@@ -305,7 +327,7 @@ failed publication retains the private edits.
 This requires no volumes, administrator access or filesystem setup. It is a
 best-effort safeguard, not a quota: concurrent writers and writes between
 checks can overshoot the reserve. Host-authority native commands do not use
-this guard.
+this runtime reserve monitor.
 
 ## The Tool Loop
 
@@ -1438,11 +1460,15 @@ callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,
 checks the kernel-retained memory/process limits, and includes the trusted
-helper in that budget. It limits committed private memory and processes, not
+helper in that budget. Memory ceilings are rounded down to whole native pages
+before setting and verifying them; budgets smaller than one page are refused.
+It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
-Windows Auto integration is unfinished.
+Windows Auto uses this adapter with detached task files, checked copy-based
+publication and a private cache retained for goal continuation. Control-root
+owner and ACL validation runs before admitting task authority.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
@@ -1477,7 +1503,7 @@ Native containment does not itself grant credential access.
   by default. `exit` is `signal:<n>` or `timeout` when there is no code.
 - No login/profile shell initialization on the hot path.
 - A **cleared environment**: the child starts with `PATH HOME LANG TERM
-  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows), plus variables the call names in `env` (≤ 16) that
+  TMPDIR` (also `SYSTEMROOT LOCALAPPDATA USERPROFILE APPDATA TEMP TMP` on Windows), plus variables the call names in `env` (≤ 16) that
   `policy.shell_env` allows. A name outside the allowlist fails the call
   (`env_not_allowed`) before anything runs. Secrets the server holds never
   reach a child by accident. Native command-owner submissions carry a snapshot

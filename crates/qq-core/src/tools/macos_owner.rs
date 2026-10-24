@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use std::{
     ffi::OsString,
-    io::Read as _,
     os::{fd::AsRawFd as _, unix::ffi::OsStringExt as _},
 };
 use std::{
-    io::{self, Write as _},
+    io::{self, Read as _, Write as _},
     ops::{Deref, DerefMut},
     os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _, process::ExitStatusExt as _},
     process::ExitStatus,
@@ -68,7 +67,7 @@ impl MacosOwner {
                 "macOS command isolation requires an unprivileged owner",
             ));
         }
-        let mut source = std::fs::File::open(&launcher.executable)?;
+        let source = std::fs::File::open(&launcher.executable)?;
         let metadata = source.metadata()?;
         if !launcher.executable.is_absolute()
             || !metadata.is_file()
@@ -85,12 +84,20 @@ impl MacosOwner {
         let image = tempfile::Builder::new()
             .prefix("qq-macos-helper-")
             .tempdir()?;
+        crate::storage::check_path_blocking(image.path(), metadata.len())
+            .map_err(io::Error::other)?;
         let path = image.path().join("helper");
         let mut copy = std::fs::File::options()
             .write(true)
             .create_new(true)
             .open(&path)?;
-        io::copy(&mut source, &mut copy)?;
+        if io::copy(
+            &mut source.take(metadata.len().saturating_add(1)),
+            &mut copy,
+        )? != metadata.len()
+        {
+            return Err(io::Error::other("native helper changed while copying"));
+        }
         copy.set_permissions(std::fs::Permissions::from_mode(0o500))?;
         drop(copy);
         launcher.executable = path.canonicalize()?;
