@@ -49,6 +49,22 @@ impl Debugger {
         let main_script = root.join(format!("cdb-{pid}-main.txt"));
         let open_script = root.join(format!("cdb-{pid}-open.txt"));
         let return_script = root.join(format!("cdb-{pid}-return.txt"));
+        let win32_script = root.join(format!("cdb-{pid}-win32.txt"));
+        let ntstatus_script = root.join(format!("cdb-{pid}-ntstatus.txt"));
+        for (path, function, kind) in [
+            (&win32_script, "RtlSetLastWin32Error", "Win32"),
+            (&ntstatus_script, "RtlNtStatusToDosError", "NtStatus"),
+        ] {
+            write_new(
+                path,
+                &format!(
+                    r#".printf "QQ_CDB_HIT function={function} pid=%x tid=%x\n", @$tpid, @$tid
+.if (@ecx != 0) {{.printf "QQ_CDB_STATUS {kind}=%x pid=%x tid=%x\n", @ecx, @$tpid, @$tid; kn 12}}
+gc
+"#
+                ),
+            )?;
+        }
         write_new(
             &return_script,
             r#".printf "QQ_CDB_EVENT_RETURN pid=%x tid=%x status=%x\n", @$tpid, @$tid, @eax
@@ -71,14 +87,16 @@ gc
         write_new(
             &target_script,
             &format!(
-                r#"bu ntdll!RtlSetLastWin32Error ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS Win32=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
-bu ntdll!RtlNtStatusToDosError ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS NtStatus=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
+                r#"bu ntdll!RtlSetLastWin32Error "$$><{}"
+bu ntdll!RtlNtStatusToDosError "$$><{}"
 bu ntdll!NtOpenEvent "$$><{}"
 .printf "QQ_CDB_BREAKPOINTS pid=%x\n", @$tpid
 bl
 .printf "QQ_CDB_READY pid=%x\n", @$tpid
 g
 "#,
+                win32_script.display(),
+                ntstatus_script.display(),
                 open_script.display()
             ),
         )?;
@@ -89,6 +107,7 @@ g
                 r#".sympath {}
 sxn bpe
 sxn ibp
+sx
 $$><{}
 "#,
                 root.join("cdb-symbols").display(),
@@ -235,12 +254,35 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
     let mut batch = Vec::new();
     let mut count = 0;
     let mut bytes = 0;
-    while let Ok(buffer) = reader.fill_buf() {
-        if buffer.is_empty() {
+    let mut hits = 0usize;
+    let mut stops = 0usize;
+    let mut read_failed = false;
+    loop {
+        let buffer = if read_failed {
+            &[]
+        } else {
+            match reader.fill_buf() {
+                Ok(buffer) => buffer,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    read_failed = true;
+                    &[]
+                }
+            }
+        };
+        if buffer.is_empty() && line.is_empty() {
             break;
         }
-        let end = buffer.iter().position(|b| *b == b'\n');
-        let used = end.map_or(buffer.len(), |n| n + 1);
+        let end = if buffer.is_empty() {
+            Some(0)
+        } else {
+            buffer.iter().position(|b| *b == b'\n')
+        };
+        let used = if buffer.is_empty() {
+            0
+        } else {
+            end.map_or(buffer.len(), |n| n + 1)
+        };
         let remaining = 4096usize.saturating_sub(line.len());
         line.extend_from_slice(&buffer[..used.min(remaining)]);
         reader.consume(used);
@@ -256,15 +298,62 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
                 .collect::<String>();
             if !code.is_empty() {
                 flush(&mut batch, output, &mut count, &mut bytes);
-                batch.push(format!("QQ_CDB_EXCEPTION code={code}"));
+                let chance = if text.contains("(first chance)") {
+                    "first"
+                } else if text.contains("(second chance)") {
+                    "second"
+                } else {
+                    "unknown"
+                };
+                batch.push(format!("QQ_CDB_EXCEPTION code={code} chance={chance}"));
             }
+        }
+        if ["bpe -", "bpec -", "ibp -"]
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+            && text.len() <= 256
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || " -:,()".contains(c))
+        {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            batch.push(format!("QQ_CDB_POLICY {text}"));
+            line.clear();
+            continue;
+        }
+        if let Some(index) = text
+            .strip_prefix("Breakpoint ")
+            .and_then(|value| value.strip_suffix(" hit"))
+            && !index.is_empty()
+            && index.len() <= 8
+            && index.chars().all(|c| c.is_ascii_digit())
+        {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            if stops < 16 {
+                batch.push(format!("QQ_CDB_STOP breakpoint={index}"));
+            }
+            stops = stops.saturating_add(1);
+        }
+        if text.starts_with("QQ_CDB_HIT ") {
+            flush(&mut batch, output, &mut count, &mut bytes);
+            if hits < 8 {
+                batch.push(text);
+            }
+            hits = hits.saturating_add(1);
+            line.clear();
+            continue;
         }
         if text.starts_with("QQ_CDB_READY") {
             let _ = ready.try_send(());
         }
         if let Some(class) = diagnostic(&text) {
             flush(&mut batch, output, &mut count, &mut bytes);
-            batch.push(format!("QQ_CDB_DIAGNOSTIC class={class}"));
+            if !matches!(class, "debugger-prompt" | "break-instruction") || stops < 16 {
+                batch.push(format!("QQ_CDB_DIAGNOSTIC class={class}"));
+            }
+            if matches!(class, "debugger-prompt" | "break-instruction") {
+                stops = stops.saturating_add(1);
+            }
         } else if text.starts_with("QQ_CDB_") {
             flush(&mut batch, output, &mut count, &mut bytes);
             batch.push(text);
@@ -280,9 +369,27 @@ fn collect(stdout: impl io::Read, output: &Mutex<Vec<String>>, ready: &mpsc::Syn
         line.clear();
     }
     flush(&mut batch, output, &mut count, &mut bytes);
+    if hits > 0 {
+        batch.push(format!("QQ_CDB_HIT_COUNT count={hits}"));
+    }
+    if stops > 0 {
+        batch.push(format!("QQ_CDB_STOP_COUNT count={stops}"));
+    }
+    if read_failed {
+        batch.push("QQ_CDB_DIAGNOSTIC class=read-error-incomplete".to_owned());
+    }
+    flush(&mut batch, output, &mut count, &mut bytes);
 }
 fn diagnostic(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
+    if lower.split_once('>').is_some_and(|(prompt, _)| {
+        prompt.contains(':')
+            && prompt
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == ' ')
+    }) {
+        return Some("debugger-prompt");
+    }
     [
         (
             "processes created by the current process will be debugged",
@@ -292,6 +399,8 @@ fn diagnostic(text: &str) -> Option<&'static str> {
             "processes created by the current process will not be debugged",
             "child-debugging-disabled",
         ),
+        ("int     3", "break-instruction"),
+        ("int 3", "break-instruction"),
         ("syntax error", "syntax"),
         ("couldn't resolve", "unresolved-symbol"),
         ("unable to resolve", "unresolved-symbol"),
@@ -319,7 +428,10 @@ fn flush(
         row.to_ascii_lowercase().contains("bcrypt!")
             || row.to_ascii_lowercase().starts_with("bcrypt+")
     }) || batch.first().is_some_and(|row| {
-        row.starts_with("QQ_CDB_READY")
+        row.starts_with("QQ_CDB_POLICY")
+            || row.starts_with("QQ_CDB_STOP")
+            || row.starts_with("QQ_CDB_HIT")
+            || row.starts_with("QQ_CDB_READY")
             || row.starts_with("QQ_CDB_DIAGNOSTIC")
             || row.starts_with("QQ_CDB_EXCEPTION")
             || row.starts_with("QQ_CDB_BREAKPOINTS")
@@ -375,7 +487,7 @@ mod tests {
             [
                 "QQ_CDB_BREAKPOINTS pid=123",
                 "ntdll!RtlSetLastWin32Error",
-                "QQ_CDB_EXCEPTION code=80000003",
+                "QQ_CDB_EXCEPTION code=80000003 chance=first",
                 "QQ_CDB_READY pid=123"
             ]
         );
@@ -394,6 +506,74 @@ mod tests {
                 "QQ_CDB_DIAGNOSTIC class=unknown-command",
                 "QQ_CDB_DIAGNOSTIC class=no-runnable-target",
                 "QQ_CDB_DIAGNOSTIC class=child-debugging-enabled"
+            ]
+        );
+    }
+    #[test]
+    fn keeps_chance_stop_state_and_unterminated_prompt() {
+        let bytes = b"bpe - Break instruction exception - output - handled\n(1.2): Break instruction exception - code 80000003 (second chance)\nBreakpoint 7 hit\n00007ff0 cc int     3\n0:000>";
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_slice(), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_POLICY bpe - Break instruction exception - output - handled",
+                "QQ_CDB_EXCEPTION code=80000003 chance=second",
+                "QQ_CDB_STOP breakpoint=7",
+                "QQ_CDB_DIAGNOSTIC class=break-instruction",
+                "QQ_CDB_DIAGNOSTIC class=debugger-prompt",
+                "QQ_CDB_STOP_COUNT count=3",
+            ]
+        );
+    }
+    #[test]
+    fn retains_only_first_eight_callback_hits() {
+        let bytes = "QQ_CDB_HIT function=RtlSetLastWin32Error pid=1 tid=2\n".repeat(32);
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_bytes(), &output, &ready);
+        let rows = output.lock().unwrap();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows.last().unwrap(), "QQ_CDB_HIT_COUNT count=32");
+    }
+    #[test]
+    fn stop_noise_does_not_exhaust_crypto_output_budget() {
+        let mut bytes = "Breakpoint 7 hit\n".repeat(256);
+        bytes.push_str("QQ_CDB_STATUS NtStatus=c0000022\n0000 bcrypt+0x41\n");
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(bytes.as_bytes(), &output, &ready);
+        let rows = output.lock().unwrap();
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.starts_with("QQ_CDB_STOP breakpoint="))
+                .count(),
+            16
+        );
+        assert!(rows.iter().any(|row| row == "bcrypt+0x41"));
+        assert_eq!(rows.last().unwrap(), "QQ_CDB_STOP_COUNT count=256");
+    }
+    #[test]
+    fn preserves_unterminated_prompt_before_pipe_read_error() {
+        struct FailingPipe(io::Cursor<&'static [u8]>);
+        impl io::Read for FailingPipe {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.0.position() == self.0.get_ref().len() as u64 {
+                    return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+                }
+                io::Read::read(&mut self.0, buffer)
+            }
+        }
+        let output = Mutex::new(Vec::new());
+        let (ready, _) = mpsc::sync_channel(1);
+        collect(FailingPipe(io::Cursor::new(b"0:000>")), &output, &ready);
+        assert_eq!(
+            *output.lock().unwrap(),
+            [
+                "QQ_CDB_DIAGNOSTIC class=debugger-prompt",
+                "QQ_CDB_STOP_COUNT count=1",
+                "QQ_CDB_DIAGNOSTIC class=read-error-incomplete",
             ]
         );
     }
