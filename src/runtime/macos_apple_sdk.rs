@@ -130,11 +130,12 @@ fn roots(
         return Err(denied());
     }
     Ok(super::macos_sdk::Inputs {
-        executable_directories: vec![bin, developer_bin],
+        executable_directories: vec![bin.clone(), developer_bin.clone()],
         // xcrun opens the selected developer directory and its internal
         // metadata while finding tools/SDKs. Keep that public installation
         // readable as a unit; unrelated applications and user files stay out.
-        read_only: vec![developer.to_owned()],
+        // Native scopes require an exact read grant for each PATH entry.
+        read_only: vec![developer.to_owned(), bin, developer_bin],
     })
 }
 
@@ -177,10 +178,15 @@ mod tests {
                 .executable_directories
                 .contains(&developer.join("usr/bin"))
         );
-        assert_eq!(
-            inputs.read_only.as_slice(),
-            std::slice::from_ref(&developer)
+        assert!(
+            inputs
+                .executable_directories
+                .iter()
+                .all(|path| inputs.read_only.contains(path)),
+            "native scopes require explicit read grants for every executable directory"
         );
+        assert!(inputs.read_only.contains(&developer));
+        assert_eq!(inputs.read_only.len(), 3);
         assert!(!inputs.read_only.contains(&applications));
         std::fs::remove_dir(developer.join("usr/lib")).unwrap();
         assert_eq!(
@@ -188,7 +194,7 @@ mod tests {
                 .unwrap()
                 .read_only
                 .len(),
-            1
+            3
         );
         std::fs::create_dir(developer.join("usr/lib")).unwrap();
         assert!(
