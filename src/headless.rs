@@ -4319,6 +4319,8 @@ mod tests {
             )
             .await
             .unwrap();
+            let mut opts = options(&fixture.workspace);
+            opts.approval = HeadlessApproval::Full;
             let mut request = goal_request();
             request.max_runs = Some(3);
             request.check = Some(CHECK.to_owned());
@@ -4329,7 +4331,7 @@ mod tests {
                 Duration::from_secs(10),
                 run_goal(
                     &fixture.sessions,
-                    options(&fixture.workspace),
+                    opts,
                     request,
                     std::future::pending(),
                     &mut stdout,
