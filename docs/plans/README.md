@@ -2,7 +2,7 @@
 
 Freeze new product features until QQ can complete and verify ordinary editing
 work. Permissions, shell execution and tool policy are core repairs. This is
-the only active plan; it replaces the overlapping plans, progress ledgers,
+the active plan; it replaces the overlapping plans, progress ledgers,
 reservations and calendar gates. Existing issues and PRs remain open until
 someone resolves them. Historical evidence remains in Git and the linked
 research/ADRs; deleting a ledger does not turn a failed result into a pass.
