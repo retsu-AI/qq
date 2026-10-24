@@ -138,40 +138,38 @@ grants for every new session. See
 
 ### Approval mode
 
-How much a session may do without asking: `read_only`, `ask`,
-`auto` (the TUI default), or `full`. `ask` requires fresh human approval for
-each non-read action; grants and reviewers cannot replace it. `auto` reuses
-grants, while `full` bypasses approval prompts. `qq run` also defaults to
-`auto`. Write sub-agents retain internal supervision within their parent's
-authority. Change modes with `/approval` or `qq run --approval`.
+How much a session may do without asking: `read_only`, `ask`, `auto` (the
+default), or `full`. Ask requires fresh human approval for each non-read action.
+Auto executes within the native task policy without human or model approval;
+denied actions return tool errors so the agent can choose another permitted
+approach. Full bypasses Auto containment. Children retain the parent's authority
+ceiling. Change modes with `/approval` or `qq run --approval`.
 See [Approval modes](permissions.md#approval-modes).
 
 ### Held call
 
-A [tool call](#tool-call) waiting for an answer because its session's mode
-does not let it run on its own. A [delegate](#delegate) or you settle it; it
-waits until then, until the run's deadline or `approval_timeout_seconds`,
-or until you cancel. See
-[Who decides a held call](permissions.md#who-decides-a-held-call).
+A [tool call](#tool-call) waiting for a human answer under Ask. It waits until
+answered, cancelled, or its run deadline or configured approval timeout expires.
+Auto does not create this approval wait.
+See [the approval prompt](permissions.md#the-approval-prompt).
 
 ### Delegate
 
-Who answers a [held call](#held-call) before you are asked: the
-[reviewer](#reviewer); if it does not decide, you. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and
-`/delegate` choose whether a delegate is asked. See [Who decides a held call](permissions.md#who-decides-a-held-call).
+An optional [reviewer](#reviewer) for explicitly supervised delegation outside
+Auto. `approval_delegate`, `QQ_APPROVAL_DELEGATE`, and `/delegate` control that
+retained supervision path. They do not add review to Auto or replace Ask's
+human approval. See [Approval modes](permissions.md#approval-modes).
 
 ### Reviewer
 
-The model named by `reviewer_model`. It answers [held calls](#held-call) as a
-[delegate](#delegate): approve, deny, or send to you. Sub-agents that edit
-files need one. See
-[Who decides a held call](permissions.md#who-decides-a-held-call).
+The model named by `reviewer_model`, used for explicitly supervised delegation.
+Default Auto and its write children do not require one.
+See [Approval modes](permissions.md#approval-modes).
 
 ### Trust
 
-Your permission for a project's configuration to take effect. A project
-file that declares anything sensitive (such as the model, providers, MCP
-servers, packs, or grants) does not load until you accept its exact content:
-the TUI asks, and `qq ask`, `qq run`, and `qq serve` exit until you run
-`qq trust`. Editing a sensitive part asks again. See
-[Project trust](permissions.md#project-trust).
+Your permission for sensitive project configuration to take effect. Untrusted
+sensitive settings stay disabled while task startup uses trusted configuration;
+QQ does not prompt merely to start Auto. Review those settings and run `qq trust`
+explicitly to enable them. Changing the sensitive content revokes that trust.
+See [Project trust](permissions.md#project-trust).

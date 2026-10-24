@@ -214,9 +214,8 @@ impl BuiltInTool {
             Self::Shell => ToolSpec::new(
                 "shell",
                 format!(
-                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus {}; name allowlisted variables in env. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The {} is killed on timeout or cancel.",
+                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The host controls environment inheritance; name explicitly permitted variables in env. Native Auto preserves normal tool configuration and filters credential-like environment names unless granted. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The {} is killed on timeout or cancel.",
                     if cfg!(windows) { "cmd /C" } else { "sh -c" },
-                    crate::BASE_ENV.join(" "),
                     if cfg!(windows) {
                         "owned process tree"
                     } else {

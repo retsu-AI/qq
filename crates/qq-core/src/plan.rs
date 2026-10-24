@@ -992,7 +992,7 @@ impl CompiledAgentPlan {
                     .replace("no shell interpretation", "arguments are literal")
                     .replace("Prefer it over shell for a single program such as", "Use it for a single program such as")
                     .replace("; reserve shell for pipelines", "")
-                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace with a cleared environment, a bounded timeout and bounded output.")),
+                    .replace("Same environment, timeout, and output rules as shell.", "Runs in the selected workspace under host environment policy, the task deadline or an earlier explicit timeout, and bounded output.")),
                 "write_file" if !has_read_file => Some(
                     "Create new workspace files (parents are created); use create_only to fail if a path exists. An existing file can be overwritten only with an independently known current content hash in if_hash; no file-reading tool is declared.".to_owned()
                 ),

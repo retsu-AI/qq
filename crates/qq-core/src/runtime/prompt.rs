@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(22) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(23) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 22. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 23. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -34,6 +34,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// 20 → 21 states actual read-only, unattended and declared-tool authority (AB4).
 /// 21 → 22 removes write-child guidance from read-only delegation and freezes
 /// the restricted spawn declaration to its actual authority (AB4).
+/// 22 → 23 describes native Auto execution and normal tool environments without
+/// a command-name veto or human approval wait.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -216,11 +218,11 @@ fn agent_prompt_prefix(
         String::new()
     } else {
         format!(
-            "{command_names} run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; "
+            "{command_names} run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; "
         )
     };
     let ask_description = if has("ask_user") {
-        "ask_user puts a bounded multiple-choice question to the user and waits for the answer; "
+        "ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; "
     } else {
         ""
     };
@@ -231,7 +233,7 @@ fn agent_prompt_prefix(
     };
     let has_fetch = specs.iter().any(|spec| spec.name() == "fetch");
     let fetch_description = if has_fetch {
-        "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused."
+        "fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused."
     } else {
         ""
     };
@@ -632,7 +634,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 22);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 23);
     }
 
     #[test]
