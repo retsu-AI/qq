@@ -935,10 +935,8 @@ fn homebrew_openssl_config(directory: &Path, prefix: &Path) -> io::Result<Option
 }
 
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
-    // EACCES keeps denied PATH candidates denied while allowing exec-search
-    // implementations (including libuv) to continue to an admitted executable.
     let mut profile = String::from(
-        "(version 1)\n(deny default (with errno 13))\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
+        "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
     // Darwin uname() needs these two names in addition to the OS/hardware
     // names above; Node's OS bootstrap calls it even for ordinary npm scripts.
@@ -1076,7 +1074,7 @@ mod tests {
             NativeNetwork::Isolated,
         )
         .unwrap();
-        assert!(text.contains("(deny default (with errno 13))"));
+        assert!(text.contains("(deny default)"));
         assert!(text.contains("(sysctl-name \"kern.hostname\")"));
         assert!(text.contains("(sysctl-name \"kern.version\")"));
         assert!(!text.contains("(sysctl-name-prefix \"kern.\")"));

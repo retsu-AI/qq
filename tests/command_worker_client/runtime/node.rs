@@ -150,6 +150,9 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
     )
     .unwrap();
+    #[cfg(target_os = "macos")]
+    assert_eq!(private_proof["code"], "EPERM");
+    #[cfg(target_os = "linux")]
     assert_eq!(private_proof["code"], "EACCES");
     assert_eq!(
         std::fs::read(&credential).unwrap(),
