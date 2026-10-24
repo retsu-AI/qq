@@ -3,7 +3,7 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::{
     io::Read,
     process::{Command, Stdio},
@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return Ok(Vec::new());
@@ -69,7 +69,7 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
     roots(&rustup, Path::new(text.trim_end()), control)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
     let mut child = command
         .stdin(Stdio::null())
@@ -161,7 +161,7 @@ fn roots(home: &Path, cargo: &Path, control: &Path) -> io::Result<Vec<PathBuf>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn conventional_rustup_works_when_client_starts_in_home() {
         const CHILD: &str = "QQ_UNIX_SDK_HOME_CHILD";

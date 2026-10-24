@@ -9,6 +9,7 @@ fn payload_probe() {
     else {
         return;
     };
+    std::fs::write("probe-group", rustix::process::getpgrp().to_string()).unwrap();
     match mode.as_str() {
         "groups" => {
             assert_eq!(
@@ -31,14 +32,98 @@ fn payload_probe() {
                 ),
                 "a payload must not kill its trusted cleanup guardian"
             );
-            assert!(matches!(
-                rustix::process::setsid(),
-                Err(rustix::io::Errno::PERM)
-            ));
+            let child = |mode: &str| {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command.args([
+                    "--exact",
+                    "macos::payload_probe",
+                    "--nocapture",
+                    "--skip",
+                    &format!("qq-macos-probe:{mode}"),
+                ]);
+                command
+            };
+            let inherited = child("group-child").output().unwrap();
+            assert!(
+                inherited.status.success(),
+                "{}",
+                String::from_utf8_lossy(&inherited.stderr)
+            );
+            let facts: (u32, i32) =
+                serde_json::from_slice(&std::fs::read("child-group").unwrap()).unwrap();
+            assert_ne!(facts.0 as i32, facts.1);
+            assert_eq!(facts.1, rustix::process::getpgrp().as_raw_nonzero().get());
+            std::fs::remove_file("child-group").unwrap();
+            for session in [false, true] {
+                spawned_child_keeps_seatbelt(session);
+            }
+            let session = child("setsid-child").output().unwrap();
+            assert!(
+                session.status.success(),
+                "{}",
+                String::from_utf8_lossy(&session.stderr)
+            );
             assert!(matches!(
                 rustix::process::setpgid(None, None),
                 Err(rustix::io::Errno::PERM)
             ));
+        }
+        "group-child" => {
+            std::fs::write(
+                "child-group",
+                serde_json::to_vec(&(
+                    std::process::id(),
+                    rustix::process::getpgrp().as_raw_nonzero().get(),
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        "spawn-pgroup-child" | "spawn-session-child" => {
+            let outside = std::fs::read_to_string("outside-path").unwrap();
+            for result in [
+                std::fs::read(&outside).map(|_| ()),
+                std::fs::write(&outside, b"escaped"),
+            ] {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+            let address = std::fs::read_to_string("tcp-address")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err()
+            );
+            let socket = std::fs::read_to_string("unix-address").unwrap();
+            assert!(std::os::unix::net::UnixStream::connect(socket).is_err());
+            std::fs::write(
+                mode.as_str(),
+                serde_json::to_vec(&(
+                    rustix::process::getpid().as_raw_nonzero().get(),
+                    rustix::process::getpgrp().as_raw_nonzero().get(),
+                    rustix::process::getsid(None)
+                        .unwrap()
+                        .as_raw_nonzero()
+                        .get(),
+                ))
+                .unwrap(),
+            )
+            .unwrap();
+            return;
+        }
+        "setsid-child" => {
+            let group = rustix::process::getpgrp();
+            assert_ne!(group, rustix::process::getpid());
+            assert!(matches!(
+                rustix::process::setsid(),
+                Err(rustix::io::Errno::PERM)
+            ));
+            assert_eq!(rustix::process::getpgrp(), group);
+            return;
         }
         "guardian-loss" => {
             use std::io::{Read as _, Write as _};
@@ -84,6 +169,34 @@ fn payload_probe() {
             );
             assert!(std::os::unix::net::UnixStream::connect("socket").is_err());
         }
+        "memory" => {
+            println!("native pressure probe started");
+            let mut memory = vec![0_u8; 256 * 1024 * 1024];
+            for byte in memory.iter_mut().step_by(4096) {
+                *byte = 1;
+            }
+            std::fs::write("pressure-ready", "memory").unwrap();
+            std::hint::black_box(&memory);
+            loop {
+                std::thread::park();
+            }
+        }
+        "threads" => {
+            println!("native pressure probe started");
+            let mut threads = Vec::new();
+            for _ in 0..32 {
+                threads.push(std::thread::spawn(|| {
+                    loop {
+                        std::thread::park();
+                    }
+                }));
+            }
+            std::fs::write("pressure-ready", "threads").unwrap();
+            std::hint::black_box(&threads);
+            loop {
+                std::thread::park();
+            }
+        }
         "descriptors" => {
             let fd = std::fs::read_to_string("inherited-fd").unwrap();
             let opened = std::fs::File::open(format!("/dev/fd/{fd}"));
@@ -97,6 +210,95 @@ fn payload_probe() {
     std::fs::write("probe-result", "enforced").unwrap();
 }
 
+// Wait on this exact child before returning. The fallback also reaps it if an
+// assertion fails, so this fixture never relies on group cleanup for detachment.
+struct SpawnedProbe(nix::unistd::Pid);
+impl Drop for SpawnedProbe {
+    fn drop(&mut self) {
+        let _ = nix::sys::signal::kill(self.0, nix::sys::signal::Signal::SIGKILL);
+        while let Err(nix::errno::Errno::EINTR) = nix::sys::wait::waitpid(self.0, None) {}
+    }
+}
+
+fn spawned_child_keeps_seatbelt(session: bool) {
+    use nix::spawn::{PosixSpawnAttr, PosixSpawnFileActions, PosixSpawnFlags, posix_spawn};
+    use std::{ffi::CString, os::unix::ffi::OsStrExt as _};
+    let mode = if session {
+        "spawn-session-child"
+    } else {
+        "spawn-pgroup-child"
+    };
+    let executable = std::env::current_exe().unwrap();
+    let executable = CString::new(executable.as_os_str().as_bytes()).unwrap();
+    let args = [
+        executable.clone(),
+        CString::new("--exact").unwrap(),
+        CString::new("macos::payload_probe").unwrap(),
+        CString::new("--nocapture").unwrap(),
+        CString::new("--skip").unwrap(),
+        CString::new(format!("qq-macos-probe:{mode}")).unwrap(),
+    ];
+    let environment = std::env::vars_os()
+        .map(|(mut name, value)| {
+            name.push("=");
+            name.push(value);
+            CString::new(name.as_bytes()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut attributes = PosixSpawnAttr::init().unwrap();
+    let flags = if session {
+        // Darwin's public POSIX_SPAWN_SETSID, absent from nix's named flags.
+        // apple-oss-distributions/xnu: bsd/sys/spawn.h
+        PosixSpawnFlags::from_bits_retain(0x0400)
+    } else {
+        attributes
+            .set_pgroup(nix::unistd::Pid::from_raw(0))
+            .unwrap();
+        PosixSpawnFlags::POSIX_SPAWN_SETPGROUP
+    };
+    attributes.set_flags(flags).unwrap();
+    let actions = PosixSpawnFileActions::init().unwrap();
+    let child = SpawnedProbe(
+        posix_spawn(
+            executable.as_c_str(),
+            &actions,
+            &attributes,
+            &args,
+            &environment,
+        )
+        .unwrap(),
+    );
+    let status = loop {
+        match nix::sys::wait::waitpid(child.0, None) {
+            Err(nix::errno::Errno::EINTR) => continue,
+            result => break result.unwrap(),
+        }
+    };
+    // The PID is no longer ours after the successful reap.
+    std::mem::forget(child);
+    assert!(
+        matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+        "{status:?}"
+    );
+    let facts: (i32, i32, i32) = serde_json::from_slice(&std::fs::read(mode).unwrap()).unwrap();
+    assert_eq!(
+        facts.0, facts.1,
+        "spawned child must lead a different group"
+    );
+    assert_ne!(facts.1, rustix::process::getpgrp().as_raw_nonzero().get());
+    if session {
+        assert_eq!(facts.0, facts.2, "SETSID child must lead its own session");
+    } else {
+        assert_eq!(
+            facts.2,
+            rustix::process::getsid(None)
+                .unwrap()
+                .as_raw_nonzero()
+                .get()
+        );
+    }
+}
+
 async fn fixture_command(
     workspace: &std::path::Path,
     arguments: serde_json::Value,
@@ -104,6 +306,28 @@ async fn fixture_command(
     isolated: bool,
     restricted: bool,
     additional_read_only: &[std::path::PathBuf],
+) -> qq_core::command_owner::CommandResult {
+    fixture_command_with_resources(
+        workspace,
+        arguments,
+        tool,
+        isolated,
+        restricted,
+        additional_read_only,
+        qq_core::command_owner::NativeResources::Host,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fixture_command_with_resources(
+    workspace: &std::path::Path,
+    arguments: serde_json::Value,
+    tool: &str,
+    isolated: bool,
+    restricted: bool,
+    additional_read_only: &[std::path::PathBuf],
+    resources: qq_core::command_owner::NativeResources,
 ) -> qq_core::command_owner::CommandResult {
     let root = tempfile::tempdir().unwrap();
     let worker = client::CommandWorker::new(
@@ -157,7 +381,7 @@ async fn fixture_command(
         } else {
             qq_core::command_owner::NativeFilesystem::Host
         },
-        resources: qq_core::command_owner::NativeResources::Host,
+        resources,
         not_after_ms: None,
     };
     worker.submit(request.clone()).await.unwrap();
@@ -181,12 +405,37 @@ fn probe(mode: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn payload_cannot_leave_the_owned_process_group() {
+async fn spawn_attributes_preserve_seatbelt_outside_the_owned_group() {
     let root = tempfile::tempdir().unwrap();
-    let result = fixture_command(root.path(), probe("groups"), "exec", false, false, &[]).await;
+    let workspace = root.path().join("task");
+    std::fs::create_dir(&workspace).unwrap();
+    let secret = root.path().canonicalize().unwrap().join("secret");
+    std::fs::write(&secret, b"host secret").unwrap();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let socket = root.path().join("host.sock");
+    let _unix = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    drop(std::net::TcpStream::connect(tcp.local_addr().unwrap()).unwrap());
+    drop(std::os::unix::net::UnixStream::connect(&socket).unwrap());
+    std::fs::write(workspace.join("outside-path"), secret.to_str().unwrap()).unwrap();
+    std::fs::write(
+        workspace.join("tcp-address"),
+        tcp.local_addr().unwrap().to_string(),
+    )
+    .unwrap();
+    std::fs::write(workspace.join("unix-address"), socket.to_str().unwrap()).unwrap();
+    let executable = std::env::current_exe().unwrap();
+    let result = fixture_command(
+        &workspace,
+        probe("groups"),
+        "exec",
+        true,
+        true,
+        &[executable.parent().unwrap().to_owned()],
+    )
+    .await;
     assert!(!result.is_error(), "{}", result.text());
     assert_eq!(
-        std::fs::read_to_string(root.path().join("probe-result")).unwrap(),
+        std::fs::read_to_string(workspace.join("probe-result")).unwrap(),
         "enforced"
     );
 }
@@ -409,4 +658,120 @@ async fn worker_death_leaves_the_guardian_alive_until_every_payload_process_exit
     result
         .expect("native worker-loss fixture exceeded its deadline")
         .unwrap();
+}
+
+#[tokio::test]
+async fn guarded_commands_complete_and_resource_pressure_stops_the_owned_group() {
+    use qq_core::command_owner::NativeResources;
+    let refused = tempfile::tempdir().unwrap();
+    let result = fixture_command_with_resources(
+        refused.path(),
+        serde_json::json!({"command":"printf escaped > forbidden"}),
+        "shell",
+        false,
+        false,
+        &[],
+        NativeResources::Guarded {
+            memory_bytes: 256 * 1024 * 1024,
+            max_tasks: 16,
+        },
+    )
+    .await;
+    assert!(result.is_error(), "{}", result.text());
+    assert!(
+        result.text().contains("restricted filesystem authority"),
+        "{}",
+        result.text()
+    );
+    assert!(!refused.path().join("forbidden").exists());
+    let executable = std::env::current_exe().unwrap();
+    let executable_directory = executable.parent().unwrap().to_owned();
+    for mode in ["groups", "memory", "threads"] {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        std::fs::write(&secret, b"host secret").unwrap();
+        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let socket = outside.path().join("host.sock");
+        let _unix = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        drop(std::net::TcpStream::connect(tcp.local_addr().unwrap()).unwrap());
+        drop(std::os::unix::net::UnixStream::connect(&socket).unwrap());
+        std::fs::write(
+            workspace.path().join("outside-path"),
+            secret.to_str().unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join("tcp-address"),
+            tcp.local_addr().unwrap().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.path().join("unix-address"),
+            socket.to_str().unwrap(),
+        )
+        .unwrap();
+        let result = fixture_command_with_resources(
+            workspace.path(),
+            probe(mode),
+            "exec",
+            true,
+            true,
+            std::slice::from_ref(&executable_directory),
+            NativeResources::Guarded {
+                memory_bytes: 256 * 1024 * 1024,
+                max_tasks: 16,
+            },
+        )
+        .await;
+        if mode == "groups" {
+            assert!(!result.is_error(), "{}", result.text());
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("probe-result")).unwrap(),
+                "enforced"
+            );
+        } else {
+            assert!(result.is_error(), "{}", result.text());
+            assert!(
+                result.text().contains("native pressure probe started"),
+                "{}",
+                result.text()
+            );
+            assert!(
+                result.text().contains("native resource safeguard"),
+                "{}",
+                result.text()
+            );
+            let group = std::fs::read_to_string(workspace.path().join("probe-group"))
+                .unwrap()
+                .parse::<i32>()
+                .unwrap();
+            nix::errno::Errno::clear();
+            let members =
+                libproc::processes::pids_by_type(libproc::processes::ProcFilter::ByProgramGroup {
+                    pgrpid: group as u32,
+                })
+                .unwrap();
+            assert!(
+                (members.is_empty() || members.len() < members.capacity()) && members.len() <= 4096
+            );
+            for pid in members {
+                match libproc::proc_pid::pidinfo::<libproc::bsd_info::BSDInfo>(pid as i32, 1) {
+                    Ok(info) => assert!(
+                        info.pbi_pgid != group as u32 || info.pbi_status == nix::libc::SZOMB,
+                        "resource termination left a live group member: {pid}"
+                    ),
+                    Err(error) => assert!(
+                        matches!(
+                            rustix::process::getpgid(Some(
+                                rustix::process::Pid::from_raw(pid as i32).unwrap()
+                            )),
+                            Err(rustix::io::Errno::SRCH)
+                        ),
+                        "could not prove process exit for {pid}: {error}"
+                    ),
+                }
+            }
+        }
+    }
 }

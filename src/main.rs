@@ -568,7 +568,7 @@ async fn prepare_headless(
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
             runtime::RuntimeHandlerError::NativeCommands(error) => harness(error.to_string()),
-            #[cfg(any(target_os = "linux", windows))]
+            #[cfg(any(target_os = "linux", target_os = "macos", windows))]
             runtime::RuntimeHandlerError::TaskPreparation(error) => harness(error.to_string()),
         })?;
 

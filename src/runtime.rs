@@ -51,7 +51,7 @@ use crate::{
     },
 };
 
-#[cfg(any(target_os = "linux", all(target_os = "macos", test)))]
+#[cfg(unix)]
 #[path = "runtime/unix_sdk.rs"]
 mod unix_sdk;
 
@@ -3117,9 +3117,8 @@ impl RuntimeHandler {
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
-        // Native backends share task ownership and publication; resource units
-        // retain each backend's kernel accounting semantics.
-        #[cfg(any(target_os = "linux", windows))]
+        // Native policy retains kernel limits or explicit sampled safeguards.
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3418,7 +3417,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
-    #[cfg(any(target_os = "linux", windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
@@ -3461,7 +3460,7 @@ fn windows_toolchain_read_roots(bin: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-#[cfg(any(target_os = "linux", windows))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
@@ -3492,6 +3491,7 @@ fn task_workspace_policy(
             "/lib64",
             "/nix/store",
             "/System/Library",
+            "/System/Cryptexes/OS",
             "/Library/Developer/CommandLineTools",
         ] {
             match std::fs::canonicalize(candidate) {
@@ -3502,7 +3502,7 @@ fn task_workspace_policy(
                 Err(error) => return Err(error),
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             let roots = unix_sdk::discover(&directory)?;
             if let Some(bin) = roots.first() {
@@ -3612,6 +3612,11 @@ fn task_workspace_policy(
                 memory_bytes: 4 * 1024 * 1024 * 1024,
                 max_processes: 512,
                 cpu_percent: 90,
+            },
+            #[cfg(target_os = "macos")]
+            resources: qq_core::command_owner::NativeResources::Guarded {
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                max_tasks: 512,
             },
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
