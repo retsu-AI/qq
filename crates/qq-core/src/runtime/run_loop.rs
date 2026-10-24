@@ -1057,22 +1057,27 @@ impl RunState {
                             }
                             slice.pending_notice = Some(notice);
                         }
-                        let request_system: Arc<str> = if budget_final_turn {
-                            Arc::from(format!("{system}\n\n{BUDGET_FINAL_RESPONSE_NOTICE}"))
-                        } else {
-                            Arc::clone(system)
-                        };
+                        // The budget-final notice is a message too, placed last and
+                        // persisted with this turn's ordered notices so a later run
+                        // replays it where the model saw it.
+                        if budget_final_turn {
+                            let text = BUDGET_FINAL_RESPONSE_NOTICE.to_owned();
+                            let message = Message::user(text.clone());
+                            window.irreducible_message_bytes =
+                                window.irreducible_message_bytes.saturating_add(measure_message(&message));
+                            Arc::make_mut(messages).push(message);
+                            slice.pending_goal_notices.push(runtime::OrderedTurnNotice {
+                                text, preceding_deliveries: slice.pending_deliveries,
+                            });
+                        }
+                        let request_system: Arc<str> = Arc::clone(system);
                         // A budget-final turn keeps its tools declared and asks for
                         // none: dropping them is rejected by Bedrock once history
                         // holds tool calls, and an unchanged tool block keeps its
                         // cache entry. A call the model makes anyway still settles
                         // the run (below), so the choice is advice, not the bound.
                         let request_has_tools = allow_tools;
-                        let request_system_hash = if budget_final_turn {
-                            ContentHash::from_bytes(Sha256::digest(request_system.as_bytes()).into())
-                        } else {
-                            system_prompt_hash
-                        };
+                        let request_system_hash = system_prompt_hash;
                         let system_bytes = u64::try_from(request_system.len())
                             .unwrap_or(u64::MAX)
                             .saturating_add(CONTEXT_BLOCK_FRAMING_BYTES);
