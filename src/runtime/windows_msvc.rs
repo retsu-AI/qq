@@ -184,9 +184,45 @@ pub(super) fn discover(control: &Path) -> io::Result<Option<Inputs>> {
             .ok_or_else(|| io::Error::other("compiler metadata frame missing"))?,
     )
     .map_err(io::Error::other)?;
-    metadata
-        .map(|metadata| validate(metadata, &program_files, control))
-        .transpose()
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    if !conventional_selection(&metadata.linker, &program_files, control)? {
+        return Ok(None);
+    }
+    validate(metadata, &program_files, control).map(Some)
+}
+
+fn conventional_selection(linker: &Path, roots: &[PathBuf], control: &Path) -> io::Result<bool> {
+    if !linker.is_absolute()
+        || linker.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(denied());
+    }
+    let parent = linker.parent().ok_or_else(denied)?;
+    let canonical = parent.canonicalize()?;
+    let control = control.canonicalize()?;
+    if canonical.starts_with(&control) || control.starts_with(&canonical) {
+        return Err(denied());
+    }
+    let starts = |path: &Path, prefix: &Path| {
+        let mut path = dunce::simplified(path).components();
+        dunce::simplified(prefix).components().all(|part| {
+            path.next()
+                .is_some_and(|actual| actual.as_os_str().eq_ignore_ascii_case(part.as_os_str()))
+        })
+    };
+    // Registered installations elsewhere remain usable by the host, but do not
+    // become an automatic task grant or prevent unrelated QQ startup.
+    Ok(roots.iter().any(|root| {
+        let selected = root.join("Microsoft Visual Studio");
+        starts(parent, &selected) || starts(&canonical, &selected)
+    }))
 }
 
 #[derive(Clone, Copy)]
@@ -430,6 +466,48 @@ mod tests {
         let mut unrelated = metadata();
         unrelated.libraries = vec![control];
         assert!(validate(unrelated, &[program_files], &root.join("other-control")).is_err());
+    }
+
+    #[test]
+    fn unsupported_msvc_selection_skips_without_skipping_control_or_malformed_refusals() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let program_files = root.join("Program Files");
+        let custom = root.join("Custom Visual Studio").join("bin");
+        let control = root.join("private-control");
+        for path in [&program_files, &custom, &control] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let linker = custom.join("link.exe");
+        std::fs::write(&linker, b"owned unsupported image").unwrap();
+        assert!(
+            !conventional_selection(&linker, std::slice::from_ref(&program_files), &control)
+                .unwrap()
+        );
+        assert!(
+            conventional_selection(
+                &control.join("link.exe"),
+                std::slice::from_ref(&program_files),
+                &control
+            )
+            .is_err()
+        );
+        assert!(
+            conventional_selection(
+                Path::new("relative/link.exe"),
+                std::slice::from_ref(&program_files),
+                &control
+            )
+            .is_err()
+        );
+        assert!(
+            conventional_selection(
+                &custom.join("..").join("bin").join("link.exe"),
+                &[program_files],
+                &control
+            )
+            .is_err()
+        );
     }
 
     #[test]
