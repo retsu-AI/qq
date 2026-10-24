@@ -39,7 +39,7 @@ jobs:
           $normalized = $adapter.Replace([IO.Path]::DirectorySeparatorChar, [char]'/')
           "[patch.`"https://github.com/retsu-AI/rappct`"]`nrappct = { path = `"$normalized`" }" | Set-Content -LiteralPath $config -Encoding utf8NoBOM
           "QQ_RAPPCT_PATCH=$config" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          cargo update --offline --config $config -p rappct
+          cargo update --config $config -p rappct
           exit $LASTEXITCODE
       - name: Build exact payload probes and durable worker
         run: |
