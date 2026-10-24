@@ -248,6 +248,35 @@ async fn task_hosting_reauthorizes_after_preparation_before_native_submission() 
             );
         }
         drop(submissions);
+        // This fixture manually claimed the run instead of giving it to the
+        // scheduler. Settle its refused call and run before shutdown waits on it.
+        runtime
+            .inner
+            .store
+            .finish_tool_call(
+                &claimed,
+                id,
+                output.model_text,
+                true,
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        runtime
+            .inner
+            .store
+            .finish_run(
+                &claimed,
+                RunOutcome::Completed,
+                None,
+                TeardownComplete::nothing_ran(),
+            )
+            .await
+            .unwrap();
         drop(permit);
         runtime.shutdown().await.unwrap();
     }
