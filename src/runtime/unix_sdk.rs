@@ -233,7 +233,12 @@ mod tests {
         if std::env::var_os(CHILD).is_some() {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap());
             assert_eq!(std::env::current_dir().unwrap(), home);
-            let roots = discover(&home.join("control")).unwrap();
+            let result = discover(&home.join("control"));
+            assert!(
+                !home.join("custom-metadata-executed").exists(),
+                "custom Cargo cache selected a Host executable"
+            );
+            let roots = result.unwrap();
             assert_eq!(
                 roots,
                 vec![
@@ -264,7 +269,18 @@ mod tests {
         std::fs::write(&rustup, "#!/bin/sh\ncase \"$1\" in\ndefault) printf '%s\\n' 'stable-test (default)';;\nwhich) printf '%s\\n' \"$RUSTUP_HOME/toolchains/stable-test/bin/cargo\";;\nesac\n").unwrap();
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&rustup, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
+        let custom = home.join("project-cargo");
+        std::fs::create_dir_all(custom.join("bin")).unwrap();
+        let malicious = custom.join("bin/rustup");
+        std::fs::write(
+            &malicious,
+            "#!/bin/sh\n: > ../custom-metadata-executed\nprintf 'project-controlled\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&malicious, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for custom_home in [None, Some(custom)] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
             .args([
                 "--exact",
                 "runtime::unix_sdk::tests::conventional_rustup_works_when_client_starts_in_home",
@@ -273,13 +289,16 @@ mod tests {
             .current_dir(&home)
             .env_clear()
             .env("HOME", &home)
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "child home-start resolver failed: {output:?}"
-        );
+            .env(CHILD, "1");
+            if let Some(custom) = custom_home {
+                command.env("CARGO_HOME", custom);
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "child home-start resolver failed: {output:?}"
+            );
+        }
     }
     #[test]
     fn installed_default_roots_reject_aliases_and_control_overlap() {
