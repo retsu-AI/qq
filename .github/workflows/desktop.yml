@@ -57,3 +57,58 @@ jobs:
           name: qq-desktop-nsis
           path: apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error
+
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.10.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android SDK and NDK
+        run: |
+          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
+          echo "NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          rustup target add aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:version
+      - name: Verify mobile dependency boundary
+        run: |
+          cargo tree --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --edges normal --prefix none > /tmp/qq-mobile-dependencies.txt
+          # Allow-list: only the remote client and its wire types may reach a
+          # phone; any other workspace crate is host engine code.
+          if grep -E '^qq-' /tmp/qq-mobile-dependencies.txt | grep -Ev '^qq-(desktop|client|protocol) '; then
+            echo 'The mobile build must not link the workspace crates listed above.'
+            exit 1
+          fi
+      # The desktop job's clippy never compiles the `cfg(mobile)` entry point.
+      - name: Clippy (Android)
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib -- -D warnings
+      - name: Build debug APK (no engine sidecar or distribution keys)
+        run: pnpm tauri android build --ci --debug --apk --target aarch64 -- --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qq-android-debug
+          path: apps/desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

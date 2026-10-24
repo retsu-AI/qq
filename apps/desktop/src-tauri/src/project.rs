@@ -33,7 +33,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{
+use crate::desktop::{
     engine::Engine,
     view::{self, ConnectionDto, ModelDto, NoticeDto, ProjectStateDto, SkillDto},
 };
@@ -105,8 +105,8 @@ pub enum UiCommand {
         session_id: SessionId,
         objective: String,
         check: Option<qq_protocol::GoalCheck>,
-        preset: crate::goals::BudgetPreset,
-        defaults: crate::goals::GoalDefaultsDto,
+        preset: crate::desktop::goals::BudgetPreset,
+        defaults: crate::desktop::goals::GoalDefaultsDto,
         expected: Option<qq_protocol::GoalIdentity>,
         replace: bool,
         reply: SubmissionReply,
@@ -438,7 +438,7 @@ impl Project {
                 // recommended model, then whatever the catalog lists first.
                 let valid = |id: &String| self.models.iter().any(|m| &view::model_id(m) == id);
                 let recommended = self.models.iter().find_map(|option| {
-                    crate::auth::recommended_model(&option.provider).filter(|id| valid(id))
+                    crate::desktop::auth::recommended_model(&option.provider).filter(|id| valid(id))
                 });
                 self.selected_model = self
                     .selected_model
@@ -617,7 +617,7 @@ impl Project {
                     if let Some(app) = &self.app {
                         let _ = app.emit("attention", attention.summary());
                         if app
-                            .state::<crate::AppState>()
+                            .state::<crate::desktop::AppState>()
                             .notifications_enabled
                             .load(Ordering::Relaxed)
                             && !self.attentive.load(Ordering::Relaxed)
@@ -775,14 +775,18 @@ impl Project {
                 // Editing rebases on the current budget; a first goal or a
                 // replacement starts from the configured defaults.
                 let base = current.filter(|_| !replace).map(|goal| &goal.budget);
-                let budget =
-                    match crate::goals::budget(preset, &defaults, base, crate::goals::now_ms()) {
-                        Ok(budget) => budget,
-                        Err(error) => {
-                            let _ = reply.send(Err(error));
-                            return;
-                        }
-                    };
+                let budget = match crate::desktop::goals::budget(
+                    preset,
+                    &defaults,
+                    base,
+                    crate::desktop::goals::now_ms(),
+                ) {
+                    Ok(budget) => budget,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
                 self.command(
                     client,
                     SessionCommand::SetGoal {
@@ -1392,8 +1396,8 @@ mod submission_tests {
         project
     }
 
-    fn goal_defaults() -> crate::goals::GoalDefaultsDto {
-        crate::goals::GoalDefaultsDto::from_config(&qq_config::GoalsConfig::default())
+    fn goal_defaults() -> crate::desktop::goals::GoalDefaultsDto {
+        crate::desktop::goals::GoalDefaultsDto::from_config(&qq_config::GoalsConfig::default())
     }
 
     #[tokio::test]
@@ -1408,7 +1412,7 @@ mod submission_tests {
                 session_id: SessionId::from_bytes([7; 16]),
                 objective: "ship".into(),
                 check: None,
-                preset: crate::goals::BudgetPreset::Focused,
+                preset: crate::desktop::goals::BudgetPreset::Focused,
                 defaults: goal_defaults(),
                 expected: Some(qq_protocol::GoalIdentity {
                     goal_id: qq_protocol::GoalId::from_bytes([1; 16]),
@@ -1432,14 +1436,14 @@ mod submission_tests {
         let mut project = goal_project();
         let (reply, _answered) = oneshot::channel();
         let session_id = SessionId::from_bytes([7; 16]);
-        let before = crate::goals::now_ms();
+        let before = crate::desktop::goals::now_ms();
         project.apply_command(
             &client,
             UiCommand::SetGoal {
                 session_id,
                 objective: "ship".into(),
                 check: None,
-                preset: crate::goals::BudgetPreset::Focused,
+                preset: crate::desktop::goals::BudgetPreset::Focused,
                 defaults: goal_defaults(),
                 expected: None,
                 replace: false,

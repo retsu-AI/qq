@@ -13,10 +13,20 @@ license = "MIT"
 repository = "https://github.com/retsu-AI/qq"
 publish = false
 
+[lib]
+name = "qq_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+# Engine discovery, local configuration/auth, filesystem and desktop plugins
+# cannot become transitive dependencies of a phone binary.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 qq-auth = { path = "../../../crates/qq-auth" }
 qq-client = { path = "../../../crates/qq-client" }
 qq-config = { path = "../../../crates/qq-config" }
@@ -25,16 +35,14 @@ qq-protocol = { path = "../../../crates/qq-protocol" }
 qq-server = { path = "../../../crates/qq-server" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "process", "sync", "time"] }
 
-[dev-dependencies]
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dev-dependencies]
 ts-rs = { version = "11", features = ["serde-json-impl"] }
 
 # Mirrors the engine's release profile (see the root Cargo.toml).

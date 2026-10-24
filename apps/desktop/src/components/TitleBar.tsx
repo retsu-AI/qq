@@ -3,25 +3,14 @@ import clsx from "clsx";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowLeft, ArrowRight, Copy, Minus, PanelLeft, Square, X } from "lucide-react";
 import { Logo } from "./Logo";
+import { platform } from "../lib/platform";
 
-export type MenuItem =
-  | {
-      label: string;
-      shortcut?: string;
-      onSelect: () => void;
-      disabled?: boolean;
-      checked?: boolean;
-    }
-  | "separator";
+import { phoneMenus, type Menu } from "../lib/menu";
 
-export interface Menu {
-  label: string;
-  /** Alt plus this key opens the menu. */
-  mnemonic: string;
-  items: MenuItem[];
-}
+export type { Menu, MenuItem } from "../lib/menu";
 
-const appWindow = getCurrentWindow();
+// Resolved on use: the browser rendering fixture has no Tauri window.
+const appWindow = () => getCurrentWindow();
 
 /**
  * The window's own title bar (decorations are off): navigation, the menu bar,
@@ -43,14 +32,27 @@ export function TitleBar({
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
-    void appWindow.isMaximized().then(setMaximized);
-    const stop = appWindow.onResized(() => {
-      void appWindow.isMaximized().then(setMaximized);
+    if (platform.mobile) return;
+    void appWindow().isMaximized().then(setMaximized);
+    const stop = appWindow().onResized(() => {
+      void appWindow().isMaximized().then(setMaximized);
     });
     return () => {
       void stop.then((unlisten) => unlisten());
     };
   }, []);
+
+  if (platform.mobile) return (
+    <header className="mobile-titlebar flex shrink-0 items-center border-b border-line bg-sidebar">
+      <BarButton label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+        onClick={toggleSidebar} pressed={sidebarOpen}>
+        <PanelLeft className="h-5 w-5" />
+      </BarButton>
+      <Logo className="mx-2 h-5 w-5" />
+      <div className="flex-1" />
+      <MenuBar menus={phoneMenus(menus)} />
+    </header>
+  );
 
   return (
     <header
@@ -76,12 +78,12 @@ export function TitleBar({
       </div>
       <div data-tauri-drag-region className="h-full flex-1" />
       <div className="flex h-full">
-        <Caption label="Minimize" onClick={() => void appWindow.minimize()}>
+        <Caption label="Minimize" onClick={() => void appWindow().minimize()}>
           <Minus className="h-4 w-4" />
         </Caption>
         <Caption
           label={maximized ? "Restore" : "Maximize"}
-          onClick={() => void appWindow.toggleMaximize()}
+          onClick={() => void appWindow().toggleMaximize()}
         >
           {maximized ? (
             <Copy className="h-3.5 w-3.5 -scale-x-100" />
@@ -89,7 +91,7 @@ export function TitleBar({
             <Square className="h-3.5 w-3.5" />
           )}
         </Caption>
-        <Caption label="Close" danger onClick={() => void appWindow.close()}>
+        <Caption label="Close" danger onClick={() => void appWindow().close()}>
           <X className="h-4 w-4" />
         </Caption>
       </div>
@@ -263,7 +265,11 @@ function MenuBar({ menus }: { menus: Menu[] }) {
                 event.preventDefault();
                 event.stopPropagation();
               }}
-              className="animate-pop-down absolute left-0 top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none"
+              className={clsx(
+                "animate-pop-down absolute top-full z-50 mt-1 min-w-[248px] rounded-xl border border-line-strong bg-raised p-1 text-[13px] text-fg shadow-popover outline-none",
+                // The phone menu sits at the bar's right edge.
+                platform.mobile ? "right-0" : "left-0",
+              )}
             >
               {menu.items.map((item, itemIndex) =>
                 item === "separator" ? (
@@ -284,7 +290,7 @@ function MenuBar({ menus }: { menus: Menu[] }) {
                   >
                     <span className="w-3 text-accent">{item.checked ? "•" : ""}</span>
                     <span className="flex-1">{item.label}</span>
-                    {item.shortcut && (
+                    {item.shortcut && !platform.mobile && (
                       <span className="font-mono text-[11px] text-faint">{item.shortcut}</span>
                     )}
                   </div>

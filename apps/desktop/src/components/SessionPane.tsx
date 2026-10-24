@@ -45,6 +45,7 @@ import { toast } from "../lib/toast";
 import { Starters } from "./Starters";
 import { Transcript } from "./Transcript";
 import { TrustPrompt } from "./TrustPrompt";
+import { platform } from "../lib/platform";
 
 export function SessionPane({
   project,
@@ -133,7 +134,7 @@ function SessionView({
           goalOpen={goalOpen}
         />
         <TranscriptScroller project={project} transcript={transcript} />
-        <div className="mx-auto w-full max-w-[860px] px-6 pb-5">
+        <div className="composer-dock mx-auto w-full max-w-[860px] px-6 pb-5">
           <SideQuestions project={project} transcript={transcript} />
           <CheckInterruptionBanner project={project} />
           <NoticeLine project={project} />
@@ -210,6 +211,8 @@ function Landing({ project }: { project: ProjectState }) {
 }
 
 function ConnectProvider() {
+  if (!platform.features.hostConfiguration)
+    return <p className="text-center text-muted">Configure a model provider on the computer running QQ.</p>;
   return (
     <div className="mx-auto max-w-[460px] rounded-xl border border-line-strong bg-raised px-6 py-5 text-center">
       <KeyRound className="mx-auto mb-3 h-5 w-5 text-accent" />
@@ -249,7 +252,7 @@ function Header({
   )?.active_tool;
 
   return (
-    <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line px-5">
+    <header className="session-header flex h-12 shrink-0 items-center gap-3 border-b border-line px-5">
       <h2 className="min-w-0 flex-1 truncate text-[14px] font-medium">
         {transcript.title}
       </h2>
@@ -265,7 +268,7 @@ function Header({
         </span>
       )}
       <span
-        className="text-[12px] text-faint"
+        className="session-model text-[12px] text-faint"
         title={transcript.model ?? undefined}
       >
         {modelLabel(transcript.model, project.models)}
@@ -277,19 +280,19 @@ function Header({
           toggle={() => toggleGoalPanel(transcript.session_id)}
         />
       )}
-      <GitStrip
+      {platform.features.git && <GitStrip
         projectId={project.project_id}
         sessionTitle={transcript.title}
         refreshKey={`${transcript.session_id}:${transcript.status}:${transcript.items.length}`}
-      />
-      <button
+      />}
+      {platform.features.editor && <button
         onClick={() => void openInEditor(project.project_id)}
         aria-label="Open in editor"
         title="Open the project in your editor (Ctrl Shift E)"
         className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-hover hover:text-fg"
       >
         <Code2 className="h-3.5 w-3.5" />
-      </button>
+      </button>}
       <button
         onClick={toggleChanges}
         aria-pressed={changesOpen}

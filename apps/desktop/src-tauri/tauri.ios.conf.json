@@ -1,0 +1,11 @@
+{
+  "identifier": "ai.qq.mobile",
+  "app": {
+    "windows": [{ "label": "main", "title": "QQ" }]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "externalBin": []
+  }
+}

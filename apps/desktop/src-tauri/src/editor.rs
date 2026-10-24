@@ -75,7 +75,7 @@ pub fn open(root: &Path, relative: Option<&str>) -> Result<&'static str, EditorE
     let (label, launcher) = find(std::env::var_os("PATH")).ok_or(EditorError::NotFound)?;
     let mut command = Command::new(&launcher);
     // Editors expect ordinary paths, not Windows' verbatim `\\?\` form.
-    let plain = |path: &Path| crate::view::display_path(path);
+    let plain = |path: &Path| crate::desktop::view::display_path(path);
     // Open the project folder too, so a file lands in its workspace window.
     if target != root {
         command.arg(plain(root));

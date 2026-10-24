@@ -3,7 +3,10 @@ import { createRoot } from "react-dom/client";
 import { lazy, Suspense, useEffect, useState, type ComponentType } from "react";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
-import { Sidebar } from "../src/components/Sidebar";
+import { Navigation } from "../src/components/Navigation";
+import { configurePlatform, platform, watchMobileViewport } from "../src/lib/platform";
+import { TitleBar, type Menu } from "../src/components/TitleBar";
+import { Welcome } from "../src/components/Welcome";
 import { SessionPane } from "../src/components/SessionPane";
 import { Settings } from "../src/components/Settings";
 import type { Item, ProjectState } from "../src/lib/types";
@@ -13,12 +16,16 @@ import { showWorktreeDialog } from "../src/lib/worktree-dialog";
 import { showProviders, start } from "../src/lib/store";
 import "../src/styles.css";
 
+configurePlatform(new URLSearchParams(location.search).get("platform") ?? "desktop");
+watchMobileViewport();
+
 const count = Math.min(
   8192,
   Math.max(1, Number(new URLSearchParams(location.search).get("rows") ?? 2048)),
 );
 const running = new URLSearchParams(location.search).has("running");
 const baseline = new URLSearchParams(location.search).has("baseline");
+const welcome = new URLSearchParams(location.search).has("welcome");
 const baselinePath = "/src-tauri/target/qq-perf/baseline.tsx";
 const Baseline = lazy<
   ComponentType<{
@@ -303,7 +310,48 @@ if (new URLSearchParams(location.search).has("approval"))
       grant_label: "echo fixture",
     },
   });
+/** A menu bar with desktop-only items, to show what phones fold away. */
+function fixtureMenus(openSettings: () => void): Menu[] {
+  const none = () => undefined;
+  return [
+    {
+      label: "File",
+      mnemonic: "f",
+      items: [
+        { label: "New session", shortcut: "Ctrl N", onSelect: none },
+        { label: "Open project…", desktopOnly: true, onSelect: none },
+        "separator",
+        { label: "Settings…", shortcut: "Ctrl ,", onSelect: openSettings },
+      ],
+    },
+    {
+      label: "Edit",
+      mnemonic: "e",
+      items: [
+        { label: "Undo", desktopOnly: true, onSelect: none },
+        { label: "Paste", desktopOnly: true, onSelect: none },
+      ],
+    },
+    {
+      label: "View",
+      mnemonic: "v",
+      items: [
+        { label: "System theme", checked: true, onSelect: none },
+        { label: "Dark theme", checked: false, onSelect: none },
+        "separator",
+        { label: "Zoom in", desktopOnly: true, onSelect: none },
+      ],
+    },
+    {
+      label: "Help",
+      mnemonic: "h",
+      items: [{ label: "About QQ", onSelect: none }],
+    },
+  ];
+}
+
 function Fixture() {
+  const [navigationOpen, setNavigationOpen] = useState(!platform.mobile);
   const [commands, setCommands] = useState<string[]>([]);
   const [measurement, setMeasurement] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -382,8 +430,8 @@ function Fixture() {
   return (
     <>
       <div className="flex h-full">
-        <Sidebar
-          openSettings={() => undefined}
+        <Navigation open={navigationOpen} close={() => setNavigationOpen(false)}
+          openSettings={() => setSettingsOpen(true)}
           app={{
             open: [
               {
@@ -399,7 +447,18 @@ function Fixture() {
           project={project}
         />
         <main className="flex min-w-0 flex-1 flex-col">
-          {baseline ? (
+          {platform.mobile && (
+            <TitleBar
+              menus={fixtureMenus(() => setSettingsOpen(true))}
+              sidebarOpen={navigationOpen}
+              toggleSidebar={() => setNavigationOpen(!navigationOpen)}
+              back={null}
+              forward={null}
+            />
+          )}
+          {welcome ? (
+            <Welcome recents={[]} />
+          ) : baseline ? (
             <div data-baseline className="overflow-y-auto p-6">
               <Suspense fallback="Loading baseline">
                 <Baseline project={project} transcript={project.transcript!} />

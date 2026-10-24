@@ -3,6 +3,7 @@ import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { FileCog, FolderSearch, Loader2, ShieldAlert } from "lucide-react";
 import { closeProject, trustProject } from "../lib/store";
 import type { PendingFile, ProjectState } from "../lib/types";
+import { platform } from "../lib/platform";
 
 /** `file` inside `root` as a project-relative path; otherwise unchanged. */
 function relativeTo(root: string, file: string): string {
@@ -18,6 +19,9 @@ function relativeTo(root: string, file: string): string {
 export function TrustPrompt({ project, pending }: { project: ProjectState; pending: PendingFile[] }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  if (!platform.features.hostConfiguration)
+    return <p className="p-6 text-muted">Review and trust this project's configuration on the computer running QQ.</p>;
 
   const trust = async () => {
     setBusy(true);

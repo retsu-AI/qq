@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api } from "../lib/api";
+import { platform } from "../lib/platform";
 import { dropMentions, insertMentions } from "../lib/drop";
 import {
   cost,
@@ -411,7 +412,7 @@ export function Composer({
             </button>
           </p>
         )}
-        <div className="flex items-center gap-0.5 px-2 pb-2">
+        <div className="composer-tools flex items-center gap-0.5 px-2 pb-2">
           <button
             type="button"
             title="Mention a file (@)"
@@ -539,6 +540,7 @@ function useFileDrop(onDrop: (paths: string[]) => void): boolean {
   const handler = useRef(onDrop);
   handler.current = onDrop;
   useEffect(() => {
+    if (!platform.features.fileDrop) return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
     let webview: ReturnType<typeof getCurrentWebview>;
@@ -849,6 +851,8 @@ function ModelPicker({
 }) {
   const current = transcript?.model ?? project.selected_model;
   if (project.models.length === 0) {
+    if (!platform.features.hostConfiguration)
+      return <span className="text-[12px] text-muted">Configure a model on the computer</span>;
     return (
       <button
         onClick={() => showProviders(true)}
@@ -872,7 +876,7 @@ function ModelPicker({
       value={current}
       options={options}
       onChange={(model) => void api.selectModel(project.project_id, model)}
-      actions={[{ label: "Manage providers…", onSelect: () => showProviders(true) }]}
+      actions={platform.features.hostConfiguration ? [{ label: "Manage providers…", onSelect: () => showProviders(true) }] : []}
     >
       <span className="max-w-[180px] truncate">
         {modelLabel(current, project.models)}

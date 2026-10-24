@@ -1,5 +1,141 @@
 @import "tailwindcss";
 
+/* Mobile rules require native platform identity (or the explicit dev fixture).
+   Desktop keeps its existing layout and dimensions at every window size. */
+:root[data-mobile="true"] #root {
+  position: fixed;
+  top: var(--app-top, 0px);
+  width: 100%;
+  height: var(--app-height, 100dvh);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  overflow: hidden;
+}
+:root[data-mobile="true"][data-keyboard="true"] #root {
+  padding-bottom: 0;
+}
+:root[data-mobile="true"] :is(button, [role="option"], [role="menuitem"], [role="menuitemradio"]) {
+  min-height: 44px;
+  min-width: 44px;
+  touch-action: manipulation;
+}
+:root[data-mobile="true"] :is(input, textarea, select) {
+  font-size: 16px;
+}
+:root[data-mobile="true"] :is(input:not([type="checkbox"]), select) {
+  min-height: 44px;
+}
+:root[data-mobile="true"] .mobile-titlebar {
+  min-height: 48px;
+}
+:root[data-mobile="true"] .mobile-titlebar button {
+  padding-inline: 8px;
+}
+:root[data-mobile="true"] dialog {
+  animation: none;
+}
+:root[data-mobile="true"] kbd {
+  display: none;
+}
+:root[data-mobile="true"] .mobile-drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  margin: 0;
+  padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) env(safe-area-inset-left);
+  width: min(320px, 90vw);
+  max-width: 100vw;
+  height: var(--app-height, 100dvh);
+  max-height: none;
+  border: 0;
+  background: var(--bg-sidebar);
+  color: var(--text);
+}
+.mobile-drawer::backdrop { background: rgb(0 0 0 / 0.5); }
+:root[data-mobile="true"] .mobile-drawer aside {
+  min-height: 0;
+  flex: 1;
+  width: 100%;
+}
+:root[data-mobile="true"] [aria-label="Sessions"] .group\/row > div button,
+:root[data-mobile="true"] [aria-label="Changes"] button {
+  opacity: 1;
+}
+@media (max-width: 1023px) {
+  :root[data-mobile="true"] dialog:not(.mobile-drawer) {
+    position: fixed;
+    inset: 0;
+    margin: 0;
+    width: 100%;
+    max-width: 100%;
+    height: var(--app-height, 100dvh);
+    max-height: none;
+    border-radius: 0;
+    overflow-y: auto;
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+  }
+  :root[data-mobile="true"] .session-header {
+    height: auto;
+    min-height: 48px;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding-inline: 8px;
+  }
+  :root[data-mobile="true"] .session-model { display: none; }
+  :root[data-mobile="true"] .composer-dock {
+    flex-shrink: 0;
+    padding: 8px;
+  }
+  :root[data-mobile="true"] .composer-tools {
+    flex-wrap: wrap;
+    gap: 2px;
+  }
+  :root[data-mobile="true"] .composer-tools button { max-width: 100%; }
+  :root[data-mobile="true"] .composer-tools [aria-label="Model"] > span { max-width: 130px; }
+  :root[data-mobile="true"] [aria-label="Message"] { max-height: min(180px, 25dvh); }
+  :root[data-mobile="true"] :is([role="listbox"], [role="menu"]) {
+    max-width: calc(100vw - 16px);
+    overflow-x: hidden;
+  }
+  :root[data-mobile="true"] :is(.selectable, pre, code) { overflow-wrap: anywhere; }
+  :root[data-mobile="true"] pre { white-space: pre-wrap; }
+  :root[data-mobile="true"] [aria-label="Transcript"] {
+    padding-inline: 12px;
+    overflow-x: hidden;
+  }
+}
+/* Goal and Changes sheets: full screen on phones, a right-hand sheet on
+   tablets. After the phone dialog rule above, which has equal specificity. */
+:root[data-mobile="true"] dialog.mobile-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  height: var(--app-height, 100dvh);
+  max-height: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+  border: 0;
+}
+:root[data-mobile="true"] dialog.mobile-panel[open] { display: flex; }
+.mobile-panel::backdrop { background: rgb(0 0 0 / 0.5); }
+@media (min-width: 1024px) {
+  :root[data-mobile="true"] dialog.mobile-panel {
+    inset: 0 0 0 auto;
+    width: min(460px, 50vw);
+    padding-left: 0;
+    border-left: 1px solid var(--border);
+  }
+}
+/* The folded phone menu can be taller than a landscape phone. */
+:root[data-mobile="true"] [role="menu"] {
+  max-height: calc(var(--app-height, 100dvh) - 64px);
+  overflow-y: auto;
+}
+
 /* Design tokens. Dark is the default; light follows the OS. */
 :root {
   --bg: #0d0e10;

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { Minus, Monitor, Moon, Plus, Sun, X } from "lucide-react";
 import { api } from "../lib/api";
+import { platform } from "../lib/platform";
 import {
   MAX_FONT_SIZE,
   MIN_FONT_SIZE,
@@ -156,7 +157,7 @@ export function Settings({
             </Row>
           </Section>
 
-          <Section title="Notifications">
+          {platform.features.nativeNotifications && <Section title="Notifications">
             <Row
               label="Notify me in Windows"
               hint="When QQ is in the background and a run finishes or needs approval. Needs the installed app; the text includes the session title."
@@ -167,9 +168,9 @@ export function Settings({
                 onChange={(checked) => void setNotifications(checked)}
               />
             </Row>
-          </Section>
+          </Section>}
 
-          <Section title="Keyboard shortcuts">
+          {!platform.mobile && <Section title="Keyboard shortcuts">
             <dl className="divide-y divide-line overflow-hidden rounded-xl border border-line">
               {SHORTCUTS.map(([action, keys]) => (
                 <div
@@ -190,7 +191,7 @@ export function Settings({
                 </div>
               ))}
             </dl>
-          </Section>
+          </Section>}
 
           <Section title="Diagnostics">
             <div className="space-y-1.5 rounded-xl border border-line px-3.5 py-3 text-[12.5px]">

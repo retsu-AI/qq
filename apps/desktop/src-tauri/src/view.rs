@@ -511,7 +511,7 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
     let timing = view.tool_timing.get(&call.id);
     let approval = (call.state == ToolCallState::AwaitingApproval).then(|| {
         let preview = view.approval_previews.get(&call.id);
-        let grant = crate::project::approval_grant(call, preview);
+        let grant = crate::desktop::project::approval_grant(call, preview);
         ApprovalDto {
             shell: preview
                 .and_then(|preview| preview.shell.as_ref())
@@ -528,8 +528,8 @@ fn tool_item(store: &SessionStore, view: &SessionView, call: &ToolCallSnapshot) 
             escalation: preview
                 .and_then(|preview| preview.escalated.as_ref())
                 .map(|escalated| escalated.reason.clone()),
-            grantable: crate::project::grant_recordable(&grant),
-            grant_label: crate::project::grant_label(&grant),
+            grantable: crate::desktop::project::grant_recordable(&grant),
+            grant_label: crate::desktop::project::grant_label(&grant),
         }
     });
     let diff = call.display.as_ref().map(|display| match display {
@@ -579,10 +579,10 @@ mod tests {
             ProjectStateDto::decl(),
             SkillDto::decl(),
             SideQuestionDto::decl(),
-            crate::git::GitStatusDto::decl(),
-            crate::git::PullRequestDto::decl(),
-            crate::git::WorktreeDto::decl(),
-            crate::goals::GoalDefaultsDto::decl(),
+            crate::desktop::git::GitStatusDto::decl(),
+            crate::desktop::git::PullRequestDto::decl(),
+            crate::desktop::git::WorktreeDto::decl(),
+            crate::desktop::goals::GoalDefaultsDto::decl(),
             TranscriptDto::decl(),
             ItemDto::decl(),
             ToolDto::decl(),

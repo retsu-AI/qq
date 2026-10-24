@@ -1,6 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
+  "platforms": ["windows", "macOS", "linux"],
   "description": "Main window: core events, folder picker, opening links in the system browser, and revealing project files in Explorer.",
   "windows": ["main"],
   "permissions": [

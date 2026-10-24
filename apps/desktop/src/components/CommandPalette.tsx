@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { pickProject, showProviders } from "../lib/store";
 import type { ProjectState } from "../lib/types";
+import { platform } from "../lib/platform";
 
 export function CommandPalette({
   project,
@@ -21,10 +22,11 @@ export function CommandPalette({
   const session = project?.focused ?? null;
   const idle = project?.transcript?.status === "idle";
   const commands = [
-    { name: "Open project", enabled: true, run: pickProject },
+    { name: "Open project", enabled: true, run: pickProject, visible: platform.features.localProjects },
     { name: "Settings and diagnostics", enabled: true, run: settings },
     {
       name: "Connect model provider",
+      visible: platform.features.hostConfiguration,
       enabled: true,
       run: () => showProviders(true),
     },
@@ -58,7 +60,7 @@ export function CommandPalette({
         project && api.sessionAction(project.project_id, null, "prune"),
     },
   ].filter((command) =>
-    command.name.toLowerCase().includes(query.toLowerCase()),
+    command.visible !== false && command.name.toLowerCase().includes(query.toLowerCase()),
   );
   return (
     <dialog
