@@ -26,6 +26,7 @@ pub(super) struct CommandAdmission {
     pub(super) goal_work_present: bool,
     pub(super) pause_goal_only_if_active: bool,
     pub(super) goal_check_policy: Option<Result<(), GoalCheckPolicyError>>,
+    pub(super) contained_goal_checks: bool,
     pub(super) goal_policy: Option<Result<GoalPolicy, GoalPolicyError>>,
 }
 
@@ -473,6 +474,37 @@ pub(super) fn execute_command(
                     None => GoalPolicy::default(),
                 },
             )?;
+            if let Some(check) = goal.check.as_ref()
+                && load_tool_approval_policy(&transaction, session_id)?.mode == ApprovalMode::Auto
+            {
+                if !admission.contained_goal_checks
+                    || !goals::auto_check_authority(&transaction, session_id)?
+                    || admission.goal_check_policy.is_none()
+                {
+                    return Err(GoalCheckPolicyError::Unavailable.into());
+                }
+                goals::validate_check_authority(
+                    &transaction,
+                    session_id,
+                    &check.command,
+                    admission.goal_check_policy.as_ref(),
+                )?;
+                if goal.check_authorization == Some(qq_protocol::GoalCheckAuthorization::Pending) {
+                    goal.check_authorization =
+                        Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
+                    if matches!(
+                        goal.status,
+                        qq_protocol::GoalStatus::Paused {
+                            reason: qq_protocol::GoalPauseReason::NeedsUser {
+                                cause: qq_protocol::GoalNeedsUser::CheckApproval,
+                            },
+                        }
+                    ) {
+                        goal.status = qq_protocol::GoalStatus::Active;
+                    }
+                    goals::save(&transaction, &goal)?;
+                }
+            }
             if let Some(previous) = previous {
                 cascade_cancels.extend(cancel_goal_work(
                     &transaction,
@@ -608,6 +640,16 @@ pub(super) fn execute_command(
             expected,
             action,
         } => {
+            if matches!(action, qq_protocol::GoalControl::Resume)
+                && goals::load_live(&transaction, session_id)?.is_some_and(|goal| {
+                    goal.check_authorization
+                        == Some(qq_protocol::GoalCheckAuthorization::TaskScoped)
+                })
+                && (!admission.contained_goal_checks
+                    || !goals::auto_check_authority(&transaction, session_id)?)
+            {
+                return Err(GoalCheckPolicyError::Unavailable.into());
+            }
             let stopped = if admission.pause_goal_only_if_active {
                 goals::load_live(&transaction, session_id)?.filter(|goal| {
                     goal.goal_id == expected.goal_id

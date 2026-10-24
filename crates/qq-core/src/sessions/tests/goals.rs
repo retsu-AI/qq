@@ -1384,7 +1384,7 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         .await
         .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
@@ -1515,7 +1515,7 @@ async fn goal_check_approval_requires_exact_command_and_revision() {
         .await
         .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
+    let created = create_session_with_mode(&runtime, workspace_id, None, ApprovalMode::Ask).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
@@ -7641,7 +7641,9 @@ async fn goal_check_edits_reset_only_the_changed_check_failure_streak() {
         let (directory, runtime) = test_runtime().await;
         let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
         let CommandOutcome::SessionCreated { session_id } =
-            create_session(&runtime, workspace, None).await.outcome
+            create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask)
+                .await
+                .outcome
         else {
             panic!("session");
         };
@@ -7707,7 +7709,8 @@ async fn goal_check_edits_preserve_unrelated_stop_states() {
         ] {
             let (directory, runtime) = test_runtime().await;
             let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
-            let created = create_session(&runtime, workspace, None).await;
+            let created =
+                create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
             let CommandOutcome::SessionCreated { session_id } = created.outcome else {
                 panic!("session")
             };
@@ -8807,5 +8810,150 @@ async fn goal_adoption_ignores_owned_compaction_but_detects_preempting_prompts()
             .await
             .unwrap();
         store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
+    struct Authority(bool);
+    impl WorkspaceGrantAuthority for Authority {
+        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
+            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
+        }
+        fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
+            Box::pin(std::future::ready(Ok(GoalPolicy::default())))
+        }
+        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
+            panic!("automatic checks must not promote grants")
+        }
+        fn validate_goal_check(&self, _: &Path, _: &str) -> GoalCheckPolicyFuture {
+            Box::pin(std::future::ready(if self.0 {
+                Err(GoalCheckPolicyError::ManagedDenied)
+            } else {
+                Ok(())
+            }))
+        }
+    }
+    for (mode, native, task, denied, command, expected) in [
+        (ApprovalMode::Auto, true, true, false, "true", "task_scoped"),
+        (
+            ApprovalMode::Auto,
+            false,
+            true,
+            false,
+            "true",
+            "unavailable",
+        ),
+        (
+            ApprovalMode::Auto,
+            true,
+            false,
+            false,
+            "true",
+            "unavailable",
+        ),
+        (ApprovalMode::Auto, true, true, true, "true", "denied"),
+        (
+            ApprovalMode::Auto,
+            true,
+            true,
+            false,
+            "sudo true",
+            "forbidden",
+        ),
+        (ApprovalMode::Ask, true, true, false, "true", "pending"),
+        (ApprovalMode::Full, true, true, false, "true", "pending"),
+    ] {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let workspace = root.join("work");
+        let control = root.join("control");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&control).unwrap();
+        let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        options.grant_authority = Some(Arc::new(Authority(denied)));
+        if native {
+            options.native_commands = Some(Arc::new(goal_check::CheckService { code: 0 }));
+        }
+        if task {
+            options.task_workspaces = Some(crate::sessions::TaskWorkspacePolicy {
+                directory: crate::command_owner::NativeDirectoryGrant::capture(&control).unwrap(),
+                read_only: vec![],
+                resources: crate::command_owner::NativeResources::Host,
+                limits: crate::task_workspace::TaskWorkspaceLimits {
+                    max_entries: 16,
+                    max_bytes: 4096,
+                },
+            });
+        }
+        let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
+            .await
+            .unwrap();
+        // This test covers admission. Execution is held; native protection is
+        // qualified separately by the real-worker check tests.
+        let held = Arc::clone(&runtime.inner.permits)
+            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+            .await
+            .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
+        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let id = CommandId::generate().unwrap();
+        let command: SessionCommand = serde_json::from_value(serde_json::json!({
+            "type":"set_goal", "session_id":session_id,
+            "objective":"verify the task without permission prompts",
+            "check":{"command":command,"timeout_ms":1000},
+            "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
+        }))
+        .unwrap();
+        let result = runtime.command(id, command.clone()).await;
+        match expected {
+            "unavailable" => assert!(matches!(
+                result,
+                Err(SessionRuntimeError::GoalCheckPolicy(
+                    GoalCheckPolicyError::Unavailable
+                ))
+            )),
+            "denied" => assert!(matches!(
+                result,
+                Err(SessionRuntimeError::GoalCheckPolicy(
+                    GoalCheckPolicyError::ManagedDenied
+                ))
+            )),
+            "forbidden" => assert!(matches!(
+                result,
+                Err(SessionRuntimeError::GoalCheckForbidden)
+            )),
+            authorization => {
+                let receipt = result.unwrap();
+                let CommandOutcome::GoalUpdated { goal, .. } = &receipt.outcome else {
+                    panic!("goal receipt")
+                };
+                assert_eq!(
+                    serde_json::to_value(goal.check_authorization).unwrap(),
+                    authorization
+                );
+                assert_eq!(
+                    goal.status == qq_protocol::GoalStatus::Active,
+                    authorization == "task_scoped"
+                );
+                assert_eq!(goal.revision, 1);
+                assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
+            }
+        }
+        if matches!(expected, "unavailable" | "denied" | "forbidden") {
+            let snapshot = runtime
+                .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+                .await
+                .unwrap();
+            assert!(
+                snapshot.focused.unwrap().goal.is_none(),
+                "refused checks must not leave a paused goal requiring consent"
+            );
+        }
+        runtime.shutdown().await.unwrap();
+        drop(held);
     }
 }
