@@ -989,6 +989,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
             filesystem.validate()?;
             let mut protected_directories = std::collections::BTreeSet::new();
             let mut library_entries = 4096;
+            let mut executable_filters = std::collections::BTreeSet::new();
             for (grant, writable) in read_only
                 .iter()
                 .map(|grant| (grant, false))
@@ -1005,6 +1006,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     return Err(io::Error::other("control character in native grant"));
                 }
                 let quoted = serde_json::to_string(path).map_err(io::Error::other)?;
+                executable_filters.insert(format!("(subpath {quoted})"));
                 profile.push_str(&format!(
                     "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
@@ -1039,6 +1041,16 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     }
                 }
             }
+            // Return the normal exec-search error only outside the exact
+            // admitted executable roots. Other denied operations keep EPERM.
+            if executable_filters.is_empty() {
+                profile.push_str("(deny process-exec (with errno 13))\n");
+            } else {
+                profile.push_str(&format!(
+                    "(deny process-exec (with errno 13) (require-not (require-any {})))\n",
+                    executable_filters.into_iter().collect::<Vec<_>>().join(" ")
+                ));
+            }
             // Emit denials after every allow so overlapping grants cannot
             // restore permission to replace an authority root or its ancestors.
             for directory in protected_directories {
@@ -1057,12 +1069,41 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
             }
         }
     }
+    if profile.len() > 64 * 1024 {
+        return Err(io::Error::other("native sandbox profile exceeds its bound"));
+    }
     Ok(profile)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loader_exec_search_errors_preserve_the_admitted_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        let grant = crate::command_owner::NativeDirectoryGrant::capture(&path).unwrap();
+        let text = profile(
+            &NativeFilesystem::Restricted {
+                read_only: vec![grant],
+                read_write: vec![],
+            },
+            NativeNetwork::Isolated,
+        )
+        .unwrap();
+        let quoted = serde_json::to_string(path.to_str().unwrap()).unwrap();
+        assert!(text.contains(&format!(
+            "(deny process-exec (with errno 13) (require-not (require-any (subpath {quoted}))))"
+        )));
+        assert!(text.contains(&format!("process-exec  (subpath {quoted})")));
+        assert!(text.contains("(deny default)"));
+        assert!(
+            !profile(&NativeFilesystem::Host, NativeNetwork::Isolated)
+                .unwrap()
+                .contains("(deny process-exec")
+        );
+    }
 
     #[test]
     fn loader_literals_preserve_parent_content_denial() {
@@ -1075,6 +1116,7 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("(deny default)"));
+        assert!(text.contains("(deny process-exec (with errno 13))"));
         assert!(text.contains("(sysctl-name \"kern.hostname\")"));
         assert!(text.contains("(sysctl-name \"kern.version\")"));
         assert!(!text.contains("(sysctl-name-prefix \"kern.\")"));

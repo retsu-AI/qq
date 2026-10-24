@@ -10,14 +10,19 @@ async fn installed_node_builds_and_tests_in_default_auto() {
     let host_workspace = home.join("host-workspace");
     let credential = home.join("outside-credential");
     std::fs::write(&credential, b"owned private credential canary").unwrap();
+    let outside_executable = home.join("outside-executable");
+    std::fs::write(&outside_executable, b"#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&outside_executable, std::fs::Permissions::from_mode(0o755)).unwrap();
     let package = json!({"name":"qq-node-proof","version":"1.0.0","private":true,"scripts":{"build":"node build.js","test":"node test.js"}});
     for directory in [&workspace, &host_workspace] {
         std::fs::create_dir(directory).unwrap();
         std::fs::write(directory.join("package.json"), package.to_string()).unwrap();
         std::fs::write(
             directory.join("build.js"),
-            "const os=require('os'),fs=require('fs'),assert=require('assert');assert.ok(os.type().length>0);assert.ok(os.version().length>0);fs.writeFileSync('node-os-proof.json',JSON.stringify({type:os.type(),version:os.version()}));let privateCode='READ_ALLOWED';try{fs.readFileSync(__PRIVATE_CANARY__)}catch(error){privateCode=error.code}fs.writeFileSync('private-canary-proof.json',JSON.stringify({code:privateCode}));fs.writeFileSync('built.txt','built');\n"
-                .replace("__PRIVATE_CANARY__", &serde_json::to_string(&credential).unwrap()),
+            "const os=require('os'),fs=require('fs'),assert=require('assert');assert.ok(os.type().length>0);assert.ok(os.version().length>0);fs.writeFileSync('node-os-proof.json',JSON.stringify({type:os.type(),version:os.version()}));let privateCode='READ_ALLOWED';try{fs.readFileSync(__PRIVATE_CANARY__)}catch(error){privateCode=error.code}fs.writeFileSync('private-canary-proof.json',JSON.stringify({code:privateCode}));const outsideExec=require('child_process').spawnSync(__PRIVATE_EXEC__,[],{stdio:'inherit',timeout:5000});fs.writeFileSync('outside-exec-proof.json',JSON.stringify({code:outsideExec.error?outsideExec.error.code:'EXEC_ALLOWED',status:outsideExec.status}));fs.writeFileSync('built.txt','built');\n"
+                .replace("__PRIVATE_CANARY__", &serde_json::to_string(&credential).unwrap())
+                .replace("__PRIVATE_EXEC__", &serde_json::to_string(&outside_executable).unwrap()),
         )
         .unwrap();
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
@@ -54,6 +59,12 @@ async fn installed_node_builds_and_tests_in_default_auto() {
     )
     .unwrap();
     assert_eq!(host_private["code"], "READ_ALLOWED");
+    let host_exec: Value = serde_json::from_slice(
+        &std::fs::read(host_workspace.join("outside-exec-proof.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host_exec["code"], "EXEC_ALLOWED");
+    assert_eq!(host_exec["status"], 0);
     let host_os: Value =
         serde_json::from_slice(&std::fs::read(host_workspace.join("node-os-proof.json")).unwrap())
             .unwrap();
@@ -150,10 +161,19 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
     )
     .unwrap();
-    #[cfg(target_os = "macos")]
-    assert_eq!(private_proof["code"], "EPERM");
-    #[cfg(target_os = "linux")]
-    assert_eq!(private_proof["code"], "EACCES");
+    assert_eq!(
+        private_proof["code"],
+        if cfg!(target_os = "macos") {
+            "EPERM"
+        } else {
+            "EACCES"
+        }
+    );
+    let outside_exec: Value =
+        serde_json::from_slice(&std::fs::read(workspace.join("outside-exec-proof.json")).unwrap())
+            .unwrap();
+    assert_eq!(outside_exec["code"], "EACCES");
+    assert!(outside_exec["status"].is_null());
     assert_eq!(
         std::fs::read(&credential).unwrap(),
         b"owned private credential canary"
