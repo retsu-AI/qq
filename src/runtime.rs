@@ -3131,11 +3131,15 @@ impl RuntimeHandler {
                     .map_err(RuntimeHandlerError::TaskPreparation)??,
             );
         }
-        if options.task_workspaces.is_some() && native_commands.is_some() {
-            options.task_git =
-                tokio::task::spawn_blocking(qq_core::sessions::TaskGitPolicy::from_process_env)
-                    .await
-                    .map_err(RuntimeHandlerError::TaskPreparation)?;
+        if let Some(policy) = options.task_workspaces.as_ref()
+            && native_commands.is_some()
+        {
+            let control = policy.directory.clone();
+            options.task_git = tokio::task::spawn_blocking(move || {
+                qq_core::TaskGitPolicy::from_process_env(control)
+            })
+            .await
+            .map_err(RuntimeHandlerError::TaskPreparation)??;
         }
         options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
@@ -3424,7 +3428,9 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[error(transparent)]
+    TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
+>>>>>>> 43a3f085 (fix(core): launch scoped task commits through the durable worker)    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
