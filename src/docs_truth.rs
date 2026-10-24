@@ -1418,12 +1418,13 @@ mod tests {
             const NOT_ORGANIZATION: &str = "any layer except an organization manifest";
             let managed_only = row[1] == "managed layers only";
             let not_organization = row[1] == NOT_ORGANIZATION;
+            let host_only = row[1] == "host config only";
             // A key every layer may set says so: `any layer`, or `any; …`
             // qualifying how layers combine. Anything else is wrong guidance.
             let any_layer = row[1] == "any layer" || row[1].starts_with("any; ");
-            if !managed_only && !not_organization && !any_layer {
+            if !managed_only && !not_organization && !host_only && !any_layer {
                 wrong.push(format!(
-                    "  \"{}\" is not `managed layers only`, `{NOT_ORGANIZATION}`, `any layer` or `any; …`",
+                    "  \"{}\" is not `managed layers only`, `{NOT_ORGANIZATION}`, `host config only`, `any layer` or `any; …`",
                     row[1]
                 ));
                 continue;
@@ -1440,9 +1441,17 @@ mod tests {
                 let is_managed_only = qq_config::MANAGED_ONLY_POLICY_FIELD_NAMES.contains(&key);
                 let is_not_organization =
                     qq_config::ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES.contains(&key);
-                if (is_managed_only, is_not_organization) != (managed_only, not_organization) {
+                let is_host_only = qq_config::HOST_ONLY_POLICY_FIELD_NAMES.contains(&key);
+                if (
+                    is_managed_only,
+                    is_not_organization && !is_host_only,
+                    is_host_only,
+                ) != (managed_only, not_organization, host_only)
+                {
                     let truth = if is_managed_only {
                         "managed layers only".to_owned()
+                    } else if is_host_only {
+                        "host config only".to_owned()
                     } else if is_not_organization {
                         NOT_ORGANIZATION.to_owned()
                     } else {

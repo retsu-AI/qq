@@ -685,6 +685,9 @@ pub const ORGANIZATION_FORBIDDEN_POLICY_FIELD_NAMES: [&str; 5] = [
     "task_hosting",
 ];
 
+/// Policy fields forbidden in project and organization sources even when trusted.
+pub const HOST_ONLY_POLICY_FIELD_NAMES: [&str; 1] = ["task_hosting"];
+
 /// Every top-level key a configuration document accepts, as spelled in RON,
 /// in declaration order. See [`POLICY_FIELD_NAMES`].
 pub const DOCUMENT_FIELD_NAMES: [&str; 17] = [
@@ -1572,6 +1575,9 @@ fn validate_policy_names(policy: &PolicyPatch, origin: &SourceIdentity) -> Resul
                     | "write_file"
                     | "shell"
                     | "exec"
+                    | "task_commit"
+                    | "task_push"
+                    | "task_pr"
                     | "ask_user"
                     | "fetch"
                     | "spawn_agent"
