@@ -42,6 +42,10 @@ async fn installed_cargo_startup_through_real_auto_worker() {
     fs::write(source.join("rust-proof/src/main.rs"), "fn main(){std::fs::write(\"rust-built-output\",b\"42\").unwrap();} #[test]fn answer(){assert_eq!(6*7,42);}").unwrap();
     let commands = [
         ("images", "compiler-images.exe compiler-images.json"),
+        (
+            "dll-init",
+            "compiler-images.exe --load compiler-images.json",
+        ),
         ("cargo-version", "cargo --version"),
         ("rustc-version", "rustc --version"),
         (
@@ -122,10 +126,8 @@ async fn installed_cargo_startup_through_real_auto_worker() {
         "host bytes",
         "same private canary is readable in host control"
     );
-    let script = format!(
-        "echo task-output>task-write.txt & echo damage>\"{}\" & call cargo-startup.cmd",
-        secret.display()
-    );
+    fs::write(source.join("auto-startup.cmd"),format!("@echo off\r\necho task-output>task-write.txt\r\necho damage>\"{}\"\r\ncall cargo-startup.cmd\r\nexit /b 0\r\n",secret.display())).unwrap();
+    let script = "call auto-startup.cmd";
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![

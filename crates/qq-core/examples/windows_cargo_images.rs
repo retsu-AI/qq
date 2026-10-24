@@ -164,11 +164,12 @@ mod probe {
             println!("{manifest}");
             return Ok(());
         }
-        if args.len() != 1 {
+        let load_only = args.first().is_some_and(|arg| arg == "--load");
+        if args.len() != if load_only { 2 } else { 1 } {
             return Err(invalid());
         }
         let mut bytes = Vec::new();
-        fs::File::open(&args[0])?
+        fs::File::open(&args[usize::from(load_only)])?
             .take(1024 * 1024 + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() > 1024 * 1024 {
@@ -192,6 +193,58 @@ mod probe {
             token.integrity_level().map_err(io::Error::from)?,
             token.privileges().map_err(io::Error::from)?.privileges()
         );
+        if load_only {
+            let system = PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?)
+                .join("System32")
+                .canonicalize()?;
+            let cargo = manifest["cargo"].as_str().ok_or_else(invalid)?;
+            let rows = manifest["imports"].as_array().ok_or_else(invalid)?;
+            if rows.len() > 32768 {
+                return Err(invalid());
+            }
+            let mut loaded = BTreeSet::new();
+            for row in rows {
+                if row["image"].as_str() != Some(cargo) {
+                    continue;
+                }
+                let Some(path) = row["resolved"].as_str() else {
+                    continue;
+                };
+                let path = PathBuf::from(path).canonicalize()?;
+                if path.parent() == Some(system.as_path()) {
+                    loaded.insert(path);
+                }
+            }
+            let mut loaded = loaded.into_iter().collect::<Vec<_>>();
+            loaded.sort_by_key(|path| {
+                !path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("user32.dll"))
+            });
+            println!(
+                "Cargo DLL initialization metadata: selected={} USER32_present={} (empty/missing USER32 means incomplete attribution)",
+                loaded.len(),
+                loaded.iter().any(|path| path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("user32.dll")))
+            );
+            for path in loaded {
+                use std::io::Write as _;
+                println!(
+                    "exact-Cargo-import LoadLibraryW begin path={}",
+                    path.display()
+                );
+                io::stdout().flush()?;
+                let result =
+                    winsafe::HINSTANCE::LoadLibrary(path.to_str().ok_or_else(invalid)?).map(|_| ());
+                println!(
+                    "exact-Cargo-import LoadLibraryW path={} initialization={result:?}",
+                    path.display()
+                );
+                io::stdout().flush()?;
+            }
+            return Ok(());
+        }
         let images = manifest["images"].as_array().ok_or_else(invalid)?;
         if images.len() > 128 {
             return Err(invalid());
