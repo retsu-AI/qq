@@ -49,6 +49,10 @@ pub struct ShellPolicy {
     /// environment, beyond [`BASE_ENV`]. Sorted, deduplicated, validated.
     pub env_allowlist: Arc<[String]>,
     pub builtin_preference: BuiltinPreference,
+    /// Explicit literal command-prefix controls, independent of approval mode.
+    /// These are not filesystem or network containment boundaries.
+    #[serde(default)]
+    pub deny_prefixes: Arc<[String]>,
 }
 
 impl Default for ShellPolicy {
@@ -56,6 +60,7 @@ impl Default for ShellPolicy {
         Self {
             env_allowlist: Arc::from([]),
             builtin_preference: BuiltinPreference::default(),
+            deny_prefixes: Arc::from([]),
         }
     }
 }
@@ -357,6 +362,7 @@ mod tests {
         let policy = ShellPolicy {
             env_allowlist: Arc::from(["CARGO_HOME".to_owned()]),
             builtin_preference: BuiltinPreference::Hint,
+            ..Default::default()
         };
         assert!(policy.permits_env("PATH"));
         assert!(policy.permits_env("CARGO_HOME"));

@@ -46,6 +46,7 @@ impl NativeCommandService for Recording {
 
 fn scope(path: &Path) -> NativeCommandScope {
     NativeCommandScope {
+        read_access: Default::default(),
         workspace: NativeDirectoryGrant::capture(path).unwrap(),
         read_only: vec![],
         network: NativeNetwork::Isolated,

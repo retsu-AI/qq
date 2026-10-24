@@ -20,7 +20,7 @@ use crate::{ApprovedReadImage, ApprovedReadImages, ProcessProducer, RunCancellat
 
 mod environment;
 mod filesystem;
-pub use filesystem::{NativeDirectoryGrant, NativeFilesystem};
+pub use filesystem::{NativeDirectoryGrant, NativeFilesystem, NativeReadAccess};
 mod resources;
 pub use resources::{NativeResourceLimits, NativeResources};
 mod scope;
@@ -640,7 +640,7 @@ impl CommandOwner {
         let launch_arguments = request.arguments.clone();
         let path = request.workspace;
         let expected_workspace = request.workspace_identity;
-        let restricted = matches!(&request.filesystem, NativeFilesystem::Restricted { .. });
+        let restricted = request.filesystem.is_restricted();
         let expired = async {
             match task_deadline {
                 Some(deadline) => tokio::time::sleep_until(deadline).await,

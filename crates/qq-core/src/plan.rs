@@ -1194,6 +1194,10 @@ impl CompiledAgentPlan {
         Arc::clone(&self.runtime.network)
     }
 
+    pub(crate) fn shell_policy(&self) -> Arc<crate::ShellPolicy> {
+        Arc::clone(&self.runtime.shell)
+    }
+
     /// Who settles the approvals this plan's sessions hold. Not part of the
     /// digest: it changes who is asked, never what the model may do.
     #[must_use]

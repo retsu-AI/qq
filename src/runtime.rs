@@ -2868,7 +2868,8 @@ async fn collect_reviewer_verdict(
         request.tool_name,
         request.workspace,
         match request.mode {
-            qq_protocol::ApprovalMode::Auto => "auto: policy-held actions require review",
+            qq_protocol::ApprovalMode::Auto =>
+                "auto: execute within policy; return denied actions as tool errors",
             qq_protocol::ApprovalMode::Ask => "ask: only the human can approve this action",
             qq_protocol::ApprovalMode::ReadOnly => "read-only session",
             qq_protocol::ApprovalMode::Full => "full autonomy session",
@@ -3127,7 +3128,7 @@ impl RuntimeHandler {
             .with_approval_reviewer(reviewer);
         // Native backends share task ownership and publication. Resource policy
         // names the actual backend guarantee: kernel limits or sampled safeguards.
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         if native_commands.is_some() {
             let directory = factory
                 .inner
@@ -3440,7 +3441,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 pub enum RuntimeHandlerError {
     #[error(transparent)]
     TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
@@ -3453,7 +3454,7 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn task_workspace_policy(
     directory: &Path,
 ) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
@@ -3479,53 +3480,15 @@ fn task_workspace_policy(
                 ));
             }
         }
-        let mut read_only = std::collections::BTreeSet::new();
-        #[cfg(unix)]
-        for candidate in [
-            "/usr/bin",
-            "/usr/sbin",
-            "/usr/lib",
-            "/usr/lib64",
-            "/usr/share",
-            "/bin",
-            "/sbin",
-            "/lib",
-            "/lib64",
-            "/nix/store",
-            "/System/Library",
-            "/System/Cryptexes/OS",
-            "/Library/Developer/CommandLineTools",
-        ] {
-            match std::fs::canonicalize(candidate) {
-                Ok(path) => {
-                    read_only.insert(path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
         Ok(qq_core::TaskWorkspacePolicy {
             directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
-            read_only: read_only
-                .into_iter()
-                .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
-                .collect::<Result<_, _>>()?,
-            #[cfg(target_os = "linux")]
-            resources: qq_core::command_owner::NativeResources::Limited {
-                limits: qq_core::command_owner::NativeResourceLimits {
-                    memory_bytes: 4 * 1024 * 1024 * 1024,
-                    max_processes: 512,
-                    cpu_millicores: u32::try_from(std::thread::available_parallelism()?.get())
-                        .map_err(std::io::Error::other)?
-                        .saturating_mul(1000)
-                        .min(1_000_000),
-                },
-            },
-            #[cfg(target_os = "macos")]
-            resources: qq_core::command_owner::NativeResources::Guarded {
-                memory_bytes: 4 * 1024 * 1024 * 1024,
-                max_tasks: 512,
-            },
+            read_access: qq_core::command_owner::NativeReadAccess::Host,
+            read_only: Vec::new(),
+            #[cfg(windows)]
+            network: qq_core::command_owner::NativeNetwork::Host,
+            #[cfg(not(windows))]
+            network: qq_core::command_owner::NativeNetwork::Isolated,
+            resources: qq_core::command_owner::NativeResources::Host,
             limits: qq_core::task_workspace::TaskWorkspaceLimits {
                 max_entries: 16_384,
                 max_bytes: 256 * 1024 * 1024,
@@ -3646,6 +3609,7 @@ fn network_policy(policy: &qq_config::EffectivePolicy) -> qq_core::NetworkPolicy
 
 fn shell_policy(policy: &qq_config::EffectivePolicy) -> qq_core::ShellPolicy {
     qq_core::ShellPolicy {
+        deny_prefixes: policy.deny_shell_prefixes().to_vec().into(),
         env_allowlist: policy.shell_env().to_vec().into(),
         builtin_preference: match policy.builtin_preference() {
             qq_config::BuiltinPreference::Off => qq_core::BuiltinPreference::Off,

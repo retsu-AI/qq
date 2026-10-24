@@ -1,4 +1,4 @@
-//! AppContainer access restrictions inside the existing kernel-owned command job.
+//! Windows restricted-token and AppContainer launches inside the owned command job.
 //! The trusted helper consumes a framed request before handing its stdio to the
 //! payload. No payload handle can refer to the worker or its command journal.
 use super::{
@@ -24,6 +24,7 @@ mod access;
 mod arguments;
 mod directory;
 pub(super) mod fleet;
+mod legacy;
 mod resources;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const READY: &[u8; 8] = b"QQWIN001";
@@ -174,7 +175,13 @@ impl WindowsOwner {
             }
             return Ok((command, None));
         }
-        if native.network != NativeNetwork::Isolated {
+        let broad_reads = matches!(native.filesystem, NativeFilesystem::WorkspaceWrite { .. });
+        if broad_reads && native.network != NativeNetwork::Host {
+            return Err(io::Error::other(
+                "workspace-write Windows tokens do not enforce network isolation",
+            ));
+        }
+        if !broad_reads && native.network != NativeNetwork::Isolated {
             return Err(io::Error::other(
                 "filesystem enforcement is unavailable without isolated network authority on Windows",
             ));
@@ -196,7 +203,9 @@ impl WindowsOwner {
             None
         };
         let image = self.image()?;
-        if let NativeFilesystem::Restricted { read_write, .. } = &native.filesystem {
+        if let NativeFilesystem::Restricted { read_write, .. }
+        | NativeFilesystem::WorkspaceWrite { read_write, .. } = &native.filesystem
+        {
             for ancestor in image
                 .path
                 .parent()
@@ -430,6 +439,11 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
         return Err(io::Error::other(
             "native launch directory changed during normalization",
         ));
+    }
+    if matches!(packet.filesystem, NativeFilesystem::WorkspaceWrite { .. }) {
+        let cpu_rate = resources::apply(packet.resources, packet.cpu_parent_percent)?;
+        let launch_cwd = launch_cwd.to_owned();
+        return legacy::execute(packet, input, &launch_cwd, cpu_rate);
     }
     let name = access::identity(&packet.filesystem)?;
     let profile =

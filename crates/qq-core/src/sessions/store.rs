@@ -25,16 +25,6 @@ const OUTPUT_QUEUE_CAPACITY: usize = 1024;
 const CONTROL_BURST_LIMIT: usize = 4;
 
 #[cfg(test)]
-struct CommittedCommandHook {
-    command_id: CommandId,
-    entered: oneshot::Sender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(test)]
-static COMMITTED_COMMAND_HOOK: Mutex<Option<CommittedCommandHook>> = Mutex::new(None);
-
-#[cfg(test)]
 static CANCELLATION_READ_FAILURES: Mutex<Vec<(RunId, SessionRuntimeError)>> =
     Mutex::new(Vec::new());
 
@@ -224,39 +214,6 @@ fn take_targeted_failure(
     let mut failures = failures.lock().unwrap();
     let index = failures.iter().position(|(target, _)| *target == run_id)?;
     Some(failures.remove(index).1)
-}
-
-#[cfg(test)]
-pub(super) fn hold_committed_command(
-    command_id: CommandId,
-) -> (oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
-    let (entered, entered_rx) = oneshot::channel();
-    let (release, release_rx) = std::sync::mpsc::channel();
-    *COMMITTED_COMMAND_HOOK.lock().unwrap() = Some(CommittedCommandHook {
-        command_id,
-        entered,
-        release: release_rx,
-    });
-    (entered_rx, release)
-}
-
-#[cfg(test)]
-fn pause_after_committed_command(command_id: CommandId) {
-    let hook = {
-        let mut hook = COMMITTED_COMMAND_HOOK.lock().unwrap();
-        if hook
-            .as_ref()
-            .is_some_and(|hook| hook.command_id == command_id)
-        {
-            hook.take()
-        } else {
-            None
-        }
-    };
-    if let Some(hook) = hook {
-        let _ = hook.entered.send(());
-        let _ = hook.release.recv();
-    }
 }
 
 #[derive(Clone)]
@@ -880,8 +837,6 @@ impl Store {
                     Err(mpsc::error::TrySendError::Closed(())) => {}
                 }
             }
-            #[cfg(test)]
-            pause_after_committed_command(command_id);
             Ok(applied)
         })
         .await

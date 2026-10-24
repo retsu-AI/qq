@@ -84,17 +84,17 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux and macOS, the binary creates detached task scopes for ordinary Auto
+On Linux, macOS and Windows, the binary creates detached task scopes for ordinary Auto
 runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
-Unsupported requested native restrictions fail closed. Default Auto integration
-uses kernel resource limits on Linux and explicit sampled resource safeguards
-on macOS. Windows retains its existing permission behavior pending native
-containment integration and qualification. Authorized network egress, credential
+Unsupported requested native restrictions fail closed. Default Auto uses the native workspace-write backend, with broad host reads.
+No fixed per-command resource quota or cgroup delegation is required by
+default. Windows uses a restricted caller token and owned jobs. Authorized network egress, credential
 brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
-No implicit home, toolchain, temporary or workspace roots are granted.
+Broad reads include the existing home and installed toolchains; they do not
+provide credential-file privacy. Explicit narrow embeddings retain granted-only reads.
 
 Trusted embedding hosts can import an explicit file selection with
 `TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
@@ -141,11 +141,14 @@ directories and copying each bounded file chunk. Interrupted imports remove
 their partial private tree before settlement. Restored goal trees adopt the
 current host's file/byte ceilings; a tighter ceiling can refuse publication
 while retaining the private edits.
-Commands receive a private home/temp directory, explicit
-system read roots, isolated networking and the captured task write root. A native
-backend that cannot enforce that scope refuses execution. Commands inside this
-boundary need no additional Auto approval unless a forbidden rule or internal
-child supervision requires it. Ask and Read-only retain their own rules.
+Commands preserve HOME and normal installed-tool configuration and put temporary
+files in the task directory. Credential-like environment names require an
+explicit environment grant. The default filesystem policy reads host-readable
+files and confines writes to the task tree, with protected read-only carveouts.
+Linux/macOS request isolated shell networking; Windows uses host networking.
+Unsupported explicitly requested restrictions refuse execution. Native Auto
+commands and write children need neither command-name approval nor a reviewer.
+Ask and Read-only retain their own rules.
 
 Task traversal reads bounded regular ignore files through directory capabilities;
 special files and symlinks cannot block ignore loading. New ignored output files
@@ -181,14 +184,12 @@ source authority; cancellation, budgets and unknown-execution holds still apply.
 Unbound Full and Ask checks recover the original worker's terminal result without
 requiring a restricted scope; recovery never submits replacement execution.
 
-Linux Auto commands request enforced memory, process and CPU limits. Goal work
-retains its private tree across server restart without replaying the original
-command or resetting its goal budget. This integration does not yet qualify
-unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS kernel-quota execution and
-default Windows Auto containment remain unavailable and fail closed. Source
-symlinks are omitted and hardlinked regular inputs are refused. Scoped network
-and credential operations still require separate trusted adapters.
+Goal work retains its private tree across server restart without replaying the
+original command or resetting its goal budget. Task output disk usage remains
+unbounded and ordinary non-goal task continuation is unfinished. Source symlinks
+are omitted and hardlinked regular inputs are refused. Authenticated external
+operations require explicit credential authority; broad filesystem reads must
+not be advertised as secret isolation.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
@@ -276,12 +277,9 @@ their own delegated root. QQ does not modify service-manager configuration or
 seek elevated privileges. Root identities are checked before use; a limited
 request without usable delegation is refused.
 
-The binary's Auto policy limits each invocation to 4 GiB memory, 512 native
-tasks (including threads), and CPU bandwidth equal to the available logical
-CPUs. The worker's tasks subtree also limits the combined fleet to 4,096 native
-tasks, 75% of available memory measured at worker startup, no swap, and 90% of
-available CPU bandwidth. The supervisor remains outside those fleet limits so
-payload exhaustion does not directly kill its durable journal.
+Linux default Auto does not request these cgroup quotas. They remain available
+for explicitly limited commands on hosts with usable delegation; ordinary Auto
+startup and execution do not depend on resource delegation succeeding.
 
 All limits are installed and read back before launch. The trusted PID-1 helper
 joins by writing zero to a held membership descriptor before spawning the
@@ -1446,8 +1444,8 @@ liveness thread performs these checks; no extra per-command thread is created.
 Excess use or unavailable accounting stops the owned group and retains captured
 output. These safeguards can overshoot, exclude charged file cache and omit
 processes that detached from the group. They are not per-task aggregate quotas.
-Guarded commands require restricted filesystem authority. Default macOS Auto
-uses these safeguards with its detached task files.
+Guarded commands require restricted filesystem authority. They are an explicit
+host option rather than a default Auto requirement.
 Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`
@@ -1486,7 +1484,11 @@ It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
-Windows Auto integration is unfinished.
+Default Windows Auto uses `WorkspaceWrite` and a legacy restricted caller token
+rather than LPAC. It preserves installed-tool reads and grants workspace writes,
+but also retains writes to objects allowed by Everyone or the logon SID. It is
+not account isolation, credential privacy, or network containment. Explicit
+`Restricted` requests continue to use the narrower LPAC adapter described above.
 Native cmd shells receive a DOS-compatible working-directory spelling only
 when it names the same pinned directory. UNC and extended-only shell directories
 are refused before launch instead of allowing cmd to fall back to a host directory.
@@ -1617,12 +1619,9 @@ above the lexical workspace root. Within-root normalization such as `sub/..`
 is allowed. Process preparation also resolves and holds a contained directory,
 including checking symlink resolution.
 
-Shell is the one tool that cannot be contained by path checks — any command
-can touch anything the server process can. Containment is therefore the
-approval policy's job (§ Shell Classification), and the honest framing is
-that `shell` approval trusts the command. OS-level sandboxing (Landlock on
-Linux) is a worthwhile hardening layer, but it is not a substitute for
-policy and is intentionally deferred.
+Shell path checks alone do not contain arbitrary programs. Native Auto enforces
+its filesystem and network policy at the OS boundary. Command classification is
+admission assistance for unscoped embeddings and Ask previews, not containment.
 
 ### Shell Classification
 
@@ -1630,11 +1629,11 @@ Before policy sees a shell command, the classifier parses it with
 `tree-sitter-bash` and judges it on a three-tier lattice, strictest verdict
 over every simple command anywhere in the tree (ADR-0020):
 
-| tier | reached by | under `auto` | under `full` |
+| tier | reached by | unscoped `auto` | native Auto / Full |
 | --- | --- | --- | --- |
 | `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, stream-only redirects) whose every command, once launchers are peeled, is a listed read/build shape with workspace-relative operands | executes | executes |
-| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | asks (a grant lifts it) | executes |
-| `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | refused | **refused** |
+| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | denied without a grant | executes |
+| `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | denied without an exact grant | executes within applicable host policy |
 
 `Forbidden` is refused under every mode as a tool error naming the rule and
 an alternative; only a grant that quotes the exact command string lifts it
@@ -1811,8 +1810,8 @@ private-name set (`localhost`, single-label names, `.local`, `.internal`,
 here is `PolicyDecision::Deny { HostBlocked }` under **every** mode, `full`
 included: unrestricted authority over the workspace is not authority over
 the local network. A public name then follows the `Network` row of the
-decision table; under `auto` a `Host` grant (exact `docs.rs` or
-one leading wildcard `*.github.com`, never the apex) covers it. The
+decision table; under `auto` a public host executes without a per-host grant.
+Managed host denies and address validation still apply. The
 approval request carries a `fetch` preview (`url`, `host`, `method`) so a
 client offers the judged host as the grant without parsing arguments.
 
@@ -2032,98 +2031,39 @@ flow.
 
 Each session has an approval mode:
 
-- `read-only` — read-only built-ins execute; mutating, shell, network and
-  external tools are denied without prompting.
-- `ask` — every non-read action requires fresh human approval; stored grants
-  and model reviewers cannot authorize it.
-- `auto` (default) — workspace-contained edits, writes, and MCP calls execute
-  without prompting. Native task-contained shell commands, classifier-allowed
-  commands, and granted operations execute; actions outside that authority are
-  denied before review. Allowed write-child actions require internal review.
-  A reviewer escalation, timeout, outage, or missing reviewer denies the call;
-  Auto never escalates to a human. `Forbidden` shapes are always refused.
-- `full` — everything executes without prompting, except shell commands the
-  classifier marks `Forbidden` (§ Shell Classification): `full` is
-  unrestricted authority over the workspace, not over the machine.
+- `read-only`: reads execute; mutations, shell, network and external tools deny.
+- `ask`: every non-read action requires fresh human approval. An unattended
+  Ask call denies immediately. Stored grants and reviewers cannot approve it.
+- `auto` (default): workspace edits, native task-scoped shell, MCP tools and
+  public fetches execute without human or model approval. Denied actions return
+  tool errors, allowing the agent to choose another permitted action.
+- `full`: calls execute without Auto's task containment, subject to explicit
+  managed policy, protected built-in paths and fetch host/address checks.
 
-The mode is the ceiling; `approval_delegate` only chooses who settles the
-calls the mode already holds. It is a top-level or per-profile configuration
-key (`on`, `off`, or absent) and the `QQ_APPROVAL_DELEGATE` override; absent
-means the mode's own default above, so a configuration that never mentions it
-behaves exactly as before. It is a sensitive declaration under project trust
-like `reviewer_model`. Who is consulted, by mode and setting:
-
-| mode | absent | `on` | `off` |
-| --- | --- | --- | --- |
-| `read-only`, `full` | nobody; nothing is held | nobody | nobody |
-| `ask` | human | human | human |
-| `auto` | reviewer for child supervision; otherwise execute or deny | same | deny supervised actions |
-
-Without a `reviewer_model`, Auto denies actions requiring supervision. Ask
-still requires a human. The setting is not part of the plan digest: it never
-grants authority beyond the mode, workspace, task, and configured grants.
-`Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
-reach the reviewer under any setting.
-
-A session may override the configured choice for the rest of that session:
-`set_approval_delegate` (protocol 28; `/delegate` in the TUI) stores
-`by_mode`, `on`, or `off` on the session, or clears it back to the
-configuration. The gate reads the override with the mode at each held call,
-so it applies to a running session's next hold without a restart and without
-rewriting `.qq/config.ron`; `off` is the "stop delegating" switch. Spawned
-children start with the parent's override. The mode stays the ceiling, so no
-authority check applies: the override cannot authorize an out-of-scope action. The override is `SessionSummary.approval_delegate`,
-absent when none is set.
-
-"The reviewer" in the table is `reviewer_model`. Auto has no human fallback.
-The gate attributes every reviewer verdict to `reviewer` (`ReviewVerdict`
-carries only the decision and spend); a delegate-recorded grant
-row carries `source = 'delegate'` (§ Grant Lifetimes), and the
-`tool_approval_resolved` event carries `delegate: reviewer` beside
-`approved_by_reviewer` / `denied_by_reviewer` (protocol 28), so a supervisor
-can tell a delegate resolution from the stream alone. Recorded `source =
-'jev'` rows and `delegate: jev` events from older versions still decode but
-are never written. Human, timeout, and answer resolutions carry no
-`delegate`.
-
-`ask` holds every non-read action for fresh explicit human approval,
-regardless of grants or reviewer settings. An unattended Ask run denies
-held calls immediately. Write children retain internal supervision within
-the parent's permission ceiling; supervision is not a selectable mode.
-
-Decision by effect class before grants (ADR-0021):
+Write children inherit the parent's authority ceiling and revocation. They do
+not require per-action review. `approval_delegate` and retained reviewer event
+formats do not add a review step to native Auto or substitute for Ask approval.
+An unscoped embedding's shell call still needs conservative admission or an
+explicit grant; it is not the binary's native Auto path.
 
 | class | read-only | ask | auto | full |
 | --- | --- | --- | --- | --- |
 | `ReadOnly` | Execute | Execute | Execute | Execute |
 | `Mutating` | Deny | Human each call | Execute | Execute |
-| `Shell` | Deny | Human each call | Execute unless `Prompt`/`Forbidden` | Execute (`Forbidden` still denied) |
+| `Shell` | Deny | Human each call | Execute within native scope | Execute |
 | `External` | Deny | Human each call | Execute | Execute |
-| `Interactive` (`ask_user`) | Hold for answer | Hold | Hold | Hold |
-| `Network` (`fetch`) | Deny | Human each call | Execute if a grant covers the host | Execute |
+| `Interactive` (`ask_user`) | Answer if attended | Answer if attended | Decide without human input | Answer if attended |
+| `Network` (`fetch`) | Deny | Human each call | Public hosts execute | Public hosts execute |
 
-Blocked hosts (private, link-local, metadata, managed `deny_hosts`) are
-refused before the mode, like a shell `Forbidden` (§ Network Tools).
+Blocked fetch hosts and explicit managed denies are checked before mode.
+Command-prefix controls match literal commands, including compound command
+components. They cannot enforce equivalent behavior through Python, libraries
+or dynamically constructed commands; the OS boundary must enforce that scope.
 
-**Two clocks.** A held call is bounded by two independent timers, neither
-of which consumes the other. The delegate's: the gate waits
-`SessionRuntimeOptions::delegate_timeout` (20 s) for a verdict, past which
-the pending review is dropped and treated as an `escalate`; the reviewer
-model bounds itself at 10 s, so this is a backstop for a
-delegate that breaks its contract, never the normal path. The human's:
-`approval_timeout` is `None` by default, meaning **no server deadline**. An
-interactive hold waits for the client, the run's own deadline
-(`RunLimits::max_duration_ms`), or cancellation, and is never settled
-`denied_timeout` by a timer the operator did not set. A supervisor that wants
-a bound sets `approval_timeout_seconds` in configuration (1–86400, not
-trust-gated: it only shortens a wait); when set, the human's clock starts when
-the human is actually asked — at the hold without a delegate, at the
-escalation or delegate cut-off with one — so a slow delegate never eats into
-it. Headless `qq run` has no human and does not rely on either clock: an
-`auto` hold with no delegate configured is denied the moment it is
-published, and with a delegate it is denied 20 s after the request unless
-the delegate settled it first (§ Headless Contract). This approval-wait policy
-shipped in delegated-approval DA2 (#150).
+Human Ask holds have no server-side timeout by default. They end when answered,
+cancelled, or the run deadline expires. A configured `approval_timeout_seconds`
+adds a bound. Native Auto has no human or reviewer wait; headless questions
+return a result telling the agent to decide without human input.
 
 The allowlist is deliberately simple: exact commands or command prefixes
 (`cargo test`, `git status`), plus per-tool grants for MCP. No pattern DSL

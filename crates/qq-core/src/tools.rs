@@ -5128,6 +5128,7 @@ mod tests {
         let allowing = crate::runtime::ShellPolicy {
             env_allowlist: std::sync::Arc::from(["CARGO_MANIFEST_DIR".to_owned()]),
             builtin_preference: crate::runtime::BuiltinPreference::Hint,
+            ..Default::default()
         };
 
         let leaked = run(
@@ -5296,6 +5297,7 @@ mod tests {
                     Arc::new(crate::runtime::ShellPolicy {
                         env_allowlist: std::sync::Arc::from([]),
                         builtin_preference: policy,
+                        ..Default::default()
                     }),
                     Arc::default(),
                 )

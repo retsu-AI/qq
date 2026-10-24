@@ -49,10 +49,21 @@ pub(super) fn prepare(
         .filter(|directory| directory.writable)
         .map(|directory| path(&directory.path).to_owned())
         .collect::<Vec<_>>();
+    let carveouts = directories
+        .iter()
+        .filter(|directory| directory.carveout)
+        .map(|directory| path(&directory.path).to_owned())
+        .collect::<Vec<_>>();
     for directory in &mut directories {
         directory.writable |= writable
             .iter()
             .any(|parent| path(&directory.path).starts_with(parent));
+        if carveouts
+            .iter()
+            .any(|root| path(&directory.path).starts_with(root))
+        {
+            directory.writable = false;
+        }
     }
     directories.sort_by(|a, b| {
         path(&a.path)
@@ -156,6 +167,27 @@ pub(super) fn prepare(
 pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
     let expected_cwd = std::fs::metadata(".")?;
     let proc = File::open("/proc")?;
+    let host_read = filesystem
+        .directories
+        .iter()
+        .any(|directory| directory.host_read);
+    // Clone the complete inherited mount unit before creating construction
+    // storage. This retains locked submounts and the original /tmp without
+    // recursively copying our own future payload root.
+    let mut host_tree = if host_read {
+        Some(File::from(
+            rustix::mount::open_tree(
+                rustix::fs::CWD,
+                "/",
+                rustix::mount::OpenTreeFlags::OPEN_TREE_CLONE
+                    | rustix::mount::OpenTreeFlags::OPEN_TREE_CLOEXEC
+                    | rustix::mount::OpenTreeFlags::AT_RECURSIVE,
+            )
+            .map_err(|error| context("clone host mount tree", Path::new("/"), error.into()))?,
+        ))
+    } else {
+        None
+    };
     let null = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags((rustix::fs::OFlags::PATH | rustix::fs::OFlags::NOFOLLOW).bits() as i32)
@@ -177,7 +209,13 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
     for directory in &filesystem.directories {
         let original = File::open(format!("/proc/self/fd/{}", directory.fd))?;
         let local = crate::workspace::Workspace::open(path(&directory.path))?;
-        let file = File::from(std::os::fd::AsFd::as_fd(local.root()).try_clone_to_owned()?);
+        let file = if directory.host_read {
+            host_tree
+                .take()
+                .ok_or_else(|| io::Error::other("host mount tree already consumed"))?
+        } else {
+            File::from(std::os::fd::AsFd::as_fd(local.root()).try_clone_to_owned()?)
+        };
         let (old, new) = (original.metadata()?, file.metadata()?);
         if (old.dev(), old.ino()) != (new.dev(), new.ino()) {
             return Err(io::Error::new(
@@ -219,6 +257,14 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
             relative(path(&directory.path))?,
             root,
             !directory.writable,
+            host_read && path(&directory.path).starts_with("/dev"),
+            if directory.host_read {
+                BindKind::Detached
+            } else if host_read {
+                BindKind::Recursive
+            } else {
+                BindKind::Single
+            },
         )
         .map_err(|error| context("mount grant", path(&directory.path), error))?;
         if path(&directory.path) == Path::new("/") {
@@ -235,10 +281,26 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
         root_dir.symlink_contents(path(target), alias)?;
     }
     // Never expose the worker's host procfs, even if the host granted /proc.
-    bind(&proc, &root_dir, Path::new("proc"), root, true)?;
+    bind(
+        &proc,
+        &root_dir,
+        Path::new("proc"),
+        root,
+        true,
+        false,
+        BindKind::Single,
+    )?;
     // A read-only device mount still permits discard I/O but forbids inode
     // metadata changes. Only this pinned 1:3 character device gets device I/O.
-    bind(&null, &root_dir, Path::new("dev/null"), root, true)?;
+    bind(
+        &null,
+        &root_dir,
+        Path::new("dev/null"),
+        root,
+        true,
+        true,
+        BindKind::Single,
+    )?;
     // This filesystem belongs to the newly created IPC namespace. Never bind
     // the host's mqueue mount, whose descriptors retain host queue authority.
     let queues = root_dir.open_dir("dev/mqueue")?;
@@ -289,6 +351,99 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
     Ok(())
 }
 
+fn restrict_mount_tree(root: &Path, read_only: bool, device_root: &Path) -> io::Result<()> {
+    use io::Read as _;
+    const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    File::open("/proc/self/mountinfo")?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_BYTES {
+        return Err(io::Error::other("host mount metadata exceeds its bound"));
+    }
+    for path in mount_paths(&bytes)?
+        .into_iter()
+        .filter(|path| path.starts_with(root))
+    {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(rustix::fs::OFlags::PATH.bits() as i32)
+            .open(&path);
+        let file = match file {
+            Ok(file) => file,
+            // Inherited locked mounts must travel together, including mounts
+            // below OS-inaccessible directories (for example Docker netns).
+            // Keep that OS denial, the read-only parent, and Landlock's write
+            // boundary instead of requiring access the host user lacks. This
+            // assumes trusted host processes do not concurrently change those
+            // OS permissions; it is not isolation from a hostile host.
+            Err(error) if error.raw_os_error() == Some(nix::libc::EACCES) => continue,
+            Err(error) => return Err(context("open nested mount", &path, error)),
+        };
+        let original = rustix::fs::fstatvfs(&file)
+            .map_err(|error| context("inspect nested mount", &path, error.into()))?
+            .f_flag;
+        let mut flags = mount_flags(&file)
+            .map_err(|error| context("read nested mount flags", &path, error))?
+            | MountFlags::BIND;
+        if path.starts_with(device_root) && !original.contains(rustix::fs::StatVfsMountFlags::NODEV)
+        {
+            flags.remove(MountFlags::NODEV);
+        }
+        if read_only {
+            flags.insert(MountFlags::RDONLY);
+        }
+        rustix::mount::mount_remount(format!("/proc/self/fd/{}", file.as_raw_fd()), flags, "")
+            .map_err(|error| context("restrict nested mount", &path, error.into()))?;
+    }
+    Ok(())
+}
+
+fn mount_paths(bytes: &[u8]) -> io::Result<Vec<PathBuf>> {
+    let mut mounts = std::collections::BTreeSet::new();
+    for line in bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let encoded = line
+            .split(|byte| *byte == b' ')
+            .nth(4)
+            .ok_or_else(|| io::Error::other("invalid host mount metadata"))?;
+        let mut decoded = Vec::new();
+        let mut index = 0;
+        while index < encoded.len() {
+            if encoded[index] == b'\\' {
+                let escape = encoded
+                    .get(index + 1..index + 4)
+                    .ok_or_else(|| io::Error::other("invalid host mount escape"))?;
+                if !escape.iter().all(|byte| (b'0'..=b'7').contains(byte)) {
+                    return Err(io::Error::other("invalid host mount escape"));
+                }
+                let value = (escape[0] - b'0') as u16 * 64
+                    + (escape[1] - b'0') as u16 * 8
+                    + (escape[2] - b'0') as u16;
+                decoded.push(u8::try_from(value).map_err(io::Error::other)?);
+                index += 4;
+            } else {
+                decoded.push(encoded[index]);
+                index += 1;
+            }
+        }
+        let path = PathBuf::from(std::ffi::OsString::from_vec(decoded));
+        relative(&path)?;
+        if path == Path::new("/") || path.starts_with("/proc") || path.starts_with("/dev/mqueue") {
+            continue;
+        }
+        mounts.insert(path);
+        if mounts.len() > 4096 {
+            return Err(io::Error::other("too many host mount inputs"));
+        }
+    }
+    let mut mounts = mounts.into_iter().collect::<Vec<_>>();
+    mounts.sort_by_key(|path| path.components().count());
+    Ok(mounts)
+}
+
 fn relative(absolute: &Path) -> io::Result<&Path> {
     if !absolute.is_absolute()
         || absolute
@@ -308,21 +463,38 @@ fn relative(absolute: &Path) -> io::Result<&Path> {
     })
 }
 
+enum BindKind {
+    Single,
+    Recursive,
+    Detached,
+}
+
 fn bind(
     source: &File,
     root_dir: &cap_std::fs::Dir,
     relative: &Path,
     root: &Path,
     read_only: bool,
+    allow_devices: bool,
+    kind: BindKind,
 ) -> io::Result<()> {
     let is_directory = source.metadata()?.is_dir();
     let target = open_target(root_dir, relative, is_directory)?;
     let target_path = PathBuf::from(format!("/proc/self/fd/{}", target.as_raw_fd()));
-    rustix::mount::mount_bind(
-        format!("/proc/self/fd/{}", source.as_raw_fd()),
-        &target_path,
-    )
-    .map_err(|error| context("bind source", &target_path, error.into()))?;
+    let source_path = format!("/proc/self/fd/{}", source.as_raw_fd());
+    let result = match kind {
+        BindKind::Detached => rustix::mount::move_mount(
+            source,
+            "",
+            &target,
+            "",
+            rustix::mount::MoveMountFlags::MOVE_MOUNT_F_EMPTY_PATH
+                | rustix::mount::MoveMountFlags::MOVE_MOUNT_T_EMPTY_PATH,
+        ),
+        BindKind::Recursive => rustix::mount::mount_bind_recursive(&source_path, &target_path),
+        BindKind::Single => rustix::mount::mount_bind(&source_path, &target_path),
+    };
+    result.map_err(|error| context("bind source", &target_path, error.into()))?;
     // The old target descriptor points below the new mount. Reopen through the
     // bounded root to obtain the actual mount root before setting its flags.
     let mounted = if relative == Path::new(".") {
@@ -333,13 +505,24 @@ fn bind(
     let expected = source.metadata()?;
     let actual = mounted.metadata()?;
     if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino()) {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "mount target changed during filesystem setup",
+        return Err(context(
+            "validate bind identity",
+            &root.join(relative),
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "mount target changed during filesystem setup",
+            ),
         ));
     }
     let mounted_path = PathBuf::from(format!("/proc/self/fd/{}", mounted.as_raw_fd()));
     let mut flags = mount_flags(source)? | MountFlags::BIND;
+    if allow_devices
+        && !rustix::fs::fstatvfs(source)?
+            .f_flag
+            .contains(rustix::fs::StatVfsMountFlags::NODEV)
+    {
+        flags.remove(MountFlags::NODEV);
+    }
     if !is_directory {
         flags.remove(MountFlags::NODEV);
         flags.insert(MountFlags::NOEXEC);
@@ -355,6 +538,9 @@ fn bind(
         "",
     )
     .map_err(|error| context("remount source", &mounted_path, error.into()))?;
+    if !matches!(kind, BindKind::Single) {
+        restrict_mount_tree(&root.join(relative), read_only, &root.join("dev"))?;
+    }
     Ok(())
 }
 
@@ -414,4 +600,72 @@ fn context(operation: &'static str, path: &Path, source: io::Error) -> io::Error
             source,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_mount_metadata_preserves_nested_inputs_and_excludes_private_replacements() {
+        let paths = mount_paths(
+            b"1 0 1:1 / / rw - ext4 /dev/a rw\n\
+              2 1 1:2 / /opt/tools\\040with\\040spaces rw - ext4 /dev/b rw\n\
+              3 2 1:3 / /opt/tools\\040with\\040spaces/lib rw - ext4 /dev/c rw\n\
+              4 1 0:1 / /proc rw - proc proc rw\n\
+              5 4 0:2 / /proc/host-input rw - tmpfs tmpfs rw\n\
+              6 1 0:3 / /dev/mqueue rw - mqueue mqueue rw\n\
+              7 1 0:4 / /dev rw - tmpfs tmpfs rw\n",
+        )
+        .unwrap();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/dev"),
+                PathBuf::from("/opt/tools with spaces"),
+                PathBuf::from("/opt/tools with spaces/lib")
+            ]
+        );
+        for invalid in [
+            b"1 0 1:1 / /bad\\x40 rw".as_slice(),
+            b"1 0 1:1 / /bad/../escape rw",
+        ] {
+            assert!(mount_paths(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn workspace_carveout_blocks_nested_writable_grants_in_either_order() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        let protected = root.join("protected");
+        let nested = protected.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let entry = |path: &Path, writable, carveout| Directory {
+            fd: -1,
+            path: path.as_os_str().as_bytes().to_vec(),
+            writable,
+            carveout,
+            host_read: false,
+        };
+        for reverse in [false, true] {
+            let mut directories = vec![
+                entry(&root, true, false),
+                entry(&protected, false, true),
+                entry(&nested, true, false),
+            ];
+            if reverse {
+                directories.reverse();
+            }
+            let prepared = prepare(
+                directories,
+                root.clone(),
+                &std::process::Command::new("/bin/sh"),
+            )
+            .unwrap();
+            for directory in prepared.directories {
+                assert_eq!(directory.writable, path(&directory.path) == root);
+            }
+        }
+    }
 }

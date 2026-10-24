@@ -169,6 +169,8 @@ async fn task_hosting_reauthorizes_after_preparation_before_native_submission() 
             git: git_program(),
         });
         options.task_workspaces = Some(TaskWorkspacePolicy {
+            read_access: Default::default(),
+            network: crate::command_owner::NativeNetwork::Isolated,
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
             resources: NativeResources::Host,

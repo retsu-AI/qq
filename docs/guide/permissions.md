@@ -69,82 +69,62 @@ Every session runs under one mode. Set the default in a profile
 (`approval_mode`), change it in the TUI with `/approval`, or pass
 `qq run --approval`.
 
-| Mode | Reads | Edits and writes in the workspace | Shell | MCP tools | `fetch` |
+| Mode | Reads | Edits and writes | Shell | MCP tools | `fetch` |
 | --- | --- | --- | --- | --- | --- |
 | `read_only` | run | denied | denied | denied | denied |
-| `ask` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
-| `auto` **(default)** | run | run | task-contained, classifier `allow`, or a grant → run; otherwise denied | run | granted hosts run; others denied |
-| `full` | run | run | run except `forbidden` | run | run |
+| `ask` | run | human approval each call | human approval each call | human approval each call | human approval each call |
+| `auto` **(default)** | run | run within the workspace | run within the native task boundary | run | public hosts run |
+| `full` | run | run | run without Auto containment | run | public hosts run |
 
-Write sub-agents require internal review for each non-read action. `full`
-is authority over the workspace, not the machine:
-`forbidden` shell shapes are refused under every mode.
+Auto does not ask a human or consult a reviewer model for ordinary actions,
+including actions taken by write sub-agents. Auto questions return a result
+telling the agent to decide without human input. A denied operation returns a tool
+error so the agent can choose another permitted approach. Denial does not grant
+permission to bypass the boundary. Children remain subject to their parent's
+permissions, including later revocation.
 
-`auto` is the default for the TUI and `qq run`. In `ask`, each non-read
-action needs explicit human approval even when a stored grant matches; no
-reviewer model can approve it. Headless `qq run --approval ask` denies
-those calls immediately because no human is present. Approvals in Ask
-mode apply once and never create session or workspace grants.
+Ask requires fresh human approval for each non-read call. Stored grants and
+`approval_delegate` cannot substitute for that approval. Headless Ask denies
+immediately because no human is present. Approval in Ask applies once and does
+not create a reusable grant.
 
-## Who decides a held call
+### Native Auto execution
 
-Auto never requests permission from a human. Actions outside its configured
-workspace, task, and grants are denied before review. Allowed write-child
-actions retain internal supervision through `reviewer_model`.
+Shell and exec use the durable command worker. The worker retains command
+identity, output and terminal status independently of the server connection.
+Default Auto allows installed tools to read host files the user can already
+read, and confines writes to the task workspace. Broad reads are not credential
+privacy: readable host credential files remain readable.
 
-| Setting | Auto child supervision | Ask |
-| --- | --- | --- |
-| absent or `approval_delegate: on` | reviewer approves or denies | human approves each call |
-| `approval_delegate: off` | supervised actions denied | human approves each call |
+Linux uses its native namespace and filesystem restrictions; macOS uses
+Seatbelt. Windows uses a restricted caller token with workspace ACL grants.
+The Windows baseline also permits writes to objects already writable by
+Everyone or the logon SID, so it is weaker than Linux/macOS workspace-only
+writes. Windows currently uses host networking; Linux/macOS request isolated
+shell networking. `fetch` has a separate public-network policy.
 
-A reviewer denial, escalation, timeout, or outage denies the Auto call and
-returns a tool error so the agent can pursue an allowed alternative. A
-missing reviewer also denies actions requiring supervision. Questions and
-policy-forbidden actions never go to the reviewer.
+Normal tool environment and HOME configuration are preserved. Credential-like
+environment names are excluded unless explicitly requested through
+`policy.shell_env`. Temporary files go into the writable task directory.
+Default Auto adds no fixed per-command memory quota or cgroup setup requirement.
+Embedders can explicitly request resource limits when their host supports them.
 
-Set it at the top level, in a profile
-(`Profile(approval_mode: auto, approval_delegate: on)`), or for one process
-with `QQ_APPROVAL_DELEGATE=on|off`. In a project file it needs trust like
-any other sensitive key.
+An embedding that does not supply a native task scope retains conservative
+shell admission through read/build classification or explicit grants. This is
+not equivalent to the binary's native Auto path.
 
-### Stop delegating for this session
+### Command controls
 
-If a delegate is approving things you would rather see, `/delegate` in the
-TUI (or `set_approval_delegate` on the wire) changes who settles the focused
-session's held calls for the rest of that session: `off` denies Auto calls
-requiring supervision; `on` or `by_mode` restore delegation, and `configured`
-clears the override. It takes effect at the session's next held call — a
-running session included — and rewrites nothing: your `.qq/config.ron` and
-the next session are unchanged. Children the session spawns afterwards start
-with the same choice. The mode is still the ceiling: no value here lets the
-model do more than the mode allows.
+The shell classifier is not a security boundary. It can describe an Ask
+preview or admit conservative commands for an unscoped embedding; it does not
+veto arbitrary programs inside native Auto, or restrict Full to a fixed set of
+commands. Filesystem and network enforcement apply to scripts and libraries
+regardless of the executable's name.
 
-### Seeing who decided
-
-A settled call says who settled it. In the TUI the expanded call detail
-reads `approved by reviewer` beside its timing, and a
-delegate's denial shows as `denied by reviewer` on the
-row; your own decisions read `approved for session`, `denied by you`, or
-nothing for a plain once-approval. In `qq run --format text` the log line is
-`[tool] NAME approved by reviewer`; in JSONL the `tool_approval_resolved`
-event carries `"delegate": "reviewer"`. When an Auto delegate abstains, the
-denial includes its reason.
-
-## What the shell classifier decides
-
-Before policy sees a command, QQ parses it with a real bash grammar and
-grades it, strictest verdict across every simple command in the pipeline:
-
-| Verdict | Examples | Under `auto` | Under `full` |
-| --- | --- | --- | --- |
-| `allow` | `cargo test`, `git status`, `ls src`, `rg TODO`, `cat README.md` — literal words, listed read/build programs, operands inside the workspace | runs | runs |
-| `prompt` | anything with `$VAR`, globs, `$(…)`, redirects that write, `rm`, `git commit`, `git push`, `sed -i`, `npm install`, `curl`, `docker`, operands outside the workspace, unknown programs | runs inside the native task boundary or with a grant; otherwise denied | runs |
-| `forbidden` | `rm -rf /` or `~`, `sudo`, `mkfs`, `dd of=/dev/…`, `git push --force`, `curl … \| sh`, `eval "$x"`, writes to `~/.ssh` or `/etc`, fork bombs, `LD_PRELOAD=` | refused | refused |
-
-Wrappers (`env`, `nice`, `timeout`, `xargs`, `sh -c "…"`) are peeled so the
-inner command is graded too. In Ask, the approval prompt shows the verdict
-and the rule ids behind it. Auto never turns a classifier verdict into a
-human prompt.
+Configured command-prefix denies control literal commands; they cannot prevent
+Python, a library, or a dynamically constructed command from performing the
+same operation. Use native containment for those limits. Full still obeys
+explicit managed policy and built-in protected-file checks.
 
 ## The approval prompt
 
@@ -164,23 +144,10 @@ y once   a session   w workspace   n deny
 | `Shift-Y` / `Shift-N` | decide and then steer the run with a note | — |
 | `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open | — |
 
-"Same shape" means: an exact tool name for edits, writes, MCP tools, and
-`fetch` hosts; a **word-boundary prefix** for shell. Approving `cargo test
--p qq-core` for the session records the prefix `cargo test -p qq-core`;
-approving `cargo test` covers `cargo test -p anything` but never
-`cargo test | sh` — a command containing `|`, `;`, `&`, redirection, or
-substitution matches only a grant that quotes it exactly.
-
-A session grant is at most 256 bytes, and a session holds at most 256 of
-them. When the command is longer than that, or the session is already at the
-cap, `a` and `w` are not offered: the call is approved once, nothing is
-recorded, and the status says why. A grant that cannot be stored never fails
-the approval.
-
-A `forbidden` verdict is the exception to "same shape". A prefix grant never
-lifts it. A grant that quotes the exact command string does, which is why the
-byte cap matters: a command longer than 256 bytes cannot be blessed, under
-any mode, including `full`.
+Ask approvals apply once. Session/workspace grant choices from older clients
+are reduced to once under Ask. Stored grants remain useful for explicit
+unscoped embeddings and retained policy configuration; native Auto does not
+need a grant for every command.
 
 Edits show a diff; `fetch` shows the URL and whether a grant covers the
 host; MCP calls show the server, tool, and arguments.
@@ -195,8 +162,7 @@ you are away: the hold ends when you answer, when the run's own deadline
 you want a bound anyway — a shared server, an unattended supervisor — set
 `approval_timeout_seconds` in configuration and the call is denied
 `denied_timeout` after that many seconds, counted from when you were
-actually asked. Auto never enters this human wait: internal supervision
-times out to a denial. Headless `qq run --approval ask` denies immediately
+actually asked. Auto never enters this human wait. Headless `qq run --approval ask` denies immediately
 because no human is available.
 
 ## Grants in configuration
@@ -234,26 +200,16 @@ tool at all. A tool removed from the catalog cannot be granted back with
 
 `fetch` is refused for private, link-local, and cloud-metadata addresses
 under every mode. `policy.allow_hosts` (exact names or `*.suffix`) lets
-`auto` reach a host without asking; a managed `deny_hosts` wins.
+an unscoped caller record a host grant; native Auto can fetch public hosts
+without a per-host grant. A managed `deny_hosts` wins.
 
 ## Where the rules live
 
-The full model, the effect classes, and every shell rule are in
-[`../design/tools.md`](../design/tools.md) § Approval Policy and § Shell
-Classification. The decisions behind them: ADR-0007 (effect-classified
-approval), ADR-0020 (`forbidden` above every mode), ADR-0021 (`fetch` and
-`ask_user` classes).
+The effect classes and execution details are in
+[`../design/tools.md`](../design/tools.md). Historical ADRs record earlier
+classifier and reviewer designs; the current behavior is described above.
 
-A write child's reviewer cannot grant an action that its parent policy denies
-or holds without a grant. Such a call returns `parent_permission_required`;
-the operator must grant the necessary parent scope explicitly. An Ask
-parent instead requires human approval for each child action, without a
-reviewer or reusable grants. Existing supervised write delegation still
-requires its configured reviewer; this change does not enable unsandboxed
-children to acquire broader authority.
-
-Pending approvals do not preserve revoked authority. Tightening task or parent
-permissions while a reviewer is deciding denies that stale verdict without
-recording a grant. Switching a task or its parent to read-only also prevents
-a late human approval from executing the held mutation. Request the action
-again under the current policy.
+Parent permissions cap child authority. An Ask parent requires fresh human
+approval for each child action, while a read-only parent prevents mutation.
+Changing the task or parent policy invalidates pending approval authority;
+a late response cannot execute an action that is now denied.

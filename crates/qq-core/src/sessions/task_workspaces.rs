@@ -40,7 +40,9 @@ static PUBLICATION_WAITERS: Mutex<Vec<(String, tokio::sync::oneshot::Sender<()>)
 #[derive(Debug, Clone)]
 pub struct TaskWorkspacePolicy {
     pub directory: NativeDirectoryGrant,
+    pub read_access: crate::command_owner::NativeReadAccess,
     pub read_only: Vec<NativeDirectoryGrant>,
+    pub network: NativeNetwork,
     pub resources: NativeResources,
     pub limits: TaskWorkspaceLimits,
 }
@@ -636,9 +638,10 @@ pub(super) async fn prepare(
                     workspace.enable_git_baseline();
                 }
                 let scope = NativeCommandScope {
+                    read_access: policy.read_access,
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
-                    network: NativeNetwork::Isolated,
+                    network: policy.network,
                     resources: policy.resources,
                 };
                 TaskRecord {
@@ -652,8 +655,9 @@ pub(super) async fn prepare(
         record.validate_source(&source_grant, &source_authority)?;
         // A persisted tree retains work, not a permanent grant. Reapply the
         // trusted host's current limits and readable roots on each admission.
+        record.scope.read_access = policy.read_access;
         record.scope.read_only = policy.read_only;
-        record.scope.network = NativeNetwork::Isolated;
+        record.scope.network = policy.network;
         record.scope.resources = policy.resources;
         record.workspace.apply_limits(policy.limits)?;
         let held = Workspace::open(record.workspace.path())?;
