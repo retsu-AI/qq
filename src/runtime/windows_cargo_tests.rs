@@ -232,22 +232,28 @@ async fn installed_cargo_startup_through_real_auto_worker() {
         )
         .await
         .unwrap();
+    let mut observed = Vec::new();
     let finished = tokio::time::timeout(Duration::from_secs(60), async {
-        let mut observed = Vec::new();
         while let Some(event) = events.next().await {
             let event = event.unwrap();
             let done = matches!(event.event, SessionEvent::RunFinished { .. });
             observed.push(event);
             if done {
-                return observed;
+                return;
             }
         }
         panic!("event stream closed before terminal outcome");
     })
     .await;
+    let selected = tokio::task::spawn_blocking(selected_debugger_status)
+        .await
+        .unwrap();
+    for row in selected {
+        eprintln!("{row}");
+    }
     handler.shutdown().await.unwrap();
     owner.shutdown().await.unwrap();
-    let events = finished.expect("default Auto must finish the native editing task");
+    let events = observed;
     for event in &events {
         if let SessionEvent::ToolCallFinished { tool_call } = &event.event {
             eprintln!(
@@ -265,6 +271,7 @@ async fn installed_cargo_startup_through_real_auto_worker() {
         }
     }
 
+    finished.expect("default Auto must finish the native editing task");
     assert!(
         !events
             .iter()
@@ -372,4 +379,38 @@ fn log_results(label: &str, directory: &std::path::Path, commands: &[(&str, &str
             read(&format!("{name}.stderr"))
         );
     }
+}
+
+fn selected_debugger_status() -> Vec<String> {
+    use std::io::Read as _;
+    let mut rows = Vec::new();
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return rows;
+    };
+    for entry in entries.take(4096).flatten().filter(|entry| {
+        entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("qq-windows-helper-")
+    }) {
+        let Ok(files) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for file in files.take(64).flatten().filter(|file| {
+            file.file_name().to_string_lossy().starts_with("cdb-")
+                && file.file_name().to_string_lossy().ends_with("-state.txt")
+        }) {
+            if rows.len() >= 16 {
+                break;
+            }
+            let Ok(file) = fs::File::open(file.path()) else {
+                continue;
+            };
+            let mut bytes = Vec::new();
+            if file.take(131073).read_to_end(&mut bytes).is_ok() && bytes.len() <= 131072 {
+                rows.push(String::from_utf8_lossy(&bytes).into_owned());
+            }
+        }
+    }
+    rows
 }

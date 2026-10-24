@@ -14,6 +14,8 @@ pub(super) struct Debugger {
     stop: mpsc::SyncSender<()>,
     output: Arc<Mutex<Vec<String>>>,
     done: mpsc::Receiver<()>,
+    ready: mpsc::Receiver<()>,
+    status: Arc<Mutex<fs::File>>,
 }
 impl Debugger {
     pub(super) fn start(pid: u32) -> io::Result<Option<Self>> {
@@ -28,6 +30,16 @@ impl Debugger {
             .parent()
             .ok_or_else(|| io::Error::other("private helper root unavailable"))?
             .to_owned();
+        let status = Arc::new(Mutex::new(
+            fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(root.join(format!("cdb-{pid}-state.txt")))?,
+        ));
+        note(
+            &status,
+            &format!("QQ_CDB_STATE target_pid={pid} setup_started"),
+        );
         let child_script = root.join(format!("cdb-{pid}-child.txt"));
         let main_script = root.join(format!("cdb-{pid}-main.txt"));
         let open_script = root.join(format!("cdb-{pid}-open.txt"));
@@ -57,7 +69,7 @@ gc
                 r#"bu ntdll!RtlSetLastWin32Error ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS Win32=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
 bu ntdll!RtlNtStatusToDosError ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS NtStatus=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
 bu ntdll!NtOpenEvent "$$><{}"
-.printf "QQ_CDB_READY\n"
+.printf "QQ_CDB_READY pid=%x\n", @$tpid
 g
 "#,
                 open_script.display()
@@ -99,31 +111,66 @@ $$><{}
                 return Err(error);
             }
         };
+        note(
+            &status,
+            &format!("QQ_CDB_STATE debugger_pid={} spawned", child.id()),
+        );
         let output = Arc::new(Mutex::new(Vec::new()));
         let stdout = child.stdout.take().expect("piped debugger output");
         let observed = Arc::clone(&output);
+        let recorded = Arc::clone(&status);
         let (ready_send, ready) = mpsc::sync_channel(1);
         let (done_send, done) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
             collect(stdout, &observed, &ready_send);
+            if let Ok(rows) = observed.lock() {
+                for row in rows.iter() {
+                    note(&recorded, row);
+                }
+            }
             let _ = done_send.send(());
         });
         let (stop, stopped) = mpsc::sync_channel(1);
         let watched = Arc::clone(&process);
+        let timer_status = Arc::clone(&status);
         std::thread::spawn(move || {
             if stopped.recv_timeout(Duration::from_secs(25)).is_err() {
+                note(&timer_status, "QQ_CDB_STATE diagnostic_deadline_reached");
                 let _ = watched.terminate(1);
             }
         });
-        if ready.recv_timeout(Duration::from_secs(10)).is_err() {
+        let attached = (|| -> io::Result<bool> {
+            use winsafe::co;
+            let target = winsafe::HPROCESS::OpenProcess(co::PROCESS::QUERY_INFORMATION, false, pid)
+                .map_err(io::Error::other)?;
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if target
+                    .CheckRemoteDebuggerPresent()
+                    .map_err(io::Error::other)?
+                {
+                    return Ok(true);
+                }
+                if std::time::Instant::now() >= until || process.exit_code()?.is_some() {
+                    return Ok(false);
+                }
+                process.wait(Some(Duration::from_millis(20)))?;
+            }
+        })();
+        note(
+            &status,
+            &format!("QQ_CDB_STATE os_debug_port_attached={attached:?}; script_ready_pending"),
+        );
+        if !matches!(attached, Ok(true)) {
             let _ = stop.try_send(());
             let _ = process.terminate(1);
             let cleanup = process.wait(Some(Duration::from_secs(3)));
             let _ = done.recv_timeout(Duration::from_secs(2));
-            let rows = output.lock().map(|rows| rows.clone()).unwrap_or_default();
-            return Err(io::Error::other(format!(
-                "CDB attachment/breakpoints not ready: cleanup={cleanup:?}; selected={rows:?}"
-            )));
+            note(
+                &status,
+                &format!("QQ_CDB_STATE attach_failed cleanup={cleanup:?}"),
+            );
+            return Err(io::Error::other("CDB OS attachment not confirmed"));
         }
         Ok(Some(Self {
             child,
@@ -131,6 +178,8 @@ $$><{}
             stop,
             output,
             done,
+            ready,
+            status,
         }))
     }
     pub(super) fn finish(mut self) {
@@ -144,10 +193,13 @@ $$><{}
             let _ = self.child.wait();
         }
         let drained = self.done.recv_timeout(Duration::from_secs(2)).is_ok();
-        eprintln!(
-            "QQ_CDB_STATE exit={:?} cleanup={settled:?} output_drained={drained}",
-            self.process.exit_code()
+        let summary = format!(
+            "QQ_CDB_STATE exit={:?} cleanup={settled:?} output_drained={drained} script_ready={}",
+            self.process.exit_code(),
+            self.ready.try_recv().is_ok()
         );
+        note(&self.status, &summary);
+        eprintln!("{summary}");
         if let Ok(rows) = self.output.lock() {
             for row in rows.iter() {
                 eprintln!("{row}");
@@ -273,5 +325,12 @@ mod tests {
         let rows = output.lock().unwrap();
         assert_eq!(rows.len(), 128);
         assert!(rows.iter().map(String::len).sum::<usize>() <= 65536);
+    }
+}
+
+fn note(status: &Mutex<fs::File>, row: &str) {
+    if let Ok(mut file) = status.lock() {
+        let _ = writeln!(file, "{row}");
+        let _ = file.flush();
     }
 }
