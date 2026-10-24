@@ -68,7 +68,24 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
     );
     script.push_str(" & node -e \"const fs=require('fs'),p=require('path');try{fs.writeFileSync(p.join(p.dirname(process.execPath),'node_modules/npm/package.json'),'damage');fs.writeFileSync('sdk-write-denied','WRITE_ALLOWED')}catch(e){fs.writeFileSync('sdk-write-denied',e.code)}\"");
-    script.push_str(" & call npm run build --offline >npm-build.stdout 2>npm-build.stderr & call npm test --offline >npm-test.stdout 2>npm-test.stderr & cargo build --offline --manifest-path rust-proof/Cargo.toml >cargo-build.stdout 2>cargo-build.stderr & cargo test --offline --manifest-path rust-proof/Cargo.toml >cargo-test.stdout 2>cargo-test.stderr & rust-proof\\target\\debug\\task-proof.exe");
+    for (name, command) in [
+        ("npm-build", "call npm run build --offline"),
+        ("npm-test", "call npm test --offline"),
+        (
+            "cargo-build",
+            "cargo build --offline --manifest-path rust-proof/Cargo.toml",
+        ),
+        (
+            "cargo-test",
+            "cargo test --offline --manifest-path rust-proof/Cargo.toml",
+        ),
+    ] {
+        // Expand the result after the command, never while the outer compound
+        // line is parsed. Keep the ordinary shell command and all assertions.
+        script.push_str(&format!(" & cmd /D /V:ON /S /C \"{command} >{name}.stdout 2>{name}.stderr & >{name}.exit echo !errorlevel!\""));
+    }
+    script.push_str(" & rust-proof\\target\\debug\\task-proof.exe");
+
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
         vec![
@@ -189,6 +206,23 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     handler.shutdown().await.unwrap();
     owner.shutdown().await.unwrap();
     let events = finished.expect("default Auto must finish the native editing task");
+    for event in &events {
+        if let SessionEvent::ToolCallFinished { tool_call } = &event.event {
+            eprintln!(
+                "Windows Auto native result: tool={} is_error={} result={}",
+                tool_call.name,
+                tool_call.is_error,
+                tool_call
+                    .result
+                    .as_deref()
+                    .unwrap_or("<absent>")
+                    .chars()
+                    .take(16_384)
+                    .collect::<String>()
+            );
+        }
+    }
+
     assert!(
         matches!(
             events.last().map(|event| &event.event),
@@ -215,7 +249,8 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     assert!(!source.join(".qq/task-home").exists());
     for name in ["npm-build", "npm-test", "cargo-build", "cargo-test"] {
         eprintln!(
-            "{name}: stdout={:?}; stderr={:?}",
+            "{name}: exit={:?}; stdout={:?}; stderr={:?}",
+            fs::read_to_string(source.join(format!("{name}.exit"))),
             fs::read_to_string(source.join(format!("{name}.stdout"))),
             fs::read_to_string(source.join(format!("{name}.stderr")))
         );
@@ -324,7 +359,7 @@ fn response(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
 fn installed_toolchain_read_roots_refuse_junction_escapes() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().to_owned();
-    let toolchain = root.join("rustup/toolchains/selected");
+    let toolchain = root.join("rustup").join("toolchains").join("selected");
     let bin = toolchain.join("bin");
     let lib = toolchain.join("lib");
     let outside = root.join("private-outside");

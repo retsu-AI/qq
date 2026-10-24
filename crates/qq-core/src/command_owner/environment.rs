@@ -284,6 +284,28 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn admitted_tool_search_paths_use_command_compatible_windows_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let sdk = root.path().join("SDK with spaces-λ");
+        std::fs::create_dir(&sdk).unwrap();
+        let canonical = sdk.canonicalize().unwrap();
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_executable_directories(std::slice::from_ref(&canonical))
+            .unwrap();
+        let first = std::env::split_paths(&environment.get("PATH").unwrap())
+            .next()
+            .unwrap();
+        assert_eq!(
+            first,
+            dunce::simplified(&canonical),
+            "Windows tool PATH must use DOS spelling when identity allows it"
+        );
+        assert_eq!(first.canonicalize().unwrap(), canonical);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn toolchain_inputs_never_include_proxy_home_or_arbitrary_path_parents() {
         use std::path::Path;
         let home = Path::new(r"C:\Users\operator\.rustup");
