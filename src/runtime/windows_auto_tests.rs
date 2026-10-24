@@ -68,7 +68,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         " & node -e \"require('fs').writeFileSync('node-output.txt','node task output')\"",
     );
     script.push_str(" & node -e \"const fs=require('fs'),p=require('path');try{fs.writeFileSync(p.join(p.dirname(process.execPath),'node_modules/npm/package.json'),'damage');fs.writeFileSync('sdk-write-denied','WRITE_ALLOWED')}catch(e){fs.writeFileSync('sdk-write-denied',e.code)}\"");
-    for (name, command) in [
+    let commands = [
         ("npm-build", "call npm run build --offline"),
         ("npm-test", "call npm test --offline"),
         (
@@ -79,12 +79,79 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             "cargo-test",
             "cargo test --offline --manifest-path rust-proof/Cargo.toml",
         ),
-    ] {
-        // Expand the result after the command, never while the outer compound
-        // line is parsed. Keep the ordinary shell command and all assertions.
-        script.push_str(&format!(" & cmd /D /V:ON /S /C \"{command} >{name}.stdout 2>{name}.stderr & >{name}.exit echo !errorlevel!\""));
+        ("rust-artifact", r"rust-proof\target\debug\task-proof.exe"),
+    ];
+    // Each result is expanded on the next batch line. This avoids nested CMD
+    // quoting and compound-line expansion while retaining ordinary tool calls.
+    let mut batch = String::from(
+        "@echo off\r\n>sdk-environment.txt set PATH\r\n>>sdk-environment.txt set COMSPEC\r\n>>sdk-environment.txt set SYSTEMROOT\r\n>>sdk-environment.txt cd\r\n",
+    );
+    for program in ["cmd", "node", "npm", "cargo"] {
+        batch.push_str(&format!(
+            ">>sdk-environment.txt echo resolved-{program}\r\nwhere.exe {program} >>sdk-environment.txt 2>&1\r\n"
+        ));
     }
-    script.push_str(" & rust-proof\\target\\debug\\task-proof.exe");
+    for (name, command) in commands {
+        batch.push_str(&format!(
+            "{command} >{name}.stdout 2>{name}.stderr\r\n>{name}.exit echo %errorlevel%\r\n"
+        ));
+    }
+    batch.push_str("exit /b 0\r\n");
+    fs::write(source.join("sdk-workflow.cmd"), batch).unwrap();
+    script.push_str(" & call sdk-workflow.cmd");
+
+    // Prove the same owned batch and installed tools work without confinement;
+    // host setup failures must not be confused with sandbox admission failures.
+    let control = fixture.path("host-sdk-control");
+    fs::create_dir_all(control.join("rust-proof/src")).unwrap();
+    for name in [
+        "package.json",
+        "build.js",
+        "test.js",
+        "sdk-workflow.cmd",
+        "rust-proof/Cargo.toml",
+        "rust-proof/src/main.rs",
+    ] {
+        fs::copy(source.join(name), control.join(name)).unwrap();
+    }
+    let system = std::env::var_os("SYSTEMROOT").expect("Windows system root");
+    let mut command = tokio::process::Command::new(
+        std::path::Path::new(&system)
+            .join("System32")
+            .join("cmd.exe"),
+    );
+    {
+        use std::os::windows::process::CommandExt as _;
+        command
+            .as_std_mut()
+            .raw_arg("/D /S /C \"call sdk-workflow.cmd\"");
+    }
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        command.current_dir(&control).kill_on_drop(true).output(),
+    )
+    .await
+    .expect("owned host SDK control must finish")
+    .unwrap();
+    log_sdk_results("host", &control, &commands);
+    assert!(output.status.success(), "host SDK batch failed: {output:?}");
+    for (name, _) in commands {
+        assert_eq!(
+            fs::read_to_string(control.join(format!("{name}.exit")))
+                .unwrap()
+                .trim(),
+            "0",
+            "host {name} must succeed before Auto qualification"
+        );
+    }
+    assert_eq!(
+        fs::read_to_string(control.join("node-test-passed")).unwrap(),
+        "yes"
+    );
+    assert_eq!(
+        fs::read_to_string(control.join("rust-built-output")).unwrap(),
+        "42"
+    );
 
     let complete = json!({"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2}}});
     let provider = LoopbackServer::respond_sequence_with_timeout(
@@ -247,14 +314,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "task-output"
     );
     assert!(!source.join(".qq/task-home").exists());
-    for name in ["npm-build", "npm-test", "cargo-build", "cargo-test"] {
-        eprintln!(
-            "{name}: exit={:?}; stdout={:?}; stderr={:?}",
-            fs::read_to_string(source.join(format!("{name}.exit"))),
-            fs::read_to_string(source.join(format!("{name}.stdout"))),
-            fs::read_to_string(source.join(format!("{name}.stderr")))
-        );
-    }
+    log_sdk_results("Auto", &source, &commands);
     let sdk_write_error = fs::read_to_string(source.join("sdk-write-denied")).unwrap();
     assert!(
         matches!(sdk_write_error.as_str(), "EACCES" | "EPERM"),
@@ -353,6 +413,26 @@ fn response(events: Vec<Value>) -> (u16, Option<&'static str>, Vec<Vec<u8>>) {
                 .into_bytes(),
         ],
     )
+}
+
+fn log_sdk_results(label: &str, directory: &std::path::Path, commands: &[(&str, &str)]) {
+    let read = |name: &str| {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        fs::File::open(directory.join(name))?
+            .take(16_384)
+            .read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(String::from_utf8_lossy(&bytes).into_owned())
+    };
+    eprintln!("{label} SDK environment: {:?}", read("sdk-environment.txt"));
+    for (name, _) in commands {
+        eprintln!(
+            "{label} {name}: exit={:?}; stdout={:?}; stderr={:?}",
+            read(&format!("{name}.exit")),
+            read(&format!("{name}.stdout")),
+            read(&format!("{name}.stderr"))
+        );
+    }
 }
 
 #[test]
