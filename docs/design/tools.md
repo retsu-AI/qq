@@ -269,6 +269,17 @@ cleanup after exit and cancellation. Positive qualification requires a supported
 kernel and working user-manager delegation. Refusal tests cover unavailable
 delegation separately; they do not prove successful containment.
 
+On Windows, budgeted commands also share a per-owner kernel job envelope. It
+uses 75% of the smaller available physical-memory/commit budget at first use,
+4,096 active processes and a 90% CPU hard cap. The worker itself and Host-resource
+commands stay outside it. Every suspended helper joins this shared job before
+its independent command job, so cancelling one command preserves its peers.
+Per-command CPU rates account for the parent's allocation and never round above
+the requested machine share. Each budgeted command keeps one native exit wait,
+bounded by the worker's active-command limit, outside Tokio's blocking I/O pool.
+Native memory/process tests exercise independent commands sharing the envelope,
+capacity reuse and cleanup; exit-wait coverage includes dropped observation.
+
 ### Disk-space safeguard
 
 Restricted native commands check available space on every declared writable
@@ -1420,7 +1431,9 @@ callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,
 checks the kernel-retained memory/process limits, and includes the trusted
-helper in that budget. It limits committed private memory and processes, not
+helper in that budget. Memory ceilings are rounded down to whole native pages
+before setting and verifying them; budgets smaller than one page are refused.
+It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default
