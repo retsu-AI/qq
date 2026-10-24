@@ -1,5 +1,8 @@
 //! Application configuration to model-runtime composition.
 
+#[path = "runtime/task_hosting.rs"]
+mod task_hosting;
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
@@ -2360,6 +2363,13 @@ pub(crate) fn aws_profile_configured(profile: &str) -> bool {
 }
 
 impl RuntimeLoader for RuntimeFactory {
+    fn authorize_task_hosting(
+        &self,
+        workspace: qq_core::command_owner::NativeDirectoryGrant,
+    ) -> qq_core::TaskHostingLoadFuture {
+        self.load_task_hosting(workspace)
+    }
+
     fn resolve_worker_model(
         &self,
         workspace: String,
