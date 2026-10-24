@@ -238,6 +238,10 @@ mod tests {
                 !home.join("custom-metadata-executed").exists(),
                 "custom Cargo cache selected a Host executable"
             );
+            if std::env::var_os("QQ_UNIX_SDK_ALIAS_CHILD").is_some() {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+                return;
+            }
             let roots = result.unwrap();
             assert_eq!(
                 roots,
@@ -278,7 +282,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&malicious, std::fs::Permissions::from_mode(0o700)).unwrap();
-        for custom_home in [None, Some(custom)] {
+        for custom_home in [None, Some(custom.clone())] {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
             .args([
@@ -299,6 +303,25 @@ mod tests {
                 "child home-start resolver failed: {output:?}"
             );
         }
+        std::fs::rename(home.join(".cargo"), home.join("trusted-cargo")).unwrap();
+        std::os::unix::fs::symlink(&custom, home.join(".cargo")).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::unix_sdk::tests::conventional_rustup_works_when_client_starts_in_home",
+                "--nocapture",
+            ])
+            .current_dir(&home)
+            .env_clear()
+            .env("HOME", &home)
+            .env(CHILD, "1")
+            .env("QQ_UNIX_SDK_ALIAS_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "aliased conventional installation selected project metadata: {output:?}"
+        );
     }
     #[test]
     fn installed_default_roots_reject_aliases_and_control_overlap() {
