@@ -1,5 +1,6 @@
 //! macOS launch isolation. The guardian stays outside the payload group and
-//! retains its waitable leader until every member stops, even after owner loss.
+//! retains its waitable leader until its owned group stops, even after owner loss.
+//! Detached descendants retain Seatbelt restrictions but are outside group cleanup.
 use super::{
     dispatch::{ToolCancellation, ToolTaskLease},
     process_context::NativeExecution,
@@ -23,6 +24,11 @@ use std::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+#[cfg(any(target_os = "macos", test))]
+mod resources;
+
+const RESOURCE_STOPPED: i32 = i32::MIN;
+const LAUNCH_FAILED: i32 = i32::MIN + 1;
 const MAX_PACKET: usize = 4 * 1024 * 1024;
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -54,6 +60,7 @@ struct Packet {
     cwd_identity: NativeWorkspaceIdentity,
     filesystem: NativeFilesystem,
     network: NativeNetwork,
+    resources: NativeResources,
     not_after_ms: u64,
 }
 
@@ -114,10 +121,8 @@ impl MacosOwner {
         native: Option<&NativeExecution>,
         deadline: Instant,
     ) -> io::Result<(tokio::process::Command, Startup)> {
-        if native.is_some_and(|native| native.resources != NativeResources::Host) {
-            return Err(io::Error::other(
-                "macOS aggregate resource enforcement is unavailable",
-            ));
+        if let Some(native) = native {
+            validate_resources(&native.filesystem, native.resources)?;
         }
         if let Some(NativeExecution {
             filesystem: NativeFilesystem::Restricted { read_write, .. },
@@ -156,6 +161,7 @@ impl MacosOwner {
             cwd_identity: NativeWorkspaceIdentity::held(cwd)?,
             filesystem: native.map_or(NativeFilesystem::Host, |native| native.filesystem.clone()),
             network: native.map_or(NativeNetwork::Host, |native| native.network),
+            resources: native.map_or(NativeResources::Host, |native| native.resources),
             not_after_ms: unix_ms().saturating_add(
                 u64::try_from(
                     deadline
@@ -176,7 +182,7 @@ impl MacosOwner {
         wrapped
             .env_clear()
             .args(&self.launcher.arguments)
-            .arg("qq-macos-launch:4");
+            .arg("qq-macos-launch:5");
         wrapped
             .as_std_mut()
             .fd_mappings(vec![command_fds::FdMapping {
@@ -209,6 +215,7 @@ pub(crate) struct Child {
     result_bytes: [u8; 4],
     result_read: usize,
     stopping: bool,
+    resource_stopped: bool,
 }
 impl From<tokio::process::Child> for Child {
     fn from(inner: tokio::process::Child) -> Self {
@@ -220,6 +227,7 @@ impl From<tokio::process::Child> for Child {
             result_bytes: [0; 4],
             result_read: 0,
             stopping: false,
+            resource_stopped: false,
         }
     }
 }
@@ -235,6 +243,10 @@ impl DerefMut for Child {
     }
 }
 impl Child {
+    pub(super) fn resource_stopped(&self) -> bool {
+        self.resource_stopped
+    }
+
     pub(super) fn owns_payload_group(&self) -> bool {
         self.lease.is_some()
     }
@@ -265,7 +277,7 @@ impl Child {
             let pid = rustix::process::Pid::from_raw(i32::try_from(pid).map_err(io::Error::other)?)
                 .ok_or_else(|| io::Error::other("invalid guardian pid"))?;
             // Use the OS clock, independently of simulated task-budget clocks.
-            // A timed-out guardian keeps custody; dropping this observer only
+            // A timed-out guardian keeps the owned group; dropping this observer only
             // closes its channel, never kills it before cleanup finishes.
             super::native_exit::confirm(move || {
                 rustix::process::waitid(
@@ -289,7 +301,7 @@ impl Child {
         let status = self.inner.wait().await?;
         if !status.success() {
             return Err(io::Error::other(format!(
-                "native guardian exited without confirming payload cleanup: {status}"
+                "native guardian exited without confirming owned-group cleanup: {status}"
             )));
         }
         if self.reported.is_none() {
@@ -303,14 +315,26 @@ impl Child {
                     .await?;
                 if count == 0 {
                     return Err(io::Error::other(
-                        "native guardian omitted its cleanup result",
+                        "native guardian omitted its owned-group cleanup result",
                     ));
                 }
                 // Keep partial reads on the Child: cancelling a wait must not
                 // discard consumed bytes or turn a failed payload into success.
                 self.result_read += count;
             }
-            self.reported = Some(ExitStatus::from_raw(i32::from_le_bytes(self.result_bytes)));
+            let raw = i32::from_le_bytes(self.result_bytes);
+            if raw == LAUNCH_FAILED {
+                if let Some(lease) = &mut self.lease {
+                    lease.process_reaped();
+                }
+                return Err(io::Error::other(super::native_exit::LaunchNotStarted));
+            }
+            self.resource_stopped = raw == RESOURCE_STOPPED;
+            self.reported = Some(ExitStatus::from_raw(if self.resource_stopped {
+                9 // SIGKILL after the guardian confirms group cleanup.
+            } else {
+                raw
+            }));
         }
         if let Some(lease) = &mut self.lease {
             lease.process_reaped();
@@ -350,6 +374,7 @@ pub(super) async fn spawn(
         result_bytes: [0; 4],
         result_read: 0,
         stopping: false,
+        resource_stopped: false,
     };
     let mut released = false;
     let authorized = tokio::select! {
@@ -439,6 +464,53 @@ fn unix_ms() -> u64 {
     )
     .unwrap_or(u64::MAX)
 }
+fn validate_resources(filesystem: &NativeFilesystem, resources: NativeResources) -> io::Result<()> {
+    resources.validate()?;
+    match resources {
+        NativeResources::Host => Ok(()),
+        NativeResources::Guarded { .. } if filesystem.is_restricted() => Ok(()),
+        NativeResources::Guarded { .. } => Err(io::Error::other(
+            "resource safeguards require restricted filesystem authority",
+        )),
+        NativeResources::Limited { .. } | NativeResources::Committed { .. } => Err(
+            io::Error::other("macOS aggregate resource enforcement is unavailable"),
+        ),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn prepare_profile(
+    filesystem: &NativeFilesystem,
+    resources: NativeResources,
+    network: NativeNetwork,
+    pressure: impl FnOnce() -> io::Result<i32>,
+) -> io::Result<String> {
+    validate_resources(filesystem, resources)?;
+    resources::check_pressure(resources, pressure)?;
+    profile(filesystem, network)
+}
+
+// `None` means system pressure refused launch. Only `Some` may contain a
+// created payload; errors here must be known to precede process creation.
+#[cfg(any(target_os = "macos", test))]
+fn confirm_launch<T>(
+    control: &mut impl io::Write,
+    attempted: io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    let receipt = match attempted {
+        Ok(Some(payload)) => return Ok(Some(payload)),
+        Ok(None) => RESOURCE_STOPPED,
+        Err(error) => {
+            eprintln!("native payload did not start: {error}");
+            LAUNCH_FAILED
+        }
+    };
+    // One receipt only: retrying with a different receipt after partial
+    // delivery could turn a corrupt frame into a false cleanup confirmation.
+    control.write_all(&receipt.to_le_bytes())?;
+    Ok(None)
+}
+
 fn validate_environment(packet: &Packet) -> io::Result<()> {
     if packet
         .environment
@@ -455,7 +527,7 @@ fn validate_environment(packet: &Packet) -> io::Result<()> {
 /// Single-purpose entry, before Tokio or any application initialization.
 #[cfg(target_os = "macos")]
 pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
-    if encoded != "qq-macos-launch:4" {
+    if encoded != "qq-macos-launch:5" {
         return Err(io::Error::other("invalid native launch descriptor"));
     }
     if rustix::process::getpgrp() != rustix::process::getpid() {
@@ -510,53 +582,93 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     if NativeWorkspaceIdentity::held(cwd.root())? != packet.cwd_identity {
         return Err(io::Error::other("native working directory changed"));
     }
-    let profile = profile(&packet.filesystem, packet.network)?;
+    let profile = prepare_profile(
+        &packet.filesystem,
+        packet.resources,
+        packet.network,
+        resources::memory_pressure_level,
+    )?;
     rustix::process::fchdir(cwd.root())?;
     control.write_all(b"RDY!")?;
-    let mut authorization = [0];
-    control.read_exact(&mut authorization)?;
-    if authorization != [1] || unix_ms() >= packet.not_after_ms {
-        return Err(io::Error::other("native launch authorization expired"));
-    }
-    let mut liveness = control.try_clone()?;
-    rustix::io::fcntl_setfd(&liveness, rustix::io::FdFlags::CLOEXEC)?;
-    let custody = std::sync::Arc::new(PayloadGroup::default());
-    let stop = custody.clone();
-    std::thread::Builder::new()
-        .name("qq-owner-liveness".into())
-        .spawn(move || {
-            let mut byte = [0];
-            loop {
-                match liveness.read(&mut byte) {
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                    _ => {
-                        stop.request_stop();
-                        return;
+    // Every failure in this phase proves that no payload was created. Keep
+    // that proof separate from failures after spawn, which retain custody.
+    let attempted = (|| {
+        let mut authorization = [0];
+        control.read_exact(&mut authorization)?;
+        if authorization != [1] || unix_ms() >= packet.not_after_ms {
+            return Err(io::Error::other("native launch authorization expired"));
+        }
+        let liveness: std::os::fd::OwnedFd = control.try_clone()?.into();
+        rustix::io::fcntl_setfd(&liveness, rustix::io::FdFlags::CLOEXEC)?;
+        let mut liveness = std::os::unix::net::UnixStream::from(liveness);
+        let guarded = matches!(packet.resources, NativeResources::Guarded { .. });
+        if guarded {
+            liveness.set_read_timeout(Some(std::time::Duration::from_millis(250)))?;
+        }
+        let policy = packet.resources;
+        let custody = std::sync::Arc::new(PayloadGroup::default());
+        let stop = custody.clone();
+        std::thread::Builder::new()
+            .name("qq-owner-liveness".into())
+            .spawn(move || {
+                let mut byte = [0];
+                loop {
+                    match liveness.read(&mut byte) {
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(error)
+                            if guarded
+                                && matches!(
+                                    error.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                                ) =>
+                        {
+                            stop.check_resources(policy);
+                        }
+                        _ => {
+                            stop.request_stop();
+                            return;
+                        }
                     }
                 }
-            }
-        })?;
-    let mut command = std::process::Command::new(SANDBOX_EXEC);
-    command
-        .env_clear()
-        .arg("-p")
-        .arg(profile)
-        .arg(OsString::from_vec(packet.program))
-        .args(packet.arguments.into_iter().map(OsString::from_vec))
-        .envs(
-            packet
-                .environment
-                .into_iter()
-                .map(|(name, value)| (OsString::from_vec(name), OsString::from_vec(value))),
-        );
-    // Keep this trusted guardian outside the group it must terminate. The
-    // sandboxed child leads a new group and cannot change it or create another.
-    use std::os::unix::process::CommandExt as _;
-    command.process_group(0);
-    if unix_ms() >= packet.not_after_ms {
-        return Err(io::Error::other("native launch authorization expired"));
-    }
-    let mut child = command.spawn()?;
+            })?;
+        let mut command = if guarded {
+            let mut command = std::process::Command::new("/usr/sbin/taskpolicy");
+            command.args(["-b", SANDBOX_EXEC]);
+            command
+        } else {
+            std::process::Command::new(SANDBOX_EXEC)
+        };
+        command
+            .env_clear()
+            .arg("-p")
+            .arg(profile)
+            .arg(OsString::from_vec(packet.program))
+            .args(packet.arguments.into_iter().map(OsString::from_vec))
+            .envs(
+                packet
+                    .environment
+                    .into_iter()
+                    .map(|(name, value)| (OsString::from_vec(name), OsString::from_vec(value))),
+            );
+        // Keep this trusted guardian outside the payload group it must terminate.
+        // Seatbelt authority is inherited even when a descendant leaves this group;
+        // process-group cleanup alone does not account for detached descendants.
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+        // Authorization may have waited since preparation. Refuse fresh pressure
+        // before creating even a short-lived payload, not at its first sample.
+        if resources::check_pressure(packet.resources, resources::memory_pressure_level).is_err() {
+            return Ok(None);
+        }
+        if unix_ms() >= packet.not_after_ms {
+            return Err(io::Error::other("native launch authorization expired"));
+        }
+        let child = command.spawn()?;
+        Ok(Some((child, custody)))
+    })();
+    let Some((mut child, custody)) = confirm_launch(&mut control, attempted)? else {
+        return Ok(0);
+    };
     let pid = rustix::process::Pid::from_raw(i32::try_from(child.id()).map_err(io::Error::other)?)
         .ok_or_else(|| io::Error::other("invalid payload pid"))?;
     custody.publish(pid);
@@ -583,14 +695,19 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
             break;
         }
         // The observer has a bounded cleanup wait. If the OS cannot yet prove
-        // exit, this small guardian keeps custody after that observer leaves.
+        // group exit, this guardian retains that group after the observer leaves.
         std::thread::park_timeout(std::time::Duration::from_millis(10));
     }
     // Serialize disarming against the liveness thread before the only reap.
     // No code may signal this numeric group after its leader can be reused.
-    custody.disarm();
+    let resource_stopped = custody.disarm();
     let status = child.wait()?;
-    let _ = control.write_all(&status.into_raw().to_le_bytes());
+    let raw = if resource_stopped {
+        RESOURCE_STOPPED
+    } else {
+        status.into_raw()
+    };
+    let _ = control.write_all(&raw.to_le_bytes());
     Ok(0)
 }
 
@@ -603,6 +720,7 @@ struct PayloadGroup(std::sync::Mutex<PayloadGroupState>);
 struct PayloadGroupState {
     leader: Option<rustix::process::Pid>,
     stopping: bool,
+    resource_stopped: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -629,11 +747,27 @@ impl PayloadGroup {
         }
     }
 
-    fn disarm(&self) {
-        self.0
+    fn check_resources(&self, policy: NativeResources) {
+        let mut state = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .leader = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pid) = state.leader
+            && resources::check(policy, pid).is_err()
+        {
+            state.resource_stopped = true;
+            state.stopping = true;
+            let _ = kill_group(Some(pid.as_raw_nonzero().get() as u32));
+        }
+    }
+
+    fn disarm(&self) -> bool {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.leader = None;
+        state.resource_stopped
     }
 }
 
@@ -714,6 +848,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
             read_write,
         } => {
             filesystem.validate()?;
+            let mut protected_directories = std::collections::BTreeSet::new();
             for (grant, writable) in read_only
                 .iter()
                 .map(|grant| (grant, false))
@@ -734,6 +869,11 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     "(allow file-read* file-map-executable process-exec {} (subpath {quoted}))\n",
                     if writable { "file-write*" } else { "" }
                 ));
+                if writable {
+                    // Moving an ancestor also relocates the authority root.
+                    // Unrelated directories and grant contents stay writable.
+                    protected_directories.extend(grant.path.ancestors());
+                }
                 for ancestor in grant.path.ancestors().skip(1) {
                     let quoted = serde_json::to_string(
                         ancestor
@@ -747,6 +887,22 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     }
                 }
             }
+            // Emit denials after every allow so overlapping grants cannot
+            // restore permission to replace an authority root or its ancestors.
+            for directory in protected_directories {
+                let quoted = serde_json::to_string(
+                    directory
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("non UTF-8 native grant"))?,
+                )
+                .map_err(io::Error::other)?;
+                profile.push_str(&format!(
+                    "(deny file-write-unlink (require-all (vnode-type DIRECTORY) (literal {quoted})))\n"
+                ));
+                if profile.len() > 64 * 1024 {
+                    return Err(io::Error::other("native sandbox profile exceeds its bound"));
+                }
+            }
         }
     }
     Ok(profile)
@@ -755,6 +911,64 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn resource_admission_requires_restricted_filesystem_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let cwd = cap_std::fs::Dir::open_ambient_dir(&root, cap_std::ambient_authority()).unwrap();
+        let owner = MacosOwner::discover(CommandLauncher::new("/bin/sh".into())).unwrap();
+        let restricted = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        let guarded = NativeResources::Guarded {
+            memory_bytes: 1024,
+            max_tasks: 2,
+        };
+        for (filesystem, resources, admitted) in [
+            (NativeFilesystem::Host, NativeResources::Host, true),
+            (NativeFilesystem::Host, guarded, false),
+            (restricted.clone(), guarded, true),
+            (
+                restricted.clone(),
+                NativeResources::Committed {
+                    memory_bytes: 1024,
+                    max_processes: 2,
+                    cpu_percent: 50,
+                },
+                false,
+            ),
+            (
+                restricted,
+                NativeResources::Guarded {
+                    memory_bytes: 0,
+                    max_tasks: 2,
+                },
+                false,
+            ),
+        ] {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.current_dir(&root);
+            let result = owner.wrap(
+                command,
+                &cwd,
+                Some(&NativeExecution {
+                    environment: crate::command_owner::NativeEnvironment::from_values([]).unwrap(),
+                    filesystem,
+                    network: NativeNetwork::Isolated,
+                    resources,
+                }),
+                Instant::now() + std::time::Duration::from_secs(60),
+            );
+            assert_eq!(
+                result.is_ok(),
+                admitted,
+                "{resources:?}: {:?}",
+                result.err()
+            );
+        }
+    }
+
     #[tokio::test]
     async fn writable_launcher_cannot_replace_the_trusted_helper() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -856,7 +1070,11 @@ mod tests {
 
     #[tokio::test]
     async fn interrupted_result_reads_retain_bytes_and_require_the_cleanup_frame() {
-        for complete in [true, false] {
+        for (complete, raw_status) in [
+            (true, 7_i32 << 8),
+            (false, 7_i32 << 8),
+            (true, RESOURCE_STOPPED),
+        ] {
             let mut inner = tokio::process::Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .spawn()
@@ -874,8 +1092,9 @@ mod tests {
                 result_bytes: [0; 4],
                 result_read: 0,
                 stopping: false,
+                resource_stopped: false,
             };
-            let raw = (7_i32 << 8).to_le_bytes();
+            let raw = raw_status.to_le_bytes();
             peer.write_all(&raw[..2]).await.unwrap();
             child.control.as_ref().unwrap().readable().await.unwrap();
             let mut waiting = Box::pin(child.wait());
@@ -884,7 +1103,14 @@ mod tests {
             assert_eq!(child.result_read, 2);
             if complete {
                 peer.write_all(&raw[2..]).await.unwrap();
-                assert_eq!(child.wait().await.unwrap().code(), Some(7));
+                let status = child.wait().await.unwrap();
+                if raw_status == RESOURCE_STOPPED {
+                    assert_eq!(status.signal(), Some(9));
+                    assert!(child.resource_stopped());
+                } else {
+                    assert_eq!(status.code(), Some(7));
+                    assert!(!child.resource_stopped());
+                }
             } else {
                 drop(peer);
                 assert!(
@@ -1094,6 +1320,97 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn writable_grant_anchors_survive_content_edits_and_replacement_attempts() {
+        use crate::command_owner::NativeDirectoryGrant;
+
+        for nested_first in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let workspace = root.join("workspace");
+            let intermediate = workspace.join("intermediate");
+            let anchor = intermediate.join("anchor");
+            std::fs::create_dir_all(&anchor).unwrap();
+            let outside = root.join("outside");
+            std::fs::write(&outside, "outside-original").unwrap();
+            let read_only = ["/bin", "/usr", "/System/Library", "/System/Cryptexes/OS"]
+                .into_iter()
+                .map(|path| {
+                    NativeDirectoryGrant::capture(&std::fs::canonicalize(path).unwrap()).unwrap()
+                })
+                .collect();
+            let mut read_write = vec![
+                NativeDirectoryGrant::capture(&workspace).unwrap(),
+                NativeDirectoryGrant::capture(&anchor).unwrap(),
+            ];
+            if nested_first {
+                read_write.reverse();
+            }
+            let policy = profile(
+                &NativeFilesystem::Restricted {
+                    read_only,
+                    // The enclosing grant would otherwise permit replacing the
+                    // nested anchor even though its identity was checked at launch.
+                    read_write,
+                },
+                NativeNetwork::Isolated,
+            )
+            .unwrap();
+            let output = std::process::Command::new(SANDBOX_EXEC)
+                .args(["-p", &policy, "/bin/sh", "-c"])
+                .arg(
+                    r#"set -eu
+printf original > "$1/keep"
+printf editable > "$1/edit"
+/bin/mv "$1/edit" "$1/renamed"
+/bin/rm "$1/renamed"
+/bin/mkdir "$1/ordinary"
+/bin/rmdir "$1/ordinary"
+/bin/mkdir ordinary
+/bin/mv ordinary ordinary-renamed
+/bin/rmdir ordinary-renamed
+if /bin/mv "$3" "$3-moved"; then printf ancestor-relocated; exit 94; fi
+if /bin/mv "$1" "$1-moved"; then exit 91; fi
+/bin/rm "$1/keep"
+if /bin/rmdir "$1"; then exit 92; fi
+printf retained > "$1/kept"
+if printf changed > "$2"; then exit 93; fi
+printf anchored"#,
+                )
+                .arg("anchor-probe")
+                .arg(&anchor)
+                .arg(&outside)
+                .arg(&intermediate)
+                .current_dir(&workspace)
+                .env_clear()
+                .output()
+                .unwrap();
+            assert_ne!(
+                output.stdout, b"ancestor-relocated",
+                "an intermediate directory carrying a grant root was relocated (nested_first={nested_first})"
+            );
+            assert!(
+                output.status.success(),
+                "status={:?}, stdout={}, stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, b"anchored");
+            assert_eq!(
+                std::fs::read_to_string(anchor.join("kept")).unwrap(),
+                "retained"
+            );
+            assert!(!intermediate.join("anchor-moved").exists());
+            assert!(!workspace.join("intermediate-moved").exists());
+            assert_eq!(
+                std::fs::read_to_string(outside).unwrap(),
+                "outside-original"
+            );
+        }
+    }
+
     #[test]
     fn replaced_directory_is_refused_before_profile_construction() {
         let root = tempfile::tempdir().unwrap();
@@ -1111,5 +1428,211 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("directory grant changed"));
+    }
+
+    #[test]
+    fn guarded_preparation_checks_pressure_before_authorizing_payloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let filesystem = NativeFilesystem::Restricted {
+            read_only: vec![],
+            read_write: vec![crate::command_owner::NativeDirectoryGrant::capture(&root).unwrap()],
+        };
+        let guarded = NativeResources::Guarded {
+            memory_bytes: 1024 * 1024,
+            max_tasks: 2,
+        };
+        for (pressure, accepted) in [
+            (Ok(1), true),
+            (Ok(2), false),
+            (Ok(4), false),
+            (Ok(0), false),
+            (Err(io::Error::other("pressure query unavailable")), false),
+        ] {
+            let mut queried = false;
+            let result = prepare_profile(&filesystem, guarded, NativeNetwork::Isolated, || {
+                queried = true;
+                pressure
+            });
+            assert!(
+                queried,
+                "guarded preparation must query pressure before authorizing execution"
+            );
+            assert_eq!(result.is_ok(), accepted, "{result:?}");
+        }
+        assert!(
+            prepare_profile(
+                &filesystem,
+                NativeResources::Host,
+                NativeNetwork::Isolated,
+                || panic!("host resources must not require a pressure query"),
+            )
+            .is_ok()
+        );
+    }
+
+    struct LimitedWriter {
+        stream: std::os::unix::net::UnixStream,
+        remaining: usize,
+    }
+    impl io::Write for LimitedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "injected receipt failure",
+                ));
+            }
+            let end = bytes.len().min(self.remaining);
+            let written = io::Write::write(&mut self.stream, &bytes[..end])?;
+            self.remaining -= written;
+            Ok(written)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            io::Write::flush(&mut self.stream)
+        }
+    }
+
+    #[tokio::test]
+    async fn post_authorization_pressure_refusal_confirms_no_payload_before_settlement() {
+        for (pressure, budget) in [
+            (Ok(2), usize::MAX),
+            (Ok(4), usize::MAX),
+            (
+                Err(io::Error::other("pressure query unavailable")),
+                usize::MAX,
+            ),
+            (Ok(2), 0),
+            (Ok(4), 2),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let marker = root.path().join("payload-ran");
+            let mut inner = tokio::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .spawn()
+                .unwrap();
+            assert!(inner.wait().await.unwrap().success());
+            let (control, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+            control.set_nonblocking(true).unwrap();
+            let mut writer = LimitedWriter {
+                stream,
+                remaining: budget,
+            };
+            let tasks = crate::tools::dispatch::ToolTasks::default();
+            let mut lease = tasks.enter();
+            lease.process_started();
+            let mut child = Child {
+                inner,
+                control: Some(tokio::net::UnixStream::from_std(control).unwrap()),
+                lease: Some(lease),
+                reported: None,
+                result_bytes: [0; 4],
+                result_read: 0,
+                stopping: false,
+                resource_stopped: false,
+            };
+            let pressure = resources::check_pressure(
+                NativeResources::Guarded {
+                    memory_bytes: 1024 * 1024,
+                    max_tasks: 2,
+                },
+                || pressure,
+            );
+            let admitted = confirm_launch(&mut writer, Ok(pressure.ok()));
+            if matches!(admitted, Ok(Some(()))) {
+                std::fs::write(&marker, b"payload started").unwrap();
+            }
+            drop(writer);
+            let result = child.wait().await;
+            let resource_stopped = child.resource_stopped();
+            drop(child);
+            let drained = tasks.drain().await;
+            assert!(
+                !marker.exists(),
+                "pressure refusal must never launch a payload"
+            );
+            let delivered = budget == usize::MAX;
+            assert_eq!(admitted.is_ok(), delivered, "{admitted:?}");
+            assert_eq!(result.is_ok(), delivered, "{result:?}");
+            assert_eq!(resource_stopped, delivered);
+            assert_eq!(drained.is_ok(), delivered, "{drained:?}");
+        }
+    }
+    #[tokio::test]
+    async fn confirmed_launch_failure_releases_custody_without_reporting_an_exit() {
+        for (kind, budget, guardian_exit) in [
+            (io::ErrorKind::TimedOut, usize::MAX, 0),
+            (io::ErrorKind::NotFound, usize::MAX, 0),
+            (io::ErrorKind::PermissionDenied, usize::MAX, 0),
+            (io::ErrorKind::TimedOut, 0, 0),
+            (io::ErrorKind::NotFound, 2, 0),
+            (io::ErrorKind::TimedOut, usize::MAX, 1),
+        ] {
+            let mut inner = tokio::process::Command::new("/bin/sh")
+                .args(["-c", &format!("exit {guardian_exit}")])
+                .spawn()
+                .unwrap();
+            inner.wait().await.unwrap();
+            let (control, stream) = std::os::unix::net::UnixStream::pair().unwrap();
+            control.set_nonblocking(true).unwrap();
+            let mut writer = LimitedWriter {
+                stream,
+                remaining: budget,
+            };
+            let tasks = crate::tools::dispatch::ToolTasks::default();
+            let mut caller = tasks.enter();
+            caller.process_started();
+            let mut lease = caller.fork();
+            lease.process_started();
+            let mut child = Child {
+                inner,
+                control: Some(tokio::net::UnixStream::from_std(control).unwrap()),
+                lease: Some(lease),
+                reported: None,
+                result_bytes: [0; 4],
+                result_read: 0,
+                stopping: false,
+                resource_stopped: false,
+            };
+            let refused = confirm_launch::<()>(
+                &mut writer,
+                Err(io::Error::new(kind, "launch refused before spawn")),
+            );
+            assert_eq!(refused.is_ok(), budget == usize::MAX);
+            drop(writer);
+            let confirmed = budget == usize::MAX && guardian_exit == 0;
+            let mut group = super::super::shell::ProcessGroupGuard::new(None);
+            for _ in 0..2 {
+                let status = child.wait().await;
+                let error =
+                    super::super::shell::confirm_child_exit(status, &mut group, &mut caller)
+                        .await
+                        .expect_err("a refused launch has no payload exit");
+                assert_eq!(
+                    super::super::native_exit::confirmed_launch_failure(&error),
+                    confirmed
+                );
+                if confirmed {
+                    assert!(
+                        error.to_string().contains("before process creation"),
+                        "{error}"
+                    );
+                }
+                assert!(!child.resource_stopped());
+            }
+            drop(child);
+            drop(caller);
+            let drained = tasks.drain().await;
+            assert_eq!(drained.is_ok(), confirmed, "{kind:?}: {drained:?}");
+        }
+        let mut receipt = Vec::new();
+        assert_eq!(
+            confirm_launch(&mut receipt, Ok(Some(42))).unwrap(),
+            Some(42)
+        );
+        assert!(
+            receipt.is_empty(),
+            "a started process still needs real cleanup"
+        );
     }
 }

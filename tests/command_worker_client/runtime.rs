@@ -4,13 +4,11 @@ use qq_provider::test_support::LoopbackServer;
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_cannot_overwrite_host_files_through_a_project_symlink() {
     exercise_default_auto(None, false, "for-goal").await;
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_completion_check_uses_the_detached_native_boundary() {
     for scope in ["once", "for-goal"] {
@@ -23,13 +21,11 @@ async fn default_auto_completion_check_uses_the_detached_native_boundary() {
     }
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_goal_continuations_reuse_the_same_private_task_files() {
     exercise_default_auto(Some("test -f result.txt"), true, "for-goal").await;
 }
 
-#[cfg(target_os = "linux")]
 async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_scope: &str) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().canonicalize().unwrap();
@@ -46,8 +42,9 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_sc
     let secret = home.join("host-secret");
     std::fs::write(&secret, "host bytes").unwrap();
     std::os::unix::fs::symlink(&secret, workspace.join("alias")).unwrap();
+    let data = data_directory(&home);
     let worker = client::CommandWorker::new(
-        home.join("data/qq/command-owner-v3"),
+        data.join("command-owner-v3"),
         env!("CARGO_BIN_EXE_qq").into(),
         concat!(
             env!("CARGO_PKG_VERSION"),
@@ -182,7 +179,7 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_sc
             "{result}"
         );
         assert_eq!(
-            std::fs::read_dir(home.join("data/qq/task-workspaces"))
+            std::fs::read_dir(data.join("task-workspaces"))
                 .unwrap()
                 .filter(|entry| entry.as_ref().is_ok_and(|entry| {
                     entry
@@ -223,10 +220,7 @@ async fn real_cli_persists_native_ownership_and_releases_worker_results() {
             .unwrap()
             .success()
     );
-    #[cfg(target_os = "linux")]
-    let data = home.join("data/qq");
-    #[cfg(target_os = "macos")]
-    let data = home.join("Library/Application Support/dev.qq.qq");
+    let data = data_directory(&home);
     let worker = client::CommandWorker::new(
         data.join("command-owner-v3"),
         env!("CARGO_BIN_EXE_qq").into(),
@@ -349,4 +343,12 @@ pub(super) fn configured_cli(
         command.env(name, home.join(directory));
     }
     command
+}
+
+fn data_directory(home: &Path) -> std::path::PathBuf {
+    #[cfg(target_os = "linux")]
+    let relative = "data/qq";
+    #[cfg(target_os = "macos")]
+    let relative = "Library/Application Support/dev.qq.qq";
+    home.join(relative)
 }

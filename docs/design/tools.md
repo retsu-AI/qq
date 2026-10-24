@@ -64,6 +64,13 @@ root, which makes Linux reject further user-namespace creation and prevents
 regaining mount authority to undo read-only mounts. Setup failures return a
 bounded refusal before the payload starts.
 
+Linux startup retains namespace identity capture through cancellation or deadline
+expiry, with at most two seconds of extra identity-handshake time for cleanup.
+The grace never authorizes payload execution: an expired request is refused
+before releasing the gate. Once identity is pinned, setup and refusal reporting
+remain interruptible. A helper that never supplies
+its identity leaves cleanup unconfirmed and stops further worker admission.
+
 This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
 restrictions are available, an additional Landlock rule denies host socket
 connections. Otherwise a seccomp filter denies creation of addressable Unix
@@ -77,19 +84,20 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux and Windows, the binary creates detached task scopes for ordinary Auto runs and
-their children. Built-ins use the private task tree; native commands receive its
+On Linux, macOS and Windows, the binary creates detached task scopes for ordinary
+Auto runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-uses kernel resource limits on Linux and committed-memory/process jobs with a
-payload CPU cap on Windows. Windows defaults to 4 GiB committed memory,
-512 processes (including the helper) and 90% of all logical processors for the
-payload tree. macOS default Auto containment remains unfinished. Authorized
-network egress, credential brokering, per-task aggregate
-resource budgets and concurrent source writers still require further work.
-No implicit home, toolchain, temporary or workspace roots are granted.
+uses kernel resource limits on Linux, per-process limits and sampled owned-group
+safeguards on macOS, and committed-memory/process jobs with a payload CPU cap on
+Windows. Windows defaults to 4 GiB committed memory, 512 processes (including
+the helper) and 90% of logical processors for the payload tree. Authorized network
+egress, credential brokering, per-task aggregate resource budgets and concurrent
+source writers still require further work.
+Host home and workspace roots are not implicitly granted; compiler inputs are
+selected separately from trusted server installations.
 
 Trusted embedding hosts can import an explicit file selection with
 `TaskWorkspace::import` with a `TaskWorkspaceSource` captured from the compiled
@@ -141,10 +149,19 @@ Commands receive a private home/temp directory. On Windows, `HOME` and
 subdirectory, and `APPDATA`/`LOCALAPPDATA` point to its private `AppData/Roaming`
 and `AppData/Local` subdirectories. These values replace captured host profile
 paths before dispatch. Commands also receive explicit
-system read roots, isolated networking and the captured task write root. A native
+system and selected SDK read roots, isolated networking and the captured task write root. A native
 backend that cannot enforce that scope refuses execution. Commands inside this
 boundary need no additional Auto approval unless a forbidden rule or internal
 child supervision requires it. Ask and Read-only retain their own rules.
+
+The Unix server resolves its installed Rustup default in private control storage,
+then admits the canonical compiler `bin` and `lib` roots read-only. Every task
+admission rejects source overlap with these inputs. For a source `Cargo.lock`,
+the server copies only selected cached crates.io archives, verified against lock
+checksums, and their public sparse-index entries into the private Cargo home.
+This does not grant commands access to the host Cargo home or copy credentials,
+global configuration, Git dependencies or private registries. Missing packages
+remain unavailable to offline Cargo.
 
 Task traversal reads bounded regular ignore files through directory capabilities;
 special files and symlinks cannot block ignore loading. New ignored output files
@@ -180,14 +197,17 @@ source authority; cancellation, budgets and unknown-execution holds still apply.
 Unbound Full and Ask checks recover the original worker's terminal result without
 requiring a restricted scope; recovery never submits replacement execution.
 
-Linux Auto commands request enforced memory, process and CPU limits. Goal work
-retains its private tree across server restart without replaying the original
-command or resetting its goal budget. This integration does not yet qualify
-unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution
-remains unavailable and fails closed. Source
-symlinks are omitted and hardlinked regular inputs are refused. Scoped network
-and credential operations still require separate trusted adapters.
+Linux Auto commands request enforced memory, process and CPU limits. Windows
+uses AppContainer file/network restrictions and Job resource limits. macOS uses
+Seatbelt restrictions and sampled resource safeguards, rather than aggregate
+kernel quotas; detached-process limitations are described below. Import and SDK
+copy limits and storage-pressure checks do not provide hard per-task disk quotas.
+Goal work retains its private tree across server restart without replaying the
+original command or resetting its goal budget. Ordinary non-goal prompts start
+new task trees. Source symlinks are omitted and hardlinked regular inputs are
+refused. Public fetches use configured host grants; `task_commit`, `task_push`
+and `task_pr` use the trusted Git/hosting adapters described below. Payload
+commands retain isolated networking.
 
 Embedding hosts register immutable task authority through
 `SessionRuntimeOptions.native_scopes`. A scope names the captured task workspace,
@@ -223,16 +243,19 @@ be registered; an existing root's authority cannot be silently changed. Every
 child session uses the same store-owned restrictions regardless of its model
 profile or approval grants. Corrupt or empty stored scope records refuse startup.
 The metadata has a byte bound and the registry has a capacity bound. Store
-schema 60 prevents older runtimes from ignoring these restrictions. Scope
-retirement/reconfiguration and automatic task-workspace preparation are not yet
-implemented; this remains an opt-in host API, not qualified default Auto.
+schema 60 prevents older runtimes from ignoring these restrictions. Explicit
+embedding registrations cannot be reconfigured or retired in place. Normal
+server Auto sessions prepare isolated task workspaces and register their
+derived authority automatically through `TaskWorkspacePolicy`.
 
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
 sockets. It works with host filesystem access or explicit file-content grants.
-Loopback is not enabled in this initial offline backend; authorized egress and
-private local services still need implementation. Pipe and unnamed socket-pair
-IPC remain usable. The helper closes ambient inherited descriptors before
+The trusted helper enables loopback inside the new namespace before dropping
+its setup capabilities, so a command and its descendants can run local test
+servers. Host loopback services remain unreachable; authorized external egress
+still needs implementation. Pipe and unnamed socket-pair IPC remain usable.
+The helper closes ambient inherited descriptors before
 spawning any payload, including unrestricted payloads; only standard streams
 and the helper's owned launch descriptors survive the cleanup, with helper
 handles closed on payload exec. Network authority is part of the persisted
@@ -1417,18 +1440,35 @@ inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
-Descendants cannot call
-`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
-so terminating payloads cannot kill their cleanup owner. It retains the exited
-leader without reaping it, repeatedly terminates remaining members, and checks
-two kernel snapshots for exited process identities before reaping. This also
-covers forks racing with cancellation and worker loss. A terminal payload status
-is returned through the private channel only after cleanup; a missing or partial
-status never confirms quiescence. Exited zombies may await collection by the OS,
-but live members keep cleanup unconfirmed. Loader-injection environment
-variables are refused before helper startup. macOS does not create Linux-style
-mount or PID namespaces, and aggregate resource limits remain unavailable;
-requesting those limits fails closed.
+The profile denies direct `setsid` and `setpgid` syscalls. Darwin spawn
+attributes can still create a new process group or session; those descendants
+retain the same Seatbelt file and network restrictions. The trusted guardian
+stays outside the payload's group, so payload signals cannot kill it. It retains
+the exited leader without reaping it, repeatedly terminates remaining group
+members, and checks their exited process identities before reaping. Cancellation,
+deadlines and worker loss trigger this owned-group cleanup. The private terminal
+receipt confirms that cleanup and the guardian's exit, not the exit of detached
+descendants. Missing or partial receipts do not confirm owned-group cleanup.
+Exited zombies may await collection by the OS, but live group members keep cleanup
+unconfirmed. A deliberately detached process can survive command completion or
+cancellation while remaining sandboxed; QQ does not claim complete descendant
+custody on macOS. Loader-injection environment variables are refused before
+helper startup. macOS does not create Linux-style mount or PID namespaces.
+The payload inherits the launching process's per-process OS limits; QQ does not
+supply kernel aggregate resource quotas on this backend.
+
+An explicit `NativeResources::Guarded` request starts the payload with
+`taskpolicy -b` and samples the pinned process group's physical footprint and
+thread count every 250 ms using Darwin process accounting. The same check reads
+XNU's system-wide memory-pressure level and stops guarded work at warning or
+critical pressure; query failures and unrecognized levels also refuse execution. The existing owner
+liveness thread performs these checks; no extra per-command thread is created.
+Excess use or unavailable accounting stops the owned group and retains captured
+output. These safeguards can overshoot, exclude charged file cache and omit
+processes that detached from the group. They are not per-task aggregate quotas.
+Guarded commands require restricted filesystem authority. Default macOS Auto
+uses these safeguards with its detached task files.
+Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`
 for ordinary child-process creation and a directory-identity capability for each
