@@ -205,6 +205,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
+          bash .github/scripts/test-exact.sh command_owner::environment::tests::automatic_macos_capture_omits_loader_overrides_without_normalizing_explicit_values
           bash .github/scripts/test-exact.sh tools::macos_owner::tests::workspace_write_reads_host_files_but_preserves_write_carveouts
           bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent

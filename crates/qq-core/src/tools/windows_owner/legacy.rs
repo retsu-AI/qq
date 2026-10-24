@@ -13,13 +13,28 @@ fn error(error: firehazard::Error) -> io::Error {
     io::Error::from(error)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{operation}: {source}")]
+struct LaunchError {
+    operation: &'static str,
+    #[source]
+    source: io::Error,
+}
+
+fn stage(operation: &'static str) -> impl FnOnce(firehazard::Error) -> io::Error {
+    move |error| {
+        let source = io::Error::from(error);
+        io::Error::new(source.kind(), LaunchError { operation, source })
+    }
+}
+
 fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
     let base = firehazard::open_process_token(
         firehazard::get_current_process(),
         token::QUERY | token::DUPLICATE,
     )
-    .map_err(error)?;
-    let groups = base.groups().map_err(error)?;
+    .map_err(stage("open caller token"))?;
+    let groups = base.groups().map_err(stage("query caller token groups"))?;
     let logon = groups
         .groups()
         .iter()
@@ -27,7 +42,8 @@ fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
             group.attributes & firehazard::sid::group::LOGON_ID == firehazard::sid::group::LOGON_ID
         })
         .ok_or_else(|| io::Error::other("caller token has no logon SID"))?;
-    let capability = firehazard::sid::convert_string_sid_to_sid_a(capability).map_err(error)?;
+    let capability = firehazard::sid::convert_string_sid_to_sid_a(capability)
+        .map_err(stage("parse workspace capability SID"))?;
     let restricting = [
         firehazard::sid::AndAttributes::new(&capability, None),
         firehazard::sid::AndAttributes::new(logon.sid, None),
@@ -40,11 +56,11 @@ fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
         None,
         Some(&restricting),
     )
-    .map_err(error)?;
+    .map_err(stage("create legacy restricted token"))?;
     let notify = firehazard::privilege::name::CHANGE_NOTIFY.luid();
     token
         .privileges_enable_if(|luid| luid == notify)
-        .map_err(error)?;
+        .map_err(stage("enable retained ChangeNotify"))?;
     // New process/thread/IPC objects belong to this logon. OWNER RIGHTS
     // suppresses the shared account owner's implicit WRITE_DAC authority.
     let mut dacl = firehazard::acl::Builder::new(firehazard::acl::REVISION);
@@ -53,15 +69,17 @@ fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
         firehazard::access::GENERIC_ALL.into(),
         logon.sid,
     )
-    .map_err(error)?;
+    .map_err(stage("append logon default DACL entry"))?;
     dacl.add_access_allowed_ace(
         firehazard::acl::REVISION,
         firehazard::access::READ_CONTROL.into(),
         firehazard::sid!(S - 1 - 3 - 4),
     )
-    .map_err(error)?;
-    dacl.finish().map_err(error)?;
-    token.set_default_dacl(&mut dacl).map_err(error)?;
+    .map_err(stage("append owner-rights default DACL entry"))?;
+    dacl.finish().map_err(stage("finish token default DACL"))?;
+    token
+        .set_default_dacl(&mut dacl)
+        .map_err(stage("install token default DACL"))?;
     Ok(token)
 }
 
@@ -96,13 +114,14 @@ fn launch(
             firehazard::handle::FLAG_INHERIT,
             firehazard::handle::FLAG_INHERIT,
         )
-        .map_err(error)?;
+        .map_err(stage("make payload stdio inheritable"))?;
     }
     let handles: Vec<firehazard::handle::Borrowed<'_>> = streams.iter().map(Into::into).collect();
-    let job = firehazard::create_job_object_w(None, ()).map_err(error)?;
+    let job = firehazard::create_job_object_w(None, ()).map_err(stage("create payload job"))?;
     let mut limits = firehazard::job::object::ExtendedLimitInformation::default();
     limits.basic_limit_information.limit_flags = firehazard::job::object::limit::KILL_ON_JOB_CLOSE;
-    firehazard::set_information_job_object(&job, limits).map_err(error)?;
+    firehazard::set_information_job_object(&job, limits)
+        .map_err(stage("set payload job limits"))?;
     if let Some(rate) = cpu_rate {
         firehazard::set_information_job_object(
             &job,
@@ -112,17 +131,18 @@ fn launch(
                 false,
             ),
         )
-        .map_err(error)?;
+        .map_err(stage("set payload CPU limit"))?;
     }
     let jobs = [(&job).into()];
     // These arrays outlive the attribute list and CreateProcessAsUserW call.
-    let mut attributes = process::ThreadAttributeList::with_attribute_capacity(2).map_err(error)?;
+    let mut attributes = process::ThreadAttributeList::with_attribute_capacity(2)
+        .map_err(stage("initialize startup attributes"))?;
     attributes
         .update(process::ThreadAttributeRef::handle_list(&handles))
-        .map_err(error)?;
+        .map_err(stage("set inherited handle list"))?;
     attributes
         .update(process::ThreadAttributeRef::job_list(&jobs))
-        .map_err(error)?;
+        .map_err(stage("set birth job list"))?;
     let desktop = wide(std::ffi::OsStr::new(r"WinSta0\Default"))?;
     let mut startup = process::StartupInfoExW::default();
     startup.startup_info.desktop = Some(
@@ -168,7 +188,7 @@ fn launch(
             .map_err(|_| io::Error::other("invalid working directory"))?,
         &startup,
     )
-    .map_err(error)?;
+    .map_err(stage("CreateProcessAsUserW"))?;
     drop(startup);
     Ok(Child { _job: job, process })
 }

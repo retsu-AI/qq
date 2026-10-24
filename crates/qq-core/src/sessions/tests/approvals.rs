@@ -2538,89 +2538,143 @@ async fn malformed_ask_user_arguments_are_a_tool_error_without_a_hold() {
 #[tokio::test]
 #[cfg(feature = "tool-fetch")]
 async fn ask_fetch_has_a_preview_while_auto_fetch_needs_no_host_grant() {
-    // `invalid.` is reserved (RFC 6761) and never resolves, so the approved
-    // call fails at resolution — a tool error, not a policy event — while
-    // everything this test asserts happens before dispatch.
-    let mut harness = approval_harness(
-        ApprovalMode::Ask,
-        "fetch",
-        r#"{"url":"https://docs.invalid/axum"}"#,
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-    )
-    .await;
-    let (observed, tool_call) = collect_until_approval_requested(&mut harness.events).await;
-    let preview = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::ToolApprovalRequested {
-                fetch, shell, edit, ..
-            } => {
-                assert!(shell.is_none() && edit.is_none());
-                fetch.clone()
-            }
-            _ => None,
-        })
-        .expect("the hold carries the fetch preview");
-    assert_eq!(preview.url, "https://docs.invalid/axum");
-    assert_eq!(preview.host, "docs.invalid");
-    assert!(preview.method.is_none());
-
-    respond_approval(
-        &harness.runtime,
-        harness.run_id,
-        tool_call.id,
-        ApprovalDecision::ApproveForSession {
-            grant: ApprovalGrant::Host {
-                host: "*.invalid".to_owned(),
-            },
-        },
-    )
-    .await
-    .unwrap();
-    collect_through_finished(&mut harness.events).await;
-    harness.runtime.shutdown().await.unwrap();
-    let mut harness = approval_harness(
-        ApprovalMode::Auto,
-        "fetch",
-        r#"{"url":"https://docs.invalid/axum"}"#,
-        2,
-        DEFAULT_APPROVAL_TIMEOUT,
-    )
-    .await;
-    let observed = collect_through_finished(&mut harness.events).await;
-    assert!(
-        !observed
-            .iter()
-            .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
-        "Auto fetch must not request per-host approval"
-    );
-    let finished: Vec<_> = observed
-        .iter()
-        .filter_map(|event| match &event.event {
-            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(finished.len(), 2);
-    for call in finished {
-        assert!(call.is_error);
-        assert!(
-            call.result
-                .as_deref()
-                .is_some_and(|result| result.contains("could not resolve docs.invalid")),
-            "{:?}",
-            call.result
-        );
+    struct Loader {
+        arguments: String,
+        turns: usize,
     }
-    let (_, grants, _) = harness
-        .runtime
-        .inner
-        .store
-        .approval_policy(harness.session_id)
+    impl RuntimeLoader for Loader {
+        fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+            let provider = ScriptedRunProvider {
+                requests: Arc::new(StdMutex::new(Vec::new())),
+                script: (0..self.turns)
+                    .map(|_| ("fetch", self.arguments.clone()))
+                    .collect(),
+                turn: StdMutex::new(0),
+            };
+            Box::pin(async move {
+                let runtime = Runtime::new(provider, "test-model", 256)
+                    .unwrap()
+                    .with_network_policy(crate::NetworkPolicy {
+                        allow_private_for_tests: true,
+                        ..Default::default()
+                    });
+                Ok(loaded_runtime(runtime, &request.workspace, None))
+            })
+        }
+    }
+    for (mode, turns) in [(ApprovalMode::Ask, 1), (ApprovalMode::Auto, 2)] {
+        let server = qq_provider::test_support::LoopbackServer::respond_sequence(
+            (0..turns)
+                .map(|_| {
+                    (
+                        200,
+                        Some("text/plain"),
+                        vec![b"fixture-public-docs".to_vec()],
+                    )
+                })
+                .collect(),
+        );
+        let url = format!("{}/docs", server.base_url);
+        let directory = test_directory();
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+            Arc::new(Loader {
+                arguments: serde_json::json!({"url":url}).to_string(),
+                turns,
+            }),
+        )
         .await
         .unwrap();
-    assert!(grants.hosts.is_empty());
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+            panic!("session")
+        };
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: created.committed_through,
+            })
+            .unwrap();
+        let run_id = submit_prompt_to(&runtime, session_id, "read docs").await;
+        if mode == ApprovalMode::Ask {
+            let (observed, call) = collect_until_approval_requested(&mut events).await;
+            let preview = observed
+                .iter()
+                .find_map(|event| match &event.event {
+                    SessionEvent::ToolApprovalRequested {
+                        fetch, shell, edit, ..
+                    } => {
+                        assert!(shell.is_none() && edit.is_none());
+                        fetch.as_ref()
+                    }
+                    _ => None,
+                })
+                .expect("Ask retains its fetch preview");
+            assert_eq!(preview.url, url);
+            assert_eq!(preview.host, "127.0.0.1");
+            assert!(preview.method.is_none());
+            let receipt = respond_approval(
+                &runtime,
+                run_id,
+                call.id,
+                ApprovalDecision::ApproveForSession {
+                    grant: ApprovalGrant::Host {
+                        host: "127.0.0.1".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                receipt.outcome,
+                CommandOutcome::ToolApprovalResolved {
+                    resolution: ApprovalResolution::ApprovedOnce,
+                    ..
+                }
+            ));
+        }
+        let observed = collect_until_run_finished(&mut events, run_id).await;
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
+            "Auto needs no host approval and Ask has already received its fresh response"
+        );
+        let finished: Vec<_> = observed
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::ToolCallFinished { tool_call } => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished.len(), turns);
+        for call in finished {
+            assert!(!call.is_error, "{:?}", call.result);
+            assert!(
+                call.result
+                    .as_deref()
+                    .is_some_and(|result| result.contains("fixture-public-docs"))
+            );
+        }
+        let (_, grants, _) = runtime
+            .inner
+            .store
+            .approval_policy(session_id)
+            .await
+            .unwrap();
+        assert!(grants.hosts.is_empty());
+        let requests = tokio::task::spawn_blocking(move || server.capture_all())
+            .await
+            .unwrap();
+        assert_eq!(requests.len(), turns);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.request_line() == Some("GET /docs HTTP/1.1"))
+        );
+        runtime.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]

@@ -30,6 +30,8 @@ impl std::fmt::Debug for NativeEnvironment {
 impl NativeEnvironment {
     /// Preserve the caller's normal tool environment, excluding credential values
     /// unless the host explicitly permits the requested name.
+    /// macOS loader overrides are not inherited automatically: they could run
+    /// code in sandbox-exec before its policy takes effect.
     /// Missing names stay absent; the worker never supplies replacement values.
     pub fn capture(requested: &[String]) -> Result<Self, CommandOwnerError> {
         if requested.len() > crate::MAX_SHELL_ENV_NAMES
@@ -50,8 +52,10 @@ impl NativeEnvironment {
         requested: &[String],
     ) -> Result<Self, CommandOwnerError> {
         Self::from_values(values.into_iter().filter(|(name, _)| {
+            let loader_override =
+                cfg!(target_os = "macos") && (name.starts_with("DYLD_") || name.starts_with("LD_"));
             crate::runtime::valid_env_name(name)
-                && (!credential_name(name)
+                && ((!credential_name(name) && !loader_override)
                     || requested.iter().any(|requested| same_name(requested, name)))
         }))
     }
@@ -218,6 +222,39 @@ fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_macos_capture_omits_loader_overrides_without_normalizing_explicit_values() {
+        let names = [
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "LD_LIBRARY_PATH",
+        ];
+        let inherited = NativeEnvironment::capture_values(
+            names.map(|name| (name.to_owned(), "loader-canary".into())),
+            &[],
+        )
+        .unwrap();
+        for name in names {
+            if cfg!(target_os = "macos") {
+                assert_eq!(inherited.get(name), None);
+            } else {
+                assert_eq!(inherited.get(name), Some("loader-canary".into()));
+            }
+            // Explicit values still reach the launcher's existing safety check;
+            // capture must not silently rewrite an explicitly submitted command.
+            let explicit = NativeEnvironment::capture_values(
+                [(name.to_owned(), "loader-canary".into())],
+                &[name.to_owned()],
+            )
+            .unwrap();
+            assert_eq!(explicit.get(name), Some("loader-canary".into()));
+            let frozen =
+                NativeEnvironment::from_values([(name.to_owned(), "loader-canary".into())])
+                    .unwrap();
+            assert_eq!(frozen.get(name), Some("loader-canary".into()));
+        }
+    }
 
     #[test]
     fn normal_tool_environment_does_not_require_a_tool_catalog() {

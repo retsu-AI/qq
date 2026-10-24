@@ -375,9 +375,8 @@ pub(crate) fn managed_shell_denied(command: &str, denied_prefixes: &[String]) ->
 }
 
 fn literal_policy_argv(source: &str) -> Vec<Vec<Option<String>>> {
-    if source.len() > MAX_CLASSIFIED_BYTES {
-        return Vec::new();
-    }
+    // Tool dispatch bounds argument bytes. Its explicit literal controls must
+    // inspect that entire input, not the conservative classifier's smaller cap.
     let Some(tree) = parser().parse(source, None) else {
         return Vec::new();
     };
@@ -1299,7 +1298,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
 
 #[cfg(test)]
 mod managed_policy_tests {
-    use super::managed_shell_denied;
+    use super::{MAX_CLASSIFIED_BYTES, managed_shell_denied};
 
     #[test]
     fn managed_shell_denies_match_literal_commands_without_classifying_unknown_programs() {
@@ -1327,6 +1326,8 @@ mod managed_policy_tests {
             assert!(!managed_shell_denied(command, &denied), "{command}");
         }
         assert!(!managed_shell_denied("cargo publish", &[]));
+        let long_literal = format!("cargo publish # {}", "x".repeat(MAX_CLASSIFIED_BYTES + 1));
+        assert!(managed_shell_denied(&long_literal, &denied));
     }
 }
 
