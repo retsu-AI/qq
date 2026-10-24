@@ -161,13 +161,9 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         &std::fs::read(workspace.join("private-canary-proof.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        private_proof["code"],
-        if cfg!(target_os = "macos") {
-            "EPERM"
-        } else {
-            "EACCES"
-        }
+    assert!(
+        matches!(private_proof["code"].as_str(), Some("EPERM" | "EACCES")),
+        "{private_proof}"
     );
     let outside_exec: Value =
         serde_json::from_slice(&std::fs::read(workspace.join("outside-exec-proof.json")).unwrap())

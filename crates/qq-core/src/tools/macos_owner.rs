@@ -853,6 +853,7 @@ fn literal_read(
         },
         quote(path)?
     ));
+    metadata.insert(path.to_owned());
     for ancestor in path.ancestors().skip(1) {
         if metadata.insert(ancestor.to_owned()) {
             profile.push_str(&format!(
@@ -947,6 +948,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
     // the selected system shell. This grants one file, not its parent tree.
     profile.push_str("(allow file-read* (literal \"/private/var/select/sh\"))\n");
     let mut literal_metadata = std::collections::BTreeSet::new();
+    literal_metadata.insert(PathBuf::from("/private/var/select/sh"));
     // Xcode checks this machine-wide license receipt while resolving its SDK.
     literal_read(
         &mut profile,
@@ -1017,6 +1019,7 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     protected_directories.extend(grant.path.ancestors());
                 }
                 for ancestor in grant.path.ancestors().skip(1) {
+                    literal_metadata.insert(ancestor.to_owned());
                     let quoted = serde_json::to_string(
                         ancestor
                             .to_str()
@@ -1041,6 +1044,21 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                     }
                 }
             }
+            let mut metadata_filters = executable_filters.clone();
+            for path in &literal_metadata {
+                let quoted = serde_json::to_string(
+                    path.to_str()
+                        .ok_or_else(|| io::Error::other("non UTF-8 metadata grant"))?,
+                )
+                .map_err(io::Error::other)?;
+                metadata_filters.insert(format!("(literal {quoted})"));
+            }
+            // Executable lookup may fail at a metadata check before exec.
+            // Reuse only existing read grants; denial remains a denial.
+            profile.push_str(&format!(
+                "(deny file-read-metadata (with errno 13) (require-not (require-any {})))\n",
+                metadata_filters.into_iter().collect::<Vec<_>>().join(" ")
+            ));
             // Return the normal exec-search error only outside the exact
             // admitted executable roots. Other denied operations keep EPERM.
             if executable_filters.is_empty() {
@@ -1098,6 +1116,9 @@ mod tests {
         )));
         assert!(text.contains(&format!("process-exec  (subpath {quoted})")));
         assert!(text.contains("(deny default)"));
+        assert!(
+            text.contains("(deny file-read-metadata (with errno 13) (require-not (require-any ")
+        );
         assert!(
             !profile(&NativeFilesystem::Host, NativeNetwork::Isolated)
                 .unwrap()

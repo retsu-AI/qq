@@ -27,7 +27,7 @@ pub(super) fn discover(control: &Path) -> io::Result<super::macos_sdk::Inputs> {
     else {
         return Ok(Default::default());
     };
-    selected_inputs(
+    let mut inputs = selected_inputs(
         &path(&selected)?,
         Path::new("/Applications"),
         Path::new("/Library/Developer/CommandLineTools"),
@@ -53,7 +53,17 @@ pub(super) fn discover(control: &Path) -> io::Result<super::macos_sdk::Inputs> {
             };
             Ok(Some((path(&clang)?, path(&sdk)?)))
         },
-    )
+    )?;
+    if !inputs.read_only.is_empty()
+        && let Some(root) = relocated_system_library_root(
+            Path::new("/System/Library/PrivateFrameworks/MobileDevice.framework"),
+            Path::new("/Library/Apple/System/Library"),
+            control,
+        )?
+    {
+        inputs.read_only.push(root);
+    }
+    Ok(inputs)
 }
 
 #[cfg(target_os = "macos")]
@@ -63,6 +73,36 @@ fn path(bytes: &[u8]) -> io::Result<PathBuf> {
         return Err(denied());
     }
     Ok(PathBuf::from(text))
+}
+
+fn relocated_system_library_root(
+    framework: &Path,
+    root: &Path,
+    control: &Path,
+) -> io::Result<Option<PathBuf>> {
+    if !root.is_absolute() || !control.is_absolute() || control.canonicalize()? != control {
+        return Err(denied());
+    }
+    let target = match framework.canonicalize() {
+        Ok(target) => target,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if !target.starts_with(root) {
+        return Ok(None);
+    }
+    if root.canonicalize()? != root
+        || !root.is_dir()
+        || root.starts_with(control)
+        || control.starts_with(root)
+    {
+        return Err(denied());
+    }
+    if target.is_dir() && target.starts_with(root) {
+        Ok(Some(root.to_owned()))
+    } else {
+        Ok(None)
+    }
 }
 
 fn selected_inputs(
@@ -199,6 +239,47 @@ fn roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relocated_os_framework_admits_only_the_conventional_library_installation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let base = fixture.path().canonicalize().unwrap();
+        let root = base.join("Library/Apple/System/Library");
+        let target = root.join("PrivateFrameworks/MobileDevice.framework");
+        let framework = base.join("System/Library/PrivateFrameworks/MobileDevice.framework");
+        let control = base.join("control");
+        let private = base.join("private");
+        for directory in [&target, framework.parent().unwrap(), &control, &private] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        std::fs::write(private.join("credential"), b"private").unwrap();
+        std::os::unix::fs::symlink(&target, &framework).unwrap();
+        assert_eq!(
+            relocated_system_library_root(&framework, &root, &control).unwrap(),
+            Some(root.clone())
+        );
+        assert!(relocated_system_library_root(&framework, &root, &root).is_err());
+        std::fs::remove_file(&framework).unwrap();
+        std::os::unix::fs::symlink(&private, &framework).unwrap();
+        assert!(
+            relocated_system_library_root(&framework, &root, &control)
+                .unwrap()
+                .is_none()
+        );
+        std::fs::remove_file(&framework).unwrap();
+        std::fs::rename(&root, root.with_extension("saved")).unwrap();
+        std::os::unix::fs::symlink(&private, &root).unwrap();
+        std::os::unix::fs::symlink(&root, &framework).unwrap();
+        assert!(
+            relocated_system_library_root(&framework, &root, &control)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::read(private.join("credential")).unwrap(),
+            b"private"
+        );
+    }
+
     #[test]
     fn unsupported_apple_selection_skips_metadata_without_blocking_startup() {
         let fixture = tempfile::tempdir().unwrap();
