@@ -28,6 +28,7 @@ mod shell;
 pub(crate) mod windows_owner;
 pub(crate) use shell::forward_shell_chunk;
 mod specs;
+pub(crate) mod task_git;
 mod tree;
 pub(crate) mod walk;
 #[cfg(windows)]
