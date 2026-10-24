@@ -305,7 +305,9 @@ impl TaskWorkspace {
                     "npm bootstrap needs selected sibling Node and CLI",
                 ));
             }
-            let bytes = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\nset \"NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main\"\r\n\"%~dp0node.exe\" \"%~dp0node_modules\\npm\\bin\\{name}-cli.js\" %*\r\nexit /b %errorlevel%\r\n").into_bytes();
+            // Delayed expansion appends the approved value without reparsing
+            // quotes or metacharacters. Disable it again before forwarding argv.
+            let bytes = format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\nsetlocal EnableDelayedExpansion\r\nif defined NODE_OPTIONS (\r\n  set \"NODE_OPTIONS=!NODE_OPTIONS! --preserve-symlinks --preserve-symlinks-main\"\r\n) else (\r\n  set \"NODE_OPTIONS=--preserve-symlinks --preserve-symlinks-main\"\r\n)\r\nsetlocal DisableDelayedExpansion\r\n\"%~dp0node.exe\" \"%~dp0node_modules\\npm\\bin\\{name}-cli.js\" %*\r\nexit /b %errorlevel%\r\n").into_bytes();
             let before = read_file(&root, &path, self.limits.max_bytes)?
                 .ok_or_else(|| TaskWorkspaceError::Changed(path.clone()))?;
             total = total

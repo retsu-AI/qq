@@ -44,7 +44,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     fs::write(&secret, "host bytes").unwrap();
     fs::write(
         source.join("package.json"),
-        r#"{"private":true,"scripts":{"build":"node build.js","test":"node test.js"}}"#,
+        r#"{"private":true,"scripts":{"build":"node build.js","test":"node test.js","options":"node options.js"}}"#,
     )
     .unwrap();
     fs::write(
@@ -54,6 +54,19 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
     .unwrap();
     fs::write(source.join("sibling.js"), "module.exports=42;").unwrap();
     fs::write(source.join("test.js"), "const fs=require('fs');require('assert').strictEqual(JSON.parse(fs.readFileSync('node-built.json')).answer,42);fs.writeFileSync('node-test-passed','yes');").unwrap();
+    fs::write(
+        source.join("loader & scoped!.js"),
+        "global.qqOptionsLoaded=true;\n",
+    )
+    .unwrap();
+    fs::write(
+        source.join("options.js"),
+        r#"const assert=require('assert');assert.strictEqual(global.qqOptionsLoaded,true);assert.ok(process.env.NODE_OPTIONS.includes('--max-old-space-size=128'));require('fs').writeFileSync('node-options-preserved.json',JSON.stringify({options:process.env.NODE_OPTIONS,loaded:global.qqOptionsLoaded}));"#,
+    ).unwrap();
+    fs::write(
+        source.join("npm-options.cmd"),
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\nset NODE_OPTIONS=--require=\"./loader & scoped!.js\" --max-old-space-size=128\r\ncall npm run options --offline\r\nif errorlevel 1 exit /b %errorlevel%\r\nset NODE_OPTIONS>node-options-caller.txt\r\nexit /b %errorlevel%\r\n",
+    ).unwrap();
     fs::create_dir(source.join("rust-proof")).unwrap();
     fs::create_dir(source.join("rust-proof/src")).unwrap();
     fs::write(
@@ -104,6 +117,7 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         ),
         ("npm-build", "call npm run build --offline"),
         ("npm-test", "call npm test --offline"),
+        ("npm-custom-options", "call npm-options.cmd"),
         (
             "node-caller-env",
             r#"node -e "require('assert').strictEqual(process.env.NODE_OPTIONS,undefined);require('fs').writeFileSync('node-caller-env-clean','yes')""#,
@@ -152,6 +166,9 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "build.js",
         "sibling.js",
         "test.js",
+        "loader & scoped!.js",
+        "options.js",
+        "npm-options.cmd",
         "sdk-workflow.cmd",
         "runtime-metadata.exe",
         "rust-proof/Cargo.toml",
@@ -377,6 +394,20 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
         "--preserve-symlinks --preserve-symlinks-main"
     );
     assert_eq!(child_runtime["execArgv"], json!([]));
+    let custom_options: Value =
+        serde_json::from_slice(&fs::read(source.join("node-options-preserved.json")).unwrap())
+            .unwrap();
+    assert_eq!(custom_options["loaded"], true);
+    assert_eq!(
+        custom_options["options"],
+        "--require=\"./loader & scoped!.js\" --max-old-space-size=128 --preserve-symlinks --preserve-symlinks-main"
+    );
+    assert_eq!(
+        fs::read_to_string(source.join("node-options-caller.txt"))
+            .unwrap()
+            .trim_end(),
+        "NODE_OPTIONS=--require=\"./loader & scoped!.js\" --max-old-space-size=128"
+    );
     assert_eq!(
         fs::read_to_string(source.join("node-caller-env-clean")).unwrap(),
         "yes"
