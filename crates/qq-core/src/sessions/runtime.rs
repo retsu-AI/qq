@@ -1031,17 +1031,31 @@ impl SessionRuntime {
             Some(None) => Some(Ok(GoalPolicy::default())),
             None => None,
         };
+        let contained_goal_checks =
+            self.inner.native_commands.is_some() && self.inner.task_workspaces.is_some();
+        let automatic_check = match &command {
+            SessionCommand::SetGoal {
+                session_id,
+                check: Some(check),
+                ..
+            } if !replayed_goal && contained_goal_checks => {
+                let authority = self.inner.store.tool_approval_policy(*session_id).await?;
+                (authority.mode == ApprovalMode::Auto).then_some(check.command.as_str())
+            }
+            _ => None,
+        };
+        let check_command = match &command {
+            SessionCommand::GoalControl {
+                action: qq_protocol::GoalControl::ApproveCheck { command, .. },
+                ..
+            } => Some(command.as_str()),
+            _ => automatic_check,
+        };
         let goal_check_policy = if replayed_goal {
             None
         } else {
-            match (&command, &self.inner.grant_authority) {
-                (
-                    SessionCommand::GoalControl {
-                        action: qq_protocol::GoalControl::ApproveCheck { command, .. },
-                        ..
-                    },
-                    Some(authority),
-                ) => Some(match &goal_path {
+            match (check_command, &self.inner.grant_authority) {
+                (Some(command), Some(authority)) => Some(match &goal_path {
                     Some(Ok(path)) => {
                         match tokio::time::timeout(
                             Duration::from_secs(10),
@@ -1073,6 +1087,7 @@ impl SessionRuntime {
                     pause_goal_only_if_active,
                     seed,
                     goal_check_policy,
+                    contained_goal_checks,
                     goal_policy,
                 },
                 Some(self.inner.grant_promotions.clone()),

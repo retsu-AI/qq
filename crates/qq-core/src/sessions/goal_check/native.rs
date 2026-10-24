@@ -168,6 +168,22 @@ pub(super) async fn run(
     }
 }
 
+async fn current_authority(
+    inner: &runtime::SessionRuntimeInner,
+    claimed: &ClaimedRun,
+) -> Result<bool, CheckError> {
+    let claim = claimed.clone();
+    let native = inner.native_commands.is_some();
+    let task_workspaces = inner.task_workspaces.is_some();
+    inner
+        .store
+        .call(Priority::AwaitControl, move |connection| {
+            super::execution_scope_required(connection, &claim, native, task_workspaces)
+        })
+        .await?
+        .ok_or(CheckError::Stopped)
+}
+
 async fn run_inner(
     inner: &runtime::SessionRuntimeInner,
     claimed: &ClaimedRun,
@@ -180,6 +196,7 @@ async fn run_inner(
         .check_deadline
         .ok_or(CheckError::ScopeUnavailable)?
         .1;
+    let scope_required = current_authority(inner, claimed).await?;
     super::super::task_workspaces::prepare_check(
         inner,
         claimed,
@@ -189,7 +206,11 @@ async fn run_inner(
     )
     .await?;
     ensure_active(&cancellation, deadline)?;
-    let scope = match resources.task_scope() {
+    let task_scope = resources.task_scope();
+    if scope_required && task_scope.is_none() {
+        return Err(CheckError::ScopeUnavailable);
+    }
+    let scope = match task_scope {
         Some(scope) => Some(scope),
         None => inner
             .native_scopes
@@ -198,12 +219,6 @@ async fn run_inner(
             .transpose()
             .map_err(CheckError::Scope)?,
     };
-    if scope.is_none()
-        && inner.task_workspaces.is_some()
-        && claimed.approval_mode == ApprovalMode::Auto
-    {
-        return Err(CheckError::ScopeUnavailable);
-    }
     let service = inner
         .native_commands
         .clone()
@@ -274,6 +289,11 @@ async fn run_inner(
     };
     let tasks = resources.native_tools();
     let mut lease = tasks.enter();
+    let scope_required_now = current_authority(inner, claimed).await?;
+    if scope_required_now && resources.task_scope().is_none() {
+        return Err(CheckError::ScopeUnavailable);
+    }
+    ensure_active(&cancellation, deadline)?;
     let result = crate::command_owner::observe(
         service,
         request,
