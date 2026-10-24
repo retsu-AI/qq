@@ -33,12 +33,13 @@ a tool error so the agent can try an allowed alternative. Ask requires fresh
 human approval. Durable execution and task-continuation foundations are also
 implemented; this does not mean the entire plan is qualified.
 
-The next two PRs isolate CLI state through `QQ_HOME`, then use that isolation to
-exercise the real Windows CLI in default Auto. That Windows integration proof
-is the remaining immediate work in row 2. The platform limitations below are
-shipped behavior; further hardening is separate work, not an additional merge
-gate for these two PRs. Row 3 still needs integrated interruption/recovery
-qualification.
+The row 2 follow-up isolates CLI state through `QQ_HOME` and adds a real
+default-Auto CLI scenario on Linux, macOS and Windows. It uses an ordinary
+directory without Git and checks detached shell execution, artifact publication,
+no approvals and the durable worker record. Native CI must pass this scenario
+before the row 2 baseline is qualified. The platform limitations below remain
+shipped behavior; stronger isolation is separate hardening work. Row 3 still
+needs integrated interruption/recovery qualification.
 
 ## Small fixes, in dependency order
 
@@ -49,7 +50,7 @@ and open PRs before editing; retain compatible work already underway.
 | Outcome | Implementation boundary | Proof before calling it fixed |
 | --- | --- | --- |
 | One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
-| Shell and built-ins enforce that contract | The native three-OS baseline shipped in #463. Core tool dispatch/process ownership and native execution adapters share the practical contract below. Next: isolate CLI state with `QQ_HOME`, then qualify the real Windows CLI in default Auto. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
+| Shell and built-ins enforce that contract | The native three-OS baseline shipped in #463. Core tool dispatch/process ownership and native execution adapters share the practical contract below. CLI state can be isolated with `QQ_HOME`; a real default-Auto CLI scenario covers ordinary work without Git on all three OSes. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
 | The task survives interruption | Durable execution and continuation foundations are implemented; integrated qualification remains. `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
 | Tools tell the truth and edits preserve work | `src/runtime.rs` model discovery/admission; core edit tools. Advertise and validate against the same discovery snapshot; fresh availability failures remain recoverable. Preserve atomic edit semantics. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
 | Compaction preserves obligations | Finish/reconcile [#371](https://github.com/retsu-AI/qq/pull/371) before overlapping its runtime work; then test retained constraints and recovery. | Early user constraints beyond the record cap, later corrections, repeated compaction and a failed summary retain the effective task; retries do not duplicate tool effects. |
