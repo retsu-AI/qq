@@ -449,6 +449,14 @@ jobs:
           bash .github/scripts/test-exact.sh sessions::tests::goal_check_recovery::native_check_recovery_bounds_stalled_workspace_validation
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_cancellation_does_not_wait_for_blocking_capacity
           bash .github/scripts/test-exact.sh sessions::goal_check::native::tests::scoped_check_preparation_deadline_does_not_wait_for_blocking_capacity
+      - name: Task interruption and client continuation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh sessions::tests::approvals::goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied_actions
+          cargo test --locked -p qq --no-default-features --bin qq -- --list |
+            tr -d '\r' | grep -Fx 'runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work: test'
+          cargo test --locked -p qq --no-default-features --bin qq runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work -- --exact --nocapture
       - name: Private command transport and worker process
         if: ${{ !cancelled() }}
         shell: bash
@@ -462,6 +470,8 @@ jobs:
           # common durable worker path without repeating those same probes.
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
             tr -d '\r' | grep -Fx 'default_auto::real_cli_default_auto_publishes_detached_native_shell_work_without_approvals: test'
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
+            tr -d '\r' | grep -Fx 'default_auto::real_cli_explicit_goal_resume_keeps_identity_budget_and_artifact: test'
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --skip windows:: --skip macos::
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' > "$RUNNER_TEMP/qq-windows-tests.txt"

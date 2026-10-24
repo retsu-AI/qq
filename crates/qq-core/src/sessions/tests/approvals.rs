@@ -2903,6 +2903,51 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
                 after: cursor,
             })
             .unwrap();
+        if !expire_goal {
+            let unrelated =
+                queue_prompt(&runtime, session_id, "an unrelated question".to_owned()).await;
+            let (before, question) = collect_until_approval_requested(&mut events).await;
+            assert_eq!(question.run_id, unrelated);
+            assert_ne!(question.id, call.id);
+            assert!(
+                !before
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+            );
+            respond_approval(&runtime, unrelated, question.id, ApprovalDecision::Deny)
+                .await
+                .unwrap();
+            let after = collect_until_run_finished(&mut events, unrelated).await;
+            assert!(
+                !after
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::ToolCallStarted { .. }))
+            );
+            let snapshot = runtime
+                .snapshot(SnapshotRequest::new(workspace, Some(session_id), 8, 8))
+                .await
+                .unwrap();
+            let focused = snapshot.focused.unwrap();
+            assert_eq!(
+                focused.goal.as_deref(),
+                Some(goal.as_ref()),
+                "an unrelated prompt must not revive or spend the paused goal"
+            );
+            assert_eq!(
+                focused.runs.len(),
+                2,
+                "no autonomous successor before explicit resume"
+            );
+            assert!(
+                focused
+                    .runs
+                    .iter()
+                    .find(|run| run.id == unrelated)
+                    .unwrap()
+                    .goal
+                    .is_none()
+            );
+        }
         let command_id = CommandId::generate().unwrap();
         let resume = SessionCommand::GoalControl {
             session_id,
@@ -2960,8 +3005,8 @@ async fn goal_approval_timeout_reopens_and_resumes_once_without_replaying_denied
             let focused = snapshot.focused.unwrap();
             assert_eq!(
                 focused.runs.len(),
-                2,
-                "one successor despite replayed resume command"
+                3,
+                "one successor after the unrelated prompt despite replayed resume command"
             );
             let successor = focused
                 .runs
