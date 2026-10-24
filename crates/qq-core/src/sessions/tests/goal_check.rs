@@ -1,5 +1,14 @@
 use super::*;
 
+// These fixtures exercise human check consent and the explicit host path.
+async fn explicit_check_session(
+    runtime: &SessionRuntime,
+    workspace_id: WorkspaceId,
+    parent_id: Option<SessionId>,
+) -> CommandReceipt {
+    create_session_with_mode(runtime, workspace_id, parent_id, ApprovalMode::Full).await
+}
+
 struct Loader {
     failure_tail: bool,
     loads: Arc<AtomicUsize>,
@@ -187,7 +196,7 @@ async fn once_check(success: bool, native: bool) {
     .await
     .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
-    let created = create_session(&runtime, workspace_id, None).await;
+    let created = explicit_check_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = created.outcome else {
         panic!("missing session")
     };
@@ -749,7 +758,7 @@ async fn goal_checks_prepared_together_in_one_workspace_do_not_deadlock() {
         .unwrap();
     let mut sessions = Vec::new();
     for _ in 0..2 {
-        let created = create_session(&runtime, workspace_id, None).await;
+        let created = explicit_check_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
         };
@@ -888,7 +897,7 @@ async fn goal_check_calendar_expiry_during_policy_wait_never_refreshes_the_audit
                 after: cursor,
             })
             .unwrap();
-        let created = create_session(&runtime, workspace_id, None).await;
+        let created = explicit_check_session(&runtime, workspace_id, None).await;
         let CommandOutcome::SessionCreated { session_id } = created.outcome else {
             panic!("missing session")
         };
@@ -1029,7 +1038,9 @@ async fn goal_check_historical_result_survives_edit_replace_and_clear() {
         let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let CommandOutcome::SessionCreated { session_id } =
-            create_session(&runtime, workspace_id, None).await.outcome
+            explicit_check_session(&runtime, workspace_id, None)
+                .await
+                .outcome
         else {
             panic!("missing session")
         };
@@ -1274,7 +1285,9 @@ async fn goal_check_for_goal_blocks_after_three_failed_checks_with_durable_evide
     let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
     let CommandOutcome::SessionCreated { session_id } =
-        create_session(&runtime, workspace_id, None).await.outcome
+        explicit_check_session(&runtime, workspace_id, None)
+            .await
+            .outcome
     else {
         panic!("session")
     };
@@ -1489,7 +1502,9 @@ async fn goal_check_policy_recheck_refuses_changed_policy_and_stale_goals_before
         .unwrap();
         let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
         let CommandOutcome::SessionCreated { session_id } =
-            create_session(&runtime, workspace_id, None).await.outcome
+            explicit_check_session(&runtime, workspace_id, None)
+                .await
+                .outcome
         else {
             panic!("session")
         };
@@ -1722,7 +1737,9 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
     .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
     let CommandOutcome::SessionCreated { session_id } =
-        create_session(&runtime, workspace_id, None).await.outcome
+        explicit_check_session(&runtime, workspace_id, None)
+            .await
+            .outcome
     else {
         panic!("session")
     };
@@ -1812,7 +1829,7 @@ async fn goal_check_missing_workspace_settles_without_poisoning_other_sessions()
             }))
     );
     let (other, _) = resolve_workspace(&runtime, directory.path()).await;
-    create_session(&runtime, other, None).await;
+    explicit_check_session(&runtime, other, None).await;
     runtime.close().await.unwrap();
 }
 
@@ -1838,8 +1855,8 @@ async fn portable_check_group_confirmation_waits_until_the_group_is_absent() {
     waiting.await.unwrap();
 }
 
-struct CheckService {
-    code: i32,
+pub(super) struct CheckService {
+    pub(super) code: i32,
 }
 impl crate::command_owner::NativeCommandService for CheckService {
     fn identity(&self) -> crate::command_owner::NativeCommandFuture<StoreId> {
@@ -1940,7 +1957,7 @@ async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() 
     .await
     .unwrap();
     let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
-    let receipt = create_session(&runtime, workspace_id, None).await;
+    let receipt = explicit_check_session(&runtime, workspace_id, None).await;
     let CommandOutcome::SessionCreated { session_id } = receipt.outcome else {
         panic!("missing session")
     };

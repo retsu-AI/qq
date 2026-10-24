@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -1576,6 +1576,35 @@ fn current_goal_commands_receipts_and_origins_match_goldens() {
         &SessionEventEnvelope {
             run_id: None,
             ..envelope(80, SessionEvent::GoalUpdated { goal: goal.clone() })
+        },
+    );
+    let mut task_scoped_goal = goal.clone();
+    task_scoped_goal.check = Some(qq_protocol::GoalCheck {
+        command: "cargo test -p billing".into(),
+        timeout_ms: 1000,
+    });
+    task_scoped_goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
+    check(
+        "event_goal_task_scoped_check",
+        &SessionEventEnvelope {
+            run_id: None,
+            ..envelope(
+                80,
+                SessionEvent::GoalUpdated {
+                    goal: task_scoped_goal.clone(),
+                },
+            )
+        },
+    );
+    check(
+        "receipt_goal_task_scoped_check",
+        &CommandReceipt {
+            command_id: CommandId::from_bytes([0x62; 16]),
+            committed_through: cursor(80),
+            outcome: CommandOutcome::GoalUpdated {
+                session_id,
+                goal: task_scoped_goal,
+            },
         },
     );
     check(
