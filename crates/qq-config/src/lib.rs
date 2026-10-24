@@ -92,6 +92,7 @@ pub struct LoadRequest {
     explicit_content: Option<String>,
     overrides: RuntimeOverrides,
     process_trust: Vec<ProcessTrust>,
+    ignore_untrusted_project_config: bool,
 }
 
 /// One project file trusted for this process only: the TUI's "this
@@ -167,6 +168,21 @@ impl LoadRequest {
         self
     }
 
+    /// Continue with trusted settings and non-sensitive project settings.
+    /// Untrusted permissions, providers, connectors, and packs stay disabled;
+    /// this neither records trust nor grants authority to project content.
+    #[must_use]
+    pub fn with_untrusted_project_config_ignored(mut self) -> Self {
+        self.ignore_untrusted_project_config = true;
+        self
+    }
+
+    /// Whether pending project authority is withheld without stopping the load.
+    #[must_use]
+    pub const fn ignores_untrusted_project_config(&self) -> bool {
+        self.ignore_untrusted_project_config
+    }
+
     /// Trust these project files (by canonical path and sensitive digest)
     /// for loads made with this request, without recording them. A file
     /// whose sensitive content has since changed is pending again: the
@@ -224,6 +240,10 @@ impl fmt::Debug for LoadRequest {
             )
             .field("overrides", &self.overrides)
             .field("process_trust", &self.process_trust)
+            .field(
+                "ignore_untrusted_project_config",
+                &self.ignore_untrusted_project_config,
+            )
             .finish()
     }
 }

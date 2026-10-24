@@ -959,6 +959,7 @@ impl RuntimeFactory {
         } else {
             LoadRequest::from_process_env(workspace, max_output_tokens)?
         };
+        let request = request.with_untrusted_project_config_ignored();
         let process_trust = self.process_trust()?;
         if process_trust.is_empty() {
             return Ok(request);
@@ -1409,6 +1410,7 @@ impl RuntimeFactory {
             approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
             process_trust: crate::plan::ProcessTrustFingerprint::of(request.process_trust()),
+            ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
         let lookup = self.inner.plans.load(&key, || {
             self.compile_generation(request, profile, &workspace, progress)
@@ -7331,6 +7333,33 @@ mod tests {
     }
 
     #[test]
+    fn startup_withholds_untrusted_authority_without_weakening_strict_inspection() {
+        let fixture = RuntimeFixture::new();
+        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
+        fs::write(
+            fixture.path("work/.qq/config.ron"),
+            r#"(version: 1, mcp: {"untrusted": Stdio(command: "must-not-start")})"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let strict = fixture.request(r#"(version: 1, model: "custom/test", providers: {"custom": Custom(connection: (base_url: "http://127.0.0.1:9/v1", api: OpenAiResponses, auth: NoAuth), models: {"test": (name: "Test", context_window: 4096)})})"#);
+        let automatic = strict.clone().with_untrusted_project_config_ignored();
+        let (_, first) = factory
+            .plan_with_lookup(&automatic, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(first, PlanLookup::Compiled);
+        let (_, second) = factory
+            .plan_with_lookup(&automatic, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(second, PlanLookup::Hit);
+        assert!(matches!(
+            factory.plan_for(&strict),
+            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
+        ));
+        assert!(!fixture.path("data/trust.ron").exists());
+    }
+
+    #[test]
     fn trust_prompt_persist_records_like_qq_trust_and_session_grants_only_this_process() {
         // OB7: both answers make the configuration load and yield the same
         // client model state a trusted start would; only `Persist` writes.
@@ -7548,13 +7577,19 @@ mod tests {
         )
         .unwrap();
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
-        // Before trust the plan path fails outright.
+        // Runtime loads continue while withholding the untrusted grant.
         let before = factory.request_for_workspace(&workspace, None).unwrap();
+        let (untrusted_plan, lookup) = factory
+            .plan_with_lookup(&before, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Compiled);
+        assert_eq!(untrusted_plan.resolved_model().max_output_tokens, 64);
+        assert!(factory.load(&before).unwrap().grants().tools().is_empty());
+        let request = LoadRequest::new(&workspace);
         assert!(matches!(
-            factory.plan_for(&before),
+            factory.plan_for(&request),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
-        let request = LoadRequest::new(&workspace);
         let reviewed: Vec<ProcessTrust> = factory
             .inner
             .config
@@ -7572,8 +7607,12 @@ mod tests {
             .plan_with_lookup(&after, &AgentProfileId::default())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
-        // The whole file applies once trusted: its safe key was withheld
-        // together with the grant while the file was pending.
+        assert!(!Arc::ptr_eq(&untrusted_plan, &plan));
+        assert_eq!(
+            factory.load(&after).unwrap().grants().tools(),
+            ["read_file"]
+        );
+        // Non-sensitive settings apply both before and after trust.
         assert_eq!(plan.resolved_model().max_output_tokens, 64);
         assert_eq!(
             factory
@@ -7582,10 +7621,17 @@ mod tests {
                 .1,
             PlanLookup::Hit
         );
-        // The pre-grant key is a different slot: a lookup without the grant
-        // still fails rather than serving the trusted plan.
+        // The pre-grant slot still withholds authority; it cannot return the
+        // trusted plan merely because another request gained session trust.
+        let (still_untrusted, lookup) = factory
+            .plan_with_lookup(&before, &AgentProfileId::default())
+            .unwrap();
+        assert_eq!(lookup, PlanLookup::Hit);
+        assert!(Arc::ptr_eq(&untrusted_plan, &still_untrusted));
+        assert!(factory.load(&before).unwrap().grants().tools().is_empty());
+        // Explicit inspection without a process grant remains strict.
         assert!(matches!(
-            factory.plan_for(&before),
+            factory.plan_for(&request),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
     }
@@ -8517,6 +8563,7 @@ mod tests {
             approval_delegate: None,
             reasoning_effort: None,
             process_trust: None,
+            ignore_untrusted_project_config: false,
         };
         let (first, _) = factory
             .inner

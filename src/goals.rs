@@ -137,7 +137,8 @@ async fn load_defaults(
     tokio::task::spawn_blocking(move || {
         let request = overrides
             .load_request_in(&workspace)
-            .map_err(GoalError::Configuration)?;
+            .map_err(GoalError::Configuration)?
+            .with_untrusted_project_config_ignored();
         let loader = qq_config::ConfigLoader::system().map_err(GoalError::Configuration)?;
         loader
             .load_for_client(&request)
