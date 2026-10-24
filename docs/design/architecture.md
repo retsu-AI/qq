@@ -1065,9 +1065,12 @@ scheduler's claim read (`reserve_next_run_at_depth`) also runs alone but does
 not cut a group short: it is a wakeup, not a waiting client, and closing every
 group for it would cost a full fsync per stream per round. At most one read is
 held per group and no further control message is dequeued once one is, so the
-control lane stays FIFO. A failing job rolls back its own savepoint and its
-siblings are unaffected; a failing outer commit fails every job in the group
-with `Persistence` and publishes nothing. Eight concurrent streams and the
+control lane stays FIFO. An ordinary failing job rolls back its own savepoint
+and its siblings are unaffected. SQLite errors such as disk exhaustion can
+instead abort the whole transaction. That group stops immediately, fails all
+its jobs with the original persistence error, and publishes nothing; unstarted
+jobs remain queued. A failing outer commit likewise preserves its SQLite error
+and publishes nothing. Eight concurrent streams and the
 commands that start, steer, and settle them therefore share one fsync per
 service round, at `synchronous=FULL` throughout. Operation code is identical
 in both modes: every mutation begins a `Unit` that is a transaction when alone

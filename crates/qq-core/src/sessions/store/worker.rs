@@ -23,7 +23,7 @@ pub(super) const OUTPUT_GROUP_LIMIT: usize = 16;
 /// never sees an acknowledgement, and a subscriber never sees an event, for
 /// work that is not yet durable.
 pub(super) struct JobOutcome {
-    pub(super) ok: bool,
+    pub(super) error: Option<SessionRuntimeError>,
     pub(super) settle: Box<dyn FnOnce(Result<(), SessionRuntimeError>) + Send + 'static>,
 }
 
@@ -234,7 +234,7 @@ fn run_control_message(
         connection.is_autocommit(),
         "a control job must commit or roll back its own transaction"
     );
-    if outcome.ok {
+    if outcome.error.is_none() {
         feed.publish(staged);
     }
     (outcome.settle)(Ok(()));
@@ -243,11 +243,11 @@ fn run_control_message(
 /// Runs `first` and every write already queued behind it in either lane, up
 /// to `OUTPUT_GROUP_LIMIT`, inside one transaction with one commit and fsync.
 ///
-/// Each job's own `begin_unit` becomes a savepoint here. A job that fails
-/// rolled back its savepoint (the `Unit` drop) and is settled with its error;
-/// its siblings are unaffected. If the outer commit fails, every job in the
-/// group is settled with `Persistence` and nothing staged is published: no
-/// caller is told its write is durable when it is not.
+/// Each job's own `begin_unit` becomes a savepoint here. An ordinary failure
+/// rolls back that savepoint and leaves its siblings unaffected. If SQLite
+/// aborts the transaction or the outer commit fails, every job in the group
+/// receives that error and nothing staged is published. Unstarted jobs stay
+/// queued for the next group.
 ///
 /// Waiting control writes (`Joins::OutputGroup`) are taken before more
 /// output so an acknowledgement is never starved by a stream; they run as
@@ -262,7 +262,7 @@ fn run_output_group(
     output: &Receiver<WorkerMessage>,
     control: &Receiver<WorkerMessage>,
 ) {
-    let mut group: Vec<(bool, JobOutcome, Vec<std::sync::Arc<feed::PublishedEvent>>)> =
+    let mut group: Vec<(JobOutcome, Vec<std::sync::Arc<feed::PublishedEvent>>)> =
         Vec::with_capacity(OUTPUT_GROUP_LIMIT);
     if connection.execute_batch("BEGIN").is_err() {
         // No transaction could open: run the job alone under its own unit
@@ -275,6 +275,7 @@ fn run_output_group(
     // control message is dequeued, so the control lane never reorders.
     let mut deferred_read: Option<WorkerMessage> = None;
     let mut next = Some(first);
+    let mut aborted = None;
     while let Some(WorkerMessage::Run {
         job,
         capacity_permit,
@@ -284,14 +285,21 @@ fn run_output_group(
         drop(capacity_permit);
         let outcome = job(connection);
         let staged = feed::take_staged();
-        // Failure inside the group is only ever a rolled-back savepoint: the
-        // enclosing transaction must still be open.
-        debug_assert!(
-            !connection.is_autocommit(),
-            "a grouped job must not commit the group"
-        );
-        let ok = outcome.ok;
-        group.push((ok, outcome, staged));
+        // SQLITE_FULL, IOERR and other failures may roll back the entire
+        // transaction, including earlier jobs' released savepoints. Do not
+        // run another queued job outside the transaction we promised it.
+        if connection.is_autocommit() {
+            aborted = Some(
+                outcome
+                    .error
+                    .clone()
+                    .unwrap_or(SessionRuntimeError::CONSTRAINT),
+            );
+        }
+        group.push((outcome, staged));
+        if aborted.is_some() {
+            break;
+        }
         if group.len() >= OUTPUT_GROUP_LIMIT {
             break;
         }
@@ -324,23 +332,128 @@ fn run_output_group(
         }
         next = output.try_recv().ok();
     }
-    let committed = connection.execute_batch("COMMIT").is_ok();
-    if !committed {
+    let committed = match aborted {
+        Some(error) => Err(error),
+        None => connection
+            .execute_batch("COMMIT")
+            .map_err(SessionRuntimeError::from),
+    };
+    if committed.is_err() && !connection.is_autocommit() {
         let _ = connection.execute_batch("ROLLBACK");
     }
-    for (ok, outcome, staged) in group {
-        match (committed, ok) {
-            (true, true) => {
-                feed.publish(staged);
-                (outcome.settle)(Ok(()));
-            }
-            // The job's own error was already captured in its reply; the
-            // settle closure carries it and ignores this `Ok`.
-            (true, false) => (outcome.settle)(Ok(())),
-            (false, _) => (outcome.settle)(Err(SessionRuntimeError::CONSTRAINT)),
+    for (outcome, staged) in group {
+        if committed.is_ok() && outcome.error.is_none() {
+            feed.publish(staged);
         }
+        (outcome.settle)(committed.clone());
     }
     if let Some(read) = deferred_read {
         run_control_message(connection, feed, read);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sessions::{PersistenceFault, store::begin_unit};
+    use qq_protocol::{EventCursor, SessionEvent, SessionEventEnvelope, SessionId, WorkspaceId};
+    use std::sync::Arc;
+
+    #[test]
+    fn disk_full_rolls_back_the_group_without_publishing_or_consuming_queued_work() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE scratch(n INTEGER PRIMARY KEY, data BLOB);
+             INSERT INTO scratch VALUES (1, NULL);
+             PRAGMA max_page_count = 2;",
+            )
+            .unwrap();
+        let feed = Arc::new(feed::WorkspaceFeed::default());
+        let workspace_id = WorkspaceId::from_bytes([1; 16]);
+        let live = feed.subscribe(workspace_id).unwrap();
+        let (output, output_rx) = bounded(4);
+        let (_control, control_rx) = bounded(4);
+        let (replies, results) = std::sync::mpsc::channel();
+        let message = |n| {
+            let replies = replies.clone();
+            WorkerMessage::Run {
+                joins: Joins::OutputGroup,
+                capacity_permit: None,
+                job: Box::new(move |connection| {
+                    let result = (|| {
+                        let unit = begin_unit(connection)?;
+                        feed::stage(Arc::new(feed::PublishedEvent {
+                            envelope: SessionEventEnvelope {
+                                cursor: EventCursor {
+                                    store_id: StoreId::from_bytes([2; 16]),
+                                    workspace_id,
+                                    sequence: 1,
+                                },
+                                session_id: SessionId::from_bytes([3; 16]),
+                                run_id: None,
+                                caused_by: None,
+                                occurred_at_ms: 0,
+                                event: SessionEvent::SessionDeleted {
+                                    session_id: SessionId::from_bytes([3; 16]),
+                                },
+                            },
+                            json: Arc::from("{}"),
+                        }));
+                        if n == 2 {
+                            unit.execute(
+                                "UPDATE scratch SET data = zeroblob(1000000) WHERE n=1",
+                                [],
+                            )?;
+                        } else {
+                            unit.execute("UPDATE scratch SET n=?1", [n])?;
+                        }
+                        unit.commit()?;
+                        Ok(())
+                    })();
+                    JobOutcome {
+                        error: result.as_ref().err().cloned(),
+                        settle: Box::new(move |commit: Result<(), SessionRuntimeError>| {
+                            replies.send((n, commit.and(result))).unwrap();
+                        }),
+                    }
+                }),
+            }
+        };
+        output.send(message(2)).unwrap();
+        output.send(message(3)).unwrap();
+        run_output_group(&mut connection, &feed, message(1), &output_rx, &control_rx);
+        let full = SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+            rusqlite::ffi::ErrorCode::DiskFull,
+        ));
+        assert_eq!(results.try_recv().unwrap(), (1, Err(full.clone())));
+        assert_eq!(results.try_recv().unwrap(), (2, Err(full)));
+        assert!(results.try_recv().is_err());
+        assert!(
+            live.try_recv(0).is_err(),
+            "rolled-back events must not publish"
+        );
+        assert!(feed::take_staged().is_empty());
+        assert_eq!(
+            connection
+                .query_row("SELECT n FROM scratch", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        run_output_group(
+            &mut connection,
+            &feed,
+            output_rx.try_recv().unwrap(),
+            &output_rx,
+            &control_rx,
+        );
+        assert_eq!(results.try_recv().unwrap(), (3, Ok(())));
+        assert_eq!(live.try_recv(0).unwrap().envelope.cursor.sequence, 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT n FROM scratch", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
     }
 }
