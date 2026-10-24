@@ -139,6 +139,20 @@ pub(super) fn discover(control: &Path) -> io::Result<Option<Inputs>> {
         .env("PATH", system.join("System32"))
         .env("TEMP", control)
         .env("TMP", control);
+    // Visual Studio's setup discovery needs its machine-wide installation data.
+    // Derive this fixed location instead of inheriting caller-controlled values.
+    let data = drive.join("ProgramData");
+    let canonical = data.canonicalize()?;
+    let canonical_control = control.canonicalize()?;
+    if canonical != data
+        || canonical.starts_with(&canonical_control)
+        || canonical_control.starts_with(&canonical)
+    {
+        return Err(denied());
+    }
+    command
+        .env("ProgramData", &canonical)
+        .env("ALLUSERSPROFILE", &canonical);
     for (name, leaf) in [
         ("ProgramFiles", "Program Files"),
         ("ProgramFiles(x86)", "Program Files (x86)"),
