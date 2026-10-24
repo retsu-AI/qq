@@ -67,6 +67,9 @@ Descriptor 16 adds sorted workspace-relative configured pack roots to the
 compiled authority identity; descriptor 15 and earlier retain their original
 encoding and digest domains.
 
+Version 39 adds task-scoped Auto goal-check authority, distinct from explicit
+consent to execute a goal check.
+
 Version 38 adds authenticated, store-qualified workspace catalog pages. Clients
 can discover registered roots without interpreting server paths locally;
 continuation cursors reject another store.

@@ -319,6 +319,42 @@ pub(super) fn load_live(
     Ok(Some(goal))
 }
 
+/// Automatic verification cannot widen an ancestor's authority.
+pub(super) fn auto_check_authority(
+    connection: &Connection,
+    session: SessionId,
+) -> Result<bool, SessionRuntimeError> {
+    let authority = load_tool_approval_policy(connection, session)?;
+    Ok(authority.mode == ApprovalMode::Auto
+        && authority
+            .ancestors
+            .iter()
+            .all(|(mode, _)| matches!(mode, ApprovalMode::Auto | ApprovalMode::Full)))
+}
+
+pub(super) fn validate_check_authority(
+    connection: &Connection,
+    session: SessionId,
+    command: &str,
+    policy: Option<&Result<(), GoalCheckPolicyError>>,
+) -> Result<(), SessionRuntimeError> {
+    let workspace_id = session_workspace(connection, session)?;
+    let workspace: String = connection.query_row(
+        "SELECT path FROM workspaces WHERE id = ?1",
+        [workspace_id.to_string()],
+        |row| row.get(0),
+    )?;
+    if crate::approval::classify_command(command, Some(Path::new(&workspace))).decision
+        == crate::approval::Decision::Forbidden
+    {
+        return Err(SessionRuntimeError::GoalCheckForbidden);
+    }
+    if let Some(Err(error)) = policy {
+        return Err(SessionRuntimeError::GoalCheckPolicy(error.clone()));
+    }
+    Ok(())
+}
+
 pub(super) fn set(
     connection: &Connection,
     session: SessionId,
@@ -520,7 +556,11 @@ pub(super) fn control(
             if goal.check.is_some()
                 && !matches!(
                     goal.check_authorization,
-                    Some(GoalCheckAuthorization::Once | GoalCheckAuthorization::ForGoal)
+                    Some(
+                        GoalCheckAuthorization::Once
+                            | GoalCheckAuthorization::ForGoal
+                            | GoalCheckAuthorization::TaskScoped
+                    )
                 )
             {
                 return Err(SessionRuntimeError::GoalCheckApprovalRequired);
@@ -538,20 +578,7 @@ pub(super) fn control(
             if check.command != command {
                 return Err(SessionRuntimeError::GoalCheckCommandMismatch);
             }
-            let workspace_id = session_workspace(connection, session)?;
-            let workspace: String = connection.query_row(
-                "SELECT path FROM workspaces WHERE id = ?1",
-                [workspace_id.to_string()],
-                |row| row.get(0),
-            )?;
-            if crate::approval::classify_command(&command, Some(Path::new(&workspace))).decision
-                == crate::approval::Decision::Forbidden
-            {
-                return Err(SessionRuntimeError::GoalCheckForbidden);
-            }
-            if let Some(Err(error)) = check_policy {
-                return Err(SessionRuntimeError::GoalCheckPolicy(error.clone()));
-            }
+            validate_check_authority(connection, session, &command, check_policy)?;
             if goal.status == needs_check_approval() {
                 ensure_activation(&goal, now)?;
             }

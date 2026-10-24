@@ -200,7 +200,7 @@ pub struct RunArgs {
         conflicts_with_all = ["steer_stdin", "output_schema"])]
     pub goal: Option<Option<String>>,
 
-    /// Optional goal completion check; separate consent is required.
+    /// Optional goal completion check. Auto runs it inside native task containment.
     #[arg(
         long,
         requires = "goal",

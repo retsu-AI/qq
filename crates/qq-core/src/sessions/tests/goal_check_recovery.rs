@@ -3,11 +3,7 @@ use crate::command_owner::*;
 
 const OWNER: StoreId = StoreId::from_bytes([84; 16]);
 
-async fn pending_check(
-    store: &Store,
-    workspace: &Path,
-    owner: StoreId,
-) -> (ClaimedRun, ToolCallId) {
+async fn queued_check(store: &Store, workspace: &Path) -> ClaimedRun {
     let mut read_only = Vec::new();
     if cfg!(target_os = "linux") {
         for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
@@ -37,6 +33,10 @@ async fn pending_check(
         .call_write(Priority::Control, move |connection| {
             crate::sessions::settlement::recover_interrupted_runs(connection, store_id)?;
             let transaction = store::begin_unit(connection)?;
+            transaction.execute(
+                "UPDATE sessions SET approval_mode='full' WHERE id=?1",
+                [session.to_string()],
+            )?;
             let mut goal = crate::sessions::goals::set(
                 &transaction,
                 session,
@@ -72,13 +72,22 @@ async fn pending_check(
         })
         .await
         .unwrap();
-    let claim = store.reserve_next_run(false).await.unwrap().unwrap();
+    store.reserve_next_run(false).await.unwrap().unwrap()
+}
+
+async fn pending_check(
+    store: &Store,
+    workspace: &Path,
+    owner: StoreId,
+) -> (ClaimedRun, ToolCallId) {
+    let claim = queued_check(store, workspace).await;
+    let store_id = store.store_id();
     let captured = claim.clone();
     let deadline = claim.check_deadline.unwrap().0;
     let id = store
         .call_write(Priority::Control, move |connection| {
             match crate::sessions::goal_check::try_start(
-                connection, store_id, &captured, deadline, true,
+                connection, store_id, &captured, deadline, true, false,
             )? {
                 crate::sessions::goal_check::Start::Started(_, Some(id)) => Ok(id),
                 _ => Err(SessionRuntimeError::CONSTRAINT),
@@ -936,4 +945,291 @@ async fn native_check_real_linux_result_survives_coordinator_loss_without_reexec
     }
     assert_eq!(*loader.loads.lock().unwrap(), 0);
     owner.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn check_execution_authority_uses_current_mode_and_requires_auto_containment() {
+    use qq_protocol::GoalCheckAuthorization as Authorization;
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().canonicalize().unwrap();
+    let store = Store::open(path.join("sessions.sqlite3")).await.unwrap();
+    let (_, session, _) = create_claimed_parent(&store, &path).await;
+    let (_, parent, _) = create_claimed_parent(&store, &path).await;
+    store
+        .call_write(Priority::Control, move |connection| {
+            for (mode, authorization, native, task_workspaces, expected) in [
+                ("auto", Authorization::TaskScoped, true, true, Some(true)),
+                ("auto", Authorization::TaskScoped, false, true, None),
+                ("auto", Authorization::TaskScoped, true, false, None),
+                ("auto", Authorization::Once, true, false, None),
+                ("auto", Authorization::ForGoal, false, true, None),
+                ("auto", Authorization::ForGoal, true, true, Some(true)),
+                ("full", Authorization::TaskScoped, true, true, None),
+                ("ask", Authorization::TaskScoped, true, true, None),
+                ("read_only", Authorization::TaskScoped, true, true, None),
+                ("full", Authorization::ForGoal, false, false, Some(false)),
+                ("ask", Authorization::Once, false, false, Some(false)),
+                ("read_only", Authorization::ForGoal, true, true, None),
+            ] {
+                connection.execute(
+                    "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                    params![session.to_string(), mode],
+                )?;
+                assert_eq!(
+                    crate::sessions::goal_check::check_scope_required(
+                        connection,
+                        session,
+                        Some(authorization),
+                        native,
+                        task_workspaces
+                    )?,
+                    expected,
+                    "mode={mode}, auth={authorization:?}, native={native}, tasks={task_workspaces}"
+                );
+            }
+            connection.execute(
+                "UPDATE sessions SET parent_id=?2, approval_mode='full' WHERE id=?1",
+                params![session.to_string(), parent.to_string()],
+            )?;
+            connection.execute(
+                "UPDATE sessions SET approval_mode='read_only' WHERE id=?1",
+                [parent.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::check_scope_required(
+                    connection,
+                    session,
+                    Some(Authorization::ForGoal),
+                    true,
+                    true
+                )?,
+                None
+            );
+            connection.execute(
+                "UPDATE sessions SET approval_mode='auto' WHERE id=?1 OR id=?2",
+                params![session.to_string(), parent.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::check_scope_required(
+                    connection,
+                    session,
+                    Some(Authorization::TaskScoped),
+                    true,
+                    true
+                )?,
+                Some(true)
+            );
+            for mode in ["full", "ask"] {
+                connection.execute(
+                    "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                    params![session.to_string(), mode],
+                )?;
+                assert_eq!(
+                    crate::sessions::goal_check::check_scope_required(
+                        connection,
+                        session,
+                        Some(Authorization::ForGoal),
+                        true,
+                        true
+                    )?,
+                    None,
+                    "{mode} child cannot escape Auto parent containment"
+                );
+            }
+            connection.execute(
+                "UPDATE sessions SET approval_mode='auto' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            connection.execute(
+                "UPDATE sessions SET approval_mode='ask' WHERE id=?1",
+                [parent.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::check_scope_required(
+                    connection,
+                    session,
+                    Some(Authorization::TaskScoped),
+                    true,
+                    true
+                )?,
+                None
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revocation() {
+    use qq_protocol::GoalCheckAuthorization as Authorization;
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().canonicalize().unwrap();
+    let database = path.join("sessions.sqlite3");
+    let store = Store::open(database.clone()).await.unwrap();
+    let (mut claim, _) = pending_check(&store, &path, OWNER).await;
+    let session = claim.identity.session_id;
+    claim.goal.as_mut().unwrap().check_authorization = Some(Authorization::TaskScoped);
+    store
+        .call_write(Priority::Control, move |connection| {
+            let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+            goal.check_authorization = Some(Authorization::TaskScoped);
+            crate::sessions::goals::save(connection, &goal)?;
+            connection.execute(
+                "UPDATE sessions SET approval_mode='auto' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let store = Store::open(database).await.unwrap();
+    store
+        .call_write(Priority::Control, move |connection| {
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, true, true
+                )?,
+                Some(true)
+            );
+            for mode in ["ask", "read_only", "full"] {
+                connection.execute(
+                    "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
+                    params![session.to_string(), mode],
+                )?;
+                assert_eq!(
+                    crate::sessions::goal_check::execution_scope_required(
+                        connection, &claim, true, true
+                    )?,
+                    None,
+                    "{mode}"
+                );
+            }
+            connection.execute(
+                "UPDATE sessions SET approval_mode='auto' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, false, true
+                )?,
+                None
+            );
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, true, false
+                )?,
+                None
+            );
+            let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+            goal.check_authorization = Some(Authorization::ForGoal);
+            crate::sessions::goals::save(connection, &goal)?;
+            claim.goal.as_mut().unwrap().check_authorization = Some(Authorization::ForGoal);
+            connection.execute(
+                "UPDATE sessions SET approval_mode='full' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, false, false
+                )?,
+                Some(false)
+            );
+            connection.execute(
+                "UPDATE sessions SET approval_mode='read_only' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, true, true
+                )?,
+                None
+            );
+            assert_eq!(
+                crate::sessions::goals::load_live(connection, session)?
+                    .unwrap()
+                    .check_authorization,
+                Some(Authorization::ForGoal)
+            );
+            connection.execute(
+                "UPDATE sessions SET approval_mode='ask' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            assert_eq!(
+                crate::sessions::goal_check::execution_scope_required(
+                    connection, &claim, false, false
+                )?,
+                Some(false)
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_approval() {
+    use crate::sessions::goal_check::{self, Completion, Start};
+    let directory = TempDir::new().unwrap();
+    let path = directory.path().canonicalize().unwrap();
+    let store = Store::open(path.join("sessions.sqlite3")).await.unwrap();
+    let mut claim = queued_check(&store, &path).await;
+    claim.goal.as_mut().unwrap().check_authorization =
+        Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
+    let session = claim.identity.session_id;
+    let store_id = store.store_id();
+    store
+        .call_write(Priority::Control, move |connection| {
+            let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
+            goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
+            crate::sessions::goals::save(connection, &goal)?;
+            connection.execute(
+                "UPDATE sessions SET approval_mode='auto' WHERE id=?1",
+                [session.to_string()],
+            )?;
+            let deadline = claim.check_deadline.unwrap().0;
+            let Start::Policy(error) =
+                goal_check::try_start(connection, store_id, &claim, deadline, false, false)?
+            else {
+                panic!("missing native task containment must refuse before check start");
+            };
+            let transaction = store::begin_unit(connection)?;
+            goal_check::finish_in_transaction(
+                &transaction,
+                store_id,
+                &claim,
+                Completion::Policy(error),
+                deadline,
+                SettlementCause::Executor,
+            )?;
+            let goal = crate::sessions::goals::load_live(&transaction, session)?.unwrap();
+            assert!(matches!(
+                goal.status,
+                qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Configuration { .. }
+                    }
+                }
+            ));
+            assert!(goal.pending_run_id.is_none());
+            assert!(
+                goal.audit_pending,
+                "the refused verification remains pending without being scheduled while paused"
+            );
+            assert_eq!(goal.counters.audits, 0);
+            let queued: u32 = transaction.query_row(
+                "SELECT COUNT(*) FROM runs WHERE session_id=?1 AND status='queued'",
+                [session.to_string()],
+                |row| row.get(0),
+            )?;
+            assert_eq!(queued, 0);
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    store.close().await.unwrap();
 }
