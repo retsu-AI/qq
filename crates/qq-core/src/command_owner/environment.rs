@@ -159,13 +159,20 @@ impl NativeEnvironment {
             return Err(CommandOwnerError::Invalid);
         }
         let old = self.get("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            directories
-                .iter()
-                .cloned()
-                .chain(std::env::split_paths(&old)),
-        )
-        .map_err(|_| CommandOwnerError::Invalid)?;
+        let directories = directories.iter().map(|path| {
+            // Command processors and SDK batch scripts need ordinary DOS paths
+            // when that spelling preserves identity. Scope grants stay canonical.
+            #[cfg(windows)]
+            {
+                dunce::simplified(path).to_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                path.clone()
+            }
+        });
+        let path = std::env::join_paths(directories.chain(std::env::split_paths(&old)))
+            .map_err(|_| CommandOwnerError::Invalid)?;
         self.0.retain(|(name, _)| !same_name(name, "PATH"));
         self.0
             .extend(Self::from_values([("PATH".to_owned(), path)])?.0);
