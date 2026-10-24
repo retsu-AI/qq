@@ -41,12 +41,22 @@ scenario: an ordinary directory without Git, detached shell execution, artifact
 publication, no approvals and the durable worker record. The platform limitations
 below remain shipped behavior; stronger isolation is separate hardening work.
 
-Row 3 is the current focus. Existing restart tests cover durable commands and
-goal recovery. The integrated approval case follows an Ask approval timeout through
-store reopen and explicit resume, checking the same task identity, retained
-budget and deadline, one successor, and no replay of the denied action. Auto
-still never waits for approval. Steering, client reconnect and deadline expiry
-must also meet the row's proof before row 3 is qualified.
+Row 3 has integrated interruption/recovery coverage. The approval case in
+[#467](https://github.com/retsu-AI/qq/pull/467) now also checks that an unrelated
+prompt leaves the paused goal unchanged before explicit resume. Replayed resume
+commands create one goal-owned successor; denied effects stay denied and spent
+budgets and deadlines remain authoritative.
+
+A live HTTP/TUI client test restarts the serving adapter, reconnects the same
+client to the replacement endpoint, and applies steering once before a verified
+file write. Server shutdown now closes SSE responses so clients can reconnect.
+A real default-Auto CLI test resumes a blocked goal in a second process with
+`--goal --session ID`, reads its saved checkpoint, publishes the finished
+artifact, and retains the original goal identity, deadline and cumulative usage.
+These portable cases run in native macOS/Windows CI as well as the Linux gate.
+Existing process-kill recovery, expired-budget admission, waiting, run-stop,
+goal pause/clear and stale-control tests cover the remaining row 3 boundaries.
+The next independent repairs are model/tool truthfulness and compaction.
 
 ## Small fixes, in dependency order
 
@@ -58,7 +68,7 @@ and open PRs before editing; retain compatible work already underway.
 | --- | --- | --- |
 | One enforceable permission contract | `qq-config`, core tool admission/delegation and runtime composition. Derive task authority once; replace duplicated approval decisions and reviewer-dependent write delegation with child authority bounded by its parent. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
 | Shell and built-ins enforce that contract | The native three-OS baseline shipped in #463. Core tool dispatch/process ownership and native execution adapters share the practical contract below. CLI state can be isolated with `QQ_HOME`; a real default-Auto CLI scenario covers ordinary work without Git on all three OSes. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
-| The task survives interruption | Durable execution and continuation foundations are implemented; integrated qualification remains. `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
+| The task survives interruption | Integrated timeout/resume, live client reconnect/steering and real CLI continuation tests cover `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
 | Tools tell the truth and edits preserve work | `src/runtime.rs` model discovery/admission; core edit tools. Advertise and validate against the same discovery snapshot; fresh availability failures remain recoverable. Preserve atomic edit semantics. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
 | Compaction preserves obligations | Finish/reconcile [#371](https://github.com/retsu-AI/qq/pull/371) before overlapping its runtime work; then test retained constraints and recovery. | Early user constraints beyond the record cap, later corrections, repeated compaction and a failed summary retain the effective task; retries do not duplicate tool effects. |
 | Less code and prompt machinery | After the affected behavior is covered, remove redundant dispatch wrappers, policy branches, obsolete adapters and duplicated instructions. Reuse existing tests, smoke providers and benchmark adapters. | The affected task still passes its independent verifier; no new supervisor, model judge, mandatory planning layer or replacement evaluation framework. |

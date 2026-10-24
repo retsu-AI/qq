@@ -1358,7 +1358,9 @@ Snapshots and subscriptions remain readable while
 and after shutdown so callers can observe the settled state. An embedded HTTP
 owner first stops accepting connections, settles the runtime, and only then
 waits for a bounded response drain; a long-lived SSE subscriber cannot prevent
-accepted runs from reaching their durable terminal state.
+accepted runs from reaching their durable terminal state. Stopping the HTTP
+adapter closes its SSE responses; clients reconnect from their last received
+event cursor while committed runtime events remain available for replay.
 
 Process loss is the final backstop rather than a reason to replay uncertain
 work. Opening the store transactionally marks abandoned running runs and their

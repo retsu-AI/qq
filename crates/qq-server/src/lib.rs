@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{OwnedSemaphorePermit, Semaphore, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinHandle,
 };
 
@@ -514,15 +514,15 @@ impl ServerReservation {
         handler: Arc<dyn ServerHandler>,
         identity: ServerIdentity,
     ) -> Result<ServerHandle, ServerError> {
-        self.start_with(identity, |connection, allowed_origins| {
-            router(handler, connection, allowed_origins)
+        self.start_with(identity, |connection, allowed_origins, shutdown| {
+            router(handler, connection, allowed_origins, shutdown)
         })
     }
 
     fn start_with(
         self,
         identity: ServerIdentity,
-        build: impl FnOnce(ServerConnection, AllowedOrigins) -> Router,
+        build: impl FnOnce(ServerConnection, AllowedOrigins, watch::Receiver<bool>) -> Router,
     ) -> Result<ServerHandle, ServerError> {
         let Self {
             listener,
@@ -546,12 +546,16 @@ impl ServerReservation {
         .map_err(map_connection_error)?;
         write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
         guard.connection = Some(connection.clone());
-        let app = build(connection.clone(), allowed_origins);
-        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let (shutdown_sender, mut shutdown_receiver) = watch::channel(false);
+        let app = build(
+            connection.clone(),
+            allowed_origins,
+            shutdown_receiver.clone(),
+        );
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, app)
                 .with_graceful_shutdown(async move {
-                    let _ = shutdown_receiver.await;
+                    let _ = shutdown_receiver.wait_for(|stopping| *stopping).await;
                 })
                 .await
                 .map_err(|source| ServerError::Serve { source });
@@ -569,7 +573,7 @@ impl ServerReservation {
 /// Owns a running server task and its graceful shutdown signal.
 pub struct ServerHandle {
     connection: ServerConnection,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<Result<(), ServerError>>>,
 }
 
@@ -579,10 +583,10 @@ impl ServerHandle {
         &self.connection
     }
 
-    /// Stops accepting new connections without waiting for active responses.
+    /// Stops accepting connections and ends event streams without waiting for other responses.
     pub fn begin_shutdown(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(true);
         }
     }
 
@@ -603,7 +607,8 @@ impl ServerHandle {
         self.shutdown_with_grace(DEFAULT_SHUTDOWN_GRACE).await
     }
 
-    /// Requests graceful shutdown, aborting active responses after `grace`.
+    /// Requests graceful shutdown and bounds the wait for response draining to
+    /// `grace`; aborts the serving task on expiry.
     pub async fn shutdown_with_grace(mut self, grace: Duration) -> Result<(), ServerError> {
         self.begin_shutdown();
         let mut task = self.task.take().ok_or(ServerError::ServerTaskStopped)?;
@@ -647,7 +652,7 @@ impl fmt::Debug for ServerHandle {
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
+            let _ = shutdown.send(true);
         }
     }
 }
@@ -736,16 +741,19 @@ struct AppState {
     connection: ServerConnection,
     session_requests: Arc<Semaphore>,
     subscriptions: Arc<Semaphore>,
+    shutdown: watch::Receiver<bool>,
 }
 
 fn router(
     handler: Arc<dyn ServerHandler>,
     connection: ServerConnection,
     allowed_origins: AllowedOrigins,
+    shutdown: watch::Receiver<bool>,
 ) -> Router {
     let state = AppState {
         handler,
         connection,
+        shutdown,
         session_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_REQUESTS)),
         subscriptions: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
     };
@@ -1108,7 +1116,13 @@ async fn workspace_events(
     let output = stream! {
         let _permit = permit;
         let mut events = events;
-        while let Some(event) = events.next().await {
+        let mut shutdown = state.shutdown;
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopping| *stopping) => break,
+                event = events.next() => match event { Some(event) => event, None => break },
+            };
             let event = match event {
                 Ok(event) => event,
                 Err(qq_core::SessionRuntimeError::CursorExpired) => {
@@ -3146,12 +3160,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.chunk().await.unwrap().is_some());
 
-        let error = server
-            .shutdown_with_grace(Duration::from_millis(20))
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, ServerError::ShutdownTimedOut));
+        server.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while response.chunk().await.unwrap().is_some() {}
+        })
+        .await
+        .expect("shutdown must end the existing SSE response");
         assert!(!paths.metadata_file().exists());
         let lock = open_private_lock_file(paths.lock_file()).unwrap();
         lock.try_lock().unwrap();

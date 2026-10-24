@@ -9929,4 +9929,5 @@ mod tests {
             digest(&bearer, ResponsesBodyShape::Codex)
         );
     }
+    mod continuation;
 }
