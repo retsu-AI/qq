@@ -102,14 +102,20 @@ fn main() -> ExitCode {
             if cli.tui_qa_root.is_some() {
                 return Err(logging::LogError::QaRoot);
             }
-            let project = directories::ProjectDirs::from("dev", "qq", "qq")
-                .ok_or_else(|| io::Error::other("system directories unavailable"))?;
-            logging::LogGuard::start(
-                &project
+            let logs = if std::env::var_os("QQ_HOME").is_some() {
+                config::ConfigPaths::system()
+                    .map_err(io::Error::other)?
+                    .data_dir()
+                    .join("logs")
+            } else {
+                let project = directories::ProjectDirs::from("dev", "qq", "qq")
+                    .ok_or_else(|| io::Error::other("system directories unavailable"))?;
+                project
                     .state_dir()
                     .unwrap_or_else(|| project.data_local_dir())
-                    .join("logs"),
-            )
+                    .join("logs")
+            };
+            logging::LogGuard::start(&logs)
         })() {
             Ok(logger) => {
                 if let Err(error) = logger.install() {

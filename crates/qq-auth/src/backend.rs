@@ -89,7 +89,7 @@ impl SystemWindowsProtected {
     }
 
     #[cfg(windows)]
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let digest = Sha256::digest(name.as_bytes());

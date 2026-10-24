@@ -49,6 +49,16 @@ and the data, managed, and organization paths, each marked `(exists)` or
 `(missing)`. The global `config.ron` may be a symlink to a regular file;
 project files may not.
 
+Set `QQ_HOME` to an absolute directory to keep a separate QQ instance's
+user configuration in `<QQ_HOME>/config` and its sessions, trust records and
+credential metadata in `<QQ_HOME>/data`. Diagnostic logs also use
+`<QQ_HOME>/data/logs`; server discovery and coordination use
+`<QQ_HOME>/data/runtime`, so separate homes do not attach to each other's server.
+This is useful for isolated instances and testing; it
+does not change the workspace, managed policy, OS keyring or shell permissions.
+An empty or relative `QQ_HOME` is an error. Without it, platform paths stay
+unchanged.
+
 Project layers that declare anything sensitive — `model`, `providers`,
 `mcp`, `packs`, `profiles`, `delegation`, `audit`, `goals`,
 `reasoning_effort`, or any policy grant — are loaded only after `qq trust`
@@ -445,6 +455,7 @@ Themes are `.ron` files in `<global>/themes/` or `.qq/themes/`; shape in
 
 | Variable | Effect |
 | --- | --- |
+| `QQ_HOME` | absolute root for separate user configuration and application data; managed policy and OS keyring remain unchanged |
 | `QQ_MODEL` | override `model` for this process |
 | `QQ_ORGANIZATION` | override `organization` |
 | `QQ_CONFIG` | an extra config file applied after project layers |

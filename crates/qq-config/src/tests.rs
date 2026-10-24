@@ -5282,3 +5282,38 @@ fn task_hosting_destination_changes_are_part_of_authority_digest() {
     let encoded = ron::to_string(&first).unwrap();
     assert_eq!(document::Document::parse(&encoded, &origin).unwrap(), first);
 }
+
+#[test]
+fn qq_home_selects_user_paths_without_changing_managed_policy() {
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path().join("separate home");
+    let standard = loader::system_paths_with_home(None).unwrap();
+    let paths = loader::system_paths_with_home(Some(home.as_os_str())).unwrap();
+    assert_eq!(paths.global_dir(), home.join("config"));
+    assert_eq!(paths.data_dir(), home.join("data"));
+    assert_eq!(paths.managed_dir(), standard.managed_dir());
+    assert!(paths.enforce_managed_ownership);
+    assert!(!home.exists(), "choosing paths must not create directories");
+}
+
+#[test]
+fn qq_home_rejects_empty_and_relative_values() {
+    for value in ["", "relative", "./relative"] {
+        assert!(
+            matches!(
+                loader::system_paths_with_home(Some(std::ffi::OsStr::new(value))),
+                Err(ConfigError::InvalidHome)
+            ),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn absent_qq_home_preserves_standard_config_paths() {
+    let project = directories::ProjectDirs::from("dev", "qq", "qq").unwrap();
+    let paths = loader::system_paths_with_home(None).unwrap();
+    assert_eq!(paths.global_dir(), project.config_dir());
+    assert_eq!(paths.data_dir(), project.data_dir());
+    assert!(paths.enforce_managed_ownership);
+}

@@ -193,6 +193,19 @@ jobs:
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
+      - name: Isolated application paths
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tests::qq_home_selects_user_paths_without_changing_managed_policy qq-config
+          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_values qq-config
+          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_config_paths qq-config
+          bash .github/scripts/test-exact.sh tests::qq_home_selects_auth_metadata_in_the_shared_data_directory qq-auth
+          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_auth_roots qq-auth
+          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_auth_metadata_paths qq-auth
+          bash .github/scripts/test-exact.sh tests::qq_home_rejects_empty_and_relative_server_roots qq-server
+          bash .github/scripts/test-exact.sh tests::absent_qq_home_preserves_standard_server_paths qq-server
+          bash .github/scripts/test-exact.sh tests::distinct_qq_homes_have_separate_server_discovery_and_coordination qq-server
       - name: Native core Clippy
         if: ${{ !cancelled() }}
         shell: bash

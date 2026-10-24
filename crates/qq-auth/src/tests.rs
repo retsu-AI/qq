@@ -4392,3 +4392,35 @@ async fn expire_cached<C: Clone>(cache: &tokio::sync::Mutex<Option<Arc<request::
         refresh_after: 0,
     }));
 }
+
+#[test]
+fn qq_home_selects_auth_metadata_in_the_shared_data_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path().join("separate home");
+    let store = CredentialStore::system_with_home(Some(home.as_os_str())).unwrap();
+    assert_eq!(store.paths(), &CredentialPaths::new(home.join("data")));
+    assert!(
+        !home.exists(),
+        "selecting metadata paths must not create directories"
+    );
+}
+
+#[test]
+fn qq_home_rejects_empty_and_relative_auth_roots() {
+    for value in ["", "relative", "./relative"] {
+        assert!(
+            matches!(
+                CredentialStore::system_with_home(Some(std::ffi::OsStr::new(value))),
+                Err(AuthError::InvalidHome)
+            ),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn absent_qq_home_preserves_standard_auth_metadata_paths() {
+    let project = ProjectDirs::from("dev", "qq", "qq").unwrap();
+    let store = CredentialStore::system_with_home(None).unwrap();
+    assert_eq!(store.paths(), &CredentialPaths::new(project.data_dir()));
+}
