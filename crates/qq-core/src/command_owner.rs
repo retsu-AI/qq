@@ -470,14 +470,14 @@ impl CommandOwner {
             .map_err(|_| CommandOwnerError::Invalid)?;
         if let Some(call) = request.task_git_call.as_ref()
             && let Some(reference) = &call.job
-            && (call.tool != "task_commit"
-                || !reference.matches_launch(
-                    request.id,
-                    &request.workspace,
-                    request.workspace_identity,
-                    &request.tool,
-                    &request.arguments,
-                ))
+            && !reference.matches_launch(
+                request.id,
+                &request.workspace,
+                request.workspace_identity,
+                &request.tool,
+                &request.arguments,
+                &call.tool,
+            )
         {
             return Err(CommandOwnerError::Invalid);
         }

@@ -80,6 +80,7 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
                 "task_commit",
                 json!({"message":"Implement requested artifact"}),
             ),
+            call("push_without_grant", "task_push", json!({})),
             reply(vec![
                 json!({"type":"response.output_text.delta","delta":"finished"}),
                 completed,
@@ -120,10 +121,17 @@ async fn default_auto_edits_and_commits_without_host_git_mutation_or_approvals()
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();
-    assert_eq!(captured.len(), 3, "{diagnostics}");
+    assert_eq!(captured.len(), 4, "{diagnostics}");
     assert!(
         captured[0].body().contains("task_commit"),
         "Auto must advertise the live broker"
+    );
+    assert!(
+        captured[3]
+            .body()
+            .contains("No authorized hosting destination"),
+        "{}",
+        captured[3].body()
     );
     let request = captured[2].json_body();
     let result = request["input"]

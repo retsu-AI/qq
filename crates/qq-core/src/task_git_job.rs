@@ -1,6 +1,11 @@
-//! Private, credential-free commit jobs launched by the durable command worker.
+//! Private task Git jobs launched by the durable command worker.
 //! These records are trusted host input, never authority supplied by a model.
+pub use crate::task_git::hosting::{
+    TaskGitHostingError, TaskGitHostingTarget, TaskGitPullRequest, TaskGitPullRequestState,
+    TaskGitPush,
+};
 pub use crate::task_git::{TaskGitCommit, TaskGitError, TaskGitLimits};
+pub const HOSTING_TOKEN_ENV: &str = "QQ_TASK_GITHUB_TOKEN";
 pub use crate::task_git_helper_image::{HelperImageError, TaskGitHelperImage};
 use crate::{
     RunCancellation,
@@ -35,8 +40,56 @@ pub struct TaskGitJob {
     /// All current task changes versus immutable imported bytes.
     pub paths: Vec<PathBuf>,
     pub protected_paths: Vec<PathBuf>,
-    pub message: String,
+    pub operation: TaskGitJobOperation,
     pub not_after_ms: u64,
+}
+
+/// Only title/body/message are model input. Remote destinations are supplied
+/// by current host configuration and bound into the private job identity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TaskGitJobOperation {
+    Commit {
+        message: String,
+    },
+    Push {
+        target: TaskGitHostingTarget,
+    },
+    PullRequest {
+        target: TaskGitHostingTarget,
+        title: String,
+        body: String,
+    },
+}
+
+impl TaskGitJobOperation {
+    fn matches_call(&self, tool: &str, arguments: &str) -> bool {
+        use crate::tools::task_git::{TaskGitRequest, parse};
+        match (self, parse(tool, arguments)) {
+            (Self::Commit { message }, Ok(TaskGitRequest::Commit { message: expected })) => {
+                message == &expected
+            }
+            (Self::Push { .. }, Ok(TaskGitRequest::Push)) => true,
+            (
+                Self::PullRequest { title, body, .. },
+                Ok(TaskGitRequest::PullRequest {
+                    title: expected_title,
+                    body: expected_body,
+                }),
+            ) => title == &expected_title && body == &expected_body,
+            _ => false,
+        }
+    }
+
+    fn logical_call(&self) -> (&'static str, serde_json::Value) {
+        match self {
+            Self::Commit { message } => ("task_commit", serde_json::json!({"message":message})),
+            Self::Push { .. } => ("task_push", serde_json::json!({})),
+            Self::PullRequest { title, body, .. } => {
+                ("task_pr", serde_json::json!({"title":title,"body":body}))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,12 +134,15 @@ impl TaskGitJobReference {
         workspace_identity: crate::command_owner::NativeWorkspaceIdentity,
         tool: &str,
         arguments: &str,
+        logical_tool: &str,
     ) -> bool {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct CommitLaunch {
             program: PathBuf,
             args: [String; 2],
+            #[serde(default)]
+            env: Vec<String>,
         }
         let Ok(args) = serde_json::from_str::<CommitLaunch>(arguments) else {
             return false;
@@ -98,11 +154,17 @@ impl TaskGitJobReference {
             && args.program.is_absolute()
             && args.args[0] == "_task-git"
             && Path::new(&args.args[1]) == self.request()
+            && if logical_tool == "task_commit" {
+                args.env.is_empty()
+            } else {
+                matches!(logical_tool, "task_push" | "task_pr") && args.env == [HOSTING_TOKEN_ENV]
+            }
     }
 
     /// Historical observation only: no Git command, new deadline or ref update.
-    pub(crate) fn committed_receipt(
+    pub(crate) fn successful_receipt(
         &self,
+        tool: &str,
         arguments: &str,
     ) -> Result<Option<TaskGitJobReceipt>, TaskGitJobError> {
         let root = task_git::held(&self.control)?;
@@ -118,23 +180,17 @@ impl TaskGitJobReference {
         else {
             return Ok(None);
         };
-        let crate::tools::task_git::TaskGitRequest::Commit { message } =
-            crate::tools::task_git::parse("task_commit", arguments)
-                .map_err(|_| TaskGitJobError::Invalid("logical commit arguments"))?
-        else {
-            return Err(TaskGitJobError::Invalid("logical commit arguments"));
-        };
         if job.call != self.call
             || job.task != self.task
             || (job.control.path != self.control.path
                 || job.control.identity != self.control.identity)
             || job.digest()? != self.request_digest
-            || job.message != message
+            || !job.operation.matches_call(tool, arguments)
         {
             return Err(TaskGitJobError::Invalid("job reference mismatch"));
         }
         let receipt = read_receipt(&job)?;
-        Ok(receipt.filter(|receipt| matches!(receipt.result, TaskGitJobResult::Committed { .. })))
+        Ok(receipt.filter(|receipt| receipt.result.is_success()))
     }
 }
 
@@ -142,9 +198,21 @@ impl TaskGitJobReference {
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskGitJobResult {
     Committed { commit: TaskGitCommit },
+    Pushed { push: TaskGitPush },
+    PullRequest { pull_request: TaskGitPullRequest },
     Refused { reason: String },
     Stopped,
     CleanupUnconfirmed,
+}
+
+impl TaskGitJobResult {
+    #[must_use]
+    pub const fn is_success(&self) -> bool {
+        matches!(
+            self,
+            Self::Committed { .. } | Self::Pushed { .. } | Self::PullRequest { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,16 +262,81 @@ impl TaskGitJob {
         }
     }
 
+    fn validate_result(&self, result: &TaskGitJobResult) -> Result<(), TaskGitJobError> {
+        let branch = format!("refs/heads/qq/task/{}", self.task);
+        let invalid = || TaskGitJobError::Invalid("receipt operation or destination mismatch");
+        match (&self.operation, result) {
+            (TaskGitJobOperation::Commit { .. }, TaskGitJobResult::Committed { commit }) => {
+                if commit.branch != branch || commit.base != self.base {
+                    return Err(invalid());
+                }
+                task_git::oid(commit.oid.clone())?;
+                task_git::oid(commit.tree.clone())?;
+            }
+            (TaskGitJobOperation::Push { .. }, TaskGitJobResult::Pushed { push }) => {
+                if push.branch != branch || push.repository_id == 0 {
+                    return Err(invalid());
+                }
+                task_git::oid(push.oid.clone())?;
+            }
+            (
+                TaskGitJobOperation::PullRequest { target, .. },
+                TaskGitJobResult::PullRequest { pull_request },
+            ) => {
+                if pull_request.repository_id == 0
+                    || pull_request.number == 0
+                    || pull_request.head
+                        != branch.strip_prefix("refs/heads/").ok_or_else(invalid)?
+                    || pull_request.base != target.base_branch()
+                    || pull_request.url
+                        != format!(
+                            "https://github.com/{}/{}/pull/{}",
+                            target.owner(),
+                            target.repository(),
+                            pull_request.number
+                        )
+                {
+                    return Err(invalid());
+                }
+                task_git::oid(pull_request.oid.clone())?;
+            }
+            (
+                _,
+                TaskGitJobResult::Refused { .. }
+                | TaskGitJobResult::Stopped
+                | TaskGitJobResult::CleanupUnconfirmed,
+            ) => {}
+            _ => return Err(invalid()),
+        }
+        Ok(())
+    }
+
     fn validate(&self) -> Result<(), TaskGitJobError> {
         self.digest()?;
         task_git::oid(self.base.clone())?;
         if self.paths.len() > self.limits.max_entries
             || self.protected_paths.len() > self.limits.max_entries
-            || self.message.is_empty()
-            || self.message.len() > 16 * 1024
-            || self.message.contains('\0')
         {
             return Err(TaskGitJobError::Invalid("invalid commit bounds"));
+        }
+        let (tool, arguments) = self.operation.logical_call();
+        if !self.operation.matches_call(tool, &arguments.to_string()) {
+            return Err(TaskGitJobError::Invalid("invalid task Git operation"));
+        }
+        match &self.operation {
+            TaskGitJobOperation::Commit { .. } => {}
+            TaskGitJobOperation::Push { target }
+            | TaskGitJobOperation::PullRequest { target, .. } => {
+                TaskGitHostingTarget::new(
+                    target.owner().to_owned(),
+                    target.repository().to_owned(),
+                    target.base_branch().to_owned(),
+                )
+                .map_err(|_| TaskGitJobError::Invalid("invalid hosting target"))?;
+                if !self.paths.is_empty() {
+                    return Err(TaskGitJobError::Invalid("remote jobs cannot select files"));
+                }
+            }
         }
         for path in self.paths.iter().chain(&self.protected_paths) {
             task_git::validate_path(path)?;
@@ -275,6 +408,9 @@ pub fn read_receipt(job: &TaskGitJob) -> Result<Option<TaskGitJobReceipt>, TaskG
             "receipt belongs to another request",
         ));
     }
+    if let Some(receipt) = &receipt {
+        job.validate_result(&receipt.result)?;
+    }
     Ok(receipt)
 }
 
@@ -285,10 +421,32 @@ pub fn execute_job(request: &Path) -> Result<TaskGitJobReceipt, TaskGitJobError>
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?;
     let now_ms = u64::try_from(now.as_millis()).map_err(io::Error::other)?;
-    execute_job_at(request, now_ms)
+    execute_job_at_with_token(request, now_ms, None)
 }
 
+/// The caller supplies this credential in memory only, after trusted host policy
+/// resolution. Neither the private request nor a saved result contains it.
+pub fn execute_job_with_token(
+    request: &Path,
+    credential: Option<qq_provider::SecretLiteral>,
+) -> Result<TaskGitJobReceipt, TaskGitJobError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    let now_ms = u64::try_from(now.as_millis()).map_err(io::Error::other)?;
+    execute_job_at_with_token(request, now_ms, credential)
+}
+
+#[cfg(test)]
 fn execute_job_at(request: &Path, now_ms: u64) -> Result<TaskGitJobReceipt, TaskGitJobError> {
+    execute_job_at_with_token(request, now_ms, None)
+}
+
+fn execute_job_at_with_token(
+    request: &Path,
+    now_ms: u64,
+    credential: Option<qq_provider::SecretLiteral>,
+) -> Result<TaskGitJobReceipt, TaskGitJobError> {
     let parent = request
         .parent()
         .ok_or(TaskGitJobError::Invalid("request parent"))?;
@@ -322,15 +480,66 @@ fn execute_job_at(request: &Path, now_ms: u64) -> Result<TaskGitJobReceipt, Task
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?;
-    let result = runtime.block_on(commit(&job, now_ms, restored));
-    let result = match result {
-        Ok(commit) => TaskGitJobResult::Committed { commit },
-        Err(TaskGitError::Stopped) => TaskGitJobResult::Stopped,
-        Err(TaskGitError::CleanupUnconfirmed) => TaskGitJobResult::CleanupUnconfirmed,
-        Err(error) => TaskGitJobResult::Refused {
-            reason: error.to_string(),
+    let result = match &job.operation {
+        TaskGitJobOperation::Commit { message } => {
+            match runtime.block_on(commit(&job, message.clone(), now_ms, restored)) {
+                Ok(commit) => TaskGitJobResult::Committed { commit },
+                Err(TaskGitError::Stopped) => TaskGitJobResult::Stopped,
+                Err(TaskGitError::CleanupUnconfirmed) => TaskGitJobResult::CleanupUnconfirmed,
+                Err(error) => TaskGitJobResult::Refused {
+                    reason: error.to_string(),
+                },
+            }
+        }
+        operation => match (restored, credential) {
+            (Ok(Some(mut git)), Some(credential)) => {
+                git.inherit_worker_custody();
+                let deadline = Instant::now()
+                    .checked_add(Duration::from_millis(
+                        job.not_after_ms.saturating_sub(now_ms),
+                    ))
+                    .ok_or(TaskGitJobError::Invalid("invalid job deadline"))?;
+                let bounds = Operation {
+                    cancellation: RunCancellation::new(),
+                    deadline,
+                    worker_owned: true,
+                };
+                match operation {
+                    TaskGitJobOperation::Push { target } => runtime
+                        .block_on(git.push(target.clone(), credential, job.call, bounds))
+                        .map(|push| TaskGitJobResult::Pushed { push }),
+                    TaskGitJobOperation::PullRequest {
+                        target,
+                        title,
+                        body,
+                    } => runtime
+                        .block_on(git.pull_request(
+                            target.clone(),
+                            credential,
+                            job.call,
+                            title.clone(),
+                            body.clone(),
+                            bounds,
+                        ))
+                        .map(|pull_request| TaskGitJobResult::PullRequest { pull_request }),
+                    TaskGitJobOperation::Commit { .. } => unreachable!("commit handled above"),
+                }
+                .unwrap_or_else(|error| TaskGitJobResult::Refused {
+                    reason: error.to_string(),
+                })
+            }
+            (Err(error), _) => TaskGitJobResult::Refused {
+                reason: error.to_string(),
+            },
+            (_, None) => TaskGitJobResult::Refused {
+                reason: "host credential unavailable".into(),
+            },
+            (Ok(None), _) => TaskGitJobResult::Refused {
+                reason: "commit task changes before publishing".into(),
+            },
         },
     };
+    job.validate_result(&result)?;
     let receipt = TaskGitJobReceipt {
         call: job.call,
         task: job.task,
@@ -352,6 +561,7 @@ fn execute_job_at(request: &Path, now_ms: u64) -> Result<TaskGitJobReceipt, Task
 
 async fn commit(
     job: &TaskGitJob,
+    message: String,
     now_ms: u64,
     restored: Result<Option<TaskGit>, TaskGitError>,
 ) -> Result<TaskGitCommit, TaskGitError> {
@@ -383,7 +593,7 @@ async fn commit(
         .freeze(
             job.snapshot.clone(),
             job.paths.clone(),
-            job.message.clone(),
+            message,
             job.call,
             operation.clone(),
         )
@@ -518,10 +728,44 @@ mod tests {
             },
             paths: vec![PathBuf::from("file")],
             protected_paths: vec![PathBuf::from("private")],
-            message: "task commit".into(),
+            operation: TaskGitJobOperation::Commit {
+                message: "task commit".into(),
+            },
             not_after_ms: 30_000,
         };
         (root, job)
+    }
+
+    #[test]
+    fn task_git_job_rejects_success_receipts_for_another_effect() {
+        let (_root, job) = fixture();
+        let files = save_job(&job).unwrap();
+        let receipt = execute_job_at(&files.request, 0).unwrap();
+        let TaskGitJobResult::Committed { commit } = &receipt.result else {
+            panic!("commit failed")
+        };
+        let mut foreign = commit.clone();
+        foreign.branch = "refs/heads/unrelated".into();
+        let mismatches = [
+            TaskGitJobResult::Committed { commit: foreign },
+            TaskGitJobResult::Pushed {
+                push: TaskGitPush {
+                    repository_id: 1,
+                    oid: commit.oid.clone(),
+                    branch: commit.branch.clone(),
+                },
+            },
+        ];
+        let root = task_git::held(&job.control).unwrap();
+        let name = files.receipt.file_name().unwrap().to_str().unwrap();
+        for result in mismatches {
+            let mut invalid = receipt.clone();
+            invalid.result = result;
+            task_git::save_metadata(&root, name, &invalid).unwrap();
+            assert!(read_receipt(&job).is_err());
+        }
+        task_git::save_metadata(&root, name, &receipt).unwrap();
+        assert_eq!(read_receipt(&job).unwrap(), Some(receipt));
     }
 
     #[test]
@@ -542,7 +786,9 @@ mod tests {
         assert_eq!(execute_job_at(&files.request, 40_000).unwrap(), receipt);
         assert_eq!(read_receipt(&job).unwrap(), Some(receipt));
         let mut changed = job.clone();
-        changed.message = "different call".into();
+        changed.operation = TaskGitJobOperation::Commit {
+            message: "different call".into(),
+        };
         assert!(save_job(&changed).is_err());
         assert!(read_receipt(&changed).is_err());
     }
@@ -565,7 +811,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.digest().unwrap(), job.digest().unwrap());
-        job.message = "x".repeat(MAX_RECORD_BYTES + 1);
+        job.operation = TaskGitJobOperation::Commit {
+            message: "x".repeat(MAX_RECORD_BYTES + 1),
+        };
         assert!(save_job(&job).is_err());
     }
 
@@ -648,7 +896,7 @@ mod reconciliation_tests {
                     .to_string(),
             task_git_call: Some(NativeTaskGitCall {
                 tool: "task_commit".into(),
-                arguments: serde_json::json!({"message":job.message}).to_string(),
+                arguments: job.operation.logical_call().1.to_string(),
                 job: Some(reference.clone()),
             }),
             environment: NativeEnvironment::capture(&[]).unwrap(),
@@ -742,7 +990,7 @@ mod reconciliation_tests {
         owner.shutdown().await.unwrap();
         assert_eq!(
             reference
-                .committed_receipt(&serde_json::json!({"message":job.message}).to_string())
+                .successful_receipt("task_commit", &job.operation.logical_call().1.to_string())
                 .unwrap(),
             None
         );

@@ -33,10 +33,15 @@ mod runtime;
 
 fn main() -> ExitCode {
     if let Some(request) = cli::task_git_request() {
-        return match request
+        return match request.map_err(io::Error::other).and_then(|path| {
+            qq_core::task_git_job::execute_job_with_token(
+                &path,
+                std::env::var(qq_core::task_git_job::HOSTING_TOKEN_ENV)
+                    .ok()
+                    .map(qq_provider::SecretLiteral::new),
+            )
             .map_err(io::Error::other)
-            .and_then(|path| qq_core::task_git_job::execute_job(&path).map_err(io::Error::other))
-        {
+        }) {
             Ok(receipt) => {
                 match serde_json::to_string(&receipt) {
                     Ok(encoded) => println!("{encoded}"),
@@ -45,10 +50,7 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                 }
-                if matches!(
-                    receipt.result,
-                    qq_core::task_git_job::TaskGitJobResult::Committed { .. }
-                ) {
+                if receipt.result.is_success() {
                     ExitCode::SUCCESS
                 } else {
                     ExitCode::FAILURE
