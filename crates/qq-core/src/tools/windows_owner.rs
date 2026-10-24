@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::{
     ffi::OsString,
     fs::File,
-    io::{self, Read as _, Write as _},
+    io::{self, Read as _, Seek as _, Write as _},
     os::windows::fs::OpenOptionsExt as _,
-    path::PathBuf,
-    sync::{Arc, OnceLock},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -32,7 +32,7 @@ pub(super) struct WindowsOwner(Arc<Owner>);
 struct Owner {
     launcher: CommandLauncher,
     source: File,
-    image: OnceLock<Result<Arc<HelperImage>, Arc<io::Error>>>,
+    image: Mutex<Option<Arc<HelperImage>>>,
 }
 pub(super) struct HelperImage {
     path: PathBuf,
@@ -91,48 +91,57 @@ impl WindowsOwner {
         Ok(Self(Arc::new(Owner {
             launcher,
             source,
-            image: OnceLock::new(),
+            image: Mutex::new(None),
         })))
     }
     fn image(&self) -> io::Result<Arc<HelperImage>> {
-        self.0
-            .image
-            .get_or_init(|| {
-                (|| {
-                    let temporary = tempfile::Builder::new()
-                        .prefix("qq-windows-helper-")
-                        .tempdir()?;
-                    let directory =
-                        crate::command_owner::windows_state::directory(temporary.path())
-                            .map_err(io::Error::other)?;
-                    let path = temporary.path().join("helper.exe");
-                    let mut destination =
-                        File::options().write(true).create_new(true).open(&path)?;
-                    io::copy(&mut self.0.source.try_clone()?, &mut destination)?;
-                    drop(destination);
-                    Ok(Arc::new(HelperImage {
-                        path,
-                        // CreateProcessW resolves the AppContainer profile using the
-                        // caller's LOCALAPPDATA. Query Windows for the helper; the
-                        // payload's required profile path comes from its frozen input.
-                        local_app_data: directories::BaseDirs::new()
-                            .ok_or_else(|| {
-                                io::Error::other(
-                                    "Windows local application-data directory is unavailable",
-                                )
-                            })?
-                            .data_local_dir()
-                            .to_owned(),
+        self.image_in(&std::env::temp_dir())
+    }
 
-                        directory: Some(directory),
-                        temporary: Some(temporary),
-                    }))
-                })()
-                .map_err(Arc::new)
-            })
-            .as_ref()
-            .cloned()
-            .map_err(|error| io::Error::other(Arc::clone(error)))
+    fn image_in(&self, temporary_root: &Path) -> io::Result<Arc<HelperImage>> {
+        // This runs on the bounded preparation pool. Serialize the copy, but
+        // retain only success: disk pressure and temporary I/O failures must
+        // not disable restricted execution for this worker's lifetime.
+        let mut cached = self
+            .0
+            .image
+            .lock()
+            .map_err(|_| io::Error::other("native helper image cache poisoned"))?;
+        if let Some(image) = cached.as_ref() {
+            return Ok(Arc::clone(image));
+        }
+        let size = self.0.source.metadata()?.len();
+        crate::storage::check_path_blocking(temporary_root, size).map_err(io::Error::other)?;
+        let temporary = tempfile::Builder::new()
+            .prefix("qq-windows-helper-")
+            .tempdir_in(temporary_root)?;
+        let directory = crate::command_owner::windows_state::directory(temporary.path())
+            .map_err(io::Error::other)?;
+        let path = temporary.path().join("helper.exe");
+        let mut destination = File::options().write(true).create_new(true).open(&path)?;
+        // Clones share a file position on Windows. A previous partial copy
+        // must not turn a retry into a truncated executable.
+        let mut source = self.0.source.try_clone()?;
+        source.rewind()?;
+        if io::copy(&mut source.take(size.saturating_add(1)), &mut destination)? != size {
+            return Err(io::Error::other("native helper changed while copying"));
+        }
+        drop(destination);
+        let image = Arc::new(HelperImage {
+            path,
+            // Profile lookup belongs to the trusted helper; payload profile
+            // paths still come only from the frozen command environment.
+            local_app_data: directories::BaseDirs::new()
+                .ok_or_else(|| {
+                    io::Error::other("Windows local application-data directory is unavailable")
+                })?
+                .data_local_dir()
+                .to_owned(),
+            directory: Some(directory),
+            temporary: Some(temporary),
+        });
+        *cached = Some(Arc::clone(&image));
+        Ok(image)
     }
     pub(super) fn wrap(
         &self,
@@ -430,4 +439,68 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     // exits. The worker independently awaits its own job's empty membership.
     drop(child);
     std::process::exit(code as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn helper_image_retries_after_storage_pressure_and_reuses_only_success() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.exe");
+        let bytes = b"complete trusted helper image";
+        std::fs::write(&source, bytes).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let temporary = temporary.path().canonicalize().unwrap();
+        let owner =
+            WindowsOwner::discover(CommandLauncher::new(source.canonicalize().unwrap())).unwrap();
+        let space = crate::storage::SpaceOverride::new(&temporary, crate::storage::RESERVE_BYTES);
+        let error = match owner.image_in(&temporary) {
+            Ok(_) => panic!("helper copy must preserve the reserve"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("disk_space_low"), "{error}");
+        assert_eq!(std::fs::read_dir(&temporary).unwrap().count(), 0);
+        // Model the shared position left by an interrupted copy, too.
+        owner
+            .0
+            .source
+            .try_clone()
+            .unwrap()
+            .seek(io::SeekFrom::Start(3))
+            .unwrap();
+        space.set(crate::storage::RESERVE_BYTES + bytes.len() as u64);
+        let image = owner.image_in(&temporary).unwrap();
+        assert_eq!(std::fs::read(&image.path).unwrap(), bytes);
+        space.set(0);
+        let reused = owner.image_in(&temporary).unwrap();
+        assert!(Arc::ptr_eq(&image, &reused));
+        assert_eq!(std::fs::read_dir(&temporary).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn helper_image_concurrent_initialization_keeps_one_complete_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.exe");
+        let bytes = b"complete trusted helper image";
+        std::fs::write(&source, bytes).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let owner =
+            WindowsOwner::discover(CommandLauncher::new(source.canonicalize().unwrap())).unwrap();
+        std::thread::scope(|threads| {
+            let handles: Vec<_> = (0..4)
+                .map(|_| threads.spawn(|| owner.image_in(temporary.path()).unwrap()))
+                .collect();
+            let images: Vec<_> = handles
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect();
+            for image in &images {
+                assert!(Arc::ptr_eq(&images[0], image));
+                assert_eq!(std::fs::read(&image.path).unwrap(), bytes);
+            }
+        });
+        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 1);
+    }
 }
