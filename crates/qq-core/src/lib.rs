@@ -102,11 +102,11 @@ pub use sessions::{
     MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
     MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
-    RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
-    SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
-    SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
-    WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
+    ReviewSpend, ReviewVerdict, RunCompletion, RuntimeLoadError, RuntimeLoadFuture,
+    RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
+    SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
+    SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy,
+    WorkerRuntimeLoadFuture, WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
 /// Detects changed paths between bounded workspace scans.

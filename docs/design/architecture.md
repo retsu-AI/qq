@@ -1654,6 +1654,12 @@ server came from. `qq version` prints the product version and every contract.
 
 ## Persistence
 
+Terminal `RunFinished` receipts are saved on their run rows in the same
+transaction as their delivery events. Headless goal-result replay reads these
+receipts in cursor order, in pages bounded by 128 runs and 8 MiB, independently
+of tool-output history. Schema 62 backfills original terminal receipts where
+they remain available; it does not invent receipts for missing legacy events.
+
 SQLite is the store. It provides fast local durability,
 transactions, simple deployment, and no external service. Use WAL mode and
 keep blocking database work off Tokio executor threads, preferably behind a

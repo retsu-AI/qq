@@ -176,6 +176,24 @@ pub(super) fn append_event(
                 encoded.as_str()
             ])
         })?;
+    if let SessionEvent::RunFinished { run_id, .. } = &envelope.event {
+        if envelope.run_id != Some(*run_id) {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+        let updated = transaction.execute(
+            "UPDATE runs SET completion_sequence=?1,completion_json=?2
+             WHERE id=?3 AND session_id=?4 AND completion_sequence=0",
+            params![
+                sequence,
+                &encoded,
+                run_id.to_string(),
+                context.session_id.to_string()
+            ],
+        )?;
+        if updated != 1 {
+            return Err(SessionRuntimeError::CONSTRAINT);
+        }
+    }
     // The encoding is kept, not dropped: after commit the worker publishes
     // it to live subscribers and the server writes it to the wire as-is.
     feed::stage(Arc::new(feed::PublishedEvent {

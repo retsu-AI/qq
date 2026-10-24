@@ -714,6 +714,15 @@ async fn record_settled_goal_run(
         .run_snapshot(handle.workspace_id, handle.session_id, run_id)
         .await
         .map_err(|error| Failure::harness(error.to_string()))?;
+    record_goal_run(sink, stdout, handle, run)
+}
+
+fn record_goal_run(
+    sink: &mut RecordSink,
+    stdout: &mut impl Write,
+    handle: &SessionHandle,
+    run: qq_protocol::RunSnapshot,
+) -> Result<(), Failure> {
     let goal = match &run.origin {
         Some(
             qq_protocol::RunOrigin::Goal { goal_id, revision }
@@ -744,25 +753,32 @@ async fn replay_settled_goal_runs(
     through: qq_protocol::EventCursor,
 ) -> Result<(), Failure> {
     tokio::time::timeout(SHUTDOWN_GRACE, async {
-        if after.sequence >= through.sequence { return Ok(()); }
-        let mut events = sessions.subscribe(SubscribeRequest {
-            workspace_id: handle.workspace_id, after,
-        }).map_err(|error| Failure::harness(error.to_string()))?;
-        loop {
-            let envelope = events.next().await
-                .ok_or_else(|| Failure::harness("goal result replay ended early"))?
-                .map_err(|error| Failure::harness(error.to_string()))?;
-            if envelope.cursor.sequence > through.sequence { return Err(Failure::harness("goal result replay skipped its boundary")); }
-            if let SessionEvent::RunFinished { origin: Some(origin), run_id, .. } = &envelope.event
-                && envelope.session_id == handle.session_id
-                && matches!(origin, qq_protocol::RunOrigin::Goal { goal_id, .. }
-                    | qq_protocol::RunOrigin::GoalCheck { goal_id, .. } if *goal_id == expected.goal_id)
-            {
-                record_settled_goal_run(sessions, sink, stdout, handle, *run_id).await?;
-            }
-            if envelope.cursor.sequence == through.sequence { return Ok(()); }
+        if after.sequence >= through.sequence {
+            return Ok(());
         }
-    }).await.map_err(|_| Failure::harness("goal result replay exceeded the shutdown period"))?
+        let mut cursor = after;
+        loop {
+            let page = sessions
+                .completed_runs(handle.session_id, cursor, through)
+                .await
+                .map_err(|error| Failure::harness(error.to_string()))?;
+            if page.is_empty() {
+                return Ok(());
+            }
+            for completion in page {
+                cursor = completion.receipt.cursor;
+                if matches!(&completion.run.origin,
+                    Some(qq_protocol::RunOrigin::Goal { goal_id, .. }
+                        | qq_protocol::RunOrigin::GoalCheck { goal_id, .. })
+                    if *goal_id == expected.goal_id)
+                {
+                    record_goal_run(sink, stdout, handle, completion.run)?;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| Failure::harness("goal result replay exceeded the shutdown period"))?
 }
 
 /// Once stopped, cancel and drain only this goal's paid family. The single
@@ -7716,5 +7732,98 @@ mod tests {
         };
         assert_eq!(inclusive_usage(Some(unknown_children), Some(direct)), None);
         assert_eq!(inclusive_usage(None, Some(direct)), Some(direct));
+    }
+    #[tokio::test]
+    async fn settled_goal_run_records_survive_delivery_history_retirement() {
+        let fixture = fixture(|| TextProvider).await;
+        let mut original = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run_goal(
+                &fixture.sessions,
+                options(&fixture.workspace),
+                goal_request(),
+                std::future::pending(),
+                &mut original,
+                &mut stderr
+            )
+            .await,
+            8
+        );
+        let records: Vec<qq_protocol::HeadlessRecord> = String::from_utf8(original)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let terminal = records
+            .iter()
+            .find_map(|record| match record {
+                qq_protocol::HeadlessRecord::Goal(goal) => Some(goal),
+                _ => None,
+            })
+            .unwrap();
+        let expected_runs: Vec<_> = records
+            .iter()
+            .filter_map(|record| match record {
+                qq_protocol::HeadlessRecord::GoalRun(run) => Some(run.run.id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(expected_runs.len(), 1);
+        let workspace = terminal.workspace_id;
+        let session = terminal.goal.session_id;
+        let through = fixture
+            .sessions
+            .snapshot(SnapshotRequest::new(workspace, Some(session), 1, 1))
+            .await
+            .unwrap()
+            .cursor;
+        let after = qq_protocol::EventCursor {
+            sequence: 0,
+            ..through
+        };
+        let database = fixture._directory.path().join("sessions.sqlite3");
+        tokio::task::spawn_blocking(move || {
+            let connection = rusqlite::Connection::open(database).unwrap();
+            connection.execute("DELETE FROM events", []).unwrap();
+        })
+        .await
+        .unwrap();
+        let handle = SessionHandle {
+            approval: HeadlessApproval::ReadOnly,
+            workspace_id: workspace,
+            session_id: session,
+            subscribe_after: after,
+            wait_for_delegate: false,
+            child_waits_for_delegate: false,
+        };
+        let mut sink = RecordSink::open(&options(&fixture.workspace)).unwrap();
+        let mut replayed = Vec::new();
+        let result = replay_settled_goal_runs(
+            &fixture.sessions,
+            &mut sink,
+            &mut replayed,
+            &handle,
+            goal_identity(&terminal.goal),
+            after,
+            through,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "completed task receipts must not require an unbounded delivery log: {result:?}"
+        );
+        let replayed_runs: Vec<RunId> = String::from_utf8(replayed)
+            .unwrap()
+            .lines()
+            .map(
+                |line| match serde_json::from_str::<qq_protocol::HeadlessRecord>(line).unwrap() {
+                    qq_protocol::HeadlessRecord::GoalRun(run) => run.run.id,
+                    other => panic!("unexpected record: {other:?}"),
+                },
+            )
+            .collect();
+        assert_eq!(replayed_runs, expected_runs);
+        fixture.sessions.close().await.unwrap();
     }
 }
