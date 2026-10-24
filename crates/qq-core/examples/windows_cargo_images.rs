@@ -117,17 +117,25 @@ mod probe {
             let lib = bin.parent().ok_or_else(invalid)?.join("lib");
             let system =
                 PathBuf::from(std::env::var_os("SYSTEMROOT").ok_or_else(invalid)?).join("System32");
-            let mut pending = vec![cargo.clone(), rustc.clone()];
+            let mut pending = std::collections::VecDeque::from([cargo.clone(), rustc.clone()]);
             let mut images = BTreeSet::new();
             let mut rows = Vec::new();
-            while let Some(image) = pending.pop() {
+            while let Some(image) = pending.pop_front() {
                 if !images.insert(image.clone()) {
                     continue;
                 }
                 if images.len() > 128 {
-                    return Err(invalid());
+                    images.remove(&image);
+                    rows.push(serde_json::json!({"metadata_incomplete":"128 image bound reached"}));
+                    break;
                 }
-                let names = imports(&image)?;
+                let names = match imports(&image) {
+                    Ok(names) => names,
+                    Err(error) => {
+                        rows.push(serde_json::json!({"image":image,"metadata_incomplete":error.to_string(),"file_bytes":fs::metadata(&image).ok().map(|m|m.len())}));
+                        continue;
+                    }
+                };
                 for name in &names {
                     let resolved = [
                         image.parent().ok_or_else(invalid)?,
@@ -139,15 +147,21 @@ mod probe {
                     .map(|dir| dir.join(name))
                     .find(|path| path.is_file());
                     if let Some(path) = resolved.as_ref() {
-                        pending.push(path.canonicalize()?);
+                        match path.canonicalize() {
+                            Ok(path) => pending.push_back(path),
+                            Err(error) => rows.push(serde_json::json!({"image":path,"metadata_incomplete":error.to_string()})),
+                        }
                     }
                     rows.push(serde_json::json!({"image":image,"import":name,"resolved":resolved}));
                 }
             }
-            println!(
-                "{}",
-                serde_json::json!({"cargo":cargo,"rustc":rustc,"images":images,"imports":rows})
-            );
+            let mut manifest =
+                serde_json::json!({"cargo":cargo,"rustc":rustc,"images":images,"imports":rows});
+            if serde_json::to_vec(&manifest)?.len() > 1024 * 1024 {
+                manifest["imports"] =
+                    serde_json::json!([{"metadata_incomplete":"1MiB manifest bound reached"}]);
+            }
+            println!("{manifest}");
             return Ok(());
         }
         if args.len() != 1 {
