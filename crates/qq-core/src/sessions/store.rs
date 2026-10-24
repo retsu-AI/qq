@@ -514,7 +514,7 @@ impl Store {
         let job: worker::DatabaseJob = Box::new(move |connection| {
             let result = span.in_scope(|| operation(connection));
             worker::JobOutcome {
-                ok: result.is_ok(),
+                error: result.as_ref().err().cloned(),
                 settle: Box::new(move |commit| {
                     let _ = span.in_scope(|| reply.send(commit.and(result)));
                 }),
@@ -576,7 +576,7 @@ impl Store {
             // failure replaces the result so no caller is told a write
             // landed when it did not.
             worker::JobOutcome {
-                ok: result.is_ok(),
+                error: result.as_ref().err().cloned(),
                 settle: Box::new(move |commit| {
                     let _ = span.in_scope(|| reply.send(commit.and(result)));
                 }),
@@ -2539,11 +2539,11 @@ pub(super) fn begin_unit(connection: &mut Connection) -> Result<Unit<'_>, Sessio
         connection
             .transaction()
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)
+            .map_err(SessionRuntimeError::from)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)
+            .map_err(SessionRuntimeError::from)
     }
 }
 
@@ -2557,11 +2557,11 @@ pub(super) fn begin_immediate_unit(
         connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map(Unit::Transaction)
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)
+            .map_err(SessionRuntimeError::from)
     } else {
         rusqlite::Savepoint::new(connection)
             .map(Unit::Savepoint)
-            .map_err(|_| SessionRuntimeError::CONSTRAINT)
+            .map_err(SessionRuntimeError::from)
     }
 }
 
@@ -2640,7 +2640,7 @@ mod tests {
         Box::new(move |connection| {
             job(connection);
             worker::JobOutcome {
-                ok: true,
+                error: None,
                 settle: Box::new(|_| {}),
             }
         })
@@ -3399,5 +3399,71 @@ mod tests {
             store.call(Priority::Output, |_| Ok(())).await.unwrap_err(),
             SessionRuntimeError::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn disk_full_preserves_its_error_and_the_store_can_write_after_space_is_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("sessions.sqlite3"))
+            .await
+            .unwrap();
+        store
+            .call(Priority::Control, |connection| {
+                connection.execute_batch("CREATE TABLE scratch(data BLOB)")?;
+                let pages: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+                connection.pragma_update(None, "max_page_count", pages)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let failure = store
+            .call(Priority::Output, |connection| {
+                let unit = begin_unit(connection)?;
+                unit.execute("INSERT INTO scratch VALUES(zeroblob(1000000))", [])?;
+                unit.commit()?;
+                Ok(())
+            })
+            .await;
+        assert_eq!(
+            failure,
+            Err(SessionRuntimeError::Persistence(PersistenceFault::Sqlite(
+                rusqlite::ffi::ErrorCode::DiskFull,
+            )))
+        );
+        store
+            .call(Priority::Control, |connection| {
+                assert_eq!(
+                    connection.query_row("SELECT COUNT(*) FROM scratch", [], |row| row
+                        .get::<_, u64>(0))?,
+                    0
+                );
+                connection.pragma_update(None, "max_page_count", 10000)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        store
+            .call(Priority::Output, |connection| {
+                let unit = begin_unit(connection)?;
+                unit.execute("INSERT INTO scratch VALUES(zeroblob(1000000))", [])?;
+                unit.commit()?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .call(Priority::Control, |connection| {
+                    Ok(
+                        connection.query_row("SELECT length(data) FROM scratch", [], |row| {
+                            row.get::<_, u64>(0)
+                        })?,
+                    )
+                })
+                .await
+                .unwrap(),
+            1000000
+        );
+        store.close().await.unwrap();
     }
 }
