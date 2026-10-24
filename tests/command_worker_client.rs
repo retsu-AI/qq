@@ -151,6 +151,9 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
 #[path = "command_worker_client/cli.rs"]
 mod cli;
 
+#[path = "command_worker_client/default_auto.rs"]
+mod default_auto;
+
 #[tokio::test]
 async fn incompatible_worker_build_is_refused_before_command_admission() {
     let root = tempfile::tempdir().unwrap();

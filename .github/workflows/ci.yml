@@ -460,6 +460,8 @@ jobs:
           cargo test --locked -p qq --no-default-features --test command_owner_process
           # Platform payload suites have their own steps above. Exercise the
           # common durable worker path without repeating those same probes.
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
+            tr -d '\r' | grep -Fx 'default_auto::real_cli_default_auto_publishes_detached_native_shell_work_without_approvals: test'
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --skip windows:: --skip macos::
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' > "$RUNNER_TEMP/qq-windows-tests.txt"
