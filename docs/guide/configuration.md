@@ -181,6 +181,31 @@ policy: (
 )
 ```
 
+Task GitHub destinations belong in host configuration: your global config,
+an explicitly supplied config, or managed/MDM configuration. A project cannot
+add these grants, even after `qq trust`.
+
+```ron
+policy: (
+    task_hosting: [(
+        workspace: "/home/me/projects/qq",
+        owner: "retsu-AI",
+        repository: "qq",
+        base_branch: "main",
+        credential: Stored("github/work"),
+    )],
+)
+```
+
+Each grant selects one absolute, normalized workspace path and one GitHub
+repository/base branch. The workspace may be offline when configuration loads;
+the task host must resolve its canonical identity before use. Credentials use
+an existing stored name; `Env(...)` and literal tokens are rejected here. The
+runtime derives the task branch. This grants no shell credentials or arbitrary
+remote/ref access. The list replaces an earlier host layer's list; `[]` revokes
+it. These declarations supply authority to the scoped hosting implementation;
+they do not configure ordinary `git push` commands.
+
 Administrators only, in `managed.ron` or MDM (anywhere else is an error):
 
 ```ron managed.ron
@@ -203,6 +228,7 @@ policy: (
 | `allow_shell_prefixes` | any layer except an organization manifest | shell commands approved by word-boundary prefix: `"cargo test"` covers `cargo test -p x`, never `cargo test \| sh` |
 | `allow_hosts` | any layer except an organization manifest | hosts `fetch` may reach under `auto`; exact or `*.suffix` |
 | `shell_env` | any layer except an organization manifest | variable names passed to shell children beyond `PATH HOME LANG TERM TMPDIR` (also `SYSTEMROOT LOCALAPPDATA` on Windows) |
+| `task_hosting` | host config only | workspace-scoped GitHub destination and stored credential reference; project and organization sources cannot declare it |
 | `builtin_preference` | any; only tightens | how hard the model is steered from shell habits to built-in tools |
 | `exposed_tools` | any; intersects | the tool catalog; empty list exposes nothing |
 | `allowed_providers` / `denied_providers` | managed layers only | which providers a model route may use; denies accumulate |
