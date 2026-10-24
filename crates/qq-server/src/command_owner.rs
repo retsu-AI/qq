@@ -258,6 +258,7 @@ mod tests {
             .build()
             .unwrap();
         let request = NativeCommand {
+            task_git_call: None,
             environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
             id: ToolCallId::generate().unwrap(),
             workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
@@ -369,6 +370,7 @@ mod tests {
         let id = ToolCallId::generate().unwrap();
         owner
             .submit(NativeCommand {
+                task_git_call: None,
                 environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                 id,
                 workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(

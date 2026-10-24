@@ -1062,6 +1062,7 @@ async fn detached_task_workspace_is_shared_by_builtin_tools_and_native_commands(
     let id = qq_protocol::ToolCallId::generate().unwrap();
     owner
         .submit(NativeCommand {
+            task_git_call: None,
             environment: NativeEnvironment::capture(&[]).unwrap(),
             id,
             workspace: grant.path,

@@ -126,6 +126,7 @@ async fn command_process_persists_results_across_owner_restart_without_reexecuti
         .unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+        task_git_call: None,
         environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
@@ -195,6 +196,7 @@ async fn a_fatal_journal_failure_stops_the_worker_and_releases_its_instance() {
             "submit" => (
                 "submit",
                 serde_json::to_value(NativeCommand {
+                    task_git_call: None,
                     environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
                     id,
                     workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
@@ -371,6 +373,7 @@ async fn detached_command_process_finishes_after_observers_disconnect() {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+task_git_call: None,
 environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(&(std::fs::canonicalize(workspace.path()).unwrap())).unwrap(),
@@ -484,6 +487,7 @@ async fn assert_worker_stops(signal: rustix::process::Signal) {
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let id = ToolCallId::generate().unwrap();
     let command = NativeCommand {
+        task_git_call: None,
         environment: qq_core::command_owner::NativeEnvironment::capture(&[]).unwrap(),
         id,
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(

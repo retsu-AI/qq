@@ -1,6 +1,6 @@
 //! Arguments for task-scoped Git operations. Targets and authority are server-owned.
 use qq_provider::ToolSpec;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_TITLE_BYTES: usize = 256;
@@ -42,7 +42,7 @@ pub(crate) fn is_tool(name: &str) -> bool {
     matches!(name, "task_commit" | "task_push" | "task_pr")
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum TaskGitRequest {
     Commit { message: String },
     Push,

@@ -16,6 +16,7 @@ pub(super) fn request(workspace: &Path, tool: &str, script: &str) -> NativeComma
         }
     }
     NativeCommand {
+        task_git_call: None,
         environment: NativeEnvironment::capture(&[]).unwrap(),
         network: qq_core::command_owner::NativeNetwork::Host,
         resources: qq_core::command_owner::NativeResources::Host,

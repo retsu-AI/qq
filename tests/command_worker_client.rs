@@ -29,6 +29,7 @@ async fn reconnecting_to_a_restarted_worker_observes_the_same_command_without_re
         )
         .unwrap();
         let request = NativeCommand {
+            task_git_call: None,
             environment: NativeEnvironment::capture(&[]).unwrap(),
             id: ToolCallId::generate().unwrap(),
             workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
@@ -162,6 +163,7 @@ async fn incompatible_worker_build_is_refused_before_command_admission() {
     )
     .unwrap();
     let request = NativeCommand {
+        task_git_call: None,
         environment: NativeEnvironment::capture(&[]).unwrap(),
         id: ToolCallId::generate().unwrap(),
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(

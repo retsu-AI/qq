@@ -133,6 +133,7 @@ async fn fixture_command(
         read_only.push(qq_core::command_owner::NativeDirectoryGrant::capture(&path).unwrap());
     }
     let request = NativeCommand {
+        task_git_call: None,
         id: ToolCallId::generate().unwrap(),
         workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(&workspace)
             .unwrap(),
@@ -293,6 +294,7 @@ async fn worker_death_leaves_the_guardian_alive_until_every_payload_process_exit
     .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let request = NativeCommand {
+            task_git_call: None,
             id: ToolCallId::generate().map_err(std::io::Error::other)?,
             workspace_identity: qq_core::command_owner::NativeWorkspaceIdentity::capture(
                 &workspace,
