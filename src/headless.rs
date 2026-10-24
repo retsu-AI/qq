@@ -2267,13 +2267,7 @@ async fn unattended_call(
         } else {
             HeadlessApproval::Auto
         };
-    let granted = allowlisted_grant(
-        options,
-        approval,
-        &tool_call.name,
-        shell.as_deref(),
-        fetch.as_deref(),
-    );
+    let granted = allowlisted_grant(options, approval, &tool_call.name, shell, fetch);
     let decision = match (granted, approval) {
         (_, HeadlessApproval::Ask) => Some(ApprovalDecision::Deny),
         (Some(grant), _) => {
@@ -8356,13 +8350,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_goal_denies_a_reviewers_escalation_without_waiting_for_approval_timeout() {
+    async fn foreground_auto_goal_denies_without_human_wait_with_a_reviewer_configured() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
         let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
+        runtime_options.approval_reviewer = Some(Arc::new(CountingReviewer {
+            escalate: true,
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
         let sessions = SessionRuntime::open(
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {
