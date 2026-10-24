@@ -910,6 +910,42 @@ impl SessionRuntime {
         .await
     }
 
+    /// Add authority explicitly supplied by the trusted embedding surface.
+    /// This is not a model tool or a wire command. It seeds only the named
+    /// root session; dispatch still enforces mode, parent and managed limits.
+    pub async fn seed_session_grants(
+        &self,
+        session_id: SessionId,
+        seed: WorkspaceGrantSeed,
+    ) -> Result<(), SessionRuntimeError> {
+        if seed.is_empty() {
+            return Ok(());
+        }
+        if *self.inner.shutdown.borrow() || *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .call_write(store::Priority::Control, move |connection| {
+                let transaction = store::begin_unit(connection)?;
+                let parent: Option<String> = transaction
+                    .query_row(
+                        "SELECT parent_id FROM sessions WHERE id=?1",
+                        [session_id.to_string()],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .ok_or(SessionRuntimeError::SessionNotFound)?;
+                if parent.is_some() {
+                    return Err(SessionRuntimeError::ChildAuthorityEscalation);
+                }
+                insert_seed_grants(&transaction, session_id, &seed, now_ms())?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
     async fn command_with_pause_condition(
         &self,
         command_id: CommandId,

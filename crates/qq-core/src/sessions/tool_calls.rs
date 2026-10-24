@@ -531,7 +531,7 @@ pub(super) fn record_session_file(
 /// consults only `session_grants`, so config-seeded and approve-for-session
 /// grants are indistinguishable. Malformed or excess entries are skipped
 /// rather than failing creation: the config layer already validated
-/// well-formed grants, and a clamped seed only means more prompting.
+/// well-formed grants, and a clamped seed never adds authority.
 pub(super) fn insert_seed_grants(
     transaction: &Connection,
     session_id: SessionId,
@@ -544,7 +544,12 @@ pub(super) fn insert_seed_grants(
         .iter()
         .map(|value| ("shell_prefix", value));
     let hosts = seed.hosts.iter().map(|value| ("host", value));
-    let mut remaining = MAX_SESSION_GRANTS;
+    let existing: u32 = transaction.query_row(
+        "SELECT COUNT(*) FROM session_grants WHERE session_id=?1",
+        [session_id.to_string()],
+        |row| row.get(0),
+    )?;
+    let mut remaining = MAX_SESSION_GRANTS.saturating_sub(existing);
     for (kind, value) in tools.chain(prefixes).chain(hosts) {
         let value = value.trim();
         if value.is_empty() || value.len() > MAX_GRANT_BYTES {
@@ -553,13 +558,15 @@ pub(super) fn insert_seed_grants(
         if remaining == 0 {
             break;
         }
-        remaining -= 1;
-        transaction.execute(
+        let inserted = transaction.execute(
             "INSERT OR IGNORE INTO session_grants(
                      session_id, kind, value, created_at_ms
                  ) VALUES (?1, ?2, ?3, ?4)",
             params![session_id.to_string(), kind, value, now],
         )?;
+        if inserted != 0 {
+            remaining -= 1;
+        }
     }
     Ok(())
 }
