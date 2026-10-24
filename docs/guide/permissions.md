@@ -3,71 +3,28 @@
 QQ separates two questions:
 
 - **Trust** — may this project's configuration influence QQ at all?
-  Answered once per file content, in the TUI when it opens or with
-  `qq trust`.
+  Enabled explicitly for reviewed content with `qq trust`; task startup
+  ignores sensitive project settings until then.
 - **Approval** — may the agent take this action right now? Answered by the
   session's approval mode, the grants in effect, and, when neither decides,
   you.
 
 ## Project trust
 
-A repository can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
-`.qq/packs/`. Those files can declare providers, MCP servers that run
-commands, sub-agent rosters, and grants that let tools run without asking.
-QQ therefore refuses to load a project file that declares anything sensitive
-until you have accepted that exact content. Every project `pack.ron` (under
-`.qq/packs/` or named by a project `packs` entry) is sensitive on its own,
-even in a repository with no other configuration, and changing one asks
-again. A project `packs` entry must stay inside the repository: a path
-that leads out of it (absolute or through `..`) or through a symbolic link
-is a configuration error
-and is never opened, because QQ lists those manifests before you have
-trusted anything. Declare packs that live elsewhere in your own global
-configuration instead. A `packs` entry in your own
-global, `QQ_CONFIG`, or managed configuration is yours and loads without a
-prompt, even when it points into a repository.
+QQ starts tasks using trusted configuration and non-sensitive project settings.
+It does not ask you to approve a project before Auto can work. Untrusted project
+providers, models, MCP servers, packs, and permission grants stay disabled;
+QQ neither starts their commands nor records trust automatically.
 
-Bare `qq` opens the TUI and asks, listing each pending file and what it
-declares:
+Your global configuration, `QQ_CONFIG`, `QQ_CONFIG_CONTENT`, and managed
+configuration remain trusted sources. Configure your model and connections
+there when you want them available across projects.
 
-```
-◇ this project's configuration needs your trust
-  /home/you/repo/.qq/config.ron
-    model anthropic/claude-sonnet-5
-    MCP linear → https://mcp.linear.app/mcp
-    MCP executor → executor
-    grants: 2 tools, 3 shell prefixes
-  t trust   s this session   q quit
-```
-
-- `t` records the files exactly as `qq trust` does; the next launch does
-  not ask.
-- `s` loads them for this process only. Nothing is written; the next `qq`
-  asks again. Runs you start in this TUI (and the embedded server that
-  serves them) see the trusted configuration.
-- `q` (or `Esc`) leaves without loading them.
-
-Only names, commands, URLs, and counts are shown; open the file for the
-rest. The prompt appears only when this `qq` owns the server: a client
-attached to a server on another host cannot read or record trust for that
-host's files and sees the error below instead.
-
-`qq ask`, `qq run`, and `qq serve` do not prompt; they exit:
-
-```
-error: project configuration needs your trust before it is used:
-  /home/you/repo/.qq/config.ron
-Review the file, then run `qq trust` in this directory to accept it. Sensitive
-sections (providers, MCP servers, grants, model) load only after that.
-```
-
-Sensitive means any of: `model`, `worker_model`, `reviewer_model`,
-`organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
-`audit`, `approval_delegate`,
-`reasoning_effort`, or a `policy` grant (`allow_tools`,
-`allow_shell_prefixes`, `allow_hosts`, `shell_env`).
-A project file that only sets `policy.exposed_tools` or `max_output_tokens`
-loads without trust.
+A project can ship `.qq/config.ron`, `qq.ron`, `.qq/config.d/*.ron`, and
+`.qq/packs/`. To enable its sensitive settings, review the content and explicitly
+run `qq trust` in that project. Trust applies to the exact sensitive content;
+changing it disables the changed settings until you explicitly trust them again.
+Project pack entries must stay inside the project, including through symlinks.
 
 ```sh
 qq trust
@@ -75,13 +32,17 @@ trusted /home/you/repo/.qq/config.ron
   declares: model, policy.allow_tools, policy.allow_shell_prefixes
 ```
 
-Trust is recorded as a digest of the file's sensitive sections in your data
-directory, not in the repository. Any edit to a sensitive section of a
-trusted file — yours or from `git pull` — makes QQ ask again (in the TUI, or
-as the error above); a session-only grant expires the same way. `qq config
-sources` shows `pending trust:` lines for files awaiting your decision.
+`qq config sources` reports files awaiting trust. Explicit configuration inspection
+commands still report pending trust so you can see which settings are withheld.
+Task startup continues with the trusted settings instead of displaying a prompt.
+Trust is stored in your QQ data directory, outside the project.
 
-Nothing in your global configuration needs trust: you wrote it.
+Sensitive settings include `model`, `worker_model`, `reviewer_model`,
+`organization`, `providers`, `mcp`, `packs`, `profiles`, `delegation`,
+`audit`, `approval_delegate`, `reasoning_effort`, and policy grants
+(`allow_tools`, `allow_shell_prefixes`, `allow_hosts`, `shell_env`).
+A project file that only sets `policy.exposed_tools` or `max_output_tokens`
+loads without trust. Syntax, path boundaries, and managed policy still apply.
 
 ## Protected task files
 
@@ -112,7 +73,7 @@ Every session runs under one mode. Set the default in a profile
 | --- | --- | --- | --- | --- | --- |
 | `read_only` | run | denied | denied | denied | denied |
 | `ask` | run | explicit approval each call | explicit approval each call | explicit approval each call | explicit approval each call |
-| `auto` **(default)** | run | run | classifier `allow` or a grant → run; `prompt` → ask; `forbidden` → refused | run | granted hosts run; others ask |
+| `auto` **(default)** | run | run | task-contained, classifier `allow`, or a grant → run; otherwise denied | run | granted hosts run; others denied |
 | `full` | run | run | run except `forbidden` | run | run |
 
 Write sub-agents require internal review for each non-read action. `full`
@@ -127,19 +88,19 @@ mode apply once and never create session or workspace grants.
 
 ## Who decides a held call
 
-The mode says what is held. `approval_delegate` says who settles it when a
-delegate is configured; without one, every held call is yours. The delegate
-is `reviewer_model`; when it abstains or is unavailable, you are asked.
+Auto never requests permission from a human. Actions outside its configured
+workspace, task, and grants are denied before review. Allowed write-child
+actions retain internal supervision through `reviewer_model`.
 
-| Profile | Set | What happens |
+| Setting | Auto child supervision | Ask |
 | --- | --- | --- |
-| default | nothing | `auto` holds go to the reviewer first; `ask` always comes to you |
-| reviewer enabled | `approval_delegate: on` | reviewer decides `auto` holds; it cannot approve an `ask` call |
-| human-only holds | `approval_delegate: off` | every held call comes to you |
+| absent or `approval_delegate: on` | reviewer approves or denies | human approves each call |
+| `approval_delegate: off` | supervised actions denied | human approves each call |
 
-A reviewer denial is final: the model gets the reason as a tool error.
-An escalation, timeout, or outage asks the human. `ask` never consults a
-reviewer. Questions and policy-forbidden actions never go to the reviewer.
+A reviewer denial, escalation, timeout, or outage denies the Auto call and
+returns a tool error so the agent can pursue an allowed alternative. A
+missing reviewer also denies actions requiring supervision. Questions and
+policy-forbidden actions never go to the reviewer.
 
 Set it at the top level, in a profile
 (`Profile(approval_mode: auto, approval_delegate: on)`), or for one process
@@ -150,8 +111,8 @@ any other sensitive key.
 
 If a delegate is approving things you would rather see, `/delegate` in the
 TUI (or `set_approval_delegate` on the wire) changes who settles the focused
-session's held calls for the rest of that session: `off` brings every held
-call to you, `on` or `by_mode` widen or restore delegation, and `configured`
+session's held calls for the rest of that session: `off` denies Auto calls
+requiring supervision; `on` or `by_mode` restore delegation, and `configured`
 clears the override. It takes effect at the session's next held call — a
 running session included — and rewrites nothing: your `.qq/config.ron` and
 the next session are unchanged. Children the session spawns afterwards start
@@ -166,8 +127,8 @@ delegate's denial shows as `denied by reviewer` on the
 row; your own decisions read `approved for session`, `denied by you`, or
 nothing for a plain once-approval. In `qq run --format text` the log line is
 `[tool] NAME approved by reviewer`; in JSONL the `tool_approval_resolved`
-event carries `"delegate": "reviewer"`. When a delegate abstains and
-the prompt reaches you, the prompt's reason line says why.
+event carries `"delegate": "reviewer"`. When an Auto delegate abstains, the
+denial includes its reason.
 
 ## What the shell classifier decides
 
@@ -177,12 +138,13 @@ grades it, strictest verdict across every simple command in the pipeline:
 | Verdict | Examples | Under `auto` | Under `full` |
 | --- | --- | --- | --- |
 | `allow` | `cargo test`, `git status`, `ls src`, `rg TODO`, `cat README.md` — literal words, listed read/build programs, operands inside the workspace | runs | runs |
-| `prompt` | anything with `$VAR`, globs, `$(…)`, redirects that write, `rm`, `git commit`, `git push`, `sed -i`, `npm install`, `curl`, `docker`, operands outside the workspace, unknown programs | asks | runs |
+| `prompt` | anything with `$VAR`, globs, `$(…)`, redirects that write, `rm`, `git commit`, `git push`, `sed -i`, `npm install`, `curl`, `docker`, operands outside the workspace, unknown programs | runs inside the native task boundary or with a grant; otherwise denied | runs |
 | `forbidden` | `rm -rf /` or `~`, `sudo`, `mkfs`, `dd of=/dev/…`, `git push --force`, `curl … \| sh`, `eval "$x"`, writes to `~/.ssh` or `/etc`, fork bombs, `LD_PRELOAD=` | refused | refused |
 
 Wrappers (`env`, `nice`, `timeout`, `xargs`, `sh -c "…"`) are peeled so the
-inner command is graded too. The approval prompt shows the verdict and the
-rule ids behind it.
+inner command is graded too. In Ask, the approval prompt shows the verdict
+and the rule ids behind it. Auto never turns a classifier verdict into a
+human prompt.
 
 ## The approval prompt
 
@@ -233,10 +195,9 @@ you are away: the hold ends when you answer, when the run's own deadline
 you want a bound anyway — a shared server, an unattended supervisor — set
 `approval_timeout_seconds` in configuration and the call is denied
 `denied_timeout` after that many seconds, counted from when you were
-actually asked (after the delegate answered or was cut off, not from when
-the delegate was consulted). `qq run` has nobody to ask and never waits on
-you: an `auto` hold is denied immediately, or after the delegate has had its
-20 s when one is configured.
+actually asked. Auto never enters this human wait: internal supervision
+times out to a denial. Headless `qq run --approval ask` denies immediately
+because no human is available.
 
 ## Grants in configuration
 

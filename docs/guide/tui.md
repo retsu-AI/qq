@@ -146,8 +146,8 @@ Custom providers appear once their `auth` reference resolves — see
 `qq` opens even when the configuration is incomplete; only `qq ask` and `qq
 run` refuse to start.
 
-- **Project not yet trusted**: the transcript is the trust prompt (below);
-  nothing else loads until you answer.
+- **Project not yet trusted**: startup continues with trusted configuration;
+  sensitive project settings stay disabled until you run `qq trust`.
 - **No `model` configured**: the top row reads `no model` and the composer
   rule reads `choose a model with /models` until you pick one. `Enter` in
   the picker creates the first session with the highlighted model, which
@@ -161,36 +161,14 @@ run` refuse to start.
 
 ## Trust
 
-A repository that ships `.qq/config.ron` (or `qq.ron`, `.qq/config.d/`) with
-a model, providers, MCP servers, grants, or packs is loaded only after you
-accept it. Until then the transcript is the prompt and the composer is
-disabled (`✎ Answer the trust prompt above`):
+The TUI starts without a project-trust prompt. Sensitive project models,
+providers, MCP servers, grants, and packs stay disabled until you explicitly
+review and accept them with `qq trust` on the server host. Configure your model
+and connections globally to make them available before project trust.
 
-```
-◇ this project's configuration needs your trust
-  /home/you/repo/.qq/config.ron
-    model anthropic/claude-sonnet-5
-    MCP linear → https://mcp.linear.app/mcp
-    grants: 2 tools, 3 shell prefixes
-  t trust   s this session   q quit
-```
-
-| Key | Effect |
-| --- | --- |
-| `t` | record the files, exactly as `qq trust` does; the next launch does not ask |
-| `s` | load them for this process only; nothing is written and the next `qq` asks again |
-| `q`, `Esc` | quit without loading them |
-
-Every other key is ignored while the prompt is up. After `t` or `s` the
-notice reads `trusted N file(s)` or `trusted for this session`, and the
-empty state continues as above (`no model`, a credential remedy, or `Alt-N
-creates the first session.`). If this `qq` attached to a server on another
-host, `t` and `s` say to run `qq trust` there instead: trust is a decision
-about files on the host that runs the server. Either answer covers only the
-content the prompt showed: if a listed file's sensitive sections change while
-the prompt is open (a `git pull`, an editor save), nothing is trusted and the
-prompt redraws with the new content to answer again. Details and what "sensitive"
-means in [Permissions and trust](permissions.md#project-trust).
+Trust covers the exact sensitive content. Changing that content disables the
+changed settings on subsequent loads until you trust it again. See
+[Permissions and trust](permissions.md#project-trust).
 
 ## Your first session
 

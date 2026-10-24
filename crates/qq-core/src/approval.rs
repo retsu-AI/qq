@@ -52,10 +52,11 @@ pub(crate) const POLICY_DENIED_RESULT: &str =
     "This session's approval mode is read-only; the tool call was denied without prompting.";
 
 /// The model-facing text for a `Deny`: the mode, or the host rule that
-/// refused the fetch and what would be needed to reach it.
+/// refused the action, with an allowed alternative where applicable.
 pub(crate) fn deny_result(reason: &DenyReason) -> String {
     match reason {
         DenyReason::Mode => POLICY_DENIED_RESULT.to_owned(),
+        DenyReason::OutOfScope => "permission_denied: outside_auto_scope: this action is outside the configured authority; use an operation within the workspace, task, and granted scope.".to_owned(),
         DenyReason::HostBlocked { refusal } => format!(
             "fetch refused: {refusal}. Private, link-local, and managed-denied hosts are unreachable under every approval mode."
         ),
@@ -134,6 +135,8 @@ pub(crate) enum ToolClass {
 pub(crate) enum DenyReason {
     /// The approval mode refuses this class of call.
     Mode,
+    /// Auto refuses actions outside its configured authority without prompting.
+    OutOfScope,
     /// A managed `deny_hosts` entry, private/link-local name, or metadata
     /// host: refused under every mode.
     HostBlocked {
@@ -1078,7 +1081,8 @@ pub(crate) fn evaluate(
                 // shell commands that are allowed or only change files inside
                 // the workspace (commits, redirects, in-place edits). Remote
                 // operations, downloads, deletions, installs, unlisted
-                // programs, and dynamic words still ask; a grant lifts Prompt.
+                // programs, and dynamic words need additional authority. The
+                // session gate denies missing Auto authority without prompting.
                 ToolClass::Shell { command, .. } => {
                     let verdict = classify_command(command, None);
                     let workspace_local = verdict.decision == Decision::Prompt
@@ -1103,7 +1107,7 @@ pub(crate) fn evaluate(
                     }
                 }
                 // Auto reaches a public host the user or the workspace named;
-                // anything else asks once, and the grant covers the site.
+                // anything else needs authority and is denied by the Auto gate.
                 ToolClass::Network { .. } => {
                     if grants.covers(name, class) {
                         PolicyDecision::Execute

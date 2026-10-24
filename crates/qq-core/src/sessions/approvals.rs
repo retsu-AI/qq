@@ -63,19 +63,25 @@ impl ToolGate for SessionToolGate {
             // hold, so it applies to the next held call without a restart.
             let delegate = session_delegate.unwrap_or(delegate);
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
+            // Auto is an unattended ceiling for the entire descendant tree,
+            // even if a child session later selects a different mode.
+            let no_human_approval = mode == ApprovalMode::Auto
+                || ancestors
+                    .iter()
+                    .any(|(mode, _)| *mode == ApprovalMode::Auto);
             let mut mode = mode;
             for (parent_mode, parent_grants) in ancestors {
                 let message = match approval::evaluate_in_task(parent_mode, &call.name, &class, &parent_grants, task_scoped) {
                     approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
-                    approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask => {
-                        // Ask applies to each child action too: only the human
-                        // may approve it, even if the child normally has a reviewer.
+                    approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask && !no_human_approval => {
+                        // Ask applies to each child action too. Auto children
+                        // deny instead of inheriting a human approval wait.
                         if mode != ApprovalMode::ReadOnly {
                             mode = ApprovalMode::Ask;
                         }
                         continue;
                     }
-                    approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned(),
+                    approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; use an operation within the parent's authority".to_owned(),
                     approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
                     approval::PolicyDecision::Forbidden { rules } => approval::forbidden_result(&rules),
                 };
@@ -90,6 +96,16 @@ impl ToolGate for SessionToolGate {
             }
             let decision =
                 approval::evaluate_in_task(mode, &call.name, &class, &grants, task_scoped);
+            // A reviewer may supervise existing authority, never create it.
+            let decision = if no_human_approval
+                && matches!(decision, approval::PolicyDecision::RequireApproval)
+            {
+                approval::PolicyDecision::Deny {
+                    reason: approval::DenyReason::OutOfScope,
+                }
+            } else {
+                decision
+            };
             // Write children retain mandatory supervision independently of the
             // user's approval mode. The parent's policy was checked above.
             let decision = if supervised
@@ -176,6 +192,22 @@ impl ToolGate for SessionToolGate {
                     conclude(&inner, &claimed, call.id, timed_out, None).await
                 }
                 approval::PolicyDecision::RequireApproval => {
+                    let consult = delegate.consults_reviewer(if no_human_approval {
+                        ApprovalMode::Auto
+                    } else {
+                        mode
+                    }) && inner.approval_reviewer.is_some();
+                    if no_human_approval && !consult {
+                        let message = "permission_denied: internal supervision is unavailable; use an action that does not require supervision.".to_owned();
+                        return match inner
+                            .store
+                            .deny_tool_call(&claimed, call.id, message.clone())
+                            .await
+                        {
+                            Ok(_) => GateDecision::Deny { message },
+                            Err(error) => approval_persistence_failure(error),
+                        };
+                    }
                     #[cfg(not(feature = "tool-fetch"))]
                     let fetch = None;
                     #[cfg(feature = "tool-fetch")]
@@ -226,8 +258,6 @@ impl ToolGate for SessionToolGate {
                     let mut resolved = inner.register_approval(call.id, claimed.identity.run_id);
                     // Decided before publishing so the request says who is
                     // asked first; see the comment on the review below.
-                    let consult =
-                        delegate.consults_reviewer(mode) && inner.approval_reviewer.is_some();
                     match inner
                         .store
                         .request_tool_approval(
@@ -256,17 +286,9 @@ impl ToolGate for SessionToolGate {
                             return approval_persistence_failure(error);
                         }
                     };
-                    // Who the held call goes to first. The mode is the
-                    // ceiling; the delegate setting chooses who decides inside
-                    // it: by default the reviewer under Auto (the held bucket
-                    // is "dangerous-shaped but possibly fine") and for write
-                    // children. Ask always requires the human;
-                    // `Off` withdraws the reviewer from Auto holds.
-                    // ReadOnly and Full never reach here. Where the reviewer
-                    // is the delegate its verdict settles the call: Approve
-                    // executes, Deny is final under Auto, and
-                    // Escalate (or a reviewer failure, which the reviewer must
-                    // report as Escalate) reaches the human.
+                    // Auto uses the reviewer only for internal child supervision.
+                    // Missing authority was denied above; a reviewer cannot grant it.
+                    // Ask requires a human and never consults the reviewer.
                     let mut review: Option<ReviewFuture> = match &inner.approval_reviewer {
                         Some(reviewer) if consult => {
                             // Context is advisory: a missing brief must not
@@ -305,16 +327,9 @@ impl ToolGate for SessionToolGate {
                     // `Some` once a reviewer verdict arrived; its spend is
                     // charged to this run whatever the outcome.
                     let mut review_spend: Option<ReviewSpend> = None;
-                    // Two clocks. The delegate's: a bounded wait for its
-                    // verdict, after which the gate treats silence as an
-                    // escalation, so a delegate that breaks its contract
-                    // cannot hold the run. The human's: `None` means no server
-                    // deadline at all (the run deadline and cancellation still
-                    // apply); a configured bound starts when the human is
-                    // actually asked, which is now without a delegate and at
-                    // the escalation with one. A slow delegate never eats
-                    // into the human's time. A goal's fixed hold deadline
-                    // bounds both stages without restarting at escalation.
+                    // Internal supervision has a bounded deadline. Auto denies on
+                    // timeout; it never starts a human wait. Ask uses the configured
+                    // human deadline, also bounded by the goal's fixed deadline.
                     let delegate_deadline = tokio::time::Instant::now() + inner.delegate_timeout;
                     let mut deadline = if review.is_some() {
                         goal_deadline
@@ -338,7 +353,11 @@ impl ToolGate for SessionToolGate {
                                 verdict = pending_review => {
                                     review = None;
                                     review_spend = Some(verdict.spend);
-                                    match verdict.decision {
+                                    let decision = match verdict.decision {
+                                        ReviewDecision::Escalate { reason } if no_human_approval => ReviewDecision::Deny { reason },
+                                        decision => decision,
+                                    };
+                                    match decision {
                                         ReviewDecision::Approve => {
                                             match inner
                                                 .store
@@ -418,11 +437,22 @@ impl ToolGate for SessionToolGate {
                                         }
                                     }
                                 }
-                                // The delegate's own clock: past it the
-                                // pending verdict is dropped and the human is
-                                // asked, exactly as for an `Escalate`.
+                                // Auto settles unavailable supervision as a denial.
+                                // Other approval paths retain their human deadline.
                                 () = tokio::time::sleep_until(delegate_deadline) => {
                                     review = None;
+                                    if no_human_approval {
+                                        let message = format!("{} {}", approval::reviewer_denied_result(), approval::DELEGATE_TIMED_OUT_REASON);
+                                        match inner.store.deny_approval_by_reviewer(
+                                            &claimed, call.id, message.clone(), DelegateIdentity::Reviewer,
+                                        ).await {
+                                            Ok(Some(_)) => {
+                                                inner.remove_approval(call.id);
+                                                return reviewed(GateDecision::Deny { message }, review_spend);
+                                            }
+                                            Ok(None) | Err(_) => break false,
+                                        }
+                                    }
                                     if let Err(error) = inner
                                         .store
                                         .escalate_tool_approval(

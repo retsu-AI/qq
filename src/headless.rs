@@ -1560,6 +1560,19 @@ async fn prepare_session_with_interrupt(
             )
         }
     };
+    if matches!(approval, HeadlessApproval::Auto | HeadlessApproval::Full) {
+        sessions
+            .seed_session_grants(
+                session_id,
+                qq_core::WorkspaceGrantSeed {
+                    tools: options.allow_tools.clone(),
+                    shell_prefixes: options.allow_shell_prefixes.clone(),
+                    hosts: options.allow_hosts.clone(),
+                },
+            )
+            .await
+            .map_err(|error| Failure::harness(error.to_string()))?;
+    }
     // Whether a held call waits for a delegate: one exists and the effective
     // delegate setting (the session's override, else the configured one)
     // consults it under the call's approval mode. Without that, waiting only
@@ -1768,15 +1781,11 @@ async fn stream_run(
                             | ApprovalResolution::DeniedByReviewer),
                         delegate,
                     } if ours && text => {
-                        let verdict = match resolution {
-                            ApprovalResolution::ApprovedByReviewer => "approved",
-                            _ => "denied",
-                        };
-                        let _ = writeln!(
+                        let _ = write_delegate_resolution(
                             stderr,
-                            "[tool] {} {verdict} by {}",
-                            tool_call.name,
-                            delegate.unwrap_or_default().as_str()
+                            &tool_call.name,
+                            *resolution,
+                            *delegate,
                         );
                     }
                     // The delegate passed: say why, so the unattended deny that
@@ -2143,10 +2152,16 @@ async fn cancel_and_settle(sessions: &SessionRuntime, handle: &RunHandle) -> Res
 /// `cargo test -p qq-core` and never `cargo test | sh`.
 fn allowlisted_grant(
     options: &HeadlessOptions,
+    approval: HeadlessApproval,
     tool_name: &str,
     shell: Option<&ShellCommandPreview>,
     fetch: Option<&qq_protocol::FetchPreview>,
 ) -> Option<ApprovalGrant> {
+    // Auto's declared grants were stored before dispatch. Any remaining
+    // approval is internal supervision, which these flags cannot bypass.
+    if approval == HeadlessApproval::Auto {
+        return None;
+    }
     if recordable_grant(tool_name) && options.allow_tools.iter().any(|name| name == tool_name) {
         return Some(ApprovalGrant::Tool {
             name: tool_name.to_owned(),
@@ -2238,14 +2253,14 @@ async fn unattended_call(
     // write child: the reviewer adjudicates them, and the
     // headless root only supplies the unattended fallback
     // (a deferred deny), never a blanket approve. The
-    // allowlist still applies: the human declared it.
-    let granted = allowlisted_grant(options, &tool_call.name, shell, fetch);
+    // root's predeclared authority still applies through normal dispatch.
     let approval =
         if handle.approval == HeadlessApproval::Ask || tool_call.session_id == handle.session_id {
             handle.approval
         } else {
             HeadlessApproval::Auto
         };
+    let granted = allowlisted_grant(options, approval, &tool_call.name, shell, fetch);
     let decision = match (granted, approval) {
         (_, HeadlessApproval::Ask) => Some(ApprovalDecision::Deny),
         (Some(grant), _) => {
@@ -2346,6 +2361,24 @@ const fn status_for_error(error: &SessionRuntimeError) -> HeadlessStatus {
         | SessionRuntimeError::GoalCheckPolicy(_) => HeadlessStatus::InvalidConfiguration,
         _ => HeadlessStatus::HarnessFailure,
     }
+}
+
+fn write_delegate_resolution(
+    stderr: &mut impl Write,
+    name: &str,
+    resolution: ApprovalResolution,
+    delegate: Option<qq_protocol::DelegateIdentity>,
+) -> io::Result<()> {
+    let verdict = match resolution {
+        ApprovalResolution::ApprovedByReviewer => "approved",
+        ApprovalResolution::DeniedByReviewer => "denied",
+        _ => return Ok(()),
+    };
+    writeln!(
+        stderr,
+        "[tool] {name} {verdict} by {}",
+        delegate.unwrap_or_default().as_str()
+    )
 }
 
 /// One bounded single-line summary of tool arguments for text output.
@@ -5838,12 +5871,27 @@ mod tests {
         );
     }
 
-    /// `--allow-shell` answers a held command with a session grant: the first
-    /// request is approved for the session and the second identical prefix
-    /// is never held at all. A prefix that does not match is denied as
-    /// before, and the grant never extends over a control character.
+    #[test]
+    fn explicit_allowlists_cannot_resolve_auto_supervision() {
+        let mut options = options(Path::new("."));
+        options.allow_tools = vec!["shell".into()];
+        assert_eq!(
+            allowlisted_grant(&options, HeadlessApproval::Auto, "shell", None, None),
+            None,
+            "a root allowlist must not impersonate its child's reviewer"
+        );
+        assert_eq!(
+            allowlisted_grant(&options, HeadlessApproval::Full, "shell", None, None),
+            Some(ApprovalGrant::Tool {
+                name: "shell".into()
+            })
+        );
+    }
+
+    /// Explicit prefixes are stored before dispatch, including on resume.
+    /// A nonmatching prefix never grants authority to the requested command.
     #[tokio::test]
-    async fn shell_allowlist_grants_the_session_on_first_hold() {
+    async fn shell_allowlist_grants_the_session_before_dispatch() {
         let fixture = fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
         })
@@ -5865,14 +5913,12 @@ mod tests {
             .into_iter()
             .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_requested")
             .collect();
-        // The runtime asks about the first call only; the grant covers the
-        // second, which is never held.
-        assert_eq!(approvals.len(), 1, "one held call");
+        assert!(approvals.is_empty(), "Auto must not open an approval hold");
         let resolved = event_records(&records)
             .into_iter()
             .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
             .count();
-        assert_eq!(resolved, 1);
+        assert_eq!(resolved, 0);
         assert!(
             finished_tool_calls(&records)
                 .iter()
@@ -5896,8 +5942,7 @@ mod tests {
         );
     }
 
-    /// `--allow-tool` approves a held tool for the session under read-only
-    /// too: the allowlist is explicit authority, narrower than `full`.
+    /// An explicit Auto tool grant is installed before the first call.
     #[tokio::test]
     async fn tool_allowlist_approves_held_calls_under_auto() {
         let fixture = fixture(|| DangerousShellProvider {
@@ -6036,11 +6081,9 @@ mod tests {
         );
     }
 
-    /// `--allow-host` answers a held `fetch` with a session host grant; the
-    /// grant is the matching pattern, not the request's host, so a wildcard
-    /// covers the site's other names too.
+    /// Host patterns are granted before dispatch; Auto never opens a hold.
     #[tokio::test]
-    async fn allow_host_grants_a_held_fetch_for_the_session() {
+    async fn allow_host_grants_fetch_before_dispatch() {
         let fixture = fixture(|| FetchingProvider {
             turn: Mutex::new(0),
         })
@@ -6051,22 +6094,16 @@ mod tests {
         let (status, stdout, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed, "{stderr}");
         let records = parse_records(&stdout);
-        let resolved = event_records(&records)
-            .into_iter()
-            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-            .expect("the allowlist resolves the hold");
-        assert_eq!(
-            resolved["envelope"]["event"]["resolution"],
-            "approved_for_session"
-        );
-        let requested = event_records(&records)
-            .into_iter()
-            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_requested")
-            .unwrap();
-        assert_eq!(
-            requested["envelope"]["event"]["fetch"]["host"],
-            "docs.invalid"
-        );
+        assert!(event_records(&records).iter().all(|record| {
+            !matches!(
+                record["envelope"]["event"]["type"].as_str(),
+                Some(
+                    "tool_approval_requested"
+                        | "tool_approval_resolved"
+                        | "tool_approval_escalated"
+                )
+            )
+        }));
         // The approved call ran and failed at resolution: a tool error, not
         // a denial, and the run still completed.
         let finished = finished_tool_calls(&records);
@@ -6080,7 +6117,7 @@ mod tests {
             finished[0]["result"]
         );
 
-        // Without the allowlist, auto denies the unattended hold.
+        // Without the allowlist, Auto denies without requesting approval.
         let bare = self::fixture(|| FetchingProvider {
             turn: Mutex::new(0),
         })
@@ -6090,15 +6127,19 @@ mod tests {
         let (status, stdout, _) = run_to_end(&bare, bare_options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
         let records = parse_records(&stdout);
-        let resolved = event_records(&records)
-            .into_iter()
-            .find(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-            .unwrap();
-        assert_eq!(resolved["envelope"]["event"]["resolution"], "denied");
-        assert_eq!(
-            resolved["envelope"]["event"]["tool_call"]["state"],
-            "denied"
-        );
+        assert!(event_records(&records).iter().all(|record| {
+            !matches!(
+                record["envelope"]["event"]["type"].as_str(),
+                Some(
+                    "tool_approval_requested"
+                        | "tool_approval_resolved"
+                        | "tool_approval_escalated"
+                )
+            )
+        }));
+        let calls = finished_tool_calls(&records);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["state"], "denied");
     }
 
     /// A question with nobody to answer it ends the run at the question with
@@ -7182,17 +7223,80 @@ mod tests {
         assert_eq!(stderr.matches(DENIAL_HINT).count(), 1, "{stderr}");
     }
 
-    /// A reviewer that approves after 100 ms: slower than the event that
-    /// publishes the hold, so a headless client that denied on the spot
-    /// would win the race and the test would see `denied`.
-    struct ReviewerApproves;
+    struct CountingReviewer {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        escalate: bool,
+    }
 
-    impl qq_core::ApprovalReviewer for ReviewerApproves {
+    impl qq_core::ApprovalReviewer for CountingReviewer {
         fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
-            Box::pin(async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Approve)
-            })
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let decision = if self.escalate {
+                qq_core::ReviewDecision::Escalate {
+                    reason: "reviewer abstained".to_owned(),
+                }
+            } else {
+                qq_core::ReviewDecision::Approve
+            };
+            Box::pin(async move { qq_core::ReviewVerdict::free(decision) })
+        }
+    }
+
+    async fn root_shell_reviewer_fixture(
+        escalate: bool,
+    ) -> (Fixture, Arc<std::sync::atomic::AtomicUsize>) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let workspace = root.join("work");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = std::fs::canonicalize(&workspace).unwrap();
+        for name in ["scratch0", "scratch1"] {
+            std::fs::create_dir_all(workspace.join(name)).unwrap();
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+        runtime_options.approval_reviewer = Some(Arc::new(CountingReviewer {
+            calls: Arc::clone(&calls),
+            escalate,
+        }));
+        let sessions = SessionRuntime::open(
+            runtime_options,
+            Arc::new(ProviderLoader(|| DangerousShellProvider {
+                turn: Mutex::new(0),
+            })),
+        )
+        .await
+        .unwrap();
+        (
+            Fixture {
+                sessions,
+                workspace,
+                _directory: directory,
+            },
+            calls,
+        )
+    }
+
+    fn assert_root_shell_denied_without_review(
+        fixture: &Fixture,
+        calls: &std::sync::atomic::AtomicUsize,
+        records: &[serde_json::Value],
+    ) {
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let finished = finished_tool_calls(records);
+        assert_eq!(finished.len(), 2, "{records:?}");
+        assert!(finished.iter().all(|call| call["state"] == "denied"));
+        assert!(
+            event_records(records).iter().all(|record| {
+                !record["envelope"]["event"]["type"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("tool_approval_")
+            }),
+            "missing authority must not produce approval events: {records:?}"
+        );
+        for name in ["scratch0", "scratch1"] {
+            assert!(fixture.workspace.join(name).is_dir());
         }
     }
 
@@ -7214,39 +7318,159 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_delegated_approval_names_the_delegate_in_jsonl_and_text() {
-        // DA6: a supervisor reading the stream can tell the reviewer's
-        // decision from the operator's allowlist without the store: the
-        // resolution record carries `delegate`, and text mode says
-        // `approved by reviewer`.
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let workspace = root.join("work");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let workspace = std::fs::canonicalize(&workspace).unwrap();
-        for name in ["scratch0", "scratch1"] {
-            std::fs::create_dir_all(workspace.join(name)).unwrap();
+    async fn explicit_root_host_flags_reach_auto_children_under_full_and_auto() {
+        struct ChildFetchProvider {
+            child: bool,
+            first: Mutex<bool>,
         }
-        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(ReviewerApproves));
-        let sessions = SessionRuntime::open(
-            runtime_options,
-            Arc::new(ProviderLoader(|| DangerousShellProvider {
-                turn: Mutex::new(0),
-            })),
-        )
-        .await
-        .unwrap();
-        let fixture = Fixture {
-            sessions,
-            workspace,
-            _directory: directory,
-        };
+        impl Provider for ChildFetchProvider {
+            fn stream(&self, _request: ModelRequest) -> ProviderStream {
+                let first = std::mem::replace(&mut *self.first.lock().unwrap(), false);
+                if !first {
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::OutputTextDelta {
+                            text: "done".into(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
+                }
+                let (name, arguments) = if self.child {
+                    ("fetch", r#"{"url":"https://docs.invalid/page"}"#)
+                } else {
+                    (
+                        "spawn_agent",
+                        r#"{"task":"read explicitly allowed docs","model":"test/child","authority":"write"}"#,
+                    )
+                };
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::ToolCallStarted {
+                        id: "probe".into(),
+                        name: name.into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallArgumentsDelta {
+                        id: "probe".into(),
+                        json: arguments.into(),
+                    }),
+                    Ok(ProviderEvent::ToolCallCompleted { id: "probe".into() }),
+                    Ok(ProviderEvent::Completed { usage: None }),
+                ]))
+            }
+        }
+        struct ChildFetchLoader;
+        impl RuntimeLoader for ChildFetchLoader {
+            fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+                Box::pin(async move {
+                    let runtime = Runtime::new(
+                        ChildFetchProvider {
+                            child: request.model.model.as_deref() == Some("test/child"),
+                            first: Mutex::new(true),
+                        },
+                        "test-model",
+                        256,
+                    )
+                    .unwrap()
+                    .with_spawn_model_routes(vec!["test/child".into()])
+                    .with_delegation(qq_protocol::DelegationRoster {
+                        roster: Vec::new(),
+                        default_role: qq_protocol::DelegationRole::Balanced,
+                        max_depth: 1,
+                        write_children: true,
+                    });
+                    Ok(loaded_runtime(runtime, &request.workspace, None))
+                })
+            }
+        }
+        struct DenyChildFetch(Arc<std::sync::atomic::AtomicUsize>);
+        impl qq_core::ApprovalReviewer for DenyChildFetch {
+            fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {
+                    qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Deny {
+                        reason: "stop before network dispatch".into(),
+                    })
+                })
+            }
+        }
+        for approval in [HeadlessApproval::Full, HeadlessApproval::Auto] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(directory.path()).unwrap();
+            let workspace = root.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let consulted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+            runtime_options.max_active_runs = 2;
+            runtime_options.approval_reviewer =
+                Some(Arc::new(DenyChildFetch(Arc::clone(&consulted))));
+            let fixture = Fixture {
+                sessions: SessionRuntime::open(runtime_options, Arc::new(ChildFetchLoader))
+                    .await
+                    .unwrap(),
+                workspace,
+                _directory: directory,
+            };
+            let mut options = options(&fixture.workspace);
+            options.approval = approval;
+            options.allow_hosts = vec!["docs.invalid".into()];
+            options.reviewer_configured = true;
+            let (status, stdout, _) = run_to_end(&fixture, options, std::future::pending()).await;
+            assert_eq!(status, HeadlessStatus::Completed, "{approval:?}: {stdout}");
+            let records = parse_records(&stdout);
+            let events = event_records(&records);
+            let child = events
+                .iter()
+                .find_map(|record| {
+                    let event = &record["envelope"]["event"];
+                    (event["type"] == "session_created"
+                        && event["session"]["parent_id"].is_string())
+                    .then(|| event["session"].clone())
+                })
+                .expect("actual write child must be created");
+            assert_eq!(child["approval_mode"], "auto");
+            assert_eq!(
+                consulted.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "{approval:?}: explicit host authority must reach mandatory child review: {stdout}"
+            );
+            assert!(
+                events.iter().any(|record| {
+                    let envelope = &record["envelope"];
+                    let event = &envelope["event"];
+                    envelope["session_id"] == child["id"]
+                        && event["type"] == "tool_approval_resolved"
+                        && event["resolution"] == "denied_by_reviewer"
+                        && event["tool_call"]["name"] == "fetch"
+                        && event["tool_call"]["state"] == "denied"
+                }),
+                "{stdout}"
+            );
+            assert!(
+                !events.iter().any(|record| {
+                    let event = &record["envelope"]["event"];
+                    (event["type"] == "tool_call_started" && event["tool_call"]["name"] == "fetch")
+                        || (event["type"] == "tool_approval_requested"
+                            && event["delegated"] != true)
+                        || event["type"] == "tool_approval_escalated"
+                }),
+                "reviewer denial must prevent network dispatch without human fallback: {stdout}"
+            );
+            assert!(
+                events.iter().any(|record| {
+                    let envelope = &record["envelope"];
+                    envelope["session_id"] == child["id"]
+                        && envelope["event"]["type"] == "run_finished"
+                        && envelope["event"]["outcome"]["type"] == "completed"
+                }),
+                "child must settle: {stdout}"
+            );
+            fixture.sessions.close().await.unwrap();
+        }
+    }
 
+    #[tokio::test]
+    async fn root_auto_without_authority_does_not_consult_a_configured_reviewer() {
+        let (fixture, calls) = root_shell_reviewer_fixture(false).await;
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
-        // The delegate options come from a real configuration, resolved
-        // exactly as `prepare_headless` resolves them, not a hand-set flag.
         let snapshot = reviewer_snapshot(&fixture.workspace);
         let (reviewer_configured, configured_delegate) = crate::headless_delegate_options(
             &snapshot,
@@ -7259,72 +7483,22 @@ mod tests {
         let (status, stdout, _) =
             run_to_end(&fixture, options.clone(), std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
-        let records = parse_records(&stdout);
-        let resolutions: Vec<&serde_json::Value> = event_records(&records)
-            .into_iter()
-            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-            .map(|record| &record["envelope"]["event"])
-            .collect();
-        assert!(!resolutions.is_empty(), "{stdout}");
-        assert!(resolutions.iter().all(|event| {
-            event["resolution"] == "approved_by_reviewer" && event["delegate"] == "reviewer"
-        }));
-        assert!(
-            finished_tool_calls(&records)
-                .iter()
-                .all(|call| call["state"] == "completed")
-        );
+        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
 
         options.format = HeadlessFormat::Text;
         let (status, _, stderr) = run_to_end(&fixture, options, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
-        assert!(
-            stderr.contains("[tool] shell approved by reviewer"),
-            "{stderr}"
-        );
-    }
-
-    /// A delegate that gives up on every held call.
-    struct DelegateEscalates;
-
-    impl qq_core::ApprovalReviewer for DelegateEscalates {
-        fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {
-            Box::pin(async {
-                qq_core::ReviewVerdict::free(qq_core::ReviewDecision::Escalate {
-                    reason: "reviewer abstained".to_owned(),
-                })
-            })
+        assert!(stderr.contains("[tool] shell denied"), "{stderr}");
+        assert!(!stderr.contains("approved by reviewer"), "{stderr}");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        for name in ["scratch0", "scratch1"] {
+            assert!(fixture.workspace.join(name).is_dir());
         }
     }
 
     #[tokio::test]
-    async fn an_escalation_is_denied_at_once_not_after_the_reviewer_grace() {
-        // Review (#215): the delegate's escalation is published the moment it
-        // gives up, but headless `auto` kept waiting out the 20 s grace per
-        // held call although no one else could approve it.
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let workspace = root.join("work");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let workspace = std::fs::canonicalize(&workspace).unwrap();
-        for name in ["scratch0", "scratch1"] {
-            std::fs::create_dir_all(workspace.join(name)).unwrap();
-        }
-        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
-        let sessions = SessionRuntime::open(
-            runtime_options,
-            Arc::new(ProviderLoader(|| DangerousShellProvider {
-                turn: Mutex::new(0),
-            })),
-        )
-        .await
-        .unwrap();
-        let fixture = Fixture {
-            sessions,
-            workspace,
-            _directory: directory,
-        };
+    async fn root_auto_denies_without_waiting_for_an_escalating_reviewer() {
+        let (fixture, calls) = root_shell_reviewer_fixture(true).await;
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
         options.reviewer_configured = true;
@@ -7333,86 +7507,28 @@ mod tests {
             run_to_end(&fixture, options, std::future::pending()),
         )
         .await
-        .expect("two escalated holds must not each wait out the grace");
+        .expect("missing authority must deny without waiting for reviewer escalation");
         assert_eq!(status, HeadlessStatus::Completed);
-        let records = parse_records(&stdout);
-        let events: Vec<&serde_json::Value> = event_records(&records)
-            .into_iter()
-            .map(|record| &record["envelope"]["event"])
-            .collect();
-        let escalated = events
-            .iter()
-            .filter(|event| event["type"] == "tool_approval_escalated")
-            .count();
-        let denied = events
-            .iter()
-            .filter(|event| {
-                event["type"] == "tool_approval_resolved" && event["resolution"] == "denied"
-            })
-            .count();
-        assert_eq!(escalated, 2, "{stdout}");
-        assert_eq!(denied, 2, "each escalation is answered with a denial");
+        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
     }
 
     #[tokio::test]
     async fn a_delegate_that_is_configured_but_switched_off_does_not_delay_the_denial() {
-        // Review (#215): with a delegate configured but `approval_delegate:
-        // off` (configured or the session's own override), the gate never
-        // consults it, so waiting the reviewer grace only delays the denial.
-        // The held call must be denied at once and never reach the reviewer.
-        let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
-        let workspace = root.join("work");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let workspace = std::fs::canonicalize(&workspace).unwrap();
-        for name in ["scratch0", "scratch1"] {
-            std::fs::create_dir_all(workspace.join(name)).unwrap();
-        }
-        let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(ReviewerApproves));
-        let sessions = SessionRuntime::open(
-            runtime_options,
-            Arc::new(ProviderLoader(|| DangerousShellProvider {
-                turn: Mutex::new(0),
-            })),
-        )
-        .await
-        .unwrap();
-        let fixture = Fixture {
-            sessions,
-            workspace,
-            _directory: directory,
-        };
-
+        let (fixture, calls) = root_shell_reviewer_fixture(false).await;
         let mut options = options(&fixture.workspace);
         options.approval = HeadlessApproval::Auto;
         options.reviewer_configured = true;
         options.configured_delegate = qq_protocol::ApprovalDelegate::Off;
-        let started = std::time::Instant::now();
         let (status, stdout, _) = tokio::time::timeout(
             REVIEWER_DENY_GRACE / 2,
             run_to_end(&fixture, options.clone(), std::future::pending()),
         )
         .await
         .expect("the denial must not wait for a delegate that is switched off");
-        assert!(started.elapsed() < REVIEWER_DENY_GRACE / 2);
         assert_eq!(status, HeadlessStatus::Completed);
         let records = parse_records(&stdout);
-        let resolutions: Vec<&serde_json::Value> = event_records(&records)
-            .into_iter()
-            .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-            .map(|record| &record["envelope"]["event"])
-            .collect();
-        assert!(!resolutions.is_empty(), "{stdout}");
-        assert!(
-            resolutions
-                .iter()
-                .all(|event| event["resolution"] == "denied" && event.get("delegate").is_none()),
-            "{resolutions:?}"
-        );
+        assert_root_shell_denied_without_review(&fixture, &calls, &records);
 
-        // A resumed session whose own override is `off` wins over a
-        // configured `by_mode`, exactly as the session gate applies it.
         let session_id: SessionId = records[0]["session_id"].as_str().unwrap().parse().unwrap();
         send(
             &fixture.sessions,
@@ -7437,14 +7553,96 @@ mod tests {
         .await
         .expect("the session's off override must not wait either");
         assert_eq!(status, HeadlessStatus::Completed);
-        let records = parse_records(&stdout);
-        assert!(
-            event_records(&records)
-                .into_iter()
-                .filter(|record| record["envelope"]["event"]["type"] == "tool_approval_resolved")
-                .all(|record| record["envelope"]["event"]["resolution"] == "denied"),
-            "{stdout}"
-        );
+        assert_root_shell_denied_without_review(&fixture, &calls, &parse_records(&stdout));
+    }
+
+    #[test]
+    fn delegated_resolution_retains_reviewer_identity_in_jsonl_and_text() {
+        // Real child supervision is covered in qq-core; this adapter must
+        // preserve its typed result without treating a root denial as review.
+        for (resolution, expected) in [
+            (ApprovalResolution::ApprovedByReviewer, "approved"),
+            (ApprovalResolution::DeniedByReviewer, "denied"),
+        ] {
+            let tool_call = qq_protocol::ToolCallSnapshot {
+                id: qq_protocol::ToolCallId::from_bytes([1; 16]),
+                session_id: SessionId::from_bytes([2; 16]),
+                run_id: RunId::from_bytes([3; 16]),
+                turn_ordinal: 0,
+                call_ordinal: 0,
+                provider_call_id: "child-call".into(),
+                name: "write_file".into(),
+                arguments: r#"{"path":"note.txt","content":"child work"}"#.into(),
+                state: if resolution == ApprovalResolution::DeniedByReviewer {
+                    ToolCallState::Denied
+                } else {
+                    ToolCallState::Completed
+                },
+                result: None,
+                is_error: resolution == ApprovalResolution::DeniedByReviewer,
+                display: None,
+            };
+            let envelope = SessionEventEnvelope {
+                cursor: qq_protocol::EventCursor {
+                    store_id: qq_protocol::StoreId::from_bytes([4; 16]),
+                    workspace_id: WorkspaceId::from_bytes([5; 16]),
+                    sequence: 1,
+                },
+                session_id: tool_call.session_id,
+                run_id: Some(tool_call.run_id),
+                caused_by: None,
+                occurred_at_ms: 1,
+                event: SessionEvent::ToolApprovalResolved {
+                    tool_call,
+                    resolution,
+                    delegate: Some(qq_protocol::DelegateIdentity::Reviewer),
+                },
+            };
+            let mut sink = RecordSink {
+                goal_record: GoalRecordState::Pending,
+                stdout_failed: false,
+                trace: None,
+                to_stdout: true,
+            };
+            let mut stdout = Vec::new();
+            sink.record(
+                &mut stdout,
+                HeadlessRecordRef::Event {
+                    envelope: &envelope,
+                },
+            )
+            .unwrap();
+            let records = parse_records(&String::from_utf8(stdout).unwrap());
+            assert_eq!(records[0]["envelope"]["event"]["delegate"], "reviewer");
+            assert_eq!(
+                records[0]["envelope"]["event"]["resolution"],
+                serde_json::to_value(resolution).unwrap()
+            );
+            let SessionEvent::ToolApprovalResolved {
+                tool_call,
+                resolution,
+                delegate,
+            } = &envelope.event
+            else {
+                unreachable!()
+            };
+            let mut stderr = Vec::new();
+            write_delegate_resolution(&mut stderr, &tool_call.name, *resolution, *delegate)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(stderr).unwrap(),
+                format!("[tool] write_file {expected} by reviewer\n")
+            );
+            assert!(
+                write_delegate_resolution(
+                    &mut BrokenWriter,
+                    &tool_call.name,
+                    *resolution,
+                    *delegate,
+                )
+                .is_err()
+            );
+        }
     }
 
     #[tokio::test]
@@ -8144,13 +8342,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_goal_denies_a_reviewers_escalation_without_waiting_for_approval_timeout() {
+    async fn foreground_auto_goal_denies_without_human_wait_with_a_reviewer_configured() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let workspace = root.join("work");
         std::fs::create_dir_all(&workspace).unwrap();
         let mut runtime_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        runtime_options.approval_reviewer = Some(Arc::new(DelegateEscalates));
+        runtime_options.approval_reviewer = Some(Arc::new(CountingReviewer {
+            escalate: true,
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }));
         let sessions = SessionRuntime::open(
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {

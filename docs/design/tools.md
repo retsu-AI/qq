@@ -2014,14 +2014,11 @@ Each session has an approval mode:
 - `ask` — every non-read action requires fresh human approval; stored grants
   and model reviewers cannot authorize it.
 - `auto` (default) — workspace-contained edits, writes, and MCP calls execute
-  without prompting; shell commands the classifier allows or a grant covers
-  execute; everything it would prompt for is held. With a `reviewer_model`
-  configured the reviewer settles the hold: `approve` executes, `deny` is
-  final and the model receives the reason as a tool error, `escalate` (or a
-  reviewer timeout or outage) asks the human, whose wait starts at the
-  escalation rather than when the reviewer was consulted. Without a reviewer,
-  or with `approval_delegate: off`, the human is asked. `Forbidden` shapes are
-  refused before any of this.
+  without prompting. Native task-contained shell commands, classifier-allowed
+  commands, and granted operations execute; actions outside that authority are
+  denied before review. Allowed write-child actions require internal review.
+  A reviewer escalation, timeout, outage, or missing reviewer denies the call;
+  Auto never escalates to a human. `Forbidden` shapes are always refused.
 - `full` — everything executes without prompting, except shell commands the
   classifier marks `Forbidden` (§ Shell Classification): `full` is
   unrestricted authority over the workspace, not over the machine.
@@ -2037,10 +2034,11 @@ like `reviewer_model`. Who is consulted, by mode and setting:
 | --- | --- | --- | --- |
 | `read-only`, `full` | nobody; nothing is held | nobody | nobody |
 | `ask` | human | human | human |
-| `auto` | reviewer, then human on `escalate` | reviewer, then human on `escalate` | human |
+| `auto` | reviewer for child supervision; otherwise execute or deny | same | deny supervised actions |
 
-Without a `reviewer_model` every cell is the human. The setting is not part
-of the plan digest: it changes who is asked, never what the model may do.
+Without a `reviewer_model`, Auto denies actions requiring supervision. Ask
+still requires a human. The setting is not part of the plan digest: it never
+grants authority beyond the mode, workspace, task, and configured grants.
 `Forbidden` shapes, blocked hosts, managed `deny_*`, and `ask_user` never
 reach the reviewer under any setting.
 
@@ -2051,11 +2049,10 @@ configuration. The gate reads the override with the mode at each held call,
 so it applies to a running session's next hold without a restart and without
 rewriting `.qq/config.ron`; `off` is the "stop delegating" switch. Spawned
 children start with the parent's override. The mode stays the ceiling, so no
-authority check applies: every value asks at least as much of a human as the
-configured choice could. The override is `SessionSummary.approval_delegate`,
+authority check applies: the override cannot authorize an out-of-scope action. The override is `SessionSummary.approval_delegate`,
 absent when none is set.
 
-"The reviewer" in the table is `reviewer_model`, then the human (ADR-0041).
+"The reviewer" in the table is `reviewer_model`. Auto has no human fallback.
 The gate attributes every reviewer verdict to `reviewer` (`ReviewVerdict`
 carries only the decision and spend); a delegate-recorded grant
 row carries `source = 'delegate'` (§ Grant Lifetimes), and the
@@ -2227,28 +2224,16 @@ fields stay managed-only:
   would cover the denied commands (`cargo` denied removes `cargo test`;
   `cargo test` denied also removes a bare `cargo` grant, because a
   config-layer filter cannot partially subtract a broader grant).
-- **Trust.** Workspace-declared grants are sensitive operations behind
-  the same trust flow as MCP declarations, and remote configuration may
-  not declare them at all. The flow (ADR-0042): `qq-config` computes the
-  pending set (`ConfigLoader::pending_trust`, read-only; each entry names
-  the file, its sensitive digest, the sections, and typed
-  `TrustDeclaration`s — routes, provider names and kinds, MCP names with
-  command or URL, grant counts, pack ids — never a secret, argument list,
-  or environment value). Bare `qq` in a client that owns the server opens
-  the TUI on that set, and the composition root keeps the `(path, digest)`
-  pairs the prompt displayed. Either answer covers exactly those pairs: `t`
-  calls `grant_reviewed_trust` (the same write `qq trust` performs, but
-  re-scanned under the trust-state lock) and `s` checks the set with
-  `reviewed_pending_trust` before admitting it for the process only through
-  `LoadRequest::with_process_trust`, which every load the embedded server
-  makes for that workspace carries and which is part of the plan cache key.
-  If any file is pending at a digest the prompt did not show (edited while
-  it was open), both refuse with `ConfigError::TrustChanged { pending }`,
-  write and admit nothing, and the TUI redraws the prompt with the current
-  set. `qq trust` itself still grants the current set, because it prints
-  what it records. Headless surfaces and a client attached to a
-  server elsewhere keep the `TrustRequired` error: trust is decided on the
-  host that holds `trust.ron`. No protocol type is involved.
+- **Trust.** Workspace-declared grants, providers, models, MCP servers,
+  and packs remain sensitive. Task startup uses
+  `LoadRequest::with_untrusted_project_config_ignored`: the loader withholds
+  sensitive content before merging, applies non-sensitive settings, and
+  continues without recording trust or opening a human prompt. Explicit
+  configuration inspection retains `TrustRequired`; `qq trust` records the
+  reviewed authority on the server host. Runtime and strict inspection use
+  separate plan-cache keys. Existing process-scoped trust grants also remain
+  part of that key, so a plan compiled without project authority cannot serve
+  a trusted request, or vice versa.
 - **Promotion.** The approval prompt's workspace-lifetime choice appends
   the grant to `.qq/config.ron` by targeted text insertion — comments
   and formatting survive — with an atomic temp-and-rename write that

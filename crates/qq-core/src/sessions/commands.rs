@@ -205,6 +205,23 @@ pub(super) fn create_child_run(
             ],
         )
         ?;
+    // Inherit only authority explicitly supplied by the operator. Reviewer
+    // rows remain local exact-call decisions. Dispatch still applies every
+    // ancestor ceiling and mandatory write-child supervision.
+    if approval_mode == ApprovalMode::Auto {
+        transaction.execute(
+            "INSERT INTO session_grants(session_id,kind,value,created_at_ms,source)
+             SELECT ?1,kind,value,?3,'human' FROM session_grants
+             WHERE session_id=?2 AND source='human'
+             ORDER BY kind,value LIMIT ?4",
+            params![
+                session_id.to_string(),
+                parent_session_id.to_string(),
+                now,
+                MAX_SESSION_GRANTS,
+            ],
+        )?;
+    }
     transaction.execute(
         "INSERT INTO runs(
                 id, session_id, command_id, user_message_id, assistant_message_id,

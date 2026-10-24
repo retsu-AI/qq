@@ -247,7 +247,9 @@ impl CliOverrides {
 async fn ask(prompt: String, overrides: &CliOverrides) -> Result<(), Box<dyn Error>> {
     let factory =
         runtime::RuntimeFactory::system_with_read_images(overrides.approved_read_images.clone())?;
-    let load = overrides.load_request()?;
+    let load = overrides
+        .load_request()?
+        .with_untrusted_project_config_ignored();
     let plan = tokio::task::spawn_blocking(move || factory.plan_for(&load)).await??;
     render_events(plan.run(RunCommand::new(prompt))).await
 }
@@ -505,7 +507,8 @@ async fn prepare_headless(
             .map_err(|error| invalid(error.to_string()))?;
     let load = overrides
         .load_request_in(&workspace)
-        .map_err(|error| invalid(error.to_string()))?;
+        .map_err(|error| invalid(error.to_string()))?
+        .with_untrusted_project_config_ignored();
     let model_is_fallback = load.overrides().model().is_none();
     let overrides_approval_delegate = load.overrides().approval_delegate();
     let config_factory = factory.clone();
@@ -660,9 +663,10 @@ async fn serve(
             // The server's own configuration decides the approval wait for
             // every session it serves: a server-side control, not one a
             // client forwards. Absent is no deadline. A
-            // configuration that does not load yet (no model, untrusted
-            // project) still serves; it simply has no bound.
-            let request = config::LoadRequest::from_current_process(None)?;
+            // configuration that does not load yet still serves. Withhold
+            // untrusted project authority without losing trusted limits.
+            let request = config::LoadRequest::from_current_process(None)?
+                .with_untrusted_project_config_ignored();
             let approval_timeout = {
                 let factory = factory.clone();
                 tokio::task::spawn_blocking(move || {
@@ -776,9 +780,8 @@ async fn interactive(
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
     let (loaded, tui, themes) = tokio::task::spawn_blocking(move || {
         // The client load tolerates a missing model: the TUI opens and
-        // routes to `/models`. Headless paths keep `load`. An untrusted
-        // project opens the TUI too, on the trust prompt; every other
-        // failure still exits with its message.
+        // routes to `/models`. Headless paths keep `load`. Untrusted project
+        // authority stays disabled without stopping startup.
         let loaded = match config_factory.load_for_client(&request) {
             Ok(snapshot) => Ok(config_factory.tui_model_state(&snapshot, &request)),
             Err(runtime::RuntimeBuildError::Config(config::ConfigError::TrustRequired {
@@ -1063,7 +1066,9 @@ impl InteractiveEnvironment {
             return Ok(Self {
                 factory,
                 config,
-                request: overrides.load_request()?,
+                request: overrides
+                    .load_request()?
+                    .with_untrusted_project_config_ignored(),
                 server_paths: server::ServerPaths::for_user()?,
                 workspace: std::fs::canonicalize(std::env::current_dir()?)?,
             });
@@ -1089,7 +1094,9 @@ impl InteractiveEnvironment {
             credentials,
             workspace.clone(),
         )?;
-        let request = overrides.apply(config::LoadRequest::new(&workspace))?;
+        let request = overrides
+            .apply(config::LoadRequest::new(&workspace))?
+            .with_untrusted_project_config_ignored();
         Ok(Self {
             factory,
             config,
