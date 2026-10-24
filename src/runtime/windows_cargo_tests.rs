@@ -279,6 +279,21 @@ async fn installed_cargo_startup_through_real_auto_worker() {
         "task-output"
     );
     log_results("AUTO", &source, &commands);
+    let objects = fs::read_to_string(source.join("images.stdout")).unwrap();
+    assert!(objects.contains("self-event unnamed create succeeded; signal=Ok(())"));
+    assert!(
+        objects.lines().any(
+            |line| line.starts_with("self-event name=qq-crypto-self-event-")
+                && line.ends_with("reopen: Ok(())")
+        ),
+        "own package named event must reopen: {objects}"
+    );
+    assert!(
+        objects.lines().any(|line| line
+            .starts_with("self-event name=Local\\qq-crypto-self-event-")
+            && line.contains("ERROR(0x0005 5)")),
+        "explicit session namespace must remain blocked: {objects}"
+    );
     eprintln!(
         "AUTO private-read exit={:?}",
         fs::read_to_string(source.join("private-read.exit"))

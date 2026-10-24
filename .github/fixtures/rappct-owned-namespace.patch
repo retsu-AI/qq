@@ -1,0 +1,227 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 36d29da..a561dd2 100755
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -48,9 +48,12 @@ serde = { version = "1.0.229", features = ["derive"], optional = true }
+ [target.'cfg(windows)'.dependencies]
+ windows = { version = "0.62.2", features = [
+     "Win32_Foundation",
++    "Wdk_Foundation",
++    "Wdk_Storage_FileSystem",
+     "Win32_Security",
+     "Win32_Security_Authorization",
+     "Win32_System_Threading",
++    "Win32_System_RemoteDesktop",
+     "Win32_System_JobObjects",
+     "Win32_System_WindowsProgramming",
+     "Win32_System_Environment",
+diff --git a/src/acl.rs b/src/acl.rs
+index dfae7a5..96c4af3 100755
+--- a/src/acl.rs
++++ b/src/acl.rs
+@@ -5,6 +5,8 @@ use crate::sid::AppContainerSid;
+ 
+ #[cfg(windows)]
+ mod grant;
++#[cfg(windows)]
++pub(crate) use grant::grant_kernel_directory_creation;
+ #[cfg(test)]
+ mod tests;
+ 
+diff --git a/src/acl/grant.rs b/src/acl/grant.rs
+index 7c6d6a2..37f83a6 100644
+--- a/src/acl/grant.rs
++++ b/src/acl/grant.rs
+@@ -328,3 +328,53 @@ fn unsafe_zeroed<T>() -> T {
+     // SAFETY: Win32 record types used here are plain old data initialized before use.
+     unsafe { std::mem::zeroed() }
+ }
++
++/// Preserve the directory ACL, granting only query/traverse/object creation.
++pub(crate) fn grant_kernel_directory_creation(handle: HANDLE, sid_sddl: &str) -> Result<()> {
++    use windows::Win32::Security::Authorization::SE_KERNEL_OBJECT;
++    let trustee = SidTrustee::from_sddl(sid_sddl)?;
++    let mut descriptor = PSECURITY_DESCRIPTOR::default();
++    let mut old_dacl = std::ptr::null_mut();
++    // SAFETY: The caller owns a live directory handle with READ_CONTROL; output
++    // pointers are valid and the returned allocation is immediately guarded.
++    let status = unsafe {
++        GetSecurityInfo(
++            handle,
++            SE_KERNEL_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            None,
++            None,
++            Some(&mut old_dacl),
++            None,
++            Some(&mut descriptor),
++        )
++    };
++    win32_status(status.0, "GetSecurityInfo(AppContainer directory)")?;
++    let old = SecurityDescriptorDacl::new(descriptor, old_dacl);
++    if old.old_dacl.is_null() {
++        return Err(AcError::Win32(
++            "AppContainer directory has a null DACL".into(),
++        ));
++    }
++    let new_dacl = merge_dacl(
++        old.old_dacl,
++        0xF,
++        AceInheritance::NONE,
++        trustee.as_trustee(),
++        "SetEntriesInAclW(AppContainer directory)",
++    )?;
++    // SAFETY: Handle remains owned and both DACL allocations stay live through
++    // the synchronous setter. Only this directory's DACL is changed.
++    let status = unsafe {
++        SetSecurityInfo(
++            handle,
++            SE_KERNEL_OBJECT,
++            DACL_SECURITY_INFORMATION,
++            None,
++            None,
++            Some(new_dacl.as_ptr()),
++            None,
++        )
++    };
++    win32_status(status.0, "SetSecurityInfo(AppContainer directory)")
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index dd50f82..031e441 100755
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -80,3 +80,6 @@ pub use launch::{LaunchedIo, launch_in_container_with_io};
+ pub use lpac::supports_lpac;
+ pub use profile::{AppContainerProfile, derive_sid_from_name};
+ pub use sid::AppContainerSid;
++
++#[cfg(any(windows, test))]
++mod object_directory;
+diff --git a/src/object_directory.rs b/src/object_directory.rs
+new file mode 100644
+index 0000000..2445450
+--- /dev/null
++++ b/src/object_directory.rs
+@@ -0,0 +1,96 @@
++//! Access to one profile-owned AppContainer named-object directory.
++#[cfg(windows)]
++use crate::AppContainerProfile;
++#[cfg(windows)]
++use crate::ffi::handles::Handle;
++use crate::{AcError, Result};
++#[cfg(windows)]
++use windows::Wdk::{Foundation::OBJECT_ATTRIBUTES, Storage::FileSystem::NtOpenDirectoryObject};
++#[cfg(windows)]
++use windows::Win32::Foundation::{HANDLE, OBJECT_ATTRIBUTE_FLAGS, UNICODE_STRING};
++#[cfg(windows)]
++use windows::core::PWSTR;
++
++#[cfg(windows)]
++pub(crate) fn grant(profile: &AppContainerProfile, sid: &str) -> Result<()> {
++    use windows::Win32::System::{
++        RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId,
++    };
++    let relative = profile.named_object_path()?;
++    let mut session = 0;
++    // SAFETY: Current PID is valid; session points to one initialized u32.
++    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }
++        .map_err(|error| AcError::Win32(format!("ProcessIdToSessionId: {error}")))?;
++    let path = namespace_path(&relative, profile.sid.as_string(), session)?;
++    let directory = open_directory(&path)?;
++    crate::acl::grant_kernel_directory_creation(directory.as_win32(), sid)
++}
++
++fn namespace_path(reported: &str, sid: &str, session: u32) -> Result<String> {
++    let relative = format!("AppContainerNamedObjects\\{sid}");
++    let absolute = format!("\\Sessions\\{session}\\{relative}");
++    if reported != relative && reported != absolute {
++        return Err(AcError::Win32(format!(
++            "unexpected AppContainer namespace path: {reported}"
++        )));
++    }
++    Ok(absolute)
++}
++
++#[cfg(windows)]
++fn open_directory(path: &str) -> Result<Handle> {
++    let mut wide = path.encode_utf16().collect::<Vec<_>>();
++    let length = wide
++        .len()
++        .checked_mul(2)
++        .and_then(|n| u16::try_from(n).ok())
++        .filter(|_| !wide.contains(&0))
++        .ok_or_else(|| AcError::Win32("invalid AppContainer namespace path".into()))?;
++    let name = UNICODE_STRING {
++        Length: length,
++        MaximumLength: length,
++        Buffer: PWSTR(wide.as_mut_ptr()),
++    };
++    let attrs = OBJECT_ATTRIBUTES {
++        Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
++        ObjectName: &name,
++        Attributes: OBJECT_ATTRIBUTE_FLAGS(0x40),
++        ..Default::default()
++    };
++    let mut handle = HANDLE::default();
++    // SAFETY: Unicode buffer and object attributes remain live through this
++    // synchronous call; the output handle is guarded immediately on success.
++    let status =
++        unsafe { NtOpenDirectoryObject(&mut handle, 0x0002_0000 | 0x0004_0000 | 0x3, &attrs) };
++    if status.is_err() {
++        return Err(AcError::Win32(format!(
++            "NtOpenDirectoryObject(AppContainer {path}): {status:?}"
++        )));
++    }
++    // SAFETY: Successful NtOpenDirectoryObject returned a uniquely owned kernel
++    // handle; Handle uses CloseHandle exactly once on every return path.
++    unsafe { Handle::from_raw(handle.0) }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::namespace_path;
++    #[test]
++    fn namespace_is_exact_profile_and_current_session() {
++        let sid = "S-1-15-2-1-2-3";
++        let expected = format!("\\Sessions\\3\\AppContainerNamedObjects\\{sid}");
++        assert_eq!(
++            namespace_path(&format!("AppContainerNamedObjects\\{sid}"), sid, 3).unwrap(),
++            expected
++        );
++        assert_eq!(namespace_path(&expected, sid, 3).unwrap(), expected);
++        for bad in [
++            format!("AppContainerNamedObjects\\{sid}0"),
++            format!("\\Sessions\\4\\AppContainerNamedObjects\\{sid}"),
++            format!("AppContainerNamedObjects\\..\\{sid}"),
++            "\\BaseNamedObjects".into(),
++        ] {
++            assert!(namespace_path(&bad, sid, 3).is_err(), "{bad}");
++        }
++    }
++}
+diff --git a/src/profile.rs b/src/profile.rs
+index 9c9686d..5dc3b51 100755
+--- a/src/profile.rs
++++ b/src/profile.rs
+@@ -206,6 +206,21 @@ impl AppContainerProfile {
+             Err(AcError::UnsupportedPlatform)
+         }
+     }
++    /// Allow a restricting SID to create objects only inside this profile's
++    /// private named-object directory. Existing ACL entries are preserved.
++    /// This never grants filesystem access or changes a session-wide namespace.
++    pub fn grant_named_object_creation(&self, restricting_sid: &str) -> Result<()> {
++        #[cfg(windows)]
++        {
++            crate::object_directory::grant(self, restricting_sid)
++        }
++        #[cfg(not(windows))]
++        {
++            let _ = restricting_sid;
++            Err(AcError::UnsupportedPlatform)
++        }
++    }
++
+     /// Returns the named-object namespace path for this AppContainer profile.
+     pub fn named_object_path(&self) -> Result<String> {
+         #[cfg(windows)]

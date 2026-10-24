@@ -24,13 +24,30 @@ jobs:
         with:
           key: windows-cargo-startup-${{ matrix.os }}
           cache-on-failure: true
+      - name: Apply scoped own-package namespace adapter
+        run: |
+          $adapter = Join-Path $env:RUNNER_TEMP 'rappct-owned-namespace'
+          git clone --no-checkout https://github.com/retsu-AI/rappct $adapter
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $adapter checkout --detach 4f3449402a6cad646374404043cf90df4e090939
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $adapter apply --check "$env:GITHUB_WORKSPACE/.github/fixtures/rappct-owned-namespace.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $adapter apply "$env:GITHUB_WORKSPACE/.github/fixtures/rappct-owned-namespace.patch"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $config = Join-Path $env:RUNNER_TEMP 'rappct-owned-namespace.toml'
+          $normalized = $adapter.Replace([IO.Path]::DirectorySeparatorChar, [char]'/')
+          "[patch.`"https://github.com/retsu-AI/rappct`"]`nrappct = { path = `"$normalized`" }" | Set-Content -LiteralPath $config -Encoding utf8NoBOM
+          "QQ_RAPPCT_PATCH=$config" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          cargo update --offline --config $config -p rappct
+          exit $LASTEXITCODE
       - name: Build exact payload probes and durable worker
         run: |
-          cargo build --locked -p qq-core --example windows_cargo_images --example command_owner
+          cargo build --config $env:QQ_RAPPCT_PATCH --locked -p qq-core --example windows_cargo_images --example command_owner
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked -p qq-core --example windows_cargo_images -- -D warnings
+          cargo clippy --config $env:QQ_RAPPCT_PATCH --locked -p qq-core --example windows_cargo_images -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo clippy --locked -p qq --no-default-features --bin qq -- -D warnings
+          cargo clippy --config $env:QQ_RAPPCT_PATCH --locked -p qq --no-default-features --bin qq -- -D warnings
           exit $LASTEXITCODE
       - name: Exact installed default compiler dependency manifest and real Auto
         run: |
@@ -45,7 +62,7 @@ jobs:
           & .\target\debug\examples\windows_cargo_images.exe --prepare $cargo $rustc | Set-Content -LiteralPath $manifest -Encoding utf8NoBOM
           if ($LASTEXITCODE -ne 0) { throw 'Exact compiler PE metadata failed' }
           $env:QQ_CARGO_IMAGES = $manifest
-          $artifacts = & cargo test --locked -p qq --no-default-features --bin qq --no-run --message-format=json
+          $artifacts = & cargo test --config $env:QQ_RAPPCT_PATCH --locked -p qq --no-default-features --bin qq --no-run --message-format=json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $executables = @($artifacts | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'qq' -and $_.profile.test -and $_.executable } | ForEach-Object { $_.executable })
           if ($executables.Count -ne 1) { throw 'Expected one exact qq runtime test binary' }

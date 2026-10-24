@@ -478,6 +478,11 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     // descendants. AppContainer and its explicit handle list are in force now.
     let mut child =
         rappct::launch_in_container_with_io(&capabilities, &options).map_err(io::Error::other)?;
+    // Creating the suspended lowbox materializes its private object namespace.
+    // Grant only this task SID object creation before any payload code runs.
+    profile
+        .grant_named_object_creation(&write_sid)
+        .map_err(io::Error::other)?;
     std::io::stderr().write_all(READY)?;
     let mut release = [0];
     input.read_exact(&mut release)?;
