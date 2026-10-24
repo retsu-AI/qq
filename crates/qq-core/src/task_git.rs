@@ -166,13 +166,24 @@ impl TaskGit {
             },
             worker_owned: operation.worker_owned,
         };
-        git.text(
-            &source.path,
-            &["rev-parse", "--verify", "HEAD^{commit}"],
-            operation,
-        )
-        .and_then(oid)
-        .map(Some)
+        match git
+            .text(
+                &source.path,
+                &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                operation,
+            )
+            .and_then(oid)
+        {
+            Ok(base) => Ok(Some(base)),
+            // An unresolved/unborn/corrupt initial HEAD grants no Git effect.
+            // Ordinary local work remains available. Execution/image/I/O,
+            // cancellation, and deadline failures remain typed errors.
+            Err(TaskGitError::GitFailed {
+                code: Some(1 | 128),
+                ..
+            }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn prepare(
