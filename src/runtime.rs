@@ -3454,6 +3454,10 @@ pub enum RuntimeHandlerError {
     Sessions(#[from] SessionRuntimeError),
 }
 
+#[cfg(any(windows, test))]
+#[path = "runtime/windows_sdk.rs"]
+mod windows_sdk;
+
 #[cfg(windows)]
 fn windows_toolchain_read_roots(bin: &Path) -> std::io::Result<Vec<PathBuf>> {
     let denied = || {
@@ -3552,10 +3556,11 @@ fn task_workspace_policy(
         {
             // Admit installed compiler inputs, never the global Cargo home,
             // credentials, or hardlinked rustup proxy directory.
-            for bin in qq_core::command_owner::NativeEnvironment::windows_toolchain_bins()
-                .into_iter()
-                .take(15)
-            {
+            let bins = windows_sdk::discover(
+                &directory,
+                qq_core::command_owner::NativeEnvironment::windows_toolchain_bins(),
+            )?;
+            for bin in bins.into_iter().take(15) {
                 if !bin.join("cargo.exe").is_file() || !bin.join("rustc.exe").is_file() {
                     continue;
                 }
