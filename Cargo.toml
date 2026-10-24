@@ -116,6 +116,8 @@ tracing-core = { version = "0.1", default-features = false, features = ["std"] }
 webbrowser = "1"
 dunce = "1.0.5"
 win-custody = "0.1.1"
+winsafe = { version = "0.0.29", default-features = false }
+firehazard = "=0.0.0-2022-09-10"
 windows-permissions = "0.2.4"
 winapi-util = "0.1"
 subc-jobobject = "0.2.2"
@@ -225,4 +227,4 @@ nix = { workspace = true, features = ["event", "process", "signal"] }
 rappct.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true
-winsafe = { version = "0.0.29", default-features = false, features = ["advapi"] }
+winsafe = { workspace = true, features = ["advapi"] }
