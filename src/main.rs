@@ -32,6 +32,34 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    if let Some(request) = cli::task_git_request() {
+        return match request
+            .map_err(io::Error::other)
+            .and_then(|path| qq_core::task_git_job::execute_job(&path).map_err(io::Error::other))
+        {
+            Ok(receipt) => {
+                match serde_json::to_string(&receipt) {
+                    Ok(encoded) => println!("{encoded}"),
+                    Err(error) => {
+                        eprintln!("task Git receipt: {error}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+                if matches!(
+                    receipt.result,
+                    qq_core::task_git_job::TaskGitJobResult::Committed { .. }
+                ) {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(error) => {
+                eprintln!("task Git job: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
         return match std::env::args_os()

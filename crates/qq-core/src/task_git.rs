@@ -34,7 +34,7 @@ pub(crate) struct TaskGitRoots {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum TaskGitError {
+pub enum TaskGitError {
     #[error("task Git I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error("task Git operation stopped")]
@@ -57,6 +57,7 @@ pub(crate) enum TaskGitError {
 pub(crate) struct Operation {
     pub cancellation: RunCancellation,
     pub deadline: Instant,
+    pub worker_owned: bool,
 }
 impl Operation {
     async fn permit(&self) -> Result<tokio::sync::OwnedSemaphorePermit, TaskGitError> {
@@ -79,7 +80,7 @@ impl Operation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TaskGitLimits {
+pub struct TaskGitLimits {
     pub max_entries: usize,
     pub max_bytes: usize,
     pub max_pack_bytes: usize,
@@ -106,6 +107,8 @@ pub(crate) struct TaskGit {
     base: String,
     prefix: PathBuf,
     limits: TaskGitLimits,
+    #[serde(skip)]
+    worker_owned: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -116,7 +119,7 @@ struct Preparation {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TaskGitCommit {
+pub struct TaskGitCommit {
     pub oid: String,
     pub tree: String,
     pub branch: String,
@@ -143,6 +146,41 @@ impl TaskGit {
             Self::prepare_blocking(program, roots, task, limits, operation)
         })
         .await?
+    }
+
+    pub(crate) fn restore_job(
+        program: &Path,
+        roots: &TaskGitRoots,
+        task: qq_protocol::RunId,
+        limits: TaskGitLimits,
+    ) -> Result<Option<Self>, TaskGitError> {
+        held(&roots.control)?;
+        let path = roots.control.path.join(format!("task-git-{task}"));
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let repository = NativeDirectoryGrant::capture(&path)?;
+        let private = held(&repository)?;
+        let Some(saved) = metadata::<Self>(&private, "task-state.json")? else {
+            return Ok(None);
+        };
+        let expected = Self {
+            program: GitProgram::capture(program, roots)?,
+            repository,
+            source: roots.source.clone(),
+            task: roots.task.clone(),
+            branch: format!("refs/heads/qq/task/{task}"),
+            base: String::new(),
+            prefix: PathBuf::new(),
+            limits,
+            worker_owned: true,
+        };
+        expected.validate_saved(&saved)?;
+        Ok(Some(saved))
+    }
+
+    pub(crate) fn inherit_worker_custody(&mut self) {
+        self.worker_owned = true;
     }
 
     fn prepare_blocking(
@@ -192,6 +230,7 @@ impl TaskGit {
             base: String::new(),
             prefix: PathBuf::new(),
             limits,
+            worker_owned: operation.worker_owned,
         };
         let private = held(&git.repository)?;
         if contains_directory(private.root(), git.task.identity)? {
@@ -695,7 +734,7 @@ impl TaskGit {
     }
 }
 
-fn held(grant: &NativeDirectoryGrant) -> Result<Workspace, TaskGitError> {
+pub(crate) fn held(grant: &NativeDirectoryGrant) -> Result<Workspace, TaskGitError> {
     let directory = Workspace::open(&grant.path)?;
     if NativeWorkspaceIdentity::held(directory.root())? != grant.identity {
         return Err(TaskGitError::Invalid("directory identity changed"));
@@ -713,7 +752,7 @@ fn oid(value: String) -> Result<String, TaskGitError> {
         Err(TaskGitError::Invalid("invalid Git object identity"))
     }
 }
-fn validate_path(path: &Path) -> Result<(), TaskGitError> {
+pub(crate) fn validate_path(path: &Path) -> Result<(), TaskGitError> {
     #[cfg(not(windows))]
     if path.to_string_lossy().contains('\\') {
         return Err(TaskGitError::Invalid("ambiguous cross-platform Git path"));
@@ -736,7 +775,7 @@ fn validate_path(path: &Path) -> Result<(), TaskGitError> {
         Ok(())
     }
 }
-fn read_file(
+pub(crate) fn read_file(
     root: &Workspace,
     path: &Path,
     limit: usize,
@@ -772,7 +811,7 @@ fn read_file(
     Ok(Some((bytes, executable)))
 }
 
-fn check_file(metadata: &cap_std::fs::Metadata) -> Result<(), TaskGitError> {
+pub(crate) fn check_file(metadata: &cap_std::fs::Metadata) -> Result<(), TaskGitError> {
     #[cfg(unix)]
     let independent = {
         use cap_std::fs::MetadataExt as _;
@@ -827,7 +866,7 @@ fn private_lock(root: &Workspace) -> Result<std::fs::File, TaskGitError> {
     file.try_lock().map_err(|_| TaskGitError::Busy)?;
     Ok(file)
 }
-fn metadata<T: serde::de::DeserializeOwned>(
+pub(crate) fn metadata<T: serde::de::DeserializeOwned>(
     root: &Workspace,
     name: &str,
 ) -> Result<Option<T>, TaskGitError> {
@@ -835,7 +874,11 @@ fn metadata<T: serde::de::DeserializeOwned>(
         .map(|(bytes, _)| serde_json::from_slice(&bytes).map_err(TaskGitError::from))
         .transpose()
 }
-fn save_metadata(root: &Workspace, name: &str, value: &impl Serialize) -> Result<(), TaskGitError> {
+pub(crate) fn save_metadata(
+    root: &Workspace,
+    name: &str,
+    value: &impl Serialize,
+) -> Result<(), TaskGitError> {
     let temporary = format!("{name}.tmp");
     let mut options = OpenOptions::new();
     options

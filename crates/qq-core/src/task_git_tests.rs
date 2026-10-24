@@ -36,6 +36,7 @@ fn operation() -> Operation {
     Operation {
         cancellation: RunCancellation::new(),
         deadline: Instant::now() + Duration::from_secs(30),
+        worker_owned: false,
     }
 }
 fn limits() -> TaskGitLimits {
