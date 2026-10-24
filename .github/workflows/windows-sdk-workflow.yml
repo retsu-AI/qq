@@ -14,26 +14,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
       - uses: Swatinem/rust-cache@v2
         with:
           key: command-owner-${{ matrix.os }}
           cache-on-failure: true
-      - name: Child shell environment before correction
-        shell: bash
-        run: |
-          trap 'git checkout --detach "$GITHUB_SHA"' EXIT
-          git checkout --detach fd89fdb8
-          selector=command_owner::environment::tests::task_home_supplies_command_compatible_child_shell_selection
-          cargo test --locked -p qq-core --lib -- --list | tr -d '\r' | grep -Fx "$selector: test"
-          set +e
-          cargo test --locked -p qq-core --lib "$selector" -- --exact --nocapture > "$RUNNER_TEMP/child-shell-before.log" 2>&1
-          status=$?
-          set -e
-          cat "$RUNNER_TEMP/child-shell-before.log"
-          test "$status" -eq 101
-          grep -F 'Windows child shells need DOS-compatible COMSPEC' "$RUNNER_TEMP/child-shell-before.log"
       - name: Native production Clippy
         shell: bash
         run: |
@@ -44,6 +28,8 @@ jobs:
         shell: bash
         run: |
           cargo test --locked -p qq-core installed_tool_input -- --nocapture
+          cargo test --locked -p qq-core node_bootstraps_ -- --nocapture
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_sdk:: -- --nocapture
           cargo test --locked -p qq-core admitted_tool_search_paths_ -- --nocapture
           cargo test --locked -p qq-core task_home_supplies_command_compatible_child_shell_selection -- --nocapture
           cargo test --locked -p qq-core native_scope_tool_search_roots_require_read_authority_and_survive_restart -- --nocapture
@@ -62,28 +48,6 @@ jobs:
         run: |
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list | tr -d '\r' | grep -Fx 'windows::arap_writable_host_files_remain_readable_but_not_writable_through_the_real_worker: test'
           cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
-      - name: Host compiler image dependencies
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $rustup = Join-Path $env:USERPROFILE '.cargo\bin\rustup.exe'
-          $reader = Join-Path $env:ProgramFiles 'LLVM\bin\llvm-readobj.exe'
-          $control = Join-Path $env:RUNNER_TEMP 'qq-compiler-metadata'
-          New-Item -ItemType Directory -Force -Path $control | Out-Null
-          Set-Location -LiteralPath $control
-          if (!(Test-Path -LiteralPath $rustup) -or !(Test-Path -LiteralPath $reader)) {
-            Write-Output 'Trusted Rustup or LLVM PE metadata tool unavailable; actual Auto assertions remain mandatory.'
-            exit 0
-          }
-          foreach ($tool in @('cargo', 'rustc')) {
-            $image = & $rustup which $tool
-            if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $image)) {
-              throw "Installed $tool image metadata unavailable"
-            }
-            Write-Output "Compiler image: $image"
-            & $reader --coff-imports $image | Select-Object -First 256
-            if ($LASTEXITCODE -ne 0) { throw "PE metadata failed for $tool" }
-          }
       - name: Actual Auto npm and Cargo build test and artifact execution
         if: ${{ !cancelled() }}
         shell: bash

@@ -200,7 +200,7 @@ mod probe {
         }
         let input = qq_core::command_owner::NativeDirectoryGrant::capture(source)?;
         let stage = || {
-            qq_core::task_workspace::stage_tool_inputs(
+            qq_core::task_workspace::stage_node_tool_inputs(
                 input.clone(),
                 &parent.join("staging"),
                 &selected,

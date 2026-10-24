@@ -10,19 +10,35 @@ use std::{fs, time::Duration};
 
 #[tokio::test]
 async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
-    let tool_versions = tokio::task::spawn_blocking(|| {
-        ["git", "node", "cargo"].map(|program| {
-            let output = std::process::Command::new(program)
+    let fixture = super::tests::RuntimeFixture::new();
+    let metadata_control = fixture.path("data");
+    let (tool_versions, rust_bin) = tokio::task::spawn_blocking(move || {
+        let rust_bin = windows_sdk::discover(&metadata_control, Vec::new())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("a conventionally installed server-default Rust toolchain");
+        eprintln!(
+            "Exact server-default Rust compiler bin: {}",
+            rust_bin.display()
+        );
+        let versions = ["git", "node", "cargo"].map(|program| {
+            let image = if program == "cargo" {
+                rust_bin.join("cargo.exe")
+            } else {
+                PathBuf::from(program)
+            };
+            let output = std::process::Command::new(image)
                 .arg("--version")
                 .output()
                 .unwrap_or_else(|error| panic!("host {program} must be installed: {error}"));
             assert!(output.status.success(), "host {program}: {output:?}");
             (program, String::from_utf8(output.stdout).unwrap())
-        })
+        });
+        (versions, rust_bin)
     })
     .await
     .unwrap();
-    let fixture = super::tests::RuntimeFixture::new();
     let source = fixture.path("work");
     let secret = fixture.path("host-secret");
     fs::write(&secret, "host bytes").unwrap();
@@ -141,6 +157,16 @@ async fn default_auto_contains_shell_writes_and_publishes_detached_output() {
             .as_std_mut()
             .raw_arg("/D /S /C \"call sdk-workflow.cmd\"");
     }
+    let host_bin = dunce::simplified(&rust_bin).to_owned();
+    assert_eq!(host_bin.canonicalize().unwrap(), rust_bin);
+    command.env(
+        "PATH",
+        std::env::join_paths(
+            std::iter::once(host_bin)
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap(),
+    );
     let output = tokio::time::timeout(
         Duration::from_secs(60),
         command.current_dir(&control).kill_on_drop(true).output(),
