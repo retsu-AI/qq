@@ -3,7 +3,7 @@
 use std::{borrow::Cow, sync::Arc};
 
 use async_stream::try_stream;
-use reqwest::header::{AUTHORIZATION, HeaderMap};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
@@ -43,7 +43,12 @@ pub(crate) struct OpenAiChatCompletions {
     pub(crate) exchange: HttpExchange,
     endpoint: reqwest::Url,
     headers: Arc<HeaderMap>,
+    /// Sends the request's cache key as xAI's `x-grok-conv-id`.
+    grok_conversation: bool,
 }
+
+/// The header xAI routes a conversation's requests to one cache by.
+const GROK_CONVERSATION_ID: HeaderName = HeaderName::from_static("x-grok-conv-id");
 
 #[cfg(test)]
 impl OpenAiChatCompletions {
@@ -105,7 +110,15 @@ impl OpenAiChatCompletions {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
             endpoint,
             headers: Arc::new(headers),
+            grok_conversation: false,
         })
+    }
+
+    /// Sends each request's cache key as `x-grok-conv-id`, when it has one.
+    #[must_use]
+    pub(crate) fn with_grok_conversation(mut self, enabled: bool) -> Self {
+        self.grok_conversation = enabled;
+        self
     }
 }
 
@@ -113,7 +126,14 @@ impl Provider for OpenAiChatCompletions {
     fn stream(&self, request: ModelRequest) -> ProviderStream {
         let exchange = self.exchange.clone();
         let endpoint = self.endpoint.clone();
-        let headers = self.headers.clone();
+        let mut headers = self.headers.clone();
+        if self.grok_conversation
+            && let Some(value) = request
+                .cache_key()
+                .and_then(|key| HeaderValue::from_str(key).ok())
+        {
+            Arc::make_mut(&mut headers).insert(GROK_CONVERSATION_ID, value);
+        }
 
         with_restart(&self.exchange, move |ledger| {
             let exchange = exchange.clone();
@@ -1142,6 +1162,43 @@ mod tests {
         let without = ModelRequest::new("chat-test", vec![Message::user("ping")], 64);
         let body = serde_json::to_value(ChatCompletionsRequest::from(&without)).unwrap();
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    /// xAI routes a conversation's requests to one cache by `x-grok-conv-id`;
+    /// other Chat Completions endpoints never see the header.
+    #[tokio::test]
+    async fn the_cache_key_is_sent_as_the_grok_conversation_only_when_enabled() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        for routing in [true, false] {
+            let server = LoopbackServer::sse(body);
+            let endpoint = format!("{}/v1/chat/completions", server.base_url);
+            let provider =
+                OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true)
+                    .unwrap()
+                    .with_grok_conversation(routing);
+            provider
+                .stream(
+                    ModelRequest::new("grok-test", vec![Message::user("ping")], 64)
+                        .with_cache_key("0123456789abcdef0123456789abcdef"),
+                )
+                .collect::<Vec<_>>()
+                .await;
+            let request = server.capture();
+            assert_eq!(
+                request.header("x-grok-conv-id"),
+                routing.then_some("0123456789abcdef0123456789abcdef")
+            );
+            assert!(
+                !request
+                    .json_body()
+                    .as_object()
+                    .unwrap()
+                    .contains_key("prompt_cache_key")
+            );
+        }
     }
 
     #[tokio::test]

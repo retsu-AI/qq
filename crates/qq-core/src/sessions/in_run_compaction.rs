@@ -182,6 +182,7 @@ async fn compact_in_run(
         messages,
         request.system,
         request.tools,
+        Some(Arc::from(prompt_run.identity.session_id.to_string())),
         ceiling,
         paid_output_cap.clone(),
     );

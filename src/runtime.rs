@@ -35,8 +35,9 @@ use qq_protocol::{
     WorkspaceGrantOutcome, WorkspaceId,
 };
 use qq_provider::{
-    BedrockAuth as ProviderBedrockAuth, EndpointSpec, HttpAuth, HttpProtocol, HttpProviderRecipe,
-    ProviderCompiler, ProviderError, ProviderRecipe, ResponsesBodyShape, SecretRef,
+    BedrockAuth as ProviderBedrockAuth, CacheRouting, EndpointSpec, HttpAuth, HttpProtocol,
+    HttpProviderRecipe, ProviderCompiler, ProviderError, ProviderRecipe, ResponsesBodyShape,
+    SecretRef,
 };
 use qq_server::{
     CommandFuture, DelegationFuture, ModelsFuture, ProfilesFuture, ServerHandler,
@@ -2066,7 +2067,8 @@ impl RuntimeFactory {
         let recipe = ProviderRecipe::http(
             HttpProviderRecipe::new(endpoint, protocol, auth)
                 .with_headers(headers)
-                .with_body_shape(responses_body_shape(access)),
+                .with_body_shape(responses_body_shape(access))
+                .with_cache_routing(cache_routing(access, api)),
         );
         Ok((recipe, descriptor))
     }
@@ -3770,6 +3772,22 @@ fn provider_request_shape_identity(
             .expect("provider request-shape version must be non-zero"),
         digest: qq_protocol::ContentHash::from_bytes(digest.finalize().into()),
     })
+}
+
+/// How a route sends a session's cache key. Only built-in endpoints, which a
+/// configuration cannot redirect, get one: OpenAI and Codex route Responses
+/// by `prompt_cache_key`, xAI routes Chat Completions by `x-grok-conv-id`.
+/// Custom and LiteLLM endpoints may reject an unknown field, and the
+/// Anthropic-family, Google and Bedrock APIs have no such routing.
+fn cache_routing(access: &HttpAccess, api: ProviderApi) -> CacheRouting {
+    let HttpCredential::Builtin { provider, .. } = access.auth() else {
+        return CacheRouting::None;
+    };
+    match (provider.id, api) {
+        ("openai" | "openai-codex", ProviderApi::OpenAiResponses) => CacheRouting::PromptCacheKey,
+        ("xai", ProviderApi::OpenAiChatCompletions) => CacheRouting::GrokConversation,
+        _ => CacheRouting::None,
+    }
 }
 
 /// The Responses body a configured HTTP route sends. Only the built-in OpenAI
@@ -9893,6 +9911,72 @@ mod tests {
                 responses_body_shape(&access(auth.clone())),
                 expected,
                 "{auth:?}"
+            );
+        }
+    }
+
+    /// Only the built-in routes whose endpoints honor a cache key get one:
+    /// OpenAI and Codex Responses by `prompt_cache_key`, xAI Chat Completions
+    /// by `x-grok-conv-id`. A configured endpoint may be a strict proxy and
+    /// gets none, whatever its protocol.
+    #[test]
+    fn cache_routing_follows_the_builtin_route() {
+        let access = |auth, api| {
+            HttpAccess::new(
+                "https://example.test/v1",
+                EndpointMode::Base,
+                api,
+                auth,
+                BTreeMap::new(),
+            )
+        };
+        let builtin = |id: &str| HttpCredential::Builtin {
+            provider: qq_config::builtin_provider(id).unwrap(),
+            api_key: None,
+            profile: None,
+        };
+        let configured = HttpCredential::Configured(ProviderAuth::NoAuth);
+        for (auth, api, expected) in [
+            (
+                builtin("openai"),
+                ProviderApi::OpenAiResponses,
+                CacheRouting::PromptCacheKey,
+            ),
+            (
+                builtin("openai-codex"),
+                ProviderApi::OpenAiResponses,
+                CacheRouting::PromptCacheKey,
+            ),
+            (
+                builtin("xai"),
+                ProviderApi::OpenAiChatCompletions,
+                CacheRouting::GrokConversation,
+            ),
+            (
+                builtin("anthropic"),
+                ProviderApi::AnthropicMessages,
+                CacheRouting::None,
+            ),
+            (
+                builtin("google"),
+                ProviderApi::GoogleGenerateContent,
+                CacheRouting::None,
+            ),
+            (
+                configured.clone(),
+                ProviderApi::OpenAiResponses,
+                CacheRouting::None,
+            ),
+            (
+                configured,
+                ProviderApi::OpenAiChatCompletions,
+                CacheRouting::None,
+            ),
+        ] {
+            assert_eq!(
+                cache_routing(&access(auth.clone(), api), api),
+                expected,
+                "{auth:?} {api:?}"
             );
         }
     }
