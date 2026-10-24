@@ -42,6 +42,7 @@ pub struct TaskWorkspacePolicy {
     pub directory: NativeDirectoryGrant,
     pub read_only: Vec<NativeDirectoryGrant>,
     pub executable_directories: Vec<PathBuf>,
+    pub sdk_environment: Option<crate::command_owner::NativeSdkEnvironment>,
     /// Host-only cache input. Never included in the payload read grants.
     pub cargo_cache: Option<NativeDirectoryGrant>,
     pub resources: NativeResources,
@@ -661,6 +662,7 @@ pub(super) async fn prepare(
                     workspace.enable_git_baseline();
                 }
                 let scope = NativeCommandScope {
+                    sdk_environment: policy.sdk_environment.clone(),
                     executable_directories: policy.executable_directories.clone(),
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
@@ -680,6 +682,7 @@ pub(super) async fn prepare(
         // trusted host's current limits and readable roots on each admission.
         record.scope.read_only = policy.read_only;
         record.scope.executable_directories = policy.executable_directories;
+        record.scope.sdk_environment = policy.sdk_environment;
         record.scope.network = NativeNetwork::Isolated;
         record.scope.resources = policy.resources;
         record.workspace.apply_limits(policy.limits)?;

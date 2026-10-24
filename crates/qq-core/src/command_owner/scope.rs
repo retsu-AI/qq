@@ -19,6 +19,9 @@ pub struct NativeCommandScope {
     /// Trusted executable search roots, each also admitted read-only.
     #[serde(default)]
     pub executable_directories: Vec<std::path::PathBuf>,
+    /// Frozen server-selected compiler metadata; never supplied by project configuration.
+    #[serde(default)]
+    pub sdk_environment: Option<NativeSdkEnvironment>,
     pub network: NativeNetwork,
     pub resources: NativeResources,
 }
@@ -42,6 +45,45 @@ impl NativeCommandScope {
         NativeFilesystem::Restricted {
             read_only: self.read_only.clone(),
             read_write: vec![self.workspace.clone()],
+        }
+    }
+}
+
+/// Selected Windows MSVC inputs admitted read-only with the command scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeSdkEnvironment {
+    pub linker: std::path::PathBuf,
+    pub libraries: Vec<std::path::PathBuf>,
+    pub includes: Vec<std::path::PathBuf>,
+    pub target: String,
+}
+
+impl NativeSdkEnvironment {
+    pub(crate) fn validate(&self, scope: &NativeCommandScope) -> io::Result<()> {
+        let allowed = matches!(
+            self.target.as_str(),
+            "aarch64-pc-windows-msvc" | "x86_64-pc-windows-msvc"
+        ) && self.linker.file_name() == Some(std::ffi::OsStr::new("link.exe"))
+            && self
+                .linker
+                .parent()
+                .is_some_and(|parent| scope.executable_directories.iter().any(|p| p == parent))
+            && !self.libraries.is_empty()
+            && self.libraries.len() <= 8
+            && self.includes.len() <= 8
+            && self
+                .libraries
+                .iter()
+                .chain(&self.includes)
+                .all(|path| scope.read_only.iter().any(|root| root.path == *path));
+        if allowed {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "compiler environment contains unadmitted inputs",
+            ))
         }
     }
 }

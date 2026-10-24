@@ -211,8 +211,74 @@ impl NativeEnvironment {
         Ok(self)
     }
 
+    /// Apply only frozen metadata whose input roots are part of the native scope.
+    pub(crate) fn with_sdk_environment(
+        mut self,
+        scope: Option<&super::NativeCommandScope>,
+    ) -> Result<Self, CommandOwnerError> {
+        let Some(scope) = scope else {
+            return Ok(self);
+        };
+        let Some(sdk) = &scope.sdk_environment else {
+            return Ok(self);
+        };
+        sdk.validate(scope)
+            .map_err(|_| CommandOwnerError::Invalid)?;
+        let spelling = |path: &std::path::Path| {
+            #[cfg(windows)]
+            {
+                dunce::simplified(path).to_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                path.to_owned()
+            }
+        };
+        let overrides = [
+            (
+                "LIB".to_owned(),
+                std::env::join_paths(sdk.libraries.iter().map(|p| spelling(p)))
+                    .map_err(|_| CommandOwnerError::Invalid)?,
+            ),
+            (
+                "INCLUDE".to_owned(),
+                std::env::join_paths(sdk.includes.iter().map(|p| spelling(p)))
+                    .map_err(|_| CommandOwnerError::Invalid)?,
+            ),
+            (
+                format!(
+                    "CARGO_TARGET_{}_LINKER",
+                    sdk.target.to_ascii_uppercase().replace('-', "_")
+                ),
+                spelling(&sdk.linker).into_os_string(),
+            ),
+        ];
+        self.0
+            .retain(|(name, _)| !overrides.iter().any(|(key, _)| same_name(name, key)));
+        self.0.extend(Self::from_values(overrides)?.0);
+        self.normalize()?;
+        Ok(self)
+    }
+
     pub(super) fn normalize(&mut self) -> Result<(), CommandOwnerError> {
-        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES {
+        // Capture/from_values retain the user bound. Only these frozen compiler
+        // overrides may occupy the three additional internal entries.
+        let sdk_entries = self
+            .0
+            .iter()
+            .filter(|(name, _)| {
+                [
+                    "LIB",
+                    "INCLUDE",
+                    "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER",
+                    "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER",
+                ]
+                .iter()
+                .any(|key| same_name(name, key))
+            })
+            .count()
+            .min(3);
+        if self.0.len() > crate::BASE_ENV.len() + crate::MAX_SHELL_ENV_NAMES + sdk_entries {
             return Err(CommandOwnerError::Invalid);
         }
         self.0.sort_by(|a, b| a.0.cmp(&b.0));
@@ -300,6 +366,119 @@ fn same_name(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_msvc_environment_survives_scope_recovery_and_beats_git_linker() {
+        use super::super::{
+            NativeCommandScope, NativeDirectoryGrant, NativeNetwork, NativeResources,
+            NativeSdkEnvironment,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let paths = [
+            "workspace",
+            "msvc-bin",
+            "msvc-lib",
+            "msvc-include",
+            "git-bin",
+        ]
+        .map(|name| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            path.canonicalize().unwrap()
+        });
+        let [workspace, bin, lib, include, git] = paths;
+        let linker = bin.join("link.exe");
+        std::fs::write(&linker, b"owned fixture").unwrap();
+        let scope = NativeCommandScope {
+            workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
+            read_only: [&bin, &lib, &include]
+                .into_iter()
+                .map(|path| NativeDirectoryGrant::capture(path).unwrap())
+                .collect(),
+            executable_directories: vec![bin.clone()],
+            sdk_environment: Some(NativeSdkEnvironment {
+                linker: linker.clone(),
+                libraries: vec![lib.clone()],
+                includes: vec![include.clone()],
+                target: "aarch64-pc-windows-msvc".into(),
+            }),
+            network: NativeNetwork::Isolated,
+            resources: NativeResources::Host,
+        };
+        let encoded = serde_json::to_vec(&scope).unwrap();
+        let scope: NativeCommandScope = serde_json::from_slice(&encoded).unwrap();
+        let options = std::ffi::OsString::from("--max-old-space-size=128");
+        let home = root.path().join("private-home");
+        let initial = NativeEnvironment::from_values([
+            ("PATH".into(), std::env::join_paths([&git]).unwrap()),
+            ("NODE_OPTIONS".into(), options.clone()),
+            ("LIB".into(), "untrusted-old-lib".into()),
+        ])
+        .unwrap()
+        .with_task_home(&home)
+        .unwrap();
+        let environment = initial
+            .with_executable_directories(&scope.executable_directories)
+            .unwrap()
+            .with_sdk_environment(Some(&scope))
+            .unwrap();
+        let spelling = |path: &std::path::Path| {
+            #[cfg(windows)]
+            {
+                dunce::simplified(path).to_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                path.to_owned()
+            }
+        };
+        assert_eq!(
+            std::env::split_paths(&environment.get("PATH").unwrap())
+                .next()
+                .unwrap(),
+            spelling(&bin)
+        );
+        assert_eq!(
+            environment.get("CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER"),
+            Some(spelling(&linker).into_os_string())
+        );
+        assert_eq!(
+            std::env::split_paths(&environment.get("LIB").unwrap()).collect::<Vec<_>>(),
+            [spelling(&lib)]
+        );
+        assert_eq!(
+            std::env::split_paths(&environment.get("INCLUDE").unwrap()).collect::<Vec<_>>(),
+            [spelling(&include)]
+        );
+        assert_eq!(environment.get("NODE_OPTIONS"), Some(options));
+        assert_eq!(
+            environment.get("HOME"),
+            Some(spelling(&home).into_os_string())
+        );
+        let captured = crate::BASE_ENV
+            .iter()
+            .map(|name| ((*name).to_owned(), "base-value".into()))
+            .chain(
+                (0..crate::MAX_SHELL_ENV_NAMES)
+                    .map(|index| (format!("APPROVED_{index}"), "approved-value".into())),
+            )
+            .collect::<Vec<(String, OsString)>>();
+        let maximum = NativeEnvironment::from_values(captured).unwrap();
+        let mut maximum = maximum.with_sdk_environment(Some(&scope)).unwrap();
+        maximum.normalize().unwrap();
+        let encoded = serde_json::to_vec(&maximum).unwrap();
+        let mut restored: NativeEnvironment = serde_json::from_slice(&encoded).unwrap();
+        restored.normalize().unwrap();
+        assert_eq!(restored.get("LIB"), maximum.get("LIB"));
+        assert_eq!(restored.get("APPROVED_15"), Some("approved-value".into()));
+        assert!(
+            NativeEnvironment::capture(&vec!["ALLOWED".into(); crate::MAX_SHELL_ENV_NAMES + 1])
+                .is_err()
+        );
+        let mut unadmitted = scope;
+        unadmitted.read_only.retain(|grant| grant.path != lib);
+        assert!(environment.with_sdk_environment(Some(&unadmitted)).is_err());
+    }
 
     #[test]
     fn admitted_tool_search_paths_precede_captured_path_without_host_mutation() {

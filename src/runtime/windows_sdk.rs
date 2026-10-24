@@ -142,11 +142,18 @@ fn selected_bin(home: &Path, cargo: &Path, control: &Path) -> io::Result<PathBuf
 }
 
 fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
-    let mut child = command
+    let child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()?;
+    collect_query(child, 8192)
+}
+
+pub(super) fn collect_query(
+    mut child: std::process::Child,
+    output_limit: usize,
+) -> io::Result<Option<Vec<u8>>> {
     let outcome = (|| {
         let stdout = child
             .stdout
@@ -159,7 +166,10 @@ fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
             .name("rustup-metadata".into())
             .spawn(move || {
                 let mut bytes = Vec::new();
-                let result = stdout.take(8193).read_to_end(&mut bytes).map(|_| bytes);
+                let result = stdout
+                    .take(output_limit as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes);
                 let _ = send.send(result);
             })?;
         let bytes = receive
@@ -167,7 +177,7 @@ fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "rustup output timed out"))??;
         loop {
             if let Some(status) = child.try_wait()? {
-                return Ok(if status.success() && bytes.len() <= 8192 {
+                return Ok(if status.success() && bytes.len() <= output_limit {
                     Some(bytes)
                 } else {
                     None

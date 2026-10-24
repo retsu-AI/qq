@@ -32,6 +32,18 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_windows-sdk-metadata"))
+    {
+        return match runtime::windows_msvc::metadata_main() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("Windows compiler metadata: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if let Some(request) = cli::task_git_request() {
         return match request.map_err(io::Error::other).and_then(|path| {
             qq_core::task_git_job::execute_job_with_token(

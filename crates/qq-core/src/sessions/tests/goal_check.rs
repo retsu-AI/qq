@@ -170,6 +170,7 @@ async fn once_check(success: bool, native: bool) {
         use crate::command_owner::*;
         let workspace = directory.path().canonicalize().unwrap();
         options.native_scopes.push(NativeCommandScope {
+            sdk_environment: None,
             executable_directories: Vec::new(),
             workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
             read_only: vec![],
@@ -1927,6 +1928,7 @@ async fn scoped_goal_check_real_owner_blocks_outside_writes_and_verifies_task() 
     .await
     .unwrap();
     let mut scope = NativeCommandScope {
+        sdk_environment: None,
         executable_directories: Vec::new(),
         workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
         read_only: vec![],

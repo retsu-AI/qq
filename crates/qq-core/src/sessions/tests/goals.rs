@@ -8885,6 +8885,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     directory: crate::command_owner::NativeDirectoryGrant::capture(&control)
                         .unwrap(),
                     read_only: vec![],
+                    sdk_environment: None,
                     executable_directories: vec![],
                     cargo_cache: None,
                     resources: crate::command_owner::NativeResources::Host,

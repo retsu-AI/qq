@@ -629,6 +629,10 @@ pub(crate) async fn execute_with_images(
                     Ok(environment) => environment,
                     Err(error) => return ToolOutput::refused(error.to_string()),
                 };
+                let environment = match environment.with_sdk_environment(scope.as_deref()) {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
                 let held_workspace = workspace.clone();
                 let workspace_identity = match tokio::task::spawn_blocking(move || {
                     crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())

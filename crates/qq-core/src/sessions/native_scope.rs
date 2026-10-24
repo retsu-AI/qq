@@ -145,6 +145,10 @@ fn insert(
             "scope roots must be bounded canonical absolute paths",
         ));
     }
+    if let Some(sdk) = &scope.sdk_environment {
+        sdk.validate(&scope)
+            .map_err(|error| invalid(&error.to_string()))?;
+    }
     scope.read_only.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(old) = policies.get(&scope.workspace.path) {
         if serde_json::to_vec(old)? != serde_json::to_vec(&scope)? {

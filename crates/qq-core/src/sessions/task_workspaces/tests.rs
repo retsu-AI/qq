@@ -63,6 +63,7 @@ fn publication_fixture() -> (tempfile::TempDir, PathBuf, Arc<TaskExecution>) {
     .unwrap();
     std::fs::write(workspace.path().join("vendor/policy.md"), "agent edit").unwrap();
     let scope = NativeCommandScope {
+        sdk_environment: None,
         executable_directories: Vec::new(),
         workspace: workspace.directory_grant(),
         read_only: vec![],
@@ -103,6 +104,7 @@ async fn open_session(
         std::fs::create_dir(&control).unwrap();
         let policy = TaskWorkspacePolicy {
             cargo_cache: None,
+            sdk_environment: None,
             executable_directories: Vec::new(),
             directory: NativeDirectoryGrant::capture(&control).unwrap(),
             read_only: vec![],
@@ -1717,6 +1719,7 @@ fn installed_tool_inputs_reject_source_overlap_and_allow_sibling_tasks() {
         .into_iter()
         .map(|path| NativeDirectoryGrant::capture(&root.join(path)).unwrap())
         .collect(),
+        sdk_environment: None,
         executable_directories: vec![root.join("control/sdk"), root.join("rust/bin")],
         cargo_cache: None,
         resources: NativeResources::Host,

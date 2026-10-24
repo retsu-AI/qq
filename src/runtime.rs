@@ -3467,6 +3467,10 @@ pub enum RuntimeHandlerError {
 mod windows_sdk;
 
 #[cfg(windows)]
+#[path = "runtime/windows_msvc.rs"]
+pub(crate) mod windows_msvc;
+
+#[cfg(windows)]
 fn windows_toolchain_read_roots(bin: &Path) -> std::io::Result<Vec<PathBuf>> {
     let denied = || {
         std::io::Error::new(
@@ -3570,6 +3574,10 @@ fn task_workspace_policy(
                 .ok_or_else(|| std::io::Error::other("Windows system directory is unavailable"))?,
         )?);
         #[cfg(windows)]
+        let mut sdk_environment = None;
+        #[cfg(not(windows))]
+        let sdk_environment = None;
+        #[cfg(windows)]
         {
             // Admit installed compiler inputs, never the global Cargo home,
             // credentials, or hardlinked rustup proxy directory.
@@ -3584,6 +3592,17 @@ fn task_workspace_policy(
                 let roots = windows_toolchain_read_roots(&bin)?;
                 executable_directories.push(roots[0].clone());
                 read_only.extend(roots);
+            }
+            if let Some(msvc) = windows_msvc::discover(&directory)? {
+                // Reserve one directory for Node and retain the existing total bound.
+                if executable_directories.len() + msvc.bins.len() > 15 {
+                    return Err(std::io::Error::other(
+                        "installed compiler search roots exceed their bound",
+                    ));
+                }
+                executable_directories.extend(msvc.bins);
+                read_only.extend(msvc.read_only);
+                sdk_environment = Some(msvc.environment);
             }
             // A PATH entry alone must not authorize an arbitrary parent tree.
             // Recognize the standard Node installation beneath Program Files.
@@ -3637,6 +3656,7 @@ fn task_workspace_policy(
         Ok(qq_core::TaskWorkspacePolicy {
             cargo_cache,
             executable_directories,
+            sdk_environment,
             directory: directory_grant,
             read_only: read_only
                 .into_iter()
