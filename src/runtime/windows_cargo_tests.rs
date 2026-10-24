@@ -137,6 +137,11 @@ async fn installed_cargo_startup_through_real_auto_worker() {
                 complete.clone(),
             ]),
             response(vec![
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":""}}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"exec","arguments":json!({"program":"cargo","args":["--version"]}).to_string()}}),
+                complete.clone(),
+            ]),
+            response(vec![
                 json!({"type":"response.output_text.delta","delta":"finished"}),
                 complete,
             ]),
@@ -328,6 +333,20 @@ async fn installed_cargo_startup_through_real_auto_worker() {
     let record: Value = serde_json::from_str(&record).unwrap();
     assert_eq!(record["scope"]["network"], "isolated");
     assert_eq!(record["scope"]["resources"]["access"], "committed");
+    let direct_exec = events
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "exec" => {
+                Some(tool_call)
+            }
+            _ => None,
+        })
+        .expect("real Auto must execute direct Cargo through the durable exec tool");
+    assert!(
+        !direct_exec.is_error,
+        "direct Cargo exec must succeed: {:?}",
+        direct_exec.result
+    );
     for (name, _) in commands {
         assert_eq!(
             fs::read_to_string(source.join(format!("{name}.exit")))

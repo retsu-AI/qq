@@ -18,8 +18,13 @@ pub(super) struct Debugger {
     status: Arc<Mutex<fs::File>>,
 }
 impl Debugger {
-    pub(super) fn start(pid: u32) -> io::Result<Option<Self>> {
-        if !cfg!(target_arch = "x86_64") {
+    pub(super) fn start(pid: u32, program: &std::path::Path) -> io::Result<Option<Self>> {
+        if !cfg!(target_arch = "x86_64")
+            || !program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("cargo.exe"))
+        {
             return Ok(None);
         }
         let exe = PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe");
@@ -40,7 +45,7 @@ impl Debugger {
             &status,
             &format!("QQ_CDB_STATE target_pid={pid} setup_started"),
         );
-        let child_script = root.join(format!("cdb-{pid}-child.txt"));
+        let target_script = root.join(format!("cdb-{pid}-target.txt"));
         let main_script = root.join(format!("cdb-{pid}-main.txt"));
         let open_script = root.join(format!("cdb-{pid}-open.txt"));
         let return_script = root.join(format!("cdb-{pid}-return.txt"));
@@ -64,7 +69,7 @@ gc
             ),
         )?;
         write_new(
-            &child_script,
+            &target_script,
             &format!(
                 r#"bu ntdll!RtlSetLastWin32Error ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS Win32=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
 bu ntdll!RtlNtStatusToDosError ".if (@ecx != 0) {{.printf \"QQ_CDB_STATUS NtStatus=%x pid=%x tid=%x\\n\", @ecx, @$tpid, @$tid; kn 12}}; gc"
@@ -82,16 +87,12 @@ g
             &main_script,
             &format!(
                 r#".sympath {}
-sxe -c "$$><{}" cpr
 sxn bpe
 sxn ibp
-.childdbg 1
-.childdbg
-.printf "QQ_CDB_READY pid=%x\n", @$tpid
-g
+$$><{}
 "#,
                 root.join("cdb-symbols").display(),
-                child_script.display()
+                target_script.display()
             ),
         )?;
         let mut child = Command::new(exe)
@@ -100,7 +101,6 @@ g
             .args([
                 "-p",
                 &pid.to_string(),
-                "-o",
                 "-pd",
                 "-hd",
                 "-G",

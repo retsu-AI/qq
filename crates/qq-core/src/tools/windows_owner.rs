@@ -484,7 +484,7 @@ pub(crate) fn execute(encoded: &str) -> io::Result<u8> {
     profile
         .grant_named_object_creation(&write_sid)
         .map_err(io::Error::other)?;
-    let debugger = debugger::Debugger::start(child.pid)?;
+    let debugger = debugger::Debugger::start(child.pid, &packet.program)?;
     std::io::stderr().write_all(READY)?;
     let mut release = [0];
     input.read_exact(&mut release)?;
