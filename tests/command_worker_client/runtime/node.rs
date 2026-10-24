@@ -14,7 +14,7 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         std::fs::write(directory.join("package.json"), package.to_string()).unwrap();
         std::fs::write(
             directory.join("build.js"),
-            "require('fs').writeFileSync('built.txt', 'built');\n",
+            "const os=require('os'),fs=require('fs'),assert=require('assert');assert.ok(os.type().length>0);assert.ok(os.version().length>0);fs.writeFileSync('node-os-proof.json',JSON.stringify({type:os.type(),version:os.version()}));fs.writeFileSync('built.txt','built');\n",
         )
         .unwrap();
         std::fs::write(directory.join("test.js"), "const fs=require('fs');require('assert').strictEqual(fs.readFileSync('built.txt','utf8'),'built');fs.writeFileSync('tested.txt','tested');\n").unwrap();
@@ -46,6 +46,9 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         String::from_utf8_lossy(&host.stderr)
     );
     assert!(host.status.success());
+    let host_os: Value =
+        serde_json::from_slice(&std::fs::read(host_workspace.join("node-os-proof.json")).unwrap())
+            .unwrap();
     assert_eq!(
         std::fs::read_to_string(host_workspace.join("tested.txt")).unwrap(),
         "tested"
@@ -131,6 +134,10 @@ async fn installed_node_builds_and_tests_in_default_auto() {
         "tested"
     );
     assert!(!workspace.join(".qq/task-home").exists());
+    let task_os: Value =
+        serde_json::from_slice(&std::fs::read(workspace.join("node-os-proof.json")).unwrap())
+            .unwrap();
+    assert_eq!(task_os, host_os);
     let captured = tokio::task::spawn_blocking(move || provider.capture_all())
         .await
         .unwrap();

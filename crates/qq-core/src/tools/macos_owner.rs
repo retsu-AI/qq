@@ -938,6 +938,11 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
     );
+    // Darwin uname() needs these two names in addition to the OS/hardware
+    // names above; Node's OS bootstrap calls it even for ordinary npm scripts.
+    profile.push_str(
+        "(allow sysctl-read (sysctl-name \"kern.hostname\") (sysctl-name \"kern.version\"))\n",
+    );
     // The system /bin/sh shim reads this root-owned selector before launching
     // the selected system shell. This grants one file, not its parent tree.
     profile.push_str("(allow file-read* (literal \"/private/var/select/sh\"))\n");
@@ -1062,6 +1067,9 @@ mod tests {
             NativeNetwork::Isolated,
         )
         .unwrap();
+        assert!(text.contains("(sysctl-name \"kern.hostname\")"));
+        assert!(text.contains("(sysctl-name \"kern.version\")"));
+        assert!(!text.contains("(sysctl-name-prefix \"kern.\")"));
         assert!(text.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"));
         assert!(text.contains("(allow file-read* (literal \"/var/select/developer_dir\"))"));
         assert!(

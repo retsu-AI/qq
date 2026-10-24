@@ -123,18 +123,26 @@ fn roots(
         .ok_or_else(denied)?
         .join("lib")
         .canonicalize()?;
+    let developer_bin = developer.join("usr/bin").canonicalize()?;
+    let mut read_only = vec![bin.clone(), lib, sdk];
+    read_only.push(developer_bin.clone());
+    let developer_lib = developer.join("usr/lib");
+    if developer_lib.try_exists()? {
+        read_only.push(developer_lib.canonicalize()?);
+    }
     if !clang.is_file()
-        || !sdk.is_dir()
-        || !lib.is_dir()
-        || [&bin, &lib, &sdk].iter().any(|root| {
-            !root.starts_with(developer) || root.starts_with(control) || control.starts_with(root)
+        || read_only.iter().any(|root| {
+            !root.is_dir()
+                || !root.starts_with(developer)
+                || root.starts_with(control)
+                || control.starts_with(root)
         })
     {
         return Err(denied());
     }
     Ok(super::macos_sdk::Inputs {
-        executable_directories: vec![bin.clone()],
-        read_only: vec![bin, lib, sdk],
+        executable_directories: vec![bin, developer_bin],
+        read_only,
     })
 }
 
@@ -150,7 +158,14 @@ mod tests {
         let bin = developer.join("Toolchains/XcodeDefault.xctoolchain/usr/bin");
         let sdk = developer.join("Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk");
         let control = base.join("control");
-        for directory in [&bin, &bin.parent().unwrap().join("lib"), &sdk, &control] {
+        for directory in [
+            &bin,
+            &bin.parent().unwrap().join("lib"),
+            &sdk,
+            &control,
+            &developer.join("usr/bin"),
+            &developer.join("usr/lib"),
+        ] {
             std::fs::create_dir_all(directory).unwrap();
         }
         let clang = bin.join("clang");
@@ -163,13 +178,25 @@ mod tests {
         )
         .unwrap();
         let inputs = roots(&selected, &clang, &sdk, &control).unwrap();
-        assert_eq!(
-            inputs.executable_directories.as_slice(),
-            std::slice::from_ref(&bin)
+        assert_eq!(inputs.executable_directories.len(), 2);
+        assert_eq!(inputs.executable_directories.first(), Some(&bin));
+        assert!(
+            inputs
+                .executable_directories
+                .contains(&developer.join("usr/bin"))
         );
-        assert_eq!(inputs.read_only.len(), 3);
+        assert_eq!(inputs.read_only.len(), 5);
         assert!(!inputs.read_only.contains(&developer));
         assert!(!inputs.read_only.contains(&applications));
+        std::fs::remove_dir(developer.join("usr/lib")).unwrap();
+        assert_eq!(
+            roots(&selected, &clang, &sdk, &control)
+                .unwrap()
+                .read_only
+                .len(),
+            4
+        );
+        std::fs::create_dir(developer.join("usr/lib")).unwrap();
         assert!(
             validate_developer(
                 Path::new("relative"),
@@ -191,6 +218,18 @@ mod tests {
         let private = base.join("private");
         std::fs::create_dir(&private).unwrap();
         std::fs::write(private.join("credential"), b"private").unwrap();
+        let implementation = developer.join("usr/bin");
+        std::fs::rename(&implementation, developer.join("usr/bin.saved")).unwrap();
+        std::os::unix::fs::symlink(&private, &implementation).unwrap();
+        assert_eq!(
+            roots(&selected, &clang, &sdk, &control)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        std::fs::remove_file(&implementation).unwrap();
+        std::fs::rename(developer.join("usr/bin.saved"), &implementation).unwrap();
         assert!(
             validate_developer(
                 &private,
