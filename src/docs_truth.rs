@@ -892,7 +892,7 @@ mod tests {
             root.join("crates/qq-tui/src/lib.rs"),
         ]);
         let has = |relative: &str| files.contains(&root.join(relative));
-        assert!(has("src/main.rs") && has("src/cli.rs") && has("src/runtime.rs"));
+        assert!(has("src/main.rs") && has("src/cli.rs") && has("src/headless.rs"));
         assert!(has("crates/qq-tui/src/app.rs"));
         // Gated on the parent's `mod` line, not in the file itself.
         assert!(!has("src/docs_truth.rs"), "{files:?}");

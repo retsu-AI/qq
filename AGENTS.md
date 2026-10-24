@@ -37,7 +37,7 @@ timeout.
 
 ## Repository map
 
-- `src/`: binary, CLI, runtime composition.
+- `src/`: binary, CLI, TUI/server wiring, headless driver.
 - `crates/qq-core/`: agent runtime, sessions, tools, persistence.
 - `crates/qq-provider/`: provider-neutral model API and adapters (retry,
   transport, and auth stay here).
@@ -46,8 +46,10 @@ timeout.
 - `crates/qq-config/`: layered configuration and policy.
 - `crates/qq-client/`, `crates/qq-server/`, `crates/qq-tui/`: client, server,
   terminal UI.
-- `crates/qq-auth/`, `crates/qq-mcp/`, `crates/qq-harness/`,
-  `crates/qq-reasoning/`: auth, MCP, hosting composition, reasoning events.
+- `crates/qq-host/`: runtime composition (config and credentials to a
+  runtime loader, reviewer, model catalog, server handler).
+- `crates/qq-auth/`, `crates/qq-mcp/`, `crates/qq-reasoning/`: auth, MCP,
+  reasoning events.
 - `xtask/`: `check`, `lint`, `smoke`, `perf`, `release`.
 - `docs/guide/` (user docs, source of `website/`), `docs/design/` (as built).
 

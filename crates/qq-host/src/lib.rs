@@ -1,8 +1,26 @@
-//! Shared composition infrastructure for QQ's configuration-driven hosts.
-//! Configuration/model resolution and outcome driving move here in AC12.2/.3.
+//! Composition for QQ's configuration-driven hosts: configuration and
+//! credentials in, a `RuntimeLoader`, approval reviewer, workspace grant
+//! authority and `ServerHandler` out. The `qq` binary is its first consumer.
 #![forbid(unsafe_code)]
+pub mod builtin_auth;
+mod catalog;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+mod command_worker;
 pub mod mcp;
 pub mod plan;
+pub mod runtime;
+
+pub use catalog::ModelDiscoveryError;
+
+/// The executable hosting the runtime. Process provenance pins the source
+/// revision, and the command worker refuses a worker from a different build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostBuild {
+    /// Full source revision, with `-dirty` when the tree was modified.
+    pub source_revision: &'static str,
+    /// `<crate version>+<short sha>.<commit date>`.
+    pub version: &'static str,
+}
 
 /// Failure to construct the configured MCP bridge, not a model-discovery error.
 #[derive(Debug, thiserror::Error)]

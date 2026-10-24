@@ -1,0 +1,45 @@
+[package]
+name = "qq-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# The full provider profile. `--no-default-features` builds HTTP families
+# only; configured Bedrock providers then fail with a configuration error.
+default = ["provider-bedrock"]
+provider-bedrock = ["qq-provider/provider-bedrock"]
+# Test-only constructors and catalog probes for the binary's own tests.
+test-support = []
+
+[dependencies]
+directories.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
+qq-auth.workspace = true
+qq-config.workspace = true
+qq-core.workspace = true
+qq-mcp.workspace = true
+qq-protocol.workspace = true
+qq-provider.workspace = true
+qq-server.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+base64.workspace = true
+qq-client.workspace = true
+qq-provider = { workspace = true, features = ["test-support"] }
+ron.workspace = true
+tempfile.workspace = true
