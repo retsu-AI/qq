@@ -4624,8 +4624,65 @@ async fn write_children_inherit_only_human_grants_and_keep_internal_review() {
         assert_no_human_permission_request(&observed);
         assert!(!observed.iter().any(|event| matches!(&event.event,
             SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "fetch")));
-        assert!(observed.iter().any(|event| matches!(&event.event,
-            SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch" && tool_call.state == ToolCallState::Denied)));
+        let child_events: Vec<_> = observed
+            .iter()
+            .filter(|event| event.session_id == child_id)
+            .collect();
+        assert!(
+            child_events.iter().any(|event| matches!(
+                &event.event,
+                SessionEvent::RunFinished {
+                    outcome: RunOutcome::Completed,
+                    ..
+                }
+            )),
+            "child must settle before its foreground parent: {child_events:#?}"
+        );
+        let denied = child_events
+            .iter()
+            .find_map(|event| match &event.event {
+                SessionEvent::ToolApprovalResolved {
+                    tool_call,
+                    resolution: ApprovalResolution::DeniedByReviewer,
+                    ..
+                } if human_host && !revoke_parent => Some(tool_call),
+                SessionEvent::ToolCallFinished { tool_call } if !human_host || revoke_parent => {
+                    Some(tool_call)
+                }
+                _ => None,
+            })
+            .expect("the exact typed denial event must be present");
+        assert_eq!(denied.name, "fetch");
+        assert_eq!(denied.state, ToolCallState::Denied, "{child_events:#?}");
+        assert!(denied.is_error);
+        let expected_reason = if revoke_parent {
+            "parent_permission_required"
+        } else if human_host {
+            "stop before network dispatch"
+        } else {
+            "outside_auto_scope"
+        };
+        assert!(
+            denied
+                .result
+                .as_deref()
+                .is_some_and(|result| result.contains(expected_reason)),
+            "{child_events:#?}"
+        );
+        let persisted = harness
+            .runtime
+            .inner
+            .store
+            .call(Priority::Control, move |connection| {
+                Ok(connection.query_row(
+                    "SELECT state,is_error FROM tool_calls WHERE session_id=?1 AND name='fetch'",
+                    [child_id.to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(persisted, ("denied".into(), true));
         if revoke_parent {
             assert!(observed.iter().any(|event| matches!(&event.event,
                 SessionEvent::ToolCallFinished { tool_call } if tool_call.name == "fetch"
