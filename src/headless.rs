@@ -8031,7 +8031,16 @@ mod tests {
                 Ok(())
             }
         }
-        let fixture = fixture(|| TextProvider).await;
+        struct CountedTextProvider(Arc<std::sync::atomic::AtomicUsize>);
+        impl Provider for CountedTextProvider {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                TextProvider.stream(request)
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let fixture = fixture(move || CountedTextProvider(Arc::clone(&observed))).await;
         let mut output = StalledOutput {
             sessions: fixture.sessions.clone(),
             database: fixture
@@ -8064,6 +8073,11 @@ mod tests {
         assert_eq!(records.last().unwrap()["recovered_answer"], "hello");
         assert_eq!(records.last().unwrap()["status"], "completed");
         assert_eq!(records.last().unwrap()["exit_code"], 0);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "recovering a finished task must not send another provider request"
+        );
         fixture.sessions.close().await.unwrap();
     }
 
