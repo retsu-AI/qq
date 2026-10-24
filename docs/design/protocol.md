@@ -60,7 +60,7 @@ below. Historical descriptor JSON remains historical evidence.
 ## Protocol Version
 
 ```text
-PROTOCOL_VERSION = 39
+PROTOCOL_VERSION = 40
 ```
 
 Descriptor 16 adds sorted workspace-relative configured pack roots to the
