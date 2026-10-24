@@ -135,6 +135,7 @@ async fn retry_after_fault(operation: &'static str, fault: Fault) {
             "submit" => {
                 client
                     .submit(NativeCommand {
+                        task_git_call: None,
                         id,
                         workspace: std::fs::canonicalize(workspace.path()).unwrap(),
                         workspace_identity: NativeWorkspaceIdentity::capture(

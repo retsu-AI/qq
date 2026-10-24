@@ -367,7 +367,7 @@ impl Journal {
     pub(super) async fn started(
         &self,
         id: ToolCallId,
-        receipt: Box<ExecutionContextReceipt>,
+        mut receipt: Box<ExecutionContextReceipt>,
     ) -> Result<u64, CommandOwnerError> {
         self.call(move |db| {
             let tx = db.transaction()?;
@@ -380,10 +380,17 @@ impl Journal {
             struct ReceiptBinding {
                 tool: String,
                 arguments: String,
+                #[serde(default)]
+                task_git_call: Option<super::NativeTaskGitCall>,
             }
             let request: ReceiptBinding = serde_json::from_str(&request)?;
             if !receipt.valid() || !receipt.bound_to(id, &request.tool, &request.arguments) {
                 return Err(CommandOwnerError::Invalid);
+            }
+            if let Some(call) = request.task_git_call {
+                receipt
+                    .bind_task_git(id, &request.arguments, &call)
+                    .map_err(|_| CommandOwnerError::Invalid)?;
             }
             tx.execute(
                 "UPDATE commands SET status='running',receipt=?2,version=version+1 WHERE id=?1",

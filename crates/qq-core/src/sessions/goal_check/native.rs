@@ -259,6 +259,7 @@ async fn run_inner(
         None => environment,
     };
     let request = NativeCommand {
+        task_git_call: None,
         id,
         workspace: scope.as_ref().map_or_else(
             || PathBuf::from(&claimed.workspace),
