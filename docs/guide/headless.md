@@ -90,6 +90,9 @@ qq run --approval auto \
 Grants use the same shapes as the TUI's approve-for-session
 ([Permissions](permissions.md#grants-in-configuration)); `--allow-shell
 "cargo test"` covers `cargo test -p x` and never `cargo test | sh`.
+Under Auto, these grants are stored before the prompt is submitted, including
+when resuming a session. They do not open an approval hold. Read-only, Ask,
+parent authority, forbidden commands, and managed denies still apply.
 
 ### Limits
 

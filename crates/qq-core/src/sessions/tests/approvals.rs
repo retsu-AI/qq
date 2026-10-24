@@ -4364,3 +4364,124 @@ async fn idle_close_observes_termination_without_a_settlement() {
         ));
     }
 }
+
+#[tokio::test]
+async fn explicit_session_grants_are_bounded_idempotent_and_durable() {
+    let directory = TempDir::new().unwrap();
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+    let created = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+        panic!("session")
+    };
+    let seed = WorkspaceGrantSeed {
+        tools: vec!["one".into(), "one".into(), "two".into()],
+        shell_prefixes: vec!["cargo test".into()],
+        hosts: vec!["docs.example.org".into()],
+    };
+    runtime
+        .seed_session_grants(session_id, seed.clone())
+        .await
+        .unwrap();
+    runtime.seed_session_grants(session_id, seed).await.unwrap();
+    let (_, grants, _) = runtime
+        .inner
+        .store
+        .approval_policy(session_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        grants.tools,
+        std::collections::HashSet::from(["one".into(), "two".into()])
+    );
+    assert_eq!(grants.shell_prefixes, ["cargo test"]);
+    assert_eq!(grants.hosts, ["docs.example.org"]);
+    runtime.close().await.unwrap();
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let (_, restored, _) = runtime
+        .inner
+        .store
+        .approval_policy(session_id)
+        .await
+        .unwrap();
+    assert_eq!(restored.tools, grants.tools);
+    assert_eq!(restored.shell_prefixes, grants.shell_prefixes);
+    assert_eq!(restored.hosts, grants.hosts);
+    runtime
+        .seed_session_grants(
+            session_id,
+            WorkspaceGrantSeed {
+                tools: (0..MAX_SESSION_GRANTS)
+                    .map(|n| format!("tool-{n}"))
+                    .collect(),
+                ..WorkspaceGrantSeed::default()
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .seed_session_grants(
+            session_id,
+            WorkspaceGrantSeed {
+                tools: vec!["overflow".into()],
+                ..WorkspaceGrantSeed::default()
+            },
+        )
+        .await
+        .unwrap();
+    let total = runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM session_grants WHERE session_id=?1",
+                [session_id.to_string()],
+                |row| row.get::<_, u32>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(total, MAX_SESSION_GRANTS);
+    let (_, capped, _) = runtime
+        .inner
+        .store
+        .approval_policy(session_id)
+        .await
+        .unwrap();
+    assert!(!capped.tools.contains("overflow"));
+    assert!(capped.tools.contains("one"));
+    assert_eq!(capped.shell_prefixes, ["cargo test"]);
+    let child = create_session(&runtime, workspace_id, Some(session_id)).await;
+    let CommandOutcome::SessionCreated {
+        session_id: child_id,
+    } = child.outcome
+    else {
+        panic!("child session")
+    };
+    assert!(matches!(
+        runtime
+            .seed_session_grants(
+                child_id,
+                WorkspaceGrantSeed {
+                    tools: vec!["shell".into()],
+                    ..WorkspaceGrantSeed::default()
+                }
+            )
+            .await,
+        Err(SessionRuntimeError::ChildAuthorityEscalation)
+    ));
+    let (_, child_grants, _) = runtime.inner.store.approval_policy(child_id).await.unwrap();
+    assert!(child_grants.tools.is_empty());
+    runtime.shutdown().await.unwrap();
+}
