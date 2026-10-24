@@ -163,7 +163,7 @@ mod tests {
         )
         .unwrap();
         let inputs = roots(&selected, &clang, &sdk, &control).unwrap();
-        assert_eq!(inputs.executable_directories, [bin]);
+        assert_eq!(inputs.executable_directories, [bin.clone()]);
         assert_eq!(inputs.read_only.len(), 3);
         assert!(!inputs.read_only.contains(&developer));
         assert!(!inputs.read_only.contains(&applications));
