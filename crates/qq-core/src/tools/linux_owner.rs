@@ -22,6 +22,7 @@ mod exec;
 mod filesystem;
 mod filesystem_root;
 mod kernel_isolation;
+mod loopback;
 mod network;
 mod resources;
 pub(crate) use exec::execute;
