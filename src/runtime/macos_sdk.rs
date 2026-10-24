@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn unsupported_library_errors_identify_the_actual_install_name() {
         let (_fixture, prefix, image, _) = fixture();
-        let name = "@rpath/libnode.127.dylib";
+        let name = "@unsupported/libnode.127.dylib";
         let error = inputs(
             &prefix,
             &image,
@@ -288,6 +288,85 @@ mod tests {
                 .contains("library install name is unsupported")
         );
         assert!(error.to_string().contains(name));
+    }
+
+    #[test]
+    fn formula_rpath_resolves_libnode_and_its_self_install_name() {
+        let (_fixture, prefix, image, library) = fixture();
+        let libnode = image
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("lib/libnode.127.dylib");
+        std::fs::write(&libnode, b"libnode").unwrap();
+        let mut queried = Vec::new();
+        let result = inputs(
+            &prefix,
+            &image,
+            &prefix.join("control"),
+            Instant::now() + std::time::Duration::from_secs(5),
+            |current, _| {
+                queried.push(current.to_owned());
+                let names = if current == image {
+                    "@rpath/libnode.127.dylib".to_owned()
+                } else if current == libnode {
+                    format!("@rpath/libnode.127.dylib\n{}", library.display())
+                } else {
+                    library.display().to_string()
+                };
+                Ok(Some(
+                    format!(
+                        "{}:\n{}",
+                        current.display(),
+                        names
+                            .lines()
+                            .map(|name| format!(
+                                "\t{name} (compatibility version 1.0.0, current version 1.0.0)\n"
+                            ))
+                            .collect::<String>()
+                    )
+                    .into_bytes(),
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(queried.len(), 3);
+        assert!(queried.contains(&libnode));
+        assert_eq!(result.read_only.len(), 3);
+        assert!(!result.read_only.contains(&prefix.join("Cellar")));
+    }
+
+    #[test]
+    fn formula_rpath_refuses_missing_escaping_and_non_normal_inputs() {
+        let (_fixture, prefix, image, _) = fixture();
+        let private = prefix.join("private.dylib");
+        std::fs::write(&private, b"private").unwrap();
+        let lib = image.parent().unwrap().parent().unwrap().join("lib");
+        std::os::unix::fs::symlink(&private, lib.join("escape.dylib")).unwrap();
+        for name in [
+            "@rpath/missing.dylib",
+            "@rpath/escape.dylib",
+            "@rpath/../../private.dylib",
+            "@rpath//usr/lib/private.dylib",
+        ] {
+            let result = inputs(
+                &prefix,
+                &image,
+                &prefix.join("control"),
+                Instant::now() + std::time::Duration::from_secs(5),
+                |_, _| {
+                    Ok(Some(
+                        format!(
+                            "node:\n\t{name} (compatibility version 1.0.0, current version 1.0.0)\n"
+                        )
+                        .into_bytes(),
+                    ))
+                },
+            );
+            assert!(result.is_err(), "must reject {name}");
+        }
+        assert_eq!(std::fs::read(private).unwrap(), b"private");
     }
 
     #[test]
