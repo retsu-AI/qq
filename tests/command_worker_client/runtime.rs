@@ -4,6 +4,12 @@ use qq_provider::test_support::LoopbackServer;
 use serde_json::{Value, json};
 use std::{path::Path, process::Stdio, time::Duration};
 
+#[path = "runtime/cargo.rs"]
+mod cargo;
+#[cfg(target_os = "macos")]
+#[path = "runtime/node.rs"]
+mod node;
+
 #[tokio::test]
 async fn default_auto_cannot_overwrite_host_files_through_a_project_symlink() {
     exercise_default_auto(None, false, "for-goal").await;
@@ -204,6 +210,13 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_sc
         "{}",
         captured[1].body()
     );
+    assert!(
+        !captured[1]
+            .body()
+            .contains("Error opening /private/var/select/sh"),
+        "the system shell must read its selector without a sandbox error: {}",
+        captured[1].body()
+    );
 }
 
 #[tokio::test]
@@ -345,7 +358,7 @@ pub(super) fn configured_cli(
     command
 }
 
-fn data_directory(home: &Path) -> std::path::PathBuf {
+pub(super) fn data_directory(home: &Path) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
     let relative = "data/qq";
     #[cfg(target_os = "macos")]

@@ -46,6 +46,8 @@ impl NativeCommandService for Recording {
 
 fn scope(path: &Path) -> NativeCommandScope {
     NativeCommandScope {
+        sdk_environment: None,
+        executable_directories: Vec::new(),
         workspace: NativeDirectoryGrant::capture(path).unwrap(),
         read_only: vec![],
         network: NativeNetwork::Isolated,
@@ -375,4 +377,57 @@ async fn native_scope_goal_check_never_falls_back_to_host_execution() {
     assert!(!marker.exists(), "the host command executed before refusal");
     resources.drain().await.unwrap();
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_scope_tool_search_roots_require_read_authority_and_survive_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    for name in ["work", "sdk", "sdk-lib", "sdk-include"] {
+        std::fs::create_dir(root.join(name)).unwrap();
+    }
+    let sdk = NativeDirectoryGrant::capture(&root.join("sdk")).unwrap();
+    let mut admitted = scope(&root.join("work"));
+    admitted.executable_directories = vec![sdk.path.clone()];
+    assert!(super::super::native_scope::NativeScopes::single(admitted.clone()).is_err());
+    admitted.read_only.push(sdk.clone());
+    assert!(super::super::native_scope::NativeScopes::single(admitted.clone()).is_ok());
+    let mut oversized = admitted.clone();
+    oversized.executable_directories = vec![sdk.path.clone(); 17];
+    assert!(super::super::native_scope::NativeScopes::single(oversized).is_err());
+    admitted.sdk_environment = Some(crate::command_owner::NativeSdkEnvironment {
+        linker: sdk.path.join("link.exe"),
+        libraries: vec![root.join("sdk-lib")],
+        includes: vec![root.join("sdk-include")],
+        target: "aarch64-pc-windows-msvc".into(),
+    });
+    assert!(super::super::native_scope::NativeScopes::single(admitted.clone()).is_err());
+    admitted.read_only.extend(
+        ["sdk-lib", "sdk-include"]
+            .map(|name| NativeDirectoryGrant::capture(&root.join(name)).unwrap()),
+    );
+    let expected_environment = serde_json::to_value(&admitted.sdk_environment).unwrap();
+    let database = root.join("sessions.sqlite3");
+    let store = Store::open(database.clone()).await.unwrap();
+    super::super::native_scope::load(&store, vec![admitted])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let store = Store::open(database).await.unwrap();
+    let restored = super::super::native_scope::load(&store, vec![])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        restored
+            .get(&root.join("work"))
+            .unwrap()
+            .executable_directories,
+        [sdk.path]
+    );
+    assert_eq!(
+        serde_json::to_value(&restored.get(&root.join("work")).unwrap().sdk_environment).unwrap(),
+        expected_environment
+    );
+    store.close().await.unwrap();
 }

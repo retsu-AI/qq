@@ -15,6 +15,45 @@ pub struct NativeDirectoryGrant {
 }
 
 impl NativeDirectoryGrant {
+    /// Capture a private host-control root. Verify the open directory's owner
+    /// and access controls before capturing its identity. This does not grant
+    /// access to a payload or keep the pathname pinned after return.
+    pub fn capture_private(path: &Path) -> io::Result<Self> {
+        #[cfg(windows)]
+        let directory = cap_std::fs::Dir::from_std_file(
+            super::windows_state::directory(path).map_err(io::Error::other)?,
+        );
+        #[cfg(not(windows))]
+        let directory = cap_std::fs::Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt as _;
+            let metadata = directory.dir_metadata()?;
+            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "control directory must be private and owned by this user",
+                ));
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        return Err(io::Error::other(
+            "private directory validation is unavailable",
+        ));
+        #[cfg(any(unix, windows))]
+        {
+            let identity = NativeWorkspaceIdentity::held(&directory)?;
+            if NativeWorkspaceIdentity::capture(path)? != identity {
+                return Err(io::Error::other("private directory authority changed"));
+            }
+            Ok(Self {
+                path: path.to_owned(),
+                identity,
+            })
+        }
+    }
+
     /// The caller must authorize this canonical directory independently of
     /// model output. Replacing it before execution invalidates the grant.
     pub fn capture(path: &Path) -> io::Result<Self> {
@@ -80,5 +119,30 @@ impl NativeFilesystem {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    #[test]
+    fn private_grants_capture_the_directory_and_refuse_shared_access() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().canonicalize().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let grant = NativeDirectoryGrant::capture_private(&path).unwrap();
+        assert_eq!(
+            grant.identity,
+            NativeWorkspaceIdentity::capture(&path).unwrap()
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            NativeDirectoryGrant::capture_private(&path)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 }

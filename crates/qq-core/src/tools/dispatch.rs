@@ -623,6 +623,16 @@ pub(crate) async fn execute_with_images(
                         Err(error) => return ToolOutput::refused(error.to_string()),
                     }
                 } else { environment };
+                let environment = match environment.with_executable_directories(
+                    scope.as_ref().map_or(&[], |scope| scope.executable_directories.as_slice()),
+                ) {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let environment = match environment.with_sdk_environment(scope.as_deref()) {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
                 let held_workspace = workspace.clone();
                 let workspace_identity = match tokio::task::spawn_blocking(move || {
                     crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())

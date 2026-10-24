@@ -84,8 +84,9 @@ qq-reasoning = { path = "crates/qq-reasoning" }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
 # The published 0.13 release moves SECURITY_CAPABILITIES after registering its
-# pointer. Pin the owned attribute-storage fix and explicit stdio handle list.
-rappct = { git = "https://github.com/cpjet64/rappct", rev = "c02f9dd960645522009da3827a79bdc99f50c9c1" }
+# pointer. Pin owned attribute storage, explicit stdio handles, and the
+# suspended launch with an owned primary token and private desktop.
+rappct = { git = "https://github.com/retsu-AI/rappct", rev = "4f3449402a6cad646374404043cf90df4e090939" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
 seccompiler = { version = "0.5", default-features = false }
@@ -156,6 +157,11 @@ tracing.workspace = true
 tracing-core.workspace = true
 webbrowser.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+dunce.workspace = true
+find-msvc-tools = "=0.1.9"
+win32job.workspace = true
+
 # `qq init` opens its target relative to a no-follow directory handle.
 # Already in the lock through qq-core; this only enables `fs` for the root.
 [target.'cfg(unix)'.dependencies]
@@ -225,6 +231,8 @@ libproc.workspace = true
 nix = { workspace = true, features = ["event", "process", "signal"] }
 
 [target.'cfg(windows)'.dev-dependencies]
+dunce.workspace = true
+firehazard_sid = { package = "firehazard", git = "https://github.com/MaulingMonkey/firehazard", rev = "1b5818d8fa6c489addb8cbb133a62ab917cc1715" }
 rappct.workspace = true
 win-custody.workspace = true
 windows-permissions.workspace = true
