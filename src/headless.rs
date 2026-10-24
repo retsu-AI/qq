@@ -872,15 +872,34 @@ async fn settle_goal(
         let snapshot = recovery_snapshot(sessions, handle.workspace_id, handle.session_id).await?;
         events = subscribe_current(sessions, &snapshot)?;
         loop {
-            let pending = sessions
+            let (pending, cancel) = match sessions
                 .goal_pending_runs(handle.session_id, expected)
                 .await
-                .map_err(|error| Failure::harness(error.to_string()))?;
+            {
+                Ok(pending) => (pending, true),
+                Err(
+                    SessionRuntimeError::GoalNotFound | SessionRuntimeError::GoalConflict { .. },
+                ) => {
+                    // Clear/replacement revokes the live identity, not the old
+                    // family's cancellation obligation. Observe only work the
+                    // core already cancelled; never cancel a replacement run.
+                    (
+                        sessions
+                            .cancelled_goal_runs(handle.session_id, expected.goal_id)
+                            .await
+                            .map_err(|error| Failure::harness(error.to_string()))?,
+                        false,
+                    )
+                }
+                Err(error) => return Err(Failure::harness(error.to_string())),
+            };
             if pending.is_empty() {
                 break;
             }
-            for run in &pending {
-                request_cancel(sessions, *run).await?;
+            if cancel {
+                for run in &pending {
+                    request_cancel(sessions, *run).await?;
+                }
             }
             let mut pending: std::collections::HashSet<_> = pending.into_iter().collect();
             while !pending.is_empty() {
@@ -1004,10 +1023,20 @@ impl AcceptedGoalGuard {
         &mut self,
     ) -> Result<Option<(Box<qq_protocol::GoalSnapshot>, qq_protocol::EventCursor)>, Failure> {
         if let Some((sessions, session_id)) = &self.cleanup {
-            let receipt = sessions
+            let receipt = match sessions
                 .pause_goal_if_active(*session_id, self.expected)
                 .await
-                .map_err(|error| Failure::harness(error.to_string()))?;
+            {
+                Ok(receipt) => receipt,
+                Err(
+                    SessionRuntimeError::GoalNotFound | SessionRuntimeError::GoalConflict { .. },
+                ) => {
+                    let drained = settle_goal(sessions, &self.handle, self.expected).await;
+                    self.disarm();
+                    return drained.map(Some);
+                }
+                Err(error) => return Err(Failure::harness(error.to_string())),
+            };
             let goal = goal_receipt(receipt)?;
             self.expected = goal_identity(&goal);
             let (goal, through) = settle_goal(sessions, &self.handle, self.expected).await?;
@@ -5107,6 +5136,14 @@ mod tests {
                             }),
                             budget: Box::new(goal.budget.clone()), expected: Some(goal_identity(&stopped)), replace: true,
                         }).await.unwrap();
+                    }
+                    if matches!(action, "clear" | "replace") {
+                        let mut draining = fixture.sessions.cancelled_goal_runs(handle.session_id, expected.goal_id).await.unwrap();
+                        let mut family = vec![root, child];
+                        draining.sort();
+                        family.sort();
+                        assert_eq!(draining, family);
+                        assert!(fixture.sessions.cancelled_goal_runs(foreign.session_id, expected.goal_id).await.unwrap().is_empty());
                     }
                     assert!(foreground.as_mut().now_or_never().is_none());
                     assert!(!parse_records(&String::from_utf8(output.bytes.lock().unwrap().clone()).unwrap())

@@ -1042,6 +1042,23 @@ impl Store {
         .await
     }
 
+    pub(super) async fn cancelled_goal_runs(
+        &self,
+        session_id: SessionId,
+        goal_id: qq_protocol::GoalId,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            Ok(
+                goals::paid_obligations(connection, session_id, Some(goal_id))?
+                    .into_iter()
+                    .filter(|work| work.cancelled)
+                    .map(|work| work.run)
+                    .collect(),
+            )
+        })
+        .await
+    }
+
     pub(super) async fn goal_owns_run(
         &self,
         session_id: SessionId,

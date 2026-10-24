@@ -1171,6 +1171,23 @@ impl SessionRuntime {
             .await
     }
 
+    /// Already-cancelled runs sponsored by this session's goal, including
+    /// historical goals that were cleared or replaced while work drained.
+    /// This read never includes replacement work or requests cancellation.
+    pub async fn cancelled_goal_runs(
+        &self,
+        session_id: SessionId,
+        goal_id: qq_protocol::GoalId,
+    ) -> Result<Vec<RunId>, SessionRuntimeError> {
+        if *self.inner.failed.borrow() {
+            return Err(SessionRuntimeError::Unavailable);
+        }
+        self.inner
+            .store
+            .cancelled_goal_runs(session_id, goal_id)
+            .await
+    }
+
     /// Whether an unsettled run is sponsored by this exact live goal.
     pub async fn goal_owns_run(
         &self,
