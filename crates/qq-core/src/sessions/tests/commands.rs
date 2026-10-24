@@ -298,7 +298,7 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     // the hold point: steering queued there must enter the request for
     // turn two, after turn one's tool result.
     let mut harness = approval_harness(
-        ApprovalMode::Auto,
+        ApprovalMode::Ask,
         "__test_shell",
         r#"{"command":"git push origin main"}"#,
         2,
@@ -331,7 +331,17 @@ async fn steering_is_applied_at_the_next_boundary_and_replays_in_context() {
     )
     .await
     .unwrap();
-    let observed = collect_through_finished_generously(&mut harness.events).await;
+    // Ask requires a fresh response for the second tool turn as well.
+    let (mut observed, second_call) = collect_until_approval_requested(&mut harness.events).await;
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        second_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    observed.extend(collect_through_finished_generously(&mut harness.events).await);
     let queued = observed
         .iter()
         .find_map(|event| match &event.event {
@@ -457,7 +467,7 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     // attachments, and re-rendered from the store afterwards — so the model
     // sees the bytes as they were, even after the file changes or vanishes.
     let mut harness = approval_harness(
-        ApprovalMode::Auto,
+        ApprovalMode::Ask,
         "__test_shell",
         r#"{"command":"git push origin main"}"#,
         2,
@@ -501,7 +511,17 @@ async fn steering_with_attached_files_sends_the_bytes_and_reconstructs_them() {
     )
     .await
     .unwrap();
-    let observed = collect_through_finished_generously(&mut harness.events).await;
+    // Ask requires a fresh response for the second tool turn as well.
+    let (mut observed, second_call) = collect_until_approval_requested(&mut harness.events).await;
+    respond_approval(
+        &harness.runtime,
+        harness.run_id,
+        second_call.id,
+        ApprovalDecision::ApproveOnce,
+    )
+    .await
+    .unwrap();
+    observed.extend(collect_through_finished_generously(&mut harness.events).await);
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::SteeringApplied { message_id: applied, .. } if *applied == message_id
