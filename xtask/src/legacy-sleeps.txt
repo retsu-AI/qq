@@ -21,7 +21,7 @@ crates/qq-core/src/sessions/tests.rs	8523	async fn side_cancel_drains_a_blocked_
 crates/qq-core/src/sessions/tests.rs	8537	async fn side_cancel_drains_a_blocked_inspection_tool_before_settlement() {	tokio::time::sleep(Duration::from_millis(2)).await;
 crates/qq-core/src/sessions/tests.rs	8949	async fn side_dropped_submit_future_still_settles_and_frees_the_session() {	tokio::time::sleep(Duration::from_millis(2)).await;
 crates/qq-core/src/sessions/tests.rs	9137	async fn side_replacement_waits_for_the_cancelled_owner_to_tear_down() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/sessions/tests/commands.rs	2064	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
+crates/qq-core/src/sessions/tests/commands.rs	2084	fn stream(&self, _request: ModelRequest) -> ProviderStream {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/compaction.rs	1469	async fn saturated_reserved_reload_waits_after_auto_compaction() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/tests/compaction.rs	4794	async fn a_committed_step_survives_shutdown_and_the_next_prompt_folds_from_its_marker() {	tokio::time::sleep(Duration::from_millis(10)).await;
 crates/qq-core/src/sessions/tests/contract.rs	103	async fn the_contract_survives_a_restart_and_is_enforced_by_the_recovering_runtime() {	tokio::time::sleep(Duration::from_millis(5)).await;
@@ -52,12 +52,11 @@ crates/qq-provider/src/http.rs	2131	fn serve_scripted_with_auth(	thread::sleep(d
 crates/qq-provider/src/test_support.rs	214	fn respond_sequence_and_headers(	thread::sleep(Duration::from_millis(1));
 crates/qq-provider/src/test_support.rs	252	fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {	thread::sleep(Duration::from_millis(5));
 crates/qq-tui/src/terminal/tests.rs	455	async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {	tokio::time::sleep(FRAME_INTERVAL).await;
-src/headless.rs	5950	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	5967	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	6748	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
-src/headless.rs	7193	fn review(&self, _request: qq_core::ReviewRequest) -> qq_core::ReviewFuture {	tokio::time::sleep(Duration::from_millis(100)).await;
-src/headless.rs	7713	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
-src/headless.rs	7835	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
+src/headless.rs	6001	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	6018	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	6795	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
+src/headless.rs	7917	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
+src/headless.rs	8039	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
 src/runtime.rs	4618	async fn observers_fall_behind_restart_and_converge_without_delaying_commits() {	tokio::time::sleep(Duration::from_millis(20)).await;
 src/runtime.rs	9028	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
 src/runtime.rs	9038	fn workspace_config_edits_recompile_and_a_broken_edit_keeps_the_valid_plan() {	std::thread::sleep(Duration::from_millis(20));
