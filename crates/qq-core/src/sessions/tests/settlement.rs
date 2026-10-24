@@ -2012,6 +2012,7 @@ async fn queues_follow_ups_without_reordering_conversation_context() {
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
             task_workspaces: None,
+            task_git: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
@@ -2089,6 +2090,7 @@ async fn follow_up_after_an_empty_completed_turn_reaches_the_provider() {
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
             task_workspaces: None,
+            task_git: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
@@ -3355,6 +3357,7 @@ async fn schedules_ready_sessions_fairly() {
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
             task_workspaces: None,
+            task_git: None,
             native_scopes: Vec::new(),
             native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
