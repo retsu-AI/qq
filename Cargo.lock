@@ -3016,6 +3016,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "directories",
+ "dunce",
  "firehazard 0.0.0-2022-09-10 (git+https://github.com/MaulingMonkey/firehazard?rev=1b5818d8fa6c489addb8cbb133a62ab917cc1715)",
  "futures-core",
  "futures-util",
