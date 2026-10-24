@@ -26,6 +26,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p qq --no-default-features runtime::unix_sdk::tests:: -- --nocapture
+          cargo test --locked -p qq --no-default-features runtime::macos_sdk::tests:: -- --nocapture
       - name: Require and execute actual cached dependency Auto integration
         if: ${{ !cancelled() }}
         run: |
