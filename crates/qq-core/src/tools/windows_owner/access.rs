@@ -733,7 +733,7 @@ mod tests {
         let alias = incremental.join("task-proof.rcgu.o");
         std::fs::hard_link(&object, &alias).unwrap();
         assert_eq!(
-            winapi_util::file::information(&open(&object, true).unwrap())
+            winapi_util::file::information(open(&object, true).unwrap())
                 .unwrap()
                 .number_of_links(),
             2

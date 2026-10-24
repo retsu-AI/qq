@@ -45,6 +45,14 @@ impl find_msvc_tools::EnvGetter for ConventionalEnvironment {
     }
 }
 
+fn tool_search_paths(value: &OsStr) -> Vec<PathBuf> {
+    // The discovery crate appends the absent ambient value as a trailing empty
+    // entry. It must not become current-directory input authority.
+    std::env::split_paths(value)
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
+}
+
 pub(crate) fn metadata_main() -> io::Result<()> {
     // The parent owns the original process handle and assigns the kill-on-close job
     // before this release. In particular, the library cannot start vswhere earlier.
@@ -53,9 +61,11 @@ pub(crate) fn metadata_main() -> io::Result<()> {
     if release != *b"G" {
         return Err(denied());
     }
-    let Some(tool) =
-        find_msvc_tools::find_tool_with_env(target()?, "link.exe", &ConventionalEnvironment)
-    else {
+    let Some(tool) = find_msvc_tools::find_tool_with_env(
+        std::env::consts::ARCH,
+        "link.exe",
+        &ConventionalEnvironment,
+    ) else {
         println!("\nQQ_MSVC_METADATA:null");
         return Ok(());
     };
@@ -63,7 +73,7 @@ pub(crate) fn metadata_main() -> io::Result<()> {
         tool.env()
             .into_iter()
             .find(|(name, _)| name == key)
-            .map(|(_, value)| std::env::split_paths(value).collect())
+            .map(|(_, value)| tool_search_paths(value))
             .unwrap_or_default()
     };
     let metadata = Metadata {
@@ -293,30 +303,36 @@ fn validate(metadata: Metadata, roots: &[PathBuf], control: &Path) -> io::Result
                 }
                 _ => false,
             };
-        let kits = parts.len() >= 5
+        let kits = parts.len() >= 4
             && parts[0..2] == ["windows kits", "10"]
-            && parts[3].bytes().all(|b| b.is_ascii_digit() || b == b'.')
-            && match parts[2].as_str() {
-                "bin" => {
-                    matches!(role, InputRole::Binary)
-                        && parts.len() == 5
-                        && matches!(parts[4].as_str(), "arm64" | "x64" | "x86")
-                }
-                "lib" => {
-                    matches!(role, InputRole::Library)
-                        && parts.len() == 6
-                        && matches!(parts[4].as_str(), "ucrt" | "um")
-                        && parts[5] == arch
-                }
-                "include" => {
-                    matches!(role, InputRole::Include)
-                        && parts.len() == 5
-                        && matches!(
-                            parts[4].as_str(),
-                            "ucrt" | "um" | "shared" | "winrt" | "cppwinrt"
-                        )
-                }
-                _ => false,
+            && if parts.len() == 4 {
+                matches!(role, InputRole::Binary)
+                    && parts[2] == "bin"
+                    && matches!(parts[3].as_str(), "arm64" | "x64" | "x86")
+            } else {
+                parts[3].bytes().all(|b| b.is_ascii_digit() || b == b'.')
+                    && match parts[2].as_str() {
+                        "bin" => {
+                            matches!(role, InputRole::Binary)
+                                && parts.len() == 5
+                                && matches!(parts[4].as_str(), "arm64" | "x64" | "x86")
+                        }
+                        "lib" => {
+                            matches!(role, InputRole::Library)
+                                && parts.len() == 6
+                                && matches!(parts[4].as_str(), "ucrt" | "um")
+                                && parts[5] == arch
+                        }
+                        "include" => {
+                            matches!(role, InputRole::Include)
+                                && parts.len() == 5
+                                && matches!(
+                                    parts[4].as_str(),
+                                    "ucrt" | "um" | "shared" | "winrt" | "cppwinrt"
+                                )
+                        }
+                        _ => false,
+                    }
             };
         if !msvc && !kits {
             return Err(denied());
@@ -439,6 +455,18 @@ mod tests {
         wrong_role.linker = lib.join("link.exe");
         std::fs::write(&wrong_role.linker, b"owned wrong-role fixture").unwrap();
         assert!(validate(wrong_role, std::slice::from_ref(&program_files), &control).is_err());
+        let legacy = program_files
+            .join("Windows Kits")
+            .join("10")
+            .join("bin")
+            .join(arch);
+        std::fs::create_dir_all(&legacy).unwrap();
+        let mut with_legacy = metadata();
+        with_legacy.path.push(legacy.clone());
+        assert!(validate(with_legacy, std::slice::from_ref(&program_files), &control).is_ok());
+        let mut wrong_legacy = metadata();
+        wrong_legacy.libraries = vec![legacy];
+        assert!(validate(wrong_legacy, std::slice::from_ref(&program_files), &control).is_err());
         let host = if arch == "arm64" { "x64" } else { "x86" };
         let cross_bin = sdk.join("bin").join(format!("Host{host}")).join(arch);
         let host_dlls = sdk.join("bin").join(format!("Host{host}")).join(host);
@@ -500,14 +528,17 @@ mod tests {
             )
             .is_err()
         );
+        // PathBuf::push normalizes ParentDir when its prefix is verbatim.
+        // Construct the DOS path as raw spelling so this is actually malformed.
+        let mut malformed = dunce::simplified(&custom).as_os_str().to_os_string();
+        malformed.push(r"\..\bin\link.exe");
+        let malformed = Path::new(&malformed);
         assert!(
-            conventional_selection(
-                &custom.join("..").join("bin").join("link.exe"),
-                &[program_files],
-                &control
-            )
-            .is_err()
+            malformed
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
         );
+        assert!(conventional_selection(malformed, &[program_files], &control).is_err());
     }
 
     #[test]
@@ -539,6 +570,15 @@ mod tests {
                 .iter()
                 .all(|path| selected.read_only.contains(path))
         );
+    }
+
+    #[test]
+    fn tool_metadata_omits_empty_search_entries() {
+        let bin = PathBuf::from(r"C:\owned-sdk\bin");
+        let value = std::env::join_paths([bin.clone(), PathBuf::new()]).unwrap();
+        assert!(std::env::split_paths(&value).any(|path| path.as_os_str().is_empty()));
+        assert_eq!(tool_search_paths(&value), [bin]);
+        assert!(tool_search_paths(OsStr::new("")).is_empty());
     }
 
     #[test]

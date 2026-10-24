@@ -233,6 +233,14 @@ jobs:
             bash .github/scripts/test-exact.sh "$selector" || status=1
           done
           exit "$status"
+      - name: Windows selected compiler metadata
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          cargo test --locked -p qq --no-default-features --bin qq runtime::windows_msvc:: -- --nocapture
+          selector=runtime::windows_msvc::tests::installed_msvc_metadata_selects_real_bounded_inputs
+          cargo test --locked -p qq --no-default-features --bin qq -- --list --ignored | tr -d '\r' | grep -Fx "$selector: test"
+          cargo test --locked -p qq --no-default-features --bin qq "$selector" -- --exact --ignored --nocapture
       - name: Windows default Auto integration
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash
@@ -318,6 +326,11 @@ jobs:
         shell: bash
         run: |
           bash .github/scripts/test-exact.sh command_owner::environment::tests::invalid_wire_environments_are_rejected_before_execution
+          bash .github/scripts/test-exact.sh command_owner::environment::tests::selected_msvc_environment_survives_scope_recovery_and_beats_git_linker
+          bash .github/scripts/test-exact.sh sessions::tests::native_scope::native_scope_tool_search_roots_require_read_authority_and_survive_restart
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::public_read_only_inputs_need_no_acl_write_authority
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::repeated_admission_reuses_authorized_cargo_style_hardlinks_without_acl_changes
+          bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::aliased_writable_file_requires_both_current_package_and_task_permissions
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::duplicate_read_grants_keep_writable_roots_private_and_validate_aliases
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::native_grant_validates_the_opened_object_before_acl_changes
           bash .github/scripts/test-exact.sh tools::windows_owner::access::tests::acl_walk_cannot_follow_a_retargeted_ancestor_junction
