@@ -2173,9 +2173,51 @@ pub struct SideQuestionSnapshot {
     pub finished_at_ms: Option<u64>,
 }
 
+/// What one `ToolApprovalRequested` event said the call would do.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalPreview {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellCommandPreview>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit: Option<EditPreview>,
+    /// Present when the hold is an `ask_user` question rather than a
+    /// permission: the client collects answers instead of a yes/no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<QuestionPreview>,
+    /// Present when the held call is `fetch`: the URL and the host a grant
+    /// would name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch: Option<FetchPreview>,
+    /// Why the hold reached the human after a delegate was consulted, from
+    /// `tool_approval_escalated`: the delegate (or `None` when its clock ran
+    /// out) and its bounded reason. Absent while no delegate has answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalated: Option<ApprovalEscalation>,
+}
+
+/// A delegate declined to settle the hold; the prompt says why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovalEscalation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegate: Option<DelegateIdentity>,
+    pub reason: String,
+}
+
+/// Original inputs for an unresolved approval at the snapshot cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PendingApprovalPreview {
+    pub tool_call_id: ToolCallId,
+    pub preview: ApprovalPreview,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approval_previews: Vec<PendingApprovalPreview>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<Box<crate::GoalSnapshot>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -4411,7 +4453,8 @@ mod tests {
         // Version 37 makes Ask human-only per call and moves write-child
         // supervision out of the public approval modes.
         // Version 38 adds store-qualified workspace discovery.
-        assert_eq!(crate::PROTOCOL_VERSION, 38);
+        // Version 39 includes unresolved approval details in session snapshots.
+        assert_eq!(crate::PROTOCOL_VERSION, 39);
         let mut invalid = serde_json::to_value(&run).unwrap();
         invalid["resolved_model"]["future_control"] = serde_json::json!(true);
         assert!(serde_json::from_value::<RunSnapshot>(invalid).is_err());

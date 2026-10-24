@@ -210,7 +210,7 @@ where
 
 #[test]
 fn current_version_commands_receipts_events_and_capabilities_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
     let catalog_cursor = qq_protocol::WorkspaceCatalogCursor {
         store_id: StoreId::from_bytes([1; 16]),
         workspace_id: WorkspaceId::from_bytes([2; 16]),
@@ -1278,7 +1278,7 @@ fn current_version_commands_receipts_events_and_capabilities_match_their_goldens
                 replay_page: 128,
                 max_subscriptions: 64,
                 max_event_bytes: 1_048_576,
-                retention_bounded: false,
+                retention_bounded: true,
             },
             delegation: Some(qq_protocol::DelegationCapabilities {
                 roster: qq_protocol::DelegationRoster {
@@ -1423,7 +1423,8 @@ fn historical_fixtures_still_decode() {
                 decode::<SessionEvent>(&path, &stored);
             } else if name == "outcome_check_interruption_acknowledged" {
                 decode::<CommandOutcome>(&path, &stored);
-            } else if name == "snapshot_check_interruption" {
+            } else if name == "snapshot_check_interruption" || name == "snapshot_pending_approvals"
+            {
                 decode::<qq_protocol::WorkspaceSnapshot>(&path, &stored);
             } else if name.starts_with("command_") {
                 decode::<CommandRequest>(&path, &stored);
@@ -1630,4 +1631,47 @@ fn current_goal_commands_receipts_and_origins_match_goldens() {
             .unwrap();
         check(name, &run);
     }
+}
+
+#[test]
+fn pending_approval_snapshot_matches_its_golden() {
+    let mut summary = summary();
+    let call = ToolCallId::from_bytes([9; 16]);
+    summary.pending_holds = vec![qq_protocol::PendingHold {
+        tool_call_id: call,
+        delegated: false,
+    }];
+    let body = qq_protocol::SessionSnapshot {
+        approval_previews: vec![qq_protocol::PendingApprovalPreview {
+            tool_call_id: call,
+            preview: qq_protocol::ApprovalPreview {
+                question: Some(QuestionPreview {
+                    questions: vec![Question {
+                        prompt: "Which crate?".to_owned(),
+                        options: vec!["core".to_owned(), "provider".to_owned()],
+                        free_text: true,
+                    }],
+                }),
+                escalated: Some(qq_protocol::ApprovalEscalation {
+                    delegate: None,
+                    reason: "The reviewer needs a human decision".to_owned(),
+                }),
+                ..qq_protocol::ApprovalPreview::default()
+            },
+        }],
+        goal: None,
+        side_questions: Vec::new(),
+        summary: summary.clone(),
+        messages: Vec::new(),
+        runs: Vec::new(),
+        tool_calls: Vec::new(),
+        has_older_tool_calls: false,
+        has_older_messages: false,
+    };
+    let snapshot: qq_protocol::WorkspaceSnapshot = serde_json::from_value(serde_json::json!({
+        "cursor":cursor(17), "workspace":{"id":summary.workspace_id,"path":"/workspace"},
+        "sessions":[summary], "focused":body, "has_older_sessions":false
+    }))
+    .unwrap();
+    check("snapshot_pending_approvals", &snapshot);
 }

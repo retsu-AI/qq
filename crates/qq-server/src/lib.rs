@@ -984,7 +984,7 @@ fn server_capabilities(
             replay_page: qq_core::MAX_REPLAY_EVENTS,
             max_subscriptions: u16::try_from(MAX_CONCURRENT_SUBSCRIPTIONS).unwrap_or(u16::MAX),
             max_event_bytes: MAX_EVENT_BYTES as u64,
-            retention_bounded: false,
+            retention_bounded: true,
         },
         delegation: delegation.map(|roster| DelegationCapabilities {
             roster,
@@ -1100,6 +1100,11 @@ async fn workspace_events(
         while let Some(event) = events.next().await {
             let event = match event {
                 Ok(event) => event,
+                Err(qq_core::SessionRuntimeError::CursorExpired) => {
+                    yield Ok::<Event, Infallible>(Event::default()
+                        .event(qq_protocol::SNAPSHOT_REQUIRED_SSE_EVENT).data("{}"));
+                    return;
+                }
                 Err(_) => return,
             };
             // The store already encoded this event once, on commit; the
@@ -2955,6 +2960,59 @@ mod tests {
         assert!(read_connection(&paths).unwrap().is_none());
         let lock = open_private_lock_file(paths.lock_file()).unwrap();
         lock.try_lock().unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_delivery_history_sends_a_snapshot_control_frame_and_closes() {
+        struct ExpiredHandler;
+        impl ServerHandler for ExpiredHandler {
+            fn subscribe(
+                &self,
+                _: SubscribeRequest,
+            ) -> Result<PublishedEventStream, ServerHandlerError> {
+                Ok(Box::pin(futures_stream::iter([Err(
+                    qq_core::SessionRuntimeError::CursorExpired,
+                )])))
+            }
+        }
+        let directory = TestDirectory::new();
+        let server = start_test_server(directory.paths(), Arc::new(ExpiredHandler)).await;
+        let workspace = WorkspaceId::generate().unwrap();
+        let after = EventCursor {
+            store_id: StoreId::generate().unwrap(),
+            workspace_id: workspace,
+            sequence: 0,
+        };
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(
+                server
+                    .connection()
+                    .endpoint(&format!("/v1/workspaces/{workspace}/events")),
+            )
+            .bearer_auth(server.connection().expose_bearer_token())
+            .header("last-event-id", after.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.text().await.unwrap();
+        assert!(
+            body.lines().any(|line| line
+                .strip_prefix("event:")
+                .is_some_and(|event| event.trim() == qq_protocol::SNAPSHOT_REQUIRED_SSE_EVENT)),
+            "{body}"
+        );
+        assert!(
+            body.lines().any(|line| line
+                .strip_prefix("data:")
+                .is_some_and(|data| data.trim() == "{}")),
+            "{body}"
+        );
+        assert!(!body.contains("session_event"));
+        server.shutdown().await.unwrap();
     }
 
     #[tokio::test]

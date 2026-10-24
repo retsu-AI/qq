@@ -163,8 +163,8 @@ async fn failed_initial_replay_releases_its_feed() {
 
 /// A store written while Jev existed holds its routing and checkpoint events
 /// and `delegate: "jev"` resolutions. Protocol 36 removed those features, but
-/// the journal is gapless and permanent: replay must still decode every row
-/// instead of failing the subscriber with a codec error.
+/// retained delivery rows must still decode instead of failing the subscriber
+/// with a codec error.
 #[tokio::test]
 async fn replay_decodes_events_from_removed_jev_features() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
@@ -1033,4 +1033,495 @@ async fn terminal_receipt_pages_bound_rows_and_bytes_without_skipping_runs() {
         .unwrap();
     assert_eq!(small.len(), usize::from(MAX_REPLAY_EVENTS));
     harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cold_snapshot_restores_pending_question_details_without_delivery_events() {
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "ask_user",
+        r#"{"questions":[{"prompt":"Which crate?","options":["core","provider"],"free_text":true}]}"#,
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    ).await;
+    let (observed, call) = collect_until_approval_requested(&mut harness.events).await;
+    let expected = observed
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::ToolApprovalRequested {
+                question: Some(question),
+                ..
+            } => Some(serde_json::to_value(question).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, |connection| {
+            connection.execute(
+                "UPDATE messages SET output=?1 WHERE role='user'",
+                ["x".repeat(SNAPSHOT_BODY_BUDGET_BYTES)],
+            )?;
+            connection.execute("DELETE FROM events", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
+        .await
+        .unwrap();
+    let focused = snapshot.focused.as_ref().unwrap();
+    assert!(focused.has_older_messages);
+    assert!(
+        focused
+            .tool_calls
+            .iter()
+            .any(|pending| pending.id == call.id)
+    );
+    let body = serde_json::to_value(snapshot.focused.unwrap()).unwrap();
+    assert_eq!(
+        body["approval_previews"][0]["tool_call_id"],
+        serde_json::to_value(call.id).unwrap()
+    );
+    assert_eq!(
+        body["approval_previews"][0]["preview"]["question"], expected,
+        "a fresh client must recover the server-computed question after journal expiry"
+    );
+    respond_approval(
+        &harness.runtime,
+        call.run_id,
+        call.id,
+        ApprovalDecision::Deny,
+    )
+    .await
+    .unwrap();
+    collect_through_finished(&mut harness.events).await;
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cold_cursor_before_the_retained_journal_requires_a_snapshot() {
+    let harness = scripted_runs_harness(ApprovalMode::ReadOnly, Vec::new()).await;
+    create_session(&harness.runtime, harness.workspace_id, None).await;
+    let workspace = harness.workspace_id;
+    let replay = harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        connection.execute("DELETE FROM events WHERE workspace_id=?1 AND sequence=(SELECT MIN(sequence) FROM events WHERE workspace_id=?1)", [workspace.to_string()])?;
+        read_published_event_page(connection, workspace, 0, MAX_REPLAY_EVENTS)
+    }).await;
+    assert!(
+        replay.is_err(),
+        "a cold replay must never silently skip a retired sequence"
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn unresolved_escalation_details_survive_reconnect_upgrade_and_resolution() {
+    let mut harness = approval_harness(
+        ApprovalMode::Ask,
+        "__test_mutate",
+        "{}",
+        1,
+        DEFAULT_APPROVAL_TIMEOUT,
+    )
+    .await;
+    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
+    let store_id = harness.runtime.inner.store.store_id();
+    let workspace_id = harness.workspace_id;
+    let session_id = harness.session_id;
+    let call_id = call.id;
+    let run_id = call.run_id;
+    let expected = qq_protocol::ApprovalEscalation {
+        delegate: Some(DelegateIdentity::Reviewer),
+        reason: "The proposed edit needs a human decision".to_owned(),
+    };
+    let reason = expected.reason.clone();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Output, move |connection| {
+            let command: String = connection.query_row(
+                "SELECT command_id FROM runs WHERE id=?1",
+                [run_id.to_string()],
+                |row| row.get(0),
+            )?;
+            let identity = RunIdentity {
+                workspace_id,
+                session_id,
+                run_id,
+                command_id: parse_id(&command)?,
+                kind: RunKind::Prompt,
+                child: false,
+            };
+            assert!(
+                tool_calls::escalate_tool_approval(
+                    connection,
+                    store_id,
+                    identity,
+                    call_id,
+                    Some(DelegateIdentity::Reviewer),
+                    &reason
+                )?
+                .is_some()
+            );
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let path = harness._directory.path().join("legacy-escalation.sqlite3");
+    let backup = path.clone();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
+            connection.execute("DELETE FROM events", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.focused.unwrap().approval_previews[0]
+            .preview
+            .escalated,
+        Some(expected.clone())
+    );
+    let legacy = Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(
+            "DROP TRIGGER tool_calls_clear_approval_inputs;
+        ALTER TABLE tool_calls DROP COLUMN approval_escalation_json;
+        UPDATE metadata SET value='62' WHERE key='schema_version';",
+        )
+        .unwrap();
+    drop(legacy);
+    let (migrated, _) = store::open_database(&path).unwrap();
+    migrated.execute("DELETE FROM events", []).unwrap();
+    assert_eq!(
+        tool_calls::load_approval_preview(&migrated, call_id)
+            .unwrap()
+            .unwrap()
+            .escalated,
+        Some(expected)
+    );
+    drop(migrated);
+    respond_approval(&harness.runtime, run_id, call_id, ApprovalDecision::Deny)
+        .await
+        .unwrap();
+    collect_through_finished(&mut harness.events).await;
+    let snapshot = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
+        .await
+        .unwrap();
+    assert!(snapshot.focused.unwrap().approval_previews.is_empty());
+    let retained: Option<String> = harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            Ok(connection.query_row(
+                "SELECT approval_escalation_json FROM tool_calls WHERE id=?1",
+                [call_id.to_string()],
+                |row| row.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(retained, None);
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn journal_retention_bounds_the_global_window_and_preserves_canonical_results() {
+    let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
+    let run = submit_prompt(&harness, "finish this task").await;
+    collect_through_finished(&mut harness.events).await;
+    drop(harness.events);
+    let expected = harness
+        .runtime
+        .run_result(harness.workspace_id, harness.session_id, run)
+        .await
+        .unwrap()
+        .unwrap();
+    let root = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
+        .await
+        .unwrap();
+    let other_path = harness._directory.path().join("other-workspace");
+    tokio::fs::create_dir(&other_path).await.unwrap();
+    let receipt = harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::ResolveWorkspace {
+                path: other_path.to_str().unwrap().to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    let CommandOutcome::WorkspaceResolved {
+        workspace_id: other,
+    } = receipt.outcome
+    else {
+        panic!("wrong workspace receipt")
+    };
+    let receipt = create_session(&harness.runtime, other, None).await;
+    let CommandOutcome::SessionCreated {
+        session_id: other_session,
+    } = receipt.outcome
+    else {
+        panic!("wrong session receipt")
+    };
+    let store = harness.runtime.inner.store.store_id();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            let tail: u64 = connection.query_row(
+                "SELECT next_sequence FROM workspaces WHERE id=?1",
+                [other.to_string()],
+                |row| row.get(0),
+            )?;
+            let retired = SessionEventEnvelope {
+                cursor: EventCursor {
+                    store_id: store,
+                    workspace_id: other,
+                    sequence: tail,
+                },
+                session_id: other_session,
+                run_id: None,
+                caused_by: None,
+                occurred_at_ms: 0,
+                event: SessionEvent::Retired,
+            };
+            let count = EVENT_JOURNAL_ROWS + 3;
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<?1)
+             INSERT INTO events(workspace_id,sequence,envelope_json)
+             SELECT ?2,?3+x,json_set(?4,'$.cursor.sequence',?3+x) FROM n",
+                params![
+                    count,
+                    other.to_string(),
+                    tail,
+                    serde_json::to_string(&retired)?
+                ],
+            )?;
+            transaction.execute(
+                "UPDATE workspaces SET next_sequence=?2 WHERE id=?1",
+                params![other.to_string(), tail + count],
+            )?;
+            transaction.commit()?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let legacy_path = harness
+        ._directory
+        .path()
+        .join("legacy-full-journal.sqlite3");
+    let backup = legacy_path.clone();
+    harness
+        .runtime
+        .inner
+        .store
+        .call(Priority::Control, move |connection| {
+            connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let legacy = Connection::open(&legacy_path).unwrap();
+    legacy.execute_batch("DROP TRIGGER event_journal_insert; DROP TRIGGER event_journal_delete; DROP TRIGGER event_journal_update;
+        DROP TABLE event_journal_usage; DROP INDEX messages_run_reply;
+        DROP INDEX message_chunks_delivery; ALTER TABLE messages DROP COLUMN chunks_ordered;
+        DROP TRIGGER tool_calls_clear_approval_inputs;
+        ALTER TABLE tool_calls DROP COLUMN approval_escalation_json;
+        UPDATE metadata SET value='62' WHERE key='schema_version';").unwrap();
+    drop(legacy);
+    let (migrated, _) = store::open_database(&legacy_path).unwrap();
+    let (rows, bytes): (u64, u64) = migrated
+        .query_row(
+            "SELECT rows,bytes FROM event_journal_usage WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(rows, EVENT_JOURNAL_ROWS);
+    assert!(bytes <= EVENT_JOURNAL_BYTES);
+    assert_eq!(
+        completions::result(
+            &migrated,
+            store,
+            harness.workspace_id,
+            harness.session_id,
+            run
+        )
+        .unwrap(),
+        Some(expected.clone())
+    );
+    drop(migrated);
+    // A normal append must enforce the real configured window globally.
+    create_session(&harness.runtime, other, None).await;
+    harness.runtime.inner.store.call(Priority::Control, move |connection| {
+        let measure = |connection: &Connection| -> Result<(u64,u64), SessionRuntimeError> {
+            let actual: (u64,u64) = connection.query_row("SELECT COALESCE(SUM(length(CAST(envelope_json AS BLOB))),0),COUNT(*) FROM events", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
+            let metered = connection.query_row("SELECT bytes,rows FROM event_journal_usage WHERE singleton=1", [], |row| Ok((row.get(0)?,row.get(1)?)))?;
+            assert_eq!(actual,metered,"the durable meter must count exact encoded bytes and rows");
+            Ok(actual)
+        };
+        let (bytes,rows) = measure(connection)?;
+        assert_eq!(rows,EVENT_JOURNAL_ROWS);
+        assert!(bytes<=EVENT_JOURNAL_BYTES);
+        let transaction = connection.transaction()?;
+        prune(&transaction,0,0)?;
+        assert_eq!(measure(&transaction)?,(0,0));
+        transaction.rollback()?;
+        assert_eq!(measure(connection)?,(bytes,rows),"rollback must restore both the journal and its meter");
+        let transaction = connection.transaction()?;
+        prune(&transaction,EVENT_JOURNAL_BYTES,3)?;
+        assert_eq!(measure(&transaction)?.1,3);
+        let newest_bytes: u64 = transaction.query_row("SELECT length(CAST(envelope_json AS BLOB)) FROM events ORDER BY rowid DESC LIMIT 1", [], |row| row.get(0))?;
+        prune(&transaction,newest_bytes,3)?;
+        assert_eq!(measure(&transaction)?,(newest_bytes,1),"byte pressure trims whole oldest events");
+        transaction.commit()?;
+        Ok(())
+    }).await.unwrap();
+    assert_eq!(
+        harness
+            .runtime
+            .inner
+            .store
+            .published_events_after(harness.workspace_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::CursorExpired
+    );
+    let after = harness
+        .runtime
+        .snapshot(SnapshotRequest::new(
+            harness.workspace_id,
+            Some(harness.session_id),
+            32,
+            32,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        after, root,
+        "another workspace's replay traffic cannot change canonical session state"
+    );
+    assert_eq!(
+        harness
+            .runtime
+            .run_result(harness.workspace_id, harness.session_id, run)
+            .await
+            .unwrap(),
+        Some(expected)
+    );
+    harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn approval_recovery_is_scoped_to_the_root_family() {
+    let directory = test_directory();
+    let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
+    options.max_active_runs = 3;
+    let runtime = SessionRuntime::open(
+        options,
+        Arc::new(ApprovalLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            tool: "__test_mutate",
+            arguments: "{}",
+            tool_turns: 1,
+            delegate: approval::ApprovalDelegate::default(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (workspace, _) = resolve_workspace(&runtime, directory.path()).await;
+    let root = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
+    let CommandOutcome::SessionCreated { session_id: root } = root.outcome else {
+        panic!("wrong root")
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id: workspace,
+            after: EventCursor {
+                store_id: runtime.inner.store.store_id(),
+                workspace_id: workspace,
+                sequence: 0,
+            },
+        })
+        .unwrap();
+    let unrelated = create_session_with_mode(&runtime, workspace, None, ApprovalMode::Ask).await;
+    let CommandOutcome::SessionCreated {
+        session_id: unrelated,
+    } = unrelated.outcome
+    else {
+        panic!("wrong session")
+    };
+    let child = create_session_with_mode(&runtime, workspace, Some(root), ApprovalMode::Ask).await;
+    let CommandOutcome::SessionCreated { session_id: child } = child.outcome else {
+        panic!("wrong child")
+    };
+    submit_prompt_to(&runtime, unrelated, "unrelated work").await;
+    submit_prompt_to(&runtime, child, "owned work").await;
+    submit_prompt_to(&runtime, root, "root work").await;
+    let mut calls = Vec::new();
+    while calls.len() < 3 {
+        let (_, call) = collect_until_approval_requested(&mut events).await;
+        calls.push(call);
+    }
+    let sessions = runtime.approval_sessions(workspace, root).await.unwrap();
+    assert_eq!(
+        sessions
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        [root, child].into_iter().collect()
+    );
+    assert_eq!(
+        runtime
+            .approval_sessions(WorkspaceId::generate().unwrap(), root)
+            .await
+            .unwrap_err(),
+        SessionRuntimeError::SessionNotFound
+    );
+    for call in calls {
+        respond_approval(&runtime, call.run_id, call.id, ApprovalDecision::Deny)
+            .await
+            .unwrap();
+    }
+    assert!(
+        runtime
+            .approval_sessions(workspace, root)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    runtime.shutdown().await.unwrap();
 }

@@ -69,12 +69,20 @@ pub(super) fn load_snapshot(
         }
         match session_workspace(&transaction, *session_id) {
             Ok(workspace_id) if workspace_id == request.workspace_id => {
-                included.push(load_session_body(
+                let mut body_budget = SnapshotBudget::new(budget.remaining());
+                match load_session_body(
                     &transaction,
                     *session_id,
                     request.message_limit,
-                    &mut budget,
-                )?);
+                    &mut body_budget,
+                ) {
+                    Ok(body) => {
+                        included.push(body);
+                        budget = body_budget;
+                    }
+                    Err(SessionRuntimeError::SnapshotTooLarge) => {}
+                    Err(error) => return Err(error),
+                }
             }
             Ok(_) | Err(SessionRuntimeError::SessionNotFound) => {}
             Err(error) => return Err(error),
@@ -165,6 +173,29 @@ fn load_session_body(
     budget: &mut SnapshotBudget,
 ) -> Result<SessionSnapshot, SessionRuntimeError> {
     let summary = load_session_summary(transaction, session_id)?;
+    // Pending inputs and call rows take priority over transcript history.
+    let mut approval_previews = Vec::with_capacity(summary.pending_holds.len());
+    let mut pending_calls = Vec::with_capacity(summary.pending_holds.len());
+    for hold in &summary.pending_holds {
+        let call = load_tool_call(transaction, hold.tool_call_id)?;
+        let preview = tool_calls::load_approval_preview(transaction, hold.tool_call_id)?;
+        let bytes = serde_json::to_vec(&call)?.len()
+            + preview
+                .as_ref()
+                .map(serde_json::to_vec)
+                .transpose()?
+                .map_or(0, |json| json.len());
+        if !budget.admit(bytes) {
+            return Err(SessionRuntimeError::SnapshotTooLarge);
+        }
+        pending_calls.push(call);
+        if let Some(preview) = preview {
+            approval_previews.push(qq_protocol::PendingApprovalPreview {
+                tool_call_id: hold.tool_call_id,
+                preview,
+            });
+        }
+    }
     // Side questions draw first from a reserved share so a long transcript
     // cannot starve a running question out of a reconnect snapshot.
     let side_questions = side_questions::load_side_snapshots(transaction, session_id, budget)?;
@@ -275,10 +306,11 @@ fn load_session_body(
     Ok(SessionSnapshot {
         goal: goals::load_live(transaction, session_id)?.map(Box::new),
         side_questions,
+        approval_previews,
         summary,
         messages,
         runs,
-        tool_calls: Vec::new(),
+        tool_calls: pending_calls,
         has_older_tool_calls: false,
         has_older_messages,
     })
@@ -293,7 +325,7 @@ fn load_tool_call_tail(
     let session_id = body.summary.id;
     let mut statement = transaction.prepare(
         "SELECT t.id FROM tool_calls t JOIN runs r ON r.id = t.run_id
-             WHERE r.session_id = ?1
+             WHERE r.session_id = ?1 AND NOT(t.state='awaiting_approval' AND t.approval_resolution IS NULL)
              ORDER BY r.created_at_ms DESC, r.rowid DESC, t.turn_ordinal DESC, t.call_ordinal DESC
              LIMIT ?2",
     )?;
@@ -307,8 +339,9 @@ fn load_tool_call_tail(
         )?
         .collect::<Result<Vec<_>, _>>()?;
     drop(statement);
-    let mut has_older_tool_calls = tool_call_ids.len() > MAX_SNAPSHOT_TOOL_CALLS;
-    tool_call_ids.truncate(MAX_SNAPSHOT_TOOL_CALLS);
+    let remaining_calls = MAX_SNAPSHOT_TOOL_CALLS.saturating_sub(body.tool_calls.len());
+    let mut has_older_tool_calls = tool_call_ids.len() > remaining_calls;
+    tool_call_ids.truncate(remaining_calls);
     let mut tool_calls = Vec::with_capacity(tool_call_ids.len());
     for id in tool_call_ids {
         let tool_call = load_tool_call(transaction, parse_id(&id)?)?;
@@ -328,6 +361,7 @@ fn load_tool_call_tail(
         tool_calls.push(tool_call);
     }
     tool_calls.reverse();
+    tool_calls.append(&mut body.tool_calls);
     body.tool_calls = tool_calls;
     body.has_older_tool_calls = has_older_tool_calls;
     Ok(())

@@ -1202,8 +1202,15 @@ pub(super) fn escalate_tool_approval(
     }
     // A human is asked from here on; summaries project that.
     transaction.execute(
-        "UPDATE tool_calls SET approval_delegated = 0 WHERE id = ?1",
-        [tool_call_id.to_string()],
+        "UPDATE tool_calls SET approval_delegated=0,
+            approval_escalation_json=?2 WHERE id=?1",
+        params![
+            tool_call_id.to_string(),
+            serde_json::to_string(&qq_protocol::ApprovalEscalation {
+                delegate,
+                reason: reason.to_owned(),
+            })?
+        ],
     )?;
     let event = append_event(
         &transaction,
@@ -1597,4 +1604,100 @@ pub(super) fn load_tool_call(
                 })
             },
         )
+}
+
+pub(super) fn load_approval_preview(
+    connection: &Connection,
+    tool_call_id: ToolCallId,
+) -> Result<Option<qq_protocol::ApprovalPreview>, SessionRuntimeError> {
+    let (encoded, escalated): (Option<String>, Option<String>) = connection.query_row(
+        "SELECT approval_inputs_json,approval_escalation_json FROM tool_calls WHERE id=?1 AND state='awaiting_approval' AND approval_resolution IS NULL",
+        [tool_call_id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    encoded
+        .map(|json| {
+            let inputs: ApprovalPreviews = serde_json::from_str(&json)?;
+            Ok(qq_protocol::ApprovalPreview {
+                shell: inputs.shell,
+                edit: inputs.edit,
+                question: inputs.question,
+                fetch: inputs.fetch,
+                escalated: escalated.as_deref().map(serde_json::from_str).transpose()?,
+            })
+        })
+        .transpose()
+}
+
+pub(super) fn migrate_approval_escalations(
+    connection: &Connection,
+) -> Result<(), SessionRuntimeError> {
+    let pending: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tool_calls WHERE state='awaiting_approval' AND approval_resolution IS NULL AND approval_inputs_json IS NOT NULL)",
+        [], |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
+    let store: Option<String> = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key='store_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let mut statement = connection.prepare(
+        "WITH evidence AS MATERIALIZED (
+            SELECT workspace_id,sequence,envelope_json FROM events
+            WHERE length(CAST(envelope_json AS BLOB))<=1048576
+              AND CASE WHEN json_valid(envelope_json)
+                  THEN json_extract(envelope_json,'$.event.type')='tool_approval_escalated' ELSE 0 END
+        ) SELECT e.envelope_json,c.id,c.run_id,r.session_id,s.workspace_id,e.sequence
+          FROM evidence e JOIN tool_calls c ON c.id=json_extract(e.envelope_json,'$.event.tool_call_id')
+          JOIN runs r ON r.id=c.run_id JOIN sessions s ON s.id=r.session_id
+          WHERE c.state='awaiting_approval' AND c.approval_resolution IS NULL
+            AND c.approval_inputs_json IS NOT NULL AND e.workspace_id=s.workspace_id
+            AND json_extract(e.envelope_json,'$.event.type')='tool_approval_escalated'
+          ORDER BY e.workspace_id,e.sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let encoded: String = row.get(0)?;
+        let Ok(receipt) = serde_json::from_str::<SessionEventEnvelope>(&encoded) else {
+            continue;
+        };
+        let call: String = row.get(1)?;
+        let run: String = row.get(2)?;
+        let session: String = row.get(3)?;
+        let workspace: String = row.get(4)?;
+        let sequence: u64 = row.get(5)?;
+        let SessionEvent::ToolApprovalEscalated {
+            tool_call_id,
+            delegate,
+            reason,
+        } = receipt.event
+        else {
+            continue;
+        };
+        if receipt.cursor.store_id.to_string() != store
+            || receipt.cursor.workspace_id.to_string() != workspace
+            || receipt.cursor.sequence != sequence
+            || receipt.session_id.to_string() != session
+            || receipt.run_id.map(|id| id.to_string()).as_deref() != Some(run.as_str())
+            || tool_call_id.to_string() != call
+        {
+            continue;
+        }
+        let escalation = qq_protocol::ApprovalEscalation { delegate, reason };
+        let encoded = serde_json::to_string(&escalation)?;
+        if encoded.len() > 8192 {
+            continue;
+        }
+        connection
+            .prepare_cached("UPDATE tool_calls SET approval_escalation_json=?2 WHERE id=?1")?
+            .execute(params![call, encoded])?;
+    }
+    Ok(())
 }

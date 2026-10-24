@@ -584,6 +584,7 @@ struct SseDecoder<T> {
     data: Vec<u8>,
     id: Option<String>,
     event_bytes: usize,
+    event_type: String,
     at_start: bool,
     skip_lf: bool,
     marker: PhantomData<T>,
@@ -596,6 +597,7 @@ impl<T> Default for SseDecoder<T> {
             data: Vec::new(),
             id: None,
             event_bytes: 0,
+            event_type: String::new(),
             at_start: true,
             skip_lf: false,
             marker: PhantomData,
@@ -717,6 +719,9 @@ where
             }
             self.data.extend_from_slice(value.as_bytes());
             self.data.push(b'\n');
+        } else if field == "event" {
+            self.event_type.clear();
+            self.event_type.push_str(value);
         } else if field == "id" {
             if value.len() > 256 || value.as_bytes().contains(&0) {
                 return Err(ClientError::MalformedSse);
@@ -727,8 +732,15 @@ where
     }
 
     fn dispatch(&mut self) -> Result<Option<DecodedSse<T>>, ClientError> {
+        let snapshot_required = self.event_type == qq_protocol::SNAPSHOT_REQUIRED_SSE_EVENT;
+        self.event_type.clear();
         if self.data.is_empty() {
             return Ok(None);
+        }
+        if snapshot_required {
+            self.data.clear();
+            self.id = None;
+            return Err(ClientError::InvalidCursor);
         }
         self.data.pop();
         // Parse from the buffer in place and keep its allocation.
@@ -1240,6 +1252,30 @@ mod decode_tests {
                 "chunks of {size}"
             );
         }
+    }
+
+    #[test]
+    fn expired_delivery_history_requests_a_snapshot_across_chunk_boundaries() {
+        let body = b"event: snapshot_required\ndata: {}\n\n";
+        for split in 0..=body.len() {
+            assert_eq!(
+                decode_fragments(&[&body[..split], &body[split..]]).unwrap_err(),
+                ClientError::InvalidCursor
+            );
+        }
+        // The last event field wins; a data-less frame has no dispatch.
+        assert_eq!(
+            decode_fragments(&[
+                b"event: snapshot_required\nevent: session_event\ndata: {\"type\":\"started\"}\n\n"
+            ])
+            .unwrap(),
+            vec![TestEvent::Started]
+        );
+        assert_eq!(
+            decode_fragments(&[b"event: snapshot_required\n\ndata: {\"type\":\"completed\"}\n\n"])
+                .unwrap(),
+            vec![TestEvent::Completed]
+        );
     }
 
     #[test]

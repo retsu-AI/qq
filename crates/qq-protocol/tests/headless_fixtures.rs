@@ -205,6 +205,7 @@ fn run_events(outcome: RunOutcome, final_output: Option<Box<FinalOutput>>) -> Ve
 
 fn outcome(status: HeadlessStatus) -> HeadlessOutcome {
     HeadlessOutcome {
+        recovered_answer: None,
         status,
         exit_code: status.code(),
         message: None,
@@ -306,7 +307,7 @@ fn assert_well_formed<'a>(
 
 #[test]
 fn current_version_streams_match_their_goldens() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
 
     let stream = |trial: HeadlessTrial, events: Vec<HeadlessRecord>, outcome: HeadlessOutcome| {
         let mut stream = Vec::with_capacity(events.len() + 2);
@@ -723,6 +724,18 @@ fn current_version_streams_match_their_goldens() {
             prompt_identity: None,
             ..outcome(HeadlessStatus::InvalidConfiguration)
         }))],
+    );
+
+    check(
+        "completed_after_delivery_gap",
+        &stream(
+            trial(),
+            run_events(RunOutcome::Completed, None),
+            HeadlessOutcome {
+                recovered_answer: Some("The complete recovered reply".to_owned()),
+                ..outcome(HeadlessStatus::Completed)
+            },
+        ),
     );
 
     for path in stream_paths(PROTOCOL_VERSION) {

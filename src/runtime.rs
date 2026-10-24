@@ -3366,6 +3366,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::InvalidModelSelection
         | SessionRuntimeError::IdempotencyConflict
         | SessionRuntimeError::CursorStoreMismatch
+        | SessionRuntimeError::CursorExpired
         | SessionRuntimeError::CursorWorkspaceMismatch
         | SessionRuntimeError::GoalConflict { .. }
         | SessionRuntimeError::GoalNotFound
@@ -3404,6 +3405,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::Overloaded => ServerHandlerError::Unavailable,
         SessionRuntimeError::InvalidRunLimit
         | SessionRuntimeError::InvalidNativeScope { .. }
+        | SessionRuntimeError::SnapshotTooLarge
         | SessionRuntimeError::OutputTooLarge
         | SessionRuntimeError::AccountingUnavailable
         | SessionRuntimeError::ShutdownTimedOut

@@ -44,6 +44,7 @@ impl BenchHarness {
             .map(|index| summary(session_id(index), SessionStatus::Idle))
             .collect();
         let focused = SessionSnapshot {
+            approval_previews: Vec::new(),
             side_questions: Vec::new(),
             messages: (0..messages)
                 .map(|index| {
@@ -167,6 +168,7 @@ impl BenchHarness {
     /// through an included body, as the client's pre-warm does.
     pub fn warm_session(&mut self, index: u8, messages: u8) {
         let body = SessionSnapshot {
+            approval_previews: Vec::new(),
             side_questions: Vec::new(),
             messages: (0..messages)
                 .map(|row| {

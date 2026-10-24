@@ -22,7 +22,8 @@ use tokio::sync::Notify;
 
 /// Live events retained per workspace for subscribers that keep up or
 /// reconnect promptly. A subscriber that falls this far behind is redirected
-/// to SQLite catch-up, so the bound never drops an event; it only bounds memory.
+/// to SQLite catch-up, or receives CursorExpired if delivery history expired.
+/// This ring bounds memory independently of the journal window.
 pub(super) const FEED_CAPACITY: usize = 1024;
 
 /// Encoded bytes retained per workspace ring. Large streams would otherwise

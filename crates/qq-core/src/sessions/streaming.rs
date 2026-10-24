@@ -30,8 +30,8 @@ pub(super) fn begin_assistant_message(
     )?;
     transaction.execute(
         "INSERT INTO messages(
-                id, session_id, run_id, ordinal, turn_ordinal, role, state, created_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'assistant', 'streaming', ?6)",
+                id, session_id, run_id, ordinal, turn_ordinal, role, state, created_at_ms, chunks_ordered
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'assistant', 'streaming', ?6, 1)",
         params![
             message_id.to_string(),
             identity.session_id.to_string(),
@@ -116,7 +116,7 @@ pub(super) fn insert_message_chunk(
         .prepare_cached(
             "INSERT INTO message_chunks(message_id, channel, chunk_ordinal, text)
              SELECT ?1, ?2, COALESCE(MAX(chunk_ordinal), 0) + 1, ?3
-             FROM message_chunks WHERE message_id = ?1 AND channel = ?2",
+             FROM message_chunks WHERE message_id = ?1",
         )
         .and_then(|mut statement| {
             statement.execute(params![message_id.to_string(), channel, text])

@@ -1080,6 +1080,43 @@ impl Store {
         .await
     }
 
+    pub(super) async fn approval_sessions(
+        &self,
+        workspace_id: WorkspaceId,
+        root: SessionId,
+    ) -> Result<Vec<SessionId>, SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            if session_workspace(connection, root)? != workspace_id { return Err(SessionRuntimeError::SessionNotFound); }
+            let mut statement = connection.prepare_cached(
+                "WITH RECURSIVE family(id,depth) AS (
+                    SELECT id,0 FROM sessions WHERE id=?1 AND workspace_id=?2
+                    UNION ALL SELECT s.id,f.depth+1 FROM sessions s JOIN family f ON s.parent_id=f.id
+                    WHERE s.workspace_id=?2 AND f.depth<?3
+                 ) SELECT f.id FROM family f WHERE EXISTS(
+                    SELECT 1 FROM runs r JOIN tool_calls c ON c.run_id=r.id WHERE r.session_id=f.id
+                    AND c.state='awaiting_approval' AND c.approval_resolution IS NULL)
+                 ORDER BY f.id LIMIT ?4",
+            )?;
+            let ids = statement.query_map(params![root.to_string(),workspace_id.to_string(),MAX_CHILD_DEPTH,u32::from(MAX_DESCENDANTS_PER_ROOT)+2], |row| row.get::<_, String>(0))?
+                .map(|row| parse_id(&row?)).collect::<Result<Vec<_>, SessionRuntimeError>>()?;
+            if ids.len()>usize::from(MAX_DESCENDANTS_PER_ROOT)+1 { return Err(SessionRuntimeError::CONSTRAINT); }
+            Ok(ids)
+        }).await
+    }
+
+    pub(super) async fn run_result(
+        &self,
+        workspace_id: WorkspaceId,
+        session_id: SessionId,
+        run_id: RunId,
+    ) -> Result<Option<RunResult>, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            completions::result(connection, store_id, workspace_id, session_id, run_id)
+        })
+        .await
+    }
+
     pub(super) async fn run_snapshot(
         &self,
         workspace_id: WorkspaceId,

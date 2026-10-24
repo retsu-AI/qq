@@ -141,6 +141,13 @@ summary's cursor and omitted when empty, so a client knows a session is
 waiting or answering without loading its body or having seen the request
 event.
 
+Version 39 includes the original pending approval previews in session bodies,
+including question options and delegate escalation reasons. Expired delivery
+history ends SSE with an `event: snapshot_required` control frame and `data: {}`;
+clients load a fresh snapshot and subscribe from its cursor. Headless JSONL
+outcomes include `recovered_answer` only when replay history expired, so a
+supervisor can recover the complete final reply despite missing deltas.
+
 Authenticated `POST /v1/workspaces/list` returns a bounded page of registered
 workspace IDs and server-side paths, qualified by the persistent store ID.
 Its `after` cursor includes that store ID; a cursor from another store is
@@ -149,7 +156,7 @@ its path onto the client machine. Listing neither registers a directory nor
 changes permission grants.
 
 Golden fixtures for the current version live under
-`crates/qq-protocol/tests/fixtures/v38/`; the `v17`–`v37` directories are
+`crates/qq-protocol/tests/fixtures/v39/`; the `v17`–`v38` directories are
 retained decode-only, and `fixtures/headless/` holds the headless record
 streams.
 
@@ -711,7 +718,7 @@ Response `ServerCapabilities` (abridged; see
   },
   "events": {
     "post_commit": true, "replay_page": 128, "max_subscriptions": 64,
-    "max_event_bytes": 1048576, "retention_bounded": false
+    "max_event_bytes": 1048576, "retention_bounded": true
   },
   "delegation": {
     "roster": [
@@ -750,8 +757,9 @@ client can offer slash completion and a listing without reading the workspace.
 `events` is the observer contract: events are published only after their
 durable commit, a subscriber is served `replay_page` events per page from its
 cursor, at most `max_subscriptions` SSE subscriptions are accepted (503 beyond),
-and `retention_bounded: false` means a cursor from any point in the store's
-history replays.
+and `retention_bounded: true` means old cursors can expire. The global replay
+window retains at most 65,536 events and 64 MiB of encoded payloads. An expired
+stream sends `snapshot_required`; load a fresh snapshot before resubscribing.
 
 `delegation` (additive; present only for a named workspace) is the roster the
 workspace's configuration declares for `spawn_agent`: each entry's canonical
@@ -1320,12 +1328,11 @@ calls, session files, and grants — in one transaction. Rejected with `400`
 while the session has an active run; cancel the run first. Child sessions
 survive as roots.
 
-The session's rows in the workspace event log are deliberately **kept**:
-cursors promise a gapless `previous + 1` sequence to subscribers, so removing
-event rows would break every replay that spans the deletion. Replaying the
-kept events is harmless because the trailing `session_deleted` event
-converges any client on the deleted state; snapshots never include deleted
-sessions.
+Deleting a session does not individually purge its retained delivery rows.
+The trailing `session_deleted` event converges clients on the deleted state;
+snapshots never include deleted sessions. Global journal retention may later
+remove those rows. A cursor outside the retained window requires a fresh
+snapshot rather than silently skipping events.
 
 Outcome:
 
@@ -2227,7 +2234,7 @@ server's version and report the skew. Events, snapshots, and every inbound
 type stay strict.
 
 Golden encodings for every command, receipt, event, and the capability
-document live under `crates/qq-protocol/tests/fixtures/v38/` and are checked
+document live under `crates/qq-protocol/tests/fixtures/v39/` and are checked
 byte-for-byte by `crates/qq-protocol/tests/wire_fixtures.rs`. A wire change
 fails that test first; regenerate the goldens with `QQ_UPDATE_FIXTURES=1`
 after bumping `PROTOCOL_VERSION`.

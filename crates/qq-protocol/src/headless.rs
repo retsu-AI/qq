@@ -99,6 +99,10 @@ pub struct HeadlessTrial {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeadlessOutcome {
+    /// Exact final reply when delivery history expired during this invocation.
+    /// Otherwise consumers reconstruct the reply from the delivered events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_answer: Option<String>,
     pub status: HeadlessStatus,
     pub exit_code: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -279,6 +283,7 @@ mod tests {
 
     fn outcome() -> HeadlessOutcome {
         HeadlessOutcome {
+            recovered_answer: None,
             status: HeadlessStatus::Completed,
             exit_code: 0,
             message: None,

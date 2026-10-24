@@ -205,7 +205,12 @@ unknown `status` fails; a supervisor should do the same.
 | --- | --- | --- |
 | `trial` | `qq_version`, `qq_source_revision`, `protocol_version`, `workspace_identity`, `model`, `profile`, `context_window?`, `pricing_provenance?`, `approval`, `timeout_seconds?`, `max_turns?`, `max_cost_usd_nanos?`, `correlation?`, `arm?`, `output_schema_sha256?`, `output_repair_turns?`, `workspace_id`, `session_id`, `run_id` | Exactly one, first, unless startup fails before a session exists. `correlation` is present only when at least one `--correlation` was given; the two `output_*` fields only with `--output-schema` (the hash is SHA-256 of the compact canonical schema encoding) |
 | `event` | `envelope: SessionEventEnvelope` | `{ cursor: { sequence }, session_id, run_id?, caused_by?, occurred_at_ms, event: { type, ... } }`. Includes child-session events for the workspace |
-| `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?`, `final_output?` | Exactly one, last. `final_output` is present only for a completed run submitted with `--output-schema`: `{ "status": "valid", "value": <json>, "repair_turns": n }` or `{ "status": "invalid", "errors": ["<pointer>: <message>", …], "repair_turns": n }` |
+| `outcome` | `status`, `exit_code`, `message?`, `usage?`, `estimated_cost_usd_nanos?`, `prompt_identity?`, `audit?`, `final_output?`, `recovered_answer?` | Exactly one, last. `final_output` is present only for a completed run submitted with `--output-schema`: `{ "status": "valid", "value": <json>, "repair_turns": n }` or `{ "status": "invalid", "errors": ["<pointer>: <message>", …], "repair_turns": n }` |
+
+The replay journal is bounded. A slow consumer can miss delivery events;
+`qq run` reconciles durable state without resubmitting the task or resetting
+its limits. When present, `outcome.recovered_answer` is the complete final
+reply and supersedes text accumulated from the incomplete event stream.
 
 `--trace PATH` writes the same records to a file in either format.
 

@@ -102,7 +102,7 @@ pub use sessions::{
     MAX_REPLAY_EVENTS, MAX_REVIEW_ARGUMENT_BYTES, MAX_REVIEW_BRIEF_BYTES,
     MAX_REVIEW_RECENT_ACTIONS, MAX_SPAWNED_CHILDREN_PER_RUN, PersistenceFault, PublishedEvent,
     PublishedEventStream, RecentAction, ReviewDecision, ReviewFuture, ReviewOrigin, ReviewRequest,
-    ReviewSpend, ReviewVerdict, RunCompletion, RuntimeLoadError, RuntimeLoadFuture,
+    ReviewSpend, ReviewVerdict, RunCompletion, RunResult, RuntimeLoadError, RuntimeLoadFuture,
     RuntimeLoadProgress, RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION,
     SessionEventStream, SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer,
     SideQueryLimits, SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy,

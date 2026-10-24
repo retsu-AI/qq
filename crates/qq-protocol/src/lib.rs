@@ -56,17 +56,17 @@ pub use plan::{
 };
 pub use qq_reasoning::{ReasoningEffort, ReasoningEvent, ReasoningKind};
 pub use sessions::{
-    AccountingTotal, ApprovalDecision, ApprovalDelegate, ApprovalGrant, ApprovalMode,
-    ApprovalResolution, AuditOutcome, AuditRecord, BudgetExhaustion, BudgetLimitKind,
-    COMMAND_ROUTES, CapabilitySupport, ChildAuthority, CommandOutcome, CommandReceipt,
-    CommandRequest, ContentHash, ContentHashError, ContextSourceOutcome, ContextSourceRecord,
-    CursorError, DEFAULT_OUTPUT_REPAIR_TURNS, DelegateIdentity, EditPreview, EventCursor,
-    FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity, GuidanceKind,
+    AccountingTotal, ApprovalDecision, ApprovalDelegate, ApprovalEscalation, ApprovalGrant,
+    ApprovalMode, ApprovalPreview, ApprovalResolution, AuditOutcome, AuditRecord, BudgetExhaustion,
+    BudgetLimitKind, COMMAND_ROUTES, CapabilitySupport, ChildAuthority, CommandOutcome,
+    CommandReceipt, CommandRequest, ContentHash, ContentHashError, ContextSourceOutcome,
+    ContextSourceRecord, CursorError, DEFAULT_OUTPUT_REPAIR_TURNS, DelegateIdentity, EditPreview,
+    EventCursor, FetchPreview, FinalOutput, GenerationCapabilities, GuidanceIdentity, GuidanceKind,
     InstructionHash, InstructionHashError, MAX_INCLUDED_SESSIONS, MAX_OUTPUT_ERROR_BYTES,
     MAX_OUTPUT_REPAIR_TURNS, MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH,
     MAX_OUTPUT_SCHEMA_VALUES, MAX_PENDING_HOLDS, MessageRole, MessageSnapshot, MessageState,
     ModelCatalogRequest, ModelDescriptor, ModelPricing, ModelPricingTier, ModelSelection,
-    OutputContract, PendingHold, PromptCacheCapabilities, PromptVersion,
+    OutputContract, PendingApprovalPreview, PendingHold, PromptCacheCapabilities, PromptVersion,
     ProviderRequestShapeIdentity, ProviderRequestShapeVersion, Question, QuestionPreview,
     ResolvedModel, ResolvedModelVersion, RunActivity, RunFailure, RunLimits, RunOrigin, RunOutcome,
     RunPause, RunPromptIdentity, RunSnapshot, RunStatus, SessionAccounting, SessionCommand,
@@ -82,7 +82,10 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 38;
+pub const PROTOCOL_VERSION: u16 = 39;
+
+/// SSE control frame requesting a fresh snapshot after journal expiry.
+pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
 
 /// Most retries one turn may spend on a transient provider fault after the
 /// stream has started; a completed turn resets the count. Exhaustion settles
