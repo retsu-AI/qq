@@ -27,7 +27,9 @@ jobs:
         run: |
           cargo test --locked -p qq --no-default-features runtime::unix_sdk::tests:: -- --nocapture
           cargo test --locked -p qq --no-default-features runtime::macos_sdk::tests:: -- --nocapture
+          cargo test --locked -p qq --no-default-features runtime::macos_apple_sdk::tests:: -- --nocapture
           cargo test --locked -p qq-core tools::macos_owner::tests::homebrew_aliases_ -- --nocapture
+          cargo test --locked -p qq-core tools::macos_owner::tests::homebrew_openssl_config_ -- --nocapture
           cargo test --locked -p qq-core tools::macos_owner::tests::loader_literals_ -- --nocapture
       - name: Record selected public Node image metadata
         if: ${{ !cancelled() }}

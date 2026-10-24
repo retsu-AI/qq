@@ -915,6 +915,25 @@ fn homebrew_library_aliases(
     Ok(aliases)
 }
 
+fn homebrew_openssl_config(directory: &Path, prefix: &Path) -> io::Result<Option<PathBuf>> {
+    let Ok(suffix) = directory.strip_prefix(prefix.join("Cellar")) else {
+        return Ok(None);
+    };
+    let parts = suffix.iter().collect::<Vec<_>>();
+    if parts.len() < 3 || parts[0] != "openssl@3" || parts[2] != "lib" {
+        return Ok(None);
+    }
+    let config = prefix.join("etc/openssl@3/openssl.cnf");
+    let metadata = std::fs::symlink_metadata(&config)?;
+    if config.canonicalize()? != config || !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "installed OpenSSL configuration is aliased",
+        ));
+    }
+    Ok(Some(config))
+}
+
 fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<String> {
     let mut profile = String::from(
         "(version 1)\n(deny default)\n(allow process-fork)\n(allow signal (target same-sandbox))\n(deny syscall-unix (syscall-number SYS_setsid SYS_setpgid))\n(allow file-read-data file-write-data (require-all (literal \"/dev/null\") (vnode-type CHARACTER-DEVICE)))\n(allow sysctl-read (sysctl-name-prefix \"hw.\") (sysctl-name \"kern.osrelease\") (sysctl-name \"kern.ostype\") (sysctl-name \"kern.osversion\") (sysctl-name \"kern.osproductversion\") (sysctl-name \"kern.argmax\"))\n",
@@ -931,6 +950,17 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
         false,
         &mut literal_metadata,
     )?;
+    for selector in [
+        "/var/select/developer_dir",
+        "/private/var/select/developer_dir",
+    ] {
+        literal_read(
+            &mut profile,
+            Path::new(selector),
+            false,
+            &mut literal_metadata,
+        )?;
+    }
     // dyld opens the root directory while resolving its shared cache. This
     // grants directory entries only, never reads of descendant file contents.
     profile
@@ -986,6 +1016,9 @@ fn profile(filesystem: &NativeFilesystem, network: NativeNetwork) -> io::Result<
                 }
                 if !writable {
                     for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
+                        if let Some(config) = homebrew_openssl_config(&grant.path, prefix)? {
+                            literal_read(&mut profile, &config, false, &mut literal_metadata)?;
+                        }
                         for alias in
                             homebrew_library_aliases(&grant.path, prefix, &mut library_entries)?
                         {
@@ -1030,6 +1063,11 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("(allow file-read* (literal \"/private/etc/ssl/openssl.cnf\"))"));
+        assert!(text.contains("(allow file-read* (literal \"/var/select/developer_dir\"))"));
+        assert!(
+            text.contains("(allow file-read* (literal \"/private/var/select/developer_dir\"))")
+        );
+        assert!(!text.contains("(subpath \"/private/var/select\")"));
         for parent in ["/private/etc/ssl", "/private/etc", "/private"] {
             assert!(text.contains(&format!("(allow file-read-metadata (literal {parent:?}))")));
             assert!(!text.contains(&format!("(allow file-read* (literal {parent:?}))")));
@@ -1087,6 +1125,35 @@ mod tests {
             std::fs::read(private.join("lib/credential")).unwrap(),
             b"private"
         );
+    }
+
+    #[test]
+    fn homebrew_openssl_config_excludes_private_aliases() {
+        let temporary = tempfile::tempdir().unwrap();
+        let prefix = temporary.path().canonicalize().unwrap();
+        let directory = prefix.join("Cellar/openssl@3/3/lib");
+        let config = prefix.join("etc/openssl@3/openssl.cnf");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, b"installation configuration").unwrap();
+        assert_eq!(
+            homebrew_openssl_config(&directory, &prefix).unwrap(),
+            Some(config.clone())
+        );
+        assert!(
+            homebrew_openssl_config(&prefix.join("Cellar/private/1/lib"), &prefix)
+                .unwrap()
+                .is_none()
+        );
+        let private = prefix.join("credential");
+        std::fs::write(&private, b"private").unwrap();
+        std::fs::remove_file(&config).unwrap();
+        std::os::unix::fs::symlink(&private, &config).unwrap();
+        assert!(homebrew_openssl_config(&directory, &prefix).is_err());
+        std::fs::remove_file(&config).unwrap();
+        std::fs::hard_link(&private, &config).unwrap();
+        assert!(homebrew_openssl_config(&directory, &prefix).is_err());
+        assert_eq!(std::fs::read(private).unwrap(), b"private");
     }
     #[tokio::test]
     async fn resource_admission_requires_restricted_filesystem_authority() {
