@@ -412,7 +412,13 @@ fn prepare_goal_request(
                 .map_err(|_| Failure::invalid("system clock exceeds supported range"))?,
         )
         .map_err(|error| Failure::invalid(error.to_string()))?;
-        if let SessionCommand::SetGoal { budget, .. } = &mut command {
+        if let SessionCommand::SetGoal {
+            budget,
+            check_approval,
+            ..
+        } = &mut command
+        {
+            *check_approval = request.check_approval;
             if let Some(timeout) = options.timeout {
                 budget.per_run.max_duration_ms = Some(
                     u64::try_from(timeout.as_millis())
@@ -474,6 +480,7 @@ pub async fn run_goal(
         )).await.map_err(|error| Failure::harness(error.to_string()))?;
         let current = snapshot.focused.and_then(|session| session.goal);
         let command = prepare_goal_request(&request, &options, handle.session_id, current.as_deref())?;
+        let created = command.is_some();
         let mut goal = match command {
             Some(command) => goal_receipt(send(sessions, command).await?)?,
             None => current.ok_or_else(|| Failure::invalid("session has no stored goal"))?,
@@ -481,7 +488,7 @@ pub async fn run_goal(
         accepted = Some((handle.workspace_id, goal.clone()));
         cleanup = Some(AcceptedGoalGuard::new(sessions.clone(), &goal, &handle));
         let guard = cleanup.as_mut().unwrap();
-        if let Some(scope) = request.check_approval {
+        if let Some(scope) = request.check_approval.filter(|_| !created) {
             let check = goal.check.as_ref().unwrap();
             goal = goal_receipt(send(sessions, SessionCommand::GoalControl {
                 session_id: handle.session_id, expected: goal_identity(&goal),
@@ -3350,6 +3357,7 @@ mod tests {
             };
             let mut fixture = fixture_with_loader(Arc::clone(&loader)).await;
             let mut opts = options(&fixture.workspace);
+            opts.approval = HeadlessApproval::Full;
             let handle = prepare_session(&fixture.sessions, &opts, SessionIntent::Prompt)
                 .await
                 .unwrap();
@@ -3492,6 +3500,7 @@ mod tests {
         send(
             &fixture.sessions,
             SessionCommand::SetGoal {
+                check_approval: None,
                 session_id: owner.session_id,
                 objective: "later objective".into(),
                 check: None,
@@ -3928,6 +3937,7 @@ mod tests {
             send(
                 &fixture.sessions,
                 SessionCommand::SetGoal {
+                    check_approval: None,
                     session_id: handle.session_id,
                     objective: "ask for the missing input".into(),
                     check: None,
@@ -4025,6 +4035,7 @@ mod tests {
         let receipt = send(
             &fixture.sessions,
             SessionCommand::SetGoal {
+                check_approval: None,
                 session_id: owner.session_id,
                 objective: "held goal".into(),
                 check: None,
@@ -4645,6 +4656,7 @@ mod tests {
                 send(
                     &fixture.sessions,
                     SessionCommand::SetGoal {
+                        check_approval: None,
                         session_id: owner.session_id,
                         objective: "existing active objective".into(),
                         check: None,
@@ -4680,6 +4692,7 @@ mod tests {
                 send(
                     &fixture.sessions,
                     SessionCommand::SetGoal {
+                        check_approval: None,
                         session_id: owner.session_id,
                         objective: "edited while running".into(),
                         check: goal.check.clone(),
@@ -4949,6 +4962,7 @@ mod tests {
                 send(
                     &fixture.sessions,
                     SessionCommand::SetGoal {
+                        check_approval: None,
                         session_id: handle.session_id,
                         objective: "edited while adopted".into(),
                         check: None,
@@ -5171,6 +5185,7 @@ mod tests {
                         }).await.unwrap();
                     } else if action == "replace" {
                         send(&fixture.sessions, SessionCommand::SetGoal {
+                            check_approval: None,
                             session_id: handle.session_id, objective: "replacement must survive".into(),
                             check: Some(qq_protocol::GoalCheck {
                                 command: "printf checked".into(), timeout_ms: 1000,

@@ -279,6 +279,7 @@ pub(crate) fn prepare_set(
         editing.and_then(|goal| goal.check.clone())
     };
     Ok(SessionCommand::SetGoal {
+        check_approval: None,
         session_id: args.target.session,
         objective: args.objective.clone(),
         check,
@@ -523,6 +524,7 @@ mod tests {
         assert_eq!(
             edit,
             SessionCommand::SetGoal {
+                check_approval: None,
                 session_id: current.session_id,
                 objective: "edited objective".to_owned(),
                 check: current.check.clone(),

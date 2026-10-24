@@ -355,6 +355,34 @@ pub(super) fn validate_check_authority(
     Ok(())
 }
 
+pub(super) fn approve_check(
+    connection: &Connection,
+    session: SessionId,
+    goal: &mut GoalSnapshot,
+    scope: GoalCheckScope,
+    command: &str,
+    policy: Option<&Result<(), GoalCheckPolicyError>>,
+    now: u64,
+) -> Result<(), SessionRuntimeError> {
+    let check = goal
+        .check
+        .as_ref()
+        .ok_or(SessionRuntimeError::GoalCheckMissing)?;
+    if check.command != command {
+        return Err(SessionRuntimeError::GoalCheckCommandMismatch);
+    }
+    validate_check_authority(connection, session, command, policy)?;
+    if goal.status == needs_check_approval() {
+        ensure_activation(goal, now)?;
+        goal.status = GoalStatus::Active;
+    }
+    goal.check_authorization = Some(match scope {
+        GoalCheckScope::Once => GoalCheckAuthorization::Once,
+        GoalCheckScope::ForGoal => GoalCheckAuthorization::ForGoal,
+    });
+    Ok(())
+}
+
 pub(super) fn set(
     connection: &Connection,
     session: SessionId,
@@ -572,23 +600,15 @@ pub(super) fn control(
             goal.wait = None;
         }
         GoalControl::ApproveCheck { scope, command } => {
-            let Some(check) = goal.check.as_ref() else {
-                return Err(SessionRuntimeError::GoalCheckMissing);
-            };
-            if check.command != command {
-                return Err(SessionRuntimeError::GoalCheckCommandMismatch);
-            }
-            validate_check_authority(connection, session, &command, check_policy)?;
-            if goal.status == needs_check_approval() {
-                ensure_activation(&goal, now)?;
-            }
-            goal.check_authorization = Some(match scope {
-                GoalCheckScope::Once => GoalCheckAuthorization::Once,
-                GoalCheckScope::ForGoal => GoalCheckAuthorization::ForGoal,
-            });
-            if goal.status == needs_check_approval() {
-                goal.status = GoalStatus::Active;
-            }
+            approve_check(
+                connection,
+                session,
+                &mut goal,
+                scope,
+                &command,
+                check_policy,
+                now,
+            )?;
         }
         GoalControl::DenyCheck => {
             if goal.check.is_none() {

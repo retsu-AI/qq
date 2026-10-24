@@ -7,27 +7,30 @@ use std::{path::Path, process::Stdio, time::Duration};
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_cannot_overwrite_host_files_through_a_project_symlink() {
-    exercise_default_auto(None, false).await;
+    exercise_default_auto(None, false, "for-goal").await;
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_completion_check_uses_the_detached_native_boundary() {
-    exercise_default_auto(
-        Some("printf check-write > alias; test -f result.txt"),
-        false,
-    )
-    .await;
+    for scope in ["once", "for-goal"] {
+        exercise_default_auto(
+            Some("printf check-write > alias; test -f result.txt"),
+            false,
+            scope,
+        )
+        .await;
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn default_auto_goal_continuations_reuse_the_same_private_task_files() {
-    exercise_default_auto(Some("test -f result.txt"), true).await;
+    exercise_default_auto(Some("test -f result.txt"), true, "for-goal").await;
 }
 
 #[cfg(target_os = "linux")]
-async fn exercise_default_auto(check: Option<&str>, continuation: bool) {
+async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_scope: &str) {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().canonicalize().unwrap();
     let workspace = home.join("workspace");
@@ -101,7 +104,7 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool) {
             "--check",
             check,
             "--goal-check-approval",
-            "for-goal",
+            check_scope,
             "--goal-max-runs",
             "4",
             "--goal-deadline",

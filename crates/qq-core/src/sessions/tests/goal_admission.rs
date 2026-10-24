@@ -1269,6 +1269,7 @@ async fn goal_cancel_preserves_runtime_settlement_and_pauses_new_progress_revisi
             .command(
                 CommandId::generate().unwrap(),
                 SessionCommand::SetGoal {
+                    check_approval: None,
                     session_id: session,
                     objective: "revised objective".to_owned(),
                     check: None,
@@ -1476,6 +1477,7 @@ async fn cancelling_replaced_goal_work_preserves_the_replacement() {
         .command(
             CommandId::generate().unwrap(),
             SessionCommand::SetGoal {
+                check_approval: None,
                 session_id: session,
                 objective: "replacement".to_owned(),
                 check: None,
