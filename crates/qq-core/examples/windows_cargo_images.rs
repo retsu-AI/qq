@@ -193,6 +193,35 @@ mod probe {
             token.integrity_level().map_err(io::Error::from)?,
             token.privileges().map_err(io::Error::from)?.privileges()
         );
+        // The pinned safe wrapper panics on a documented null default DACL.
+        // Keep that optional metadata limitation from hiding actual Cargo.
+        match std::panic::catch_unwind(|| {
+            token
+                .default_dacl()
+                .map(|dacl| format!("{:?}", dacl.default_dacl().aces().collect::<Vec<_>>()))
+        }) {
+            Ok(Ok(dacl)) => println!("actual payload default DACL: {dacl}"),
+            Ok(Err(error)) => println!("actual payload default DACL query incomplete: {error:?}"),
+            Err(_) => println!(
+                "actual payload default DACL query incomplete: pinned wrapper rejected null/invalid data"
+            ),
+        }
+        let name = format!("Local\\qq-crypto-self-event-{}", std::process::id());
+        match winsafe::HEVENT::CreateEvent(None, false, false, Some(&name)) {
+            Ok(event) => {
+                println!("self-event default-DACL create succeeded: {name}");
+                let reopen = event
+                    .OpenEvent(
+                        winsafe::co::EVENT_RIGHTS::MODIFY_STATE
+                            | winsafe::co::EVENT_RIGHTS::SYNCHRONIZE,
+                        false,
+                        &name,
+                    )
+                    .map(|_| ());
+                println!("self-event default-DACL write/synchronize reopen: {reopen:?}");
+            }
+            Err(error) => println!("self-event default-DACL create: {error:?}"),
+        }
         if load_only {
             let system = PathBuf::from(manifest["system32"].as_str().ok_or_else(invalid)?);
             if !system.is_absolute() {
