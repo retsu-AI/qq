@@ -121,7 +121,6 @@ pub(super) fn capabilities(
     }
     rappct::SecurityCapabilitiesBuilder::new(package)
         .with_named(&names.iter().map(String::as_str).collect::<Vec<_>>())
-        .lpac(true)
         .build()
         .map_err(io::Error::other)
 }
