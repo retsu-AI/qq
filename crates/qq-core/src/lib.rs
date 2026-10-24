@@ -48,6 +48,8 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+#[cfg(test)]
+mod task_git;
 pub mod task_workspace;
 mod tools;
 
