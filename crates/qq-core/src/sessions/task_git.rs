@@ -197,6 +197,7 @@ impl TaskGitRunInput {
             tool: "exec".to_owned(),
             arguments,
             task_git_call: Some(NativeTaskGitCall {
+                job: None,
                 tool: call.name.clone(),
                 arguments: call.arguments.clone(),
             }),
