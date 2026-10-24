@@ -123,6 +123,68 @@ async fn scoped_command_refuses_low_disk_space_before_launch() {
         read_only: vec![],
         read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
     };
+    request.network = NativeNetwork::Isolated;
+    owner.submit(request).await.unwrap();
+    let result = wait_finished(&owner, id, 0).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(result.is_error());
+    assert!(!workspace.path().join("ran").exists());
+}
+
+#[tokio::test]
+async fn scoped_command_checks_disk_space_on_every_writable_root() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let _workspace_space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
+    let _output_space = crate::storage::SpaceOverride::new(output.path(), 0);
+    let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
+        .await
+        .unwrap();
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "echo unexpected > ran");
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: vec![],
+        read_write: vec![
+            NativeDirectoryGrant::capture(&request.workspace).unwrap(),
+            NativeDirectoryGrant::capture(&output.path().canonicalize().unwrap()).unwrap(),
+        ],
+    };
+    request.network = NativeNetwork::Isolated;
+    owner.submit(request).await.unwrap();
+    let result = wait_finished(&owner, id, 0).await.result.unwrap();
+    owner.shutdown().await.unwrap();
+    assert!(
+        result.text().contains("disk_space_low"),
+        "{}",
+        result.text()
+    );
+    assert!(result.is_error());
+    assert!(!workspace.path().join("ran").exists());
+}
+
+#[tokio::test]
+async fn scoped_command_checks_disk_space_on_the_worker_journal() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let _workspace_space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
+    let journal = root.path().canonicalize().unwrap().join("owner");
+    let owner = CommandOwner::open(journal.clone(), "unknown", launcher())
+        .await
+        .unwrap();
+    let _journal_space = crate::storage::SpaceOverride::new(&journal, 0);
+    let id = ToolCallId::generate().unwrap();
+    let mut request = command(workspace.path(), id, "echo unexpected > ran");
+    request.filesystem = NativeFilesystem::Restricted {
+        read_only: vec![],
+        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+    };
+    request.network = NativeNetwork::Isolated;
     owner.submit(request).await.unwrap();
     let result = wait_finished(&owner, id, 0).await.result.unwrap();
     owner.shutdown().await.unwrap();
@@ -138,9 +200,33 @@ async fn scoped_command_refuses_low_disk_space_before_launch() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn scoped_command_is_reaped_when_disk_space_drops() {
+    command_reaped_on_storage_pressure(PressureRoot::Workspace).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_command_is_reaped_when_another_writable_disk_fills() {
+    command_reaped_on_storage_pressure(PressureRoot::Additional).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn scoped_command_is_reaped_when_the_journal_disk_fills() {
+    command_reaped_on_storage_pressure(PressureRoot::Journal).await;
+}
+
+#[cfg(target_os = "linux")]
+enum PressureRoot {
+    Workspace,
+    Additional,
+    Journal,
+}
+
+#[cfg(target_os = "linux")]
+async fn command_reaped_on_storage_pressure(location: PressureRoot) {
     let root = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
-    let space = crate::storage::SpaceOverride::new(workspace.path(), u64::MAX);
+    let output = tempfile::tempdir().unwrap();
     let release = workspace.path().join("release");
     crate::tools::create_test_fifo(&release).await;
     let _gate = std::fs::OpenOptions::new()
@@ -151,6 +237,13 @@ async fn scoped_command_is_reaped_when_disk_space_drops() {
     let owner = CommandOwner::open(root.path().join("owner"), "unknown", launcher())
         .await
         .unwrap();
+    let journal = root.path().join("owner");
+    let pressure_root = match location {
+        PressureRoot::Workspace => workspace.path(),
+        PressureRoot::Additional => output.path(),
+        PressureRoot::Journal => journal.as_path(),
+    };
+    let space = crate::storage::SpaceOverride::new(pressure_root, u64::MAX);
     let id = ToolCallId::generate().unwrap();
     let mut request = command(
         workspace.path(),
@@ -170,7 +263,10 @@ async fn scoped_command_is_reaped_when_disk_space_drops() {
             .iter()
             .map(|path| NativeDirectoryGrant::capture(path).unwrap())
             .collect(),
-        read_write: vec![NativeDirectoryGrant::capture(&request.workspace).unwrap()],
+        read_write: [request.workspace.as_path(), output.path()]
+            .into_iter()
+            .map(|path| NativeDirectoryGrant::capture(&path.canonicalize().unwrap()).unwrap())
+            .collect(),
     };
     owner.submit(request).await.unwrap();
     let mut after = 0;

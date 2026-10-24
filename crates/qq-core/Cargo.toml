@@ -42,6 +42,7 @@ url.workspace = true
 rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+sysctl.workspace = true
 command-fds.workspace = true
 libproc.workspace = true
 nix.workspace = true
@@ -65,6 +66,8 @@ tempfile.workspace = true
 subc-jobobject.workspace = true
 win32job.workspace = true
 win-custody.workspace = true
+winsafe = { workspace = true, features = ["kernel"] }
+firehazard.workspace = true
 windows-permissions.workspace = true
 winapi-util.workspace = true
 
