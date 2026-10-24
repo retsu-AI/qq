@@ -43,6 +43,99 @@ pub struct TaskGitJob {
 pub struct TaskGitJobFiles {
     pub request: PathBuf,
     pub receipt: PathBuf,
+    /// Present only after the original private intent has been durably saved.
+    pub reference: Option<TaskGitJobReference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskGitJobReference {
+    call: ToolCallId,
+    task: RunId,
+    control: NativeDirectoryGrant,
+    request_digest: [u8; 32],
+}
+
+impl PartialEq for TaskGitJobReference {
+    fn eq(&self, other: &Self) -> bool {
+        self.call == other.call
+            && self.task == other.task
+            && self.control.path == other.control.path
+            && self.control.identity == other.control.identity
+            && self.request_digest == other.request_digest
+    }
+}
+impl Eq for TaskGitJobReference {}
+
+impl TaskGitJobReference {
+    fn request(&self) -> PathBuf {
+        self.control
+            .path
+            .join(format!("task-git-job-{}.request.json", self.call))
+    }
+
+    pub(crate) fn matches_launch(
+        &self,
+        id: ToolCallId,
+        workspace: &Path,
+        workspace_identity: crate::command_owner::NativeWorkspaceIdentity,
+        tool: &str,
+        arguments: &str,
+    ) -> bool {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct CommitLaunch {
+            program: PathBuf,
+            args: [String; 2],
+        }
+        let Ok(args) = serde_json::from_str::<CommitLaunch>(arguments) else {
+            return false;
+        };
+        id == self.call
+            && tool == "exec"
+            && workspace == self.control.path
+            && workspace_identity == self.control.identity
+            && args.program.is_absolute()
+            && args.args[0] == "_task-git"
+            && Path::new(&args.args[1]) == self.request()
+    }
+
+    /// Historical observation only: no Git command, new deadline or ref update.
+    pub(crate) fn committed_receipt(
+        &self,
+        arguments: &str,
+    ) -> Result<Option<TaskGitJobReceipt>, TaskGitJobError> {
+        let root = task_git::held(&self.control)?;
+        let request = self.request();
+        let Some(job) = read_record::<TaskGitJob>(
+            &root,
+            Path::new(
+                request
+                    .file_name()
+                    .ok_or(TaskGitJobError::Invalid("request name"))?,
+            ),
+        )?
+        else {
+            return Ok(None);
+        };
+        let crate::tools::task_git::TaskGitRequest::Commit { message } =
+            crate::tools::task_git::parse("task_commit", arguments)
+                .map_err(|_| TaskGitJobError::Invalid("logical commit arguments"))?
+        else {
+            return Err(TaskGitJobError::Invalid("logical commit arguments"));
+        };
+        if job.call != self.call
+            || job.task != self.task
+            || (job.control.path != self.control.path
+                || job.control.identity != self.control.identity)
+            || job.digest()? != self.request_digest
+            || job.message != message
+        {
+            return Err(TaskGitJobError::Invalid("job reference mismatch"));
+        }
+        let receipt = read_receipt(&job)?;
+        Ok(receipt.filter(|receipt| matches!(receipt.result, TaskGitJobResult::Committed { .. })))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -81,6 +174,7 @@ impl TaskGitJob {
         TaskGitJobFiles {
             request: self.control.path.join(format!("{stem}.request.json")),
             receipt: self.control.path.join(format!("{stem}.receipt.json")),
+            reference: None,
         }
     }
 
@@ -131,7 +225,7 @@ pub fn save_job(job: &TaskGitJob) -> Result<TaskGitJobFiles, TaskGitJobError> {
     job.validate()?;
     let root = task_git::held(&job.control)?;
     let _lock = lock_job(&root, job.call)?;
-    let files = job.files();
+    let mut files = job.files();
     let name = files
         .request
         .file_name()
@@ -150,6 +244,12 @@ pub fn save_job(job: &TaskGitJob) -> Result<TaskGitJobFiles, TaskGitJobError> {
             job,
         )?;
     }
+    files.reference = Some(TaskGitJobReference {
+        call: job.call,
+        task: job.task,
+        control: job.control.clone(),
+        request_digest: job.digest()?,
+    });
     Ok(files)
 }
 
@@ -346,7 +446,7 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
-    fn fixture() -> (TempDir, TaskGitJob) {
+    pub(super) fn fixture() -> (TempDir, TaskGitJob) {
         let root = TempDir::new().unwrap();
         let source = root.path().join("source");
         let control = root.path().join("control");
@@ -483,6 +583,165 @@ mod tests {
                 .path
                 .join(format!("task-git-{}", job.task))
                 .exists()
+        );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reconciliation_tests {
+    use super::*;
+    use crate::command_owner::{
+        CommandOwner, CommandOwnerError, CommandStatus, NativeCommand, NativeEnvironment,
+        NativeFilesystem, NativeNetwork, NativeResources, NativeTaskGitCall,
+    };
+
+    async fn finished(
+        owner: &CommandOwner,
+        id: ToolCallId,
+    ) -> crate::command_owner::CommandSnapshot {
+        let mut version = 0;
+        loop {
+            let snapshot = owner.wait(id, version).await.unwrap();
+            version = snapshot.version;
+            if snapshot.status == CommandStatus::Finished {
+                return snapshot;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn task_git_reconciles_persisted_commit_after_helper_loses_stdout() {
+        let (_root, job) = super::tests::fixture();
+        let files = save_job(&job).unwrap();
+        // This is the precise state after durable effect/receipt persistence,
+        // before the helper has printed any stdout. No effect may be repeated.
+        let receipt = execute_job_at(&files.request, 0).unwrap();
+        let TaskGitJobResult::Committed { commit } = &receipt.result else {
+            panic!("fixture must commit")
+        };
+        let reference = files.reference.clone().unwrap();
+        let owner = CommandOwner::open(
+            job.control.path.join("worker"),
+            "unknown",
+            crate::command_owner::tests::launcher(),
+        )
+        .await
+        .unwrap();
+        let request = NativeCommand {
+            id: job.call,
+            workspace: job.control.path.clone(),
+            workspace_identity: job.control.identity,
+            tool: "exec".into(),
+            arguments:
+                serde_json::json!({"program":"/bin/false","args":["_task-git",files.request]})
+                    .to_string(),
+            task_git_call: Some(NativeTaskGitCall {
+                tool: "task_commit".into(),
+                arguments: serde_json::json!({"message":job.message}).to_string(),
+                job: Some(reference.clone()),
+            }),
+            environment: NativeEnvironment::capture(&[]).unwrap(),
+            filesystem: NativeFilesystem::Host,
+            network: NativeNetwork::Host,
+            resources: NativeResources::Host,
+            shell_policy: crate::ShellPolicy::default(),
+            approved_images: Vec::new(),
+            not_after_ms: None,
+        };
+        owner.submit(request.clone()).await.unwrap();
+        let snapshot = finished(&owner, job.call).await;
+        let output = snapshot.result.unwrap().into_output();
+        assert!(!output.is_error, "{}", output.model_text);
+        assert_eq!(
+            serde_json::from_str::<TaskGitJobReceipt>(&output.model_text).unwrap(),
+            receipt
+        );
+        assert_eq!(
+            output.native_outcome,
+            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(1) })
+        );
+        assert!(output.execution_context.as_ref().unwrap().bound_to(
+            job.call,
+            "task_commit",
+            &request.task_git_call.as_ref().unwrap().arguments
+        ));
+        assert_eq!(
+            snapshot.process.unwrap().into_context(),
+            output.execution_context.unwrap()
+        );
+        // Remove the receipt: a failed helper must remain failed, and must not
+        // regenerate it by replaying Git or guessing from arbitrary stdout.
+        std::fs::remove_file(&files.receipt).unwrap();
+        let mut absent = request.clone();
+        let mut next_job = job.clone();
+        next_job.call = ToolCallId::generate().unwrap();
+        let next = save_job(&next_job).unwrap();
+        absent.id = next_job.call;
+        absent.arguments =
+            serde_json::json!({"program":"/bin/false","args":["_task-git",next.request]})
+                .to_string();
+        absent.task_git_call.as_mut().unwrap().job = next.reference;
+        owner.submit(absent.clone()).await.unwrap();
+        assert!(
+            finished(&owner, absent.id)
+                .await
+                .result
+                .unwrap()
+                .into_output()
+                .is_error
+        );
+        let mut mismatched_job = job.clone();
+        mismatched_job.call = ToolCallId::generate().unwrap();
+        let mismatched_files = save_job(&mismatched_job).unwrap();
+        let mut mismatched_receipt = receipt.clone();
+        mismatched_receipt.call = mismatched_job.call;
+        mismatched_receipt.request_digest = [7; 32];
+        task_git::save_metadata(
+            &task_git::held(&job.control).unwrap(),
+            mismatched_files
+                .receipt
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            &mismatched_receipt,
+        )
+        .unwrap();
+        let mut mismatch = request.clone();
+        mismatch.id = mismatched_job.call;
+        mismatch.arguments = serde_json::json!({"program":"/bin/false","args":["_task-git",mismatched_files.request]}).to_string();
+        mismatch.task_git_call.as_mut().unwrap().job = mismatched_files.reference;
+        owner.submit(mismatch.clone()).await.unwrap();
+        assert!(
+            finished(&owner, mismatch.id)
+                .await
+                .result
+                .unwrap()
+                .into_output()
+                .is_error
+        );
+        // A reference must be bound to both the original private request and
+        // native launch, even when the logical message otherwise matches.
+        let mut invalid = request;
+        invalid.id = ToolCallId::generate().unwrap();
+        assert!(matches!(
+            owner.submit(invalid).await,
+            Err(CommandOwnerError::Invalid)
+        ));
+        owner.shutdown().await.unwrap();
+        assert_eq!(
+            reference
+                .committed_receipt(&serde_json::json!({"message":job.message}).to_string())
+                .unwrap(),
+            None
+        );
+        let task_ref = job
+            .control
+            .path
+            .join(format!("task-git-{}/{}", job.task, commit.branch));
+        assert_eq!(
+            std::fs::read_to_string(task_ref).unwrap().trim(),
+            commit.oid
         );
     }
 }

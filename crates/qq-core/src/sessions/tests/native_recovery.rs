@@ -1385,6 +1385,7 @@ async fn task_git_native_recovery_binds_original_call_before_acknowledgement() {
         let launch = serde_json::json!({"program":"/bin/sh", "args":["-c","printf once >> counter; printf task-result"]}).to_string();
         let request = NativeCommand {
             task_git_call: Some(NativeTaskGitCall {
+                job: None,
                 tool: tool.into(),
                 arguments: arguments.into(),
             }),

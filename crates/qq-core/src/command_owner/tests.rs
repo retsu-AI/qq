@@ -2707,6 +2707,7 @@ async fn task_git_native_binding_preserves_launch_and_logical_identity() {
         .unwrap();
     let id = ToolCallId::generate().unwrap();
     let logical = NativeTaskGitCall {
+        job: None,
         tool: "task_commit".into(),
         arguments: r#"{"message":"literal ; not a shell command"}"#.into(),
     };
