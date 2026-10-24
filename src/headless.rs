@@ -4402,7 +4402,7 @@ mod tests {
             .await;
             assert_eq!(code, 2, "{command}: {}", String::from_utf8_lossy(&stderr));
             assert!(!stderr.is_empty());
-            let goal = fixture
+            let snapshot = fixture
                 .sessions
                 .snapshot(SnapshotRequest::new(
                     handle.workspace_id,
@@ -4413,24 +4413,15 @@ mod tests {
                 .await
                 .unwrap()
                 .focused
-                .unwrap()
-                .goal
                 .unwrap();
-            assert!(matches!(
-                goal.status,
-                qq_protocol::GoalStatus::Paused {
-                    reason: qq_protocol::GoalPauseReason::NeedsUser {
-                        cause: qq_protocol::GoalNeedsUser::CheckApproval
-                    },
-                }
-            ));
-            assert_eq!(
-                goal.check_authorization,
-                Some(qq_protocol::GoalCheckAuthorization::Pending)
+            assert!(
+                snapshot.goal.is_none(),
+                "refused admission must roll back the goal"
             );
-            assert_eq!(goal.counters.runs, 0);
-            assert_eq!(goal.counters.audits, 0);
-            assert!(goal.pending_run_id.is_none());
+            assert!(
+                snapshot.runs.is_empty(),
+                "refused admission must not schedule work"
+            );
             fixture.sessions.close().await.unwrap();
         }
     }
