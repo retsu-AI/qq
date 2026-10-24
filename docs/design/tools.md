@@ -1372,26 +1372,32 @@ inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
-Descendants cannot call
-`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
-so terminating payloads cannot kill their cleanup owner. It retains the exited
-leader without reaping it, repeatedly terminates remaining members, and checks
-two kernel snapshots for exited process identities before reaping. This also
-covers forks racing with cancellation and worker loss. A terminal payload status
-is returned through the private channel only after cleanup; a missing or partial
-status never confirms quiescence. Exited zombies may await collection by the OS,
-but live members keep cleanup unconfirmed. Loader-injection environment
-variables are refused before helper startup. macOS does not create Linux-style
-mount or PID namespaces, and kernel aggregate resource quotas remain unavailable.
-An explicit `NativeResources::Guarded` request instead starts the payload with
+The profile denies direct `setsid` and `setpgid` syscalls. Darwin spawn
+attributes can still create a new process group or session; those descendants
+retain the same Seatbelt file and network restrictions. The trusted guardian
+stays outside the payload's group, so payload signals cannot kill it. It retains
+the exited leader without reaping it, repeatedly terminates remaining group
+members, and checks their exited process identities before reaping. Cancellation,
+deadlines and worker loss trigger this owned-group cleanup. The private terminal
+receipt confirms that cleanup and the guardian's exit, not the exit of detached
+descendants. Missing or partial receipts do not confirm owned-group cleanup.
+Exited zombies may await collection by the OS, but live group members keep cleanup
+unconfirmed. A deliberately detached process can survive command completion or
+cancellation while remaining sandboxed; QQ does not claim complete descendant
+custody on macOS. Loader-injection environment variables are refused before
+helper startup. macOS does not create Linux-style mount or PID namespaces.
+The payload inherits the launching process's per-process OS limits; QQ does not
+supply kernel aggregate resource quotas on this backend.
+
+An explicit `NativeResources::Guarded` request starts the payload with
 `taskpolicy -b` and samples the pinned process group's physical footprint and
 thread count every 250 ms using Darwin process accounting. The existing owner
 liveness thread performs these checks; no extra per-command thread is created.
-Excess use or unavailable accounting stops the whole owned group and retains its
-captured output. These sampled safeguards can overshoot and exclude charged file
-cache; they are not `NativeResources::Limited` quotas. Guarded commands require
-restricted filesystem authority. Default macOS Auto uses these safeguards with
-its detached task files; it does not claim kernel aggregate quotas.
+Excess use or unavailable accounting stops the owned group and retains captured
+output. These safeguards can overshoot, exclude charged file cache and omit
+processes that detached from the group. They are not per-task aggregate quotas.
+Guarded commands require restricted filesystem authority. Default macOS Auto
+uses these safeguards with its detached task files.
 Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`

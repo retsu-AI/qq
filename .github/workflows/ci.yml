@@ -416,7 +416,7 @@ jobs:
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list |
               grep -Fx 'runtime::real_cli_persists_native_ownership_and_releases_worker_results: test'
             cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/qq-macos-tests.txt"
-            for name in payload_cannot_leave_the_owned_process_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes guarded_commands_complete_and_resource_pressure_stops_the_owned_group; do
+            for name in spawn_attributes_preserve_seatbelt_outside_the_owned_group isolated_network_denies_tcp_and_host_unix_sockets inherited_file_authority_is_closed_before_payload_execution restricted_filesystem_allows_task_writes_and_denies_outside_reads_and_writes guarded_commands_complete_and_resource_pressure_stops_the_owned_group; do
               grep -Fx "macos::$name: test" "$RUNNER_TEMP/qq-macos-tests.txt"
             done
           fi
