@@ -2291,6 +2291,7 @@ mod tests {
                 }
             }
             SessionCommandKind::SetGoal => SessionCommand::SetGoal {
+                check_approval: None,
                 session_id,
                 objective: "finish the task".to_owned(),
                 check: None,

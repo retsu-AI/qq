@@ -8864,112 +8864,129 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
         (ApprovalMode::Ask, true, true, false, "true", "pending"),
         (ApprovalMode::Full, true, true, false, "true", "pending"),
     ] {
-        let directory = TempDir::new().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let workspace = root.join("work");
-        let control = root.join("control");
-        std::fs::create_dir(&workspace).unwrap();
-        std::fs::create_dir(&control).unwrap();
-        let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
-        options.grant_authority = Some(Arc::new(Authority(denied)));
-        if native {
-            options.native_commands = Some(Arc::new(goal_check::CheckService { code: 0 }));
-        }
-        if task {
-            options.task_workspaces = Some(crate::sessions::TaskWorkspacePolicy {
-                directory: crate::command_owner::NativeDirectoryGrant::capture(&control).unwrap(),
-                read_only: vec![],
-                resources: crate::command_owner::NativeResources::Host,
-                limits: crate::task_workspace::TaskWorkspaceLimits {
-                    max_entries: 16,
-                    max_bytes: 4096,
-                },
-            });
-        }
-        let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
-            .await
-            .unwrap();
-        // This test covers admission. Execution is held; native protection is
-        // qualified separately by the real-worker check tests.
-        let held = Arc::clone(&runtime.inner.permits)
-            .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
-            .await
-            .unwrap();
-        let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
-        let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
-        let CommandOutcome::SessionCreated { session_id } = created.outcome else {
-            panic!("session")
-        };
-        let id = CommandId::generate().unwrap();
-        let command: SessionCommand = serde_json::from_value(serde_json::json!({
-            "type":"set_goal", "session_id":session_id,
-            "objective":"verify the task without permission prompts",
-            "check":{"command":command,"timeout_ms":1000},
-            "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
-        }))
-        .unwrap();
-        let result = runtime.command(id, command.clone()).await;
-        match expected {
-            "unavailable" => assert!(matches!(
-                result,
-                Err(SessionRuntimeError::GoalCheckPolicy(
-                    GoalCheckPolicyError::Unavailable
-                ))
-            )),
-            "denied" => assert!(matches!(
-                result,
-                Err(SessionRuntimeError::GoalCheckPolicy(
-                    GoalCheckPolicyError::ManagedDenied
-                ))
-            )),
-            "forbidden" => assert!(matches!(
-                result,
-                Err(SessionRuntimeError::GoalCheckForbidden)
-            )),
-            authorization => {
-                let receipt = result.unwrap();
-                let CommandOutcome::GoalUpdated { goal, .. } = &receipt.outcome else {
-                    panic!("goal receipt")
-                };
-                assert_eq!(
-                    serde_json::to_value(goal.check_authorization).unwrap(),
-                    authorization
-                );
-                assert_eq!(
-                    goal.status == qq_protocol::GoalStatus::Active,
-                    authorization == "task_scoped"
-                );
-                assert_eq!(goal.revision, 1);
-                assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
-                if authorization == "task_scoped" {
-                    runtime
-                        .command(
-                            CommandId::generate().unwrap(),
-                            SessionCommand::GoalControl {
-                                session_id,
-                                expected: qq_protocol::GoalIdentity {
-                                    goal_id: goal.goal_id,
-                                    revision: goal.revision,
-                                },
-                                action: qq_protocol::GoalControl::Pause,
-                            },
-                        )
-                        .await
-                        .unwrap();
-                }
+        for scope in [
+            None,
+            Some(qq_protocol::GoalCheckScope::Once),
+            Some(qq_protocol::GoalCheckScope::ForGoal),
+        ] {
+            let directory = TempDir::new().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let workspace = root.join("work");
+            let control = root.join("control");
+            std::fs::create_dir(&workspace).unwrap();
+            std::fs::create_dir(&control).unwrap();
+            let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+            options.grant_authority = Some(Arc::new(Authority(denied)));
+            if native {
+                options.native_commands = Some(Arc::new(goal_check::CheckService { code: 0 }));
             }
-        }
-        if matches!(expected, "unavailable" | "denied" | "forbidden") {
-            let snapshot = runtime
-                .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+            if task {
+                options.task_workspaces = Some(crate::sessions::TaskWorkspacePolicy {
+                    directory: crate::command_owner::NativeDirectoryGrant::capture(&control)
+                        .unwrap(),
+                    read_only: vec![],
+                    resources: crate::command_owner::NativeResources::Host,
+                    limits: crate::task_workspace::TaskWorkspaceLimits {
+                        max_entries: 16,
+                        max_bytes: 4096,
+                    },
+                });
+            }
+            let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
                 .await
                 .unwrap();
-            assert!(
-                snapshot.focused.unwrap().goal.is_none(),
-                "refused checks must not leave a paused goal requiring consent"
-            );
+            // This test covers admission. Execution is held; native protection is
+            // qualified separately by the real-worker check tests.
+            let held = Arc::clone(&runtime.inner.permits)
+                .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
+                .await
+                .unwrap();
+            let (workspace_id, _) = resolve_workspace(&runtime, &workspace).await;
+            let created = create_session_with_mode(&runtime, workspace_id, None, mode).await;
+            let CommandOutcome::SessionCreated { session_id } = created.outcome else {
+                panic!("session")
+            };
+            let id = CommandId::generate().unwrap();
+            let command: SessionCommand = serde_json::from_value(serde_json::json!({
+                "type":"set_goal", "session_id":session_id,
+                "objective":"verify the task without permission prompts",
+                "check":{"command":command,"timeout_ms":1000},
+                "check_approval":scope,
+                "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+60_000}
+            }))
+            .unwrap();
+            let result = runtime.command(id, command.clone()).await;
+            match expected {
+                "unavailable" => assert!(matches!(
+                    result,
+                    Err(SessionRuntimeError::GoalCheckPolicy(
+                        GoalCheckPolicyError::Unavailable
+                    ))
+                )),
+                "denied" => assert!(matches!(
+                    result,
+                    Err(SessionRuntimeError::GoalCheckPolicy(
+                        GoalCheckPolicyError::ManagedDenied
+                    ))
+                )),
+                "forbidden" => assert!(matches!(
+                    result,
+                    Err(SessionRuntimeError::GoalCheckForbidden)
+                )),
+                authorization => {
+                    let authorization = match (authorization, scope) {
+                        ("task_scoped" | "pending", Some(qq_protocol::GoalCheckScope::Once)) => {
+                            "once"
+                        }
+                        ("task_scoped" | "pending", Some(qq_protocol::GoalCheckScope::ForGoal)) => {
+                            "for_goal"
+                        }
+                        (value, _) => value,
+                    };
+                    let receipt = result.unwrap();
+                    let CommandOutcome::GoalUpdated { goal, .. } = &receipt.outcome else {
+                        panic!("goal receipt")
+                    };
+                    assert_eq!(
+                        serde_json::to_value(goal.check_authorization).unwrap(),
+                        authorization
+                    );
+                    assert_eq!(
+                        goal.status == qq_protocol::GoalStatus::Active,
+                        authorization != "pending"
+                    );
+                    assert_eq!(goal.revision, 1);
+                    assert_eq!(runtime.command(id, command).await.unwrap(), receipt);
+                    if authorization != "pending" {
+                        runtime
+                            .command(
+                                CommandId::generate().unwrap(),
+                                SessionCommand::GoalControl {
+                                    session_id,
+                                    expected: qq_protocol::GoalIdentity {
+                                        goal_id: goal.goal_id,
+                                        revision: goal.revision,
+                                    },
+                                    action: qq_protocol::GoalControl::Pause,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            if matches!(expected, "unavailable" | "denied" | "forbidden") {
+                let snapshot = runtime
+                    .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
+                    .await
+                    .unwrap();
+                assert!(
+                    snapshot.focused.unwrap().goal.is_none(),
+                    "refused checks must not leave a paused goal requiring consent"
+                );
+            }
+            drop(held);
+            runtime.shutdown().await.unwrap();
         }
-        drop(held);
-        runtime.shutdown().await.unwrap();
     }
 }

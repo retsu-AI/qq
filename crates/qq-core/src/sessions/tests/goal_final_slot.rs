@@ -174,6 +174,7 @@ async fn goal_tenth_run_reserves_a_durable_tool_free_handoff_after_early_complet
                         let mut budget = current.budget;
                         budget.max_goal_runs = 10;
                         runtime.command(CommandId::generate().unwrap(), SessionCommand::SetGoal {
+                            check_approval: None,
                             session_id, objective: current.objective, check: current.check,
                             budget: Box::new(budget), expected: Some(expected), replace: false,
                         }).await.unwrap();

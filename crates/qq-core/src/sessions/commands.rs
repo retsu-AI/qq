@@ -453,6 +453,7 @@ pub(super) fn execute_command(
             session_id,
             objective,
             check,
+            check_approval,
             budget,
             expected,
             replace,
@@ -504,6 +505,24 @@ pub(super) fn execute_command(
                     }
                     goals::save(&transaction, &goal)?;
                 }
+            }
+            if let Some(scope) = check_approval {
+                let command = goal
+                    .check
+                    .as_ref()
+                    .ok_or(SessionRuntimeError::GoalCheckMissing)?
+                    .command
+                    .clone();
+                goals::approve_check(
+                    &transaction,
+                    session_id,
+                    &mut goal,
+                    scope,
+                    &command,
+                    admission.goal_check_policy.as_ref(),
+                    now,
+                )?;
+                goals::save(&transaction, &goal)?;
             }
             if let Some(previous) = previous {
                 cascade_cancels.extend(cancel_goal_work(
