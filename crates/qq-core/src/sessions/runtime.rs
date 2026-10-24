@@ -395,8 +395,8 @@ pub struct ReviewRequest {
     /// The child's task brief (the prompt that created its run), truncated to
     /// `MAX_REVIEW_BRIEF_BYTES`. `None` for root sessions.
     pub task_brief: Option<String>,
-    /// The session's approval mode. Only Auto consults the reviewer;
-    /// its denial is final. Ask requires the human directly.
+    /// The session's approval mode. Auto and its descendants use the reviewer
+    /// for internal supervision; an unavailable verdict denies the action.
     pub mode: ApprovalMode,
     /// The last `MAX_REVIEW_RECENT_ACTIONS` finished tool calls of the run.
     pub recent_actions: Vec<RecentAction>,
@@ -455,14 +455,14 @@ impl ReviewVerdict {
     }
 }
 
-/// The reviewer's judgement for a call the mode held. `Approve` executes it
-/// and `Deny` settles it as a tool error, under Auto; `Escalate` hands the call to the human, whose wait starts at the
-/// escalation. A reviewer that cannot answer must return `Escalate`, never
-/// hang and never `Approve`.
+/// The reviewer's judgement for an internally supervised call. `Approve`
+/// executes within the existing authority; `Deny` settles it as a tool error.
+/// Under Auto (including an Auto ancestor), `Escalate` also denies the call.
+/// A reviewer that cannot answer must return `Escalate`, never hang or approve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewDecision {
     Approve,
-    /// The reviewer declines to decide; the human approval path continues.
+    /// The reviewer declines to decide. Auto treats this as a denial.
     Escalate {
         reason: String,
     },
@@ -478,8 +478,8 @@ pub type ReviewFuture = Pin<Box<dyn Future<Output = ReviewVerdict> + Send + 'sta
 /// A model-backed adjudicator for tool calls that static policy holds for
 /// approval. The embedding application implements this against its provider
 /// layer; qq-core stays ignorant of model routing and prompting. Reviewer
-/// failures and timeouts must resolve as `Escalate`, never hang: the gate
-/// keeps its own human timeout regardless.
+/// failures must resolve as `Escalate`, never approve. The gate bounds the
+/// review wait and denies unavailable supervision under Auto.
 pub trait ApprovalReviewer: Send + Sync + 'static {
     fn review(&self, request: ReviewRequest) -> ReviewFuture;
 }

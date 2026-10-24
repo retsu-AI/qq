@@ -507,7 +507,14 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
         fetch: None,
         delegated,
     };
-    store.reduce_event(&envelope(1, busy, requested(true)), context(&[]));
+    let effects = store.reduce_event(&envelope(1, busy, requested(true)), context(&[]));
+    assert!(
+        !effects.iter().any(|effect| matches!(
+            effect,
+            StateEffect::Attention(Attention::ApprovalRequested { .. })
+        )),
+        "internal supervision must not notify the human to approve"
+    );
     assert_eq!(
         store.activity(),
         StoreActivity::Working,
@@ -575,7 +582,11 @@ fn store_activity_is_blocked_only_when_a_human_is_asked_and_the_worst_session_wi
 
     // A hold asked of the human directly blocks at once, even while another
     // session is idle.
-    store.reduce_event(&envelope(4, busy, requested(false)), context(&[]));
+    let effects = store.reduce_event(&envelope(4, busy, requested(false)), context(&[]));
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        StateEffect::Attention(Attention::ApprovalRequested { .. })
+    )));
     assert!(matches!(store.activity(), StoreActivity::Blocked { .. }));
 
     // A client that attaches mid-hold knows who decides from the summary
