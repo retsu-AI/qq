@@ -767,6 +767,24 @@ mod proof {
         Ok(receiver)
     }
 
+    fn wait_job_empty(
+        mut active: impl FnMut() -> io::Result<u32>,
+        mut deadline_reached: impl FnMut() -> bool,
+    ) -> io::Result<()> {
+        loop {
+            let count = active()?;
+            if count == 0 {
+                return Ok(());
+            }
+            if deadline_reached() {
+                return Err(err(format!(
+                    "ordinary broker job still has {count} active processes at deadline"
+                )));
+            }
+            std::thread::yield_now();
+        }
+    }
+
     fn launch_ordinary_broker() -> io::Result<()> {
         use fh::{job, process};
         use firehazard as fh;
@@ -940,12 +958,37 @@ mod proof {
             if code != 0 {
                 return Err(err(format!("ordinary broker exit {code:#x}")));
             }
-            let accounting =
+            let initial =
                 fh::query_information_job_object::<job::object::BasicAccountingInformation>(&job)
                     .map_err(err)?;
-            if accounting.active_processes != 0 {
-                return Err(err("ordinary broker job not quiescent"));
+            println!(
+                "outer job after signaled broker {}: active={}",
+                child.process_id, initial.active_processes
+            );
+            match fh::query_information_job_object::<job::object::BasicProcessIdList>(&job) {
+                Ok(ids) => match ids
+                    .process_id_list
+                    .get(..ids.number_of_process_ids_in_list as usize)
+                {
+                    Some(listed) => println!("outer job process_ids={listed:?}"),
+                    None => println!(
+                        "outer job PID telemetry unsupported: inconsistent returned length"
+                    ),
+                },
+                Err(error) => println!("outer job PID telemetry unsupported: {error:?}"),
             }
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            wait_job_empty(
+                || {
+                    fh::query_information_job_object::<job::object::BasicAccountingInformation>(
+                        &job,
+                    )
+                    .map(|info| info.active_processes)
+                    .map_err(err)
+                },
+                || std::time::Instant::now() >= deadline,
+            )?;
+            println!("outer job: confirmed zero active processes before desktop cleanup");
             Ok(())
         })();
         if result.is_err() {
@@ -1081,6 +1124,31 @@ mod proof {
         verify_ordinary_broker("immediately before CreateProcessAsUserW")?;
         launch_lpac_as(root, "filtered", Some(filtered.as_handle()), desktop_path)
     }
+    #[cfg(test)]
+    mod job_quiescence_tests {
+        use super::*;
+
+        #[test]
+        fn zero_is_required_after_a_nonzero_observation() {
+            let mut counts = [1, 0].into_iter();
+            wait_job_empty(|| Ok(counts.next().unwrap()), || false).unwrap();
+            assert_eq!(counts.next(), None);
+        }
+
+        #[test]
+        fn nonzero_at_deadline_remains_a_failure() {
+            let error = wait_job_empty(|| Ok(2), || true).unwrap_err();
+            assert!(error.to_string().contains("2 active processes"));
+        }
+
+        #[test]
+        fn query_errors_are_preserved() {
+            let error = wait_job_empty(|| Err(io::ErrorKind::PermissionDenied.into()), || false)
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
     #[cfg(test)]
     mod capture_tests {
         use super::*;
