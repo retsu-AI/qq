@@ -296,12 +296,24 @@ mod tests {
         let first = std::env::split_paths(&environment.get("PATH").unwrap())
             .next()
             .unwrap();
-        assert_eq!(
-            first,
-            dunce::simplified(&canonical),
+        assert!(
+            !first.as_os_str().to_string_lossy().starts_with(r"\\?\"),
             "Windows tool PATH must use DOS spelling when identity allows it"
         );
         assert_eq!(first.canonicalize().unwrap(), canonical);
+        let extended = root.path().canonicalize().unwrap().join("SDK trailing.");
+        std::fs::create_dir(&extended).unwrap();
+        let environment = NativeEnvironment::from_values([])
+            .unwrap()
+            .with_executable_directories(std::slice::from_ref(&extended))
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(&environment.get("PATH").unwrap())
+                .next()
+                .unwrap(),
+            extended,
+            "DOS-incompatible names must keep their original identity"
+        );
     }
 
     #[cfg(windows)]
