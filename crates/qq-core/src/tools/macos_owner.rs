@@ -949,6 +949,24 @@ mod tests {
         let protected = task.join("protected");
         let nested = protected.join("nested");
         std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(task.join("src")).unwrap();
+        std::fs::create_dir(task.join("tmp")).unwrap();
+        std::fs::write(
+            task.join("Cargo.toml"),
+            "[package]\nname = \"native-workspace-proof\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            task.join("src/lib.rs"),
+            r#"pub fn add(a: u32, b: u32) -> u32 { a + b }
+#[test]
+fn builds_and_tests() {
+    assert_eq!(add(20, 22), 42);
+    std::fs::write("cargo-artifact", "native-cargo-tested").unwrap();
+}
+"#,
+        )
+        .unwrap();
         let outside = root.join("host-file");
         std::fs::write(&outside, b"host-readable").unwrap();
         std::fs::write(protected.join("kept"), b"protected").unwrap();
@@ -971,6 +989,12 @@ mod tests {
             let output = std::process::Command::new(SANDBOX_EXEC)
                 .env_clear()
                 .env("PATH", std::env::var_os("PATH").expect("native fixture PATH"))
+                .env("HOME", std::env::var_os("HOME").expect("native fixture HOME"))
+                .env("TMPDIR", task.join("tmp"))
+                .env("CARGO_HOME", task.join(".cargo"))
+                .env("CARGO_TARGET_DIR", task.join("target"))
+                .env("RUSTUP_AUTO_INSTALL", "0")
+                .current_dir(&task)
                 .args(["-p", &policy, "/bin/sh", "-c"])
                 .arg(
                     r#"set -eu
@@ -981,6 +1005,8 @@ if (printf changed > "$3/kept") 2>/dev/null; then exit 22; fi
 if (printf changed > "$3/nested/denied") 2>/dev/null; then exit 23; fi
 if /bin/mv "$3" "$2/moved" 2>/dev/null; then exit 24; fi
 node -e 'const os = require("node:os"); if (os.type() !== "Darwin" || !os.version()) process.exit(25); process.stdout.write("os-readable")'
+if ! cargo test --offline --quiet > "$2/cargo-log" 2>&1; then /bin/cat "$2/cargo-log" >&2; exit 26; fi
+printf cargo-tested
 "#,
                 )
                 .arg("workspace-write-test")
@@ -988,11 +1014,15 @@ node -e 'const os = require("node:os"); if (os.type() !== "Darwin" || !os.versio
                 .output()
                 .unwrap();
             assert!(output.status.success(), "{output:?}");
-            assert_eq!(output.stdout, b"host-readableos-readable");
+            assert_eq!(output.stdout, b"host-readableos-readablecargo-tested");
             assert_eq!(std::fs::read(&outside).unwrap(), b"host-readable");
             assert_eq!(std::fs::read(task.join("allowed")).unwrap(), b"allowed");
             assert_eq!(std::fs::read(protected.join("kept")).unwrap(), b"protected");
             assert!(!nested.join("denied").exists());
+            assert_eq!(
+                std::fs::read(task.join("cargo-artifact")).unwrap(),
+                b"native-cargo-tested"
+            );
         }
     }
     #[tokio::test]

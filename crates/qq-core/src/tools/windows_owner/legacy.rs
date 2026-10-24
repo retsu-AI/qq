@@ -249,6 +249,27 @@ mod tests {
         let protected = workspace.join("protected");
         std::fs::create_dir_all(&protected).unwrap();
         std::fs::write(protected.join("policy.txt"), b"protected policy").unwrap();
+        let scratch = workspace.join("tmp");
+        std::fs::create_dir(&scratch).unwrap();
+        std::fs::create_dir(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"qq-legacy-tool-proof\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            r#"#[test]
+fn builds_and_runs_in_the_workspace() {
+    assert_eq!(2 + 2, 4);
+    std::fs::write(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/cargo-test-artifact.txt"),
+        b"cargo test passed",
+    ).unwrap();
+}
+"#,
+        )
+        .unwrap();
         let outside = root.join("outside.txt");
         let public = root.join("public.txt");
         std::fs::write(&outside, b"host private bytes").unwrap();
@@ -265,16 +286,34 @@ mod tests {
         };
         let capability =
             rappct::derive_sid_from_name(&access::identity(&filesystem).unwrap()).unwrap();
-        let deadline = unix_ms() + 15_000;
+        let deadline = unix_ms() + 120_000;
         let _held = access::prepare_workspace_write(&filesystem, &capability, deadline).unwrap();
         let script = format!(
-            "type \"{}\" > host-read.txt & echo workspace-write>allowed.txt & echo forbidden>\"{}\" & echo forbidden>protected\\policy.txt & echo public-write>\"{}\" & where.exe cmd.exe>tools.txt & cargo.exe --version>cargo.txt & echo finished>done.txt",
+            "type \"{}\" > host-read.txt & echo workspace-write>allowed.txt & echo forbidden>\"{}\" & echo forbidden>protected\\policy.txt & echo public-write>\"{}\" & where.exe cmd.exe>tools.txt & cargo.exe --version>cargo.txt & cargo.exe test --offline --target-dir target -- --nocapture >cargo-test.txt 2>&1 && echo cargo-tests-passed>cargo-success.txt & echo finished>done.txt",
             dunce::simplified(&outside).display(),
             dunce::simplified(&outside).display(),
             dunce::simplified(&public).display(),
         );
         let stdin_path = root.join("stdin");
         std::fs::write(&stdin_path, b"").unwrap();
+        let mut environment: Vec<_> = std::env::vars_os()
+            .filter(|(name, _)| {
+                !["TEMP", "TMP", "TMPDIR", "CARGO_HOME"]
+                    .iter()
+                    .any(|key| name.eq_ignore_ascii_case(key))
+            })
+            .collect();
+        for name in ["TEMP", "TMP", "TMPDIR"] {
+            environment.push((
+                name.into(),
+                dunce::simplified(&scratch).as_os_str().to_owned(),
+            ));
+        }
+        // Keep this offline build's cache writes inside the granted workspace.
+        environment.push((
+            "CARGO_HOME".into(),
+            workspace.join(".cargo").into_os_string(),
+        ));
         let packet = Packet {
             program: std::path::PathBuf::from(std::env::var_os("SYSTEMROOT").unwrap())
                 .join("System32")
@@ -282,7 +321,7 @@ mod tests {
                 .canonicalize()
                 .unwrap(),
             arguments: ["/C", &script].into_iter().map(Into::into).collect(),
-            environment: std::env::vars_os().collect(),
+            environment,
             cwd: dunce::simplified(&workspace).to_owned(),
             cwd_identity: NativeWorkspaceIdentity::capture(&workspace).unwrap(),
             filesystem,
@@ -308,7 +347,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            wait.WaitForSingleObject(Some(15_000)).unwrap(),
+            wait.WaitForSingleObject(Some(120_000)).unwrap(),
             winsafe::co::WAIT::OBJECT_0
         );
         drop(child);
@@ -342,6 +381,18 @@ mod tests {
             std::fs::read_to_string(workspace.join("cargo.txt"))
                 .unwrap()
                 .starts_with("cargo ")
+        );
+        let cargo_output = std::fs::read_to_string(workspace.join("cargo-test.txt")).unwrap();
+        assert!(cargo_output.contains("test result: ok."), "{cargo_output}");
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("cargo-success.txt"))
+                .unwrap_or_else(|error| panic!("Cargo did not succeed: {error}\n{cargo_output}"))
+                .trim(),
+            "cargo-tests-passed",
+        );
+        assert_eq!(
+            std::fs::read(workspace.join("cargo-test-artifact.txt")).unwrap(),
+            b"cargo test passed",
         );
         assert_eq!(
             std::fs::read_to_string(workspace.join("done.txt"))
