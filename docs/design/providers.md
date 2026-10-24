@@ -107,6 +107,16 @@ rejects the block for families without prompt caching. OpenAI and Google
 cache the prefix implicitly. `ResolvedModel.prompt_cache.control` is `Native`
 exactly for the two codecs that mark.
 
+Implicit caches only hit when a request reaches the machine that holds its
+prefix. A session run names its session id as the request's cache key
+(`ModelRequest::with_cache_key`), and the composition root selects how a
+route sends it (`CacheRouting`). Built-in `openai` and `openai-codex` send
+the Responses `prompt_cache_key`, and the Codex body also sends the
+`session-id` header the ChatGPT backend routes by. Built-in `xai` sends
+`x-grok-conv-id`. Custom and LiteLLM endpoints send nothing, because a strict
+OpenAI-compatible proxy may reject an unknown field. The in-run summarizer
+sends the run's key, since it reads the run's cached prefix.
+
 Each adapter still owns its wire request/response schemas, protocol headers,
 error names, content-type exception, and streaming state machine. This is
 deliberate composition, not a Template Method. A `ProtocolCodec` super-trait was

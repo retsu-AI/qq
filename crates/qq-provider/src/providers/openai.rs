@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use reqwest::header::{AUTHORIZATION, HeaderMap};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -38,7 +38,13 @@ pub(crate) struct OpenAi {
     endpoint: reqwest::Url,
     headers: Arc<HeaderMap>,
     request_kind: ResponsesRequestKind,
+    /// Sends `prompt_cache_key` (and, on the Codex body, `session-id`)
+    /// from the request's cache key.
+    prompt_cache_key: bool,
 }
+
+/// The header the ChatGPT Codex backend derives cache affinity from.
+const SESSION_ID: HeaderName = HeaderName::from_static("session-id");
 
 #[cfg(test)]
 impl OpenAi {
@@ -109,7 +115,16 @@ impl OpenAi {
             endpoint,
             headers: Arc::new(headers),
             request_kind,
+            prompt_cache_key: false,
         })
+    }
+
+    /// Sends each request's cache key, when it has one. The key is a session
+    /// identifier: stable across a conversation's turns and not a secret.
+    #[must_use]
+    pub(crate) const fn with_prompt_cache_key(mut self, enabled: bool) -> Self {
+        self.prompt_cache_key = enabled;
+        self
     }
 }
 
@@ -119,17 +134,29 @@ impl Provider for OpenAi {
         let endpoint = self.endpoint.clone();
         let headers = self.headers.clone();
         let request_kind = self.request_kind;
+        let cache_key = self
+            .prompt_cache_key
+            .then(|| request.cache_key().map(Arc::<str>::from))
+            .flatten();
         with_restart(&self.exchange, move |ledger| {
             let exchange = exchange.clone();
             let endpoint = endpoint.clone();
             let headers = headers.clone();
             let request = request.clone();
+            let cache_key = cache_key.clone();
             Box::pin(try_stream! {
                 let limits = StreamLimits::new(request.max_output_tokens());
-                let body = ResponsesRequest::new(&request, request_kind);
+                let body = ResponsesRequest::new(&request, request_kind)
+                    .with_prompt_cache_key(cache_key.as_deref());
+                let mut headers = HeaderMap::clone(&headers);
+                if let (ResponsesRequestKind::Codex, Some(key)) = (request_kind, cache_key.as_deref())
+                    && let Ok(value) = HeaderValue::from_str(key)
+                {
+                    headers.insert(SESSION_ID, value);
+                }
                 let mut sse = sse_exchange(
                     &exchange,
-                    (endpoint, HeaderMap::clone(&headers)),
+                    (endpoint, headers),
                     (&body, request.wire_size_hint()),
                     sse_decoder(limits.event),
                     limits.wire,
@@ -275,6 +302,8 @@ pub(crate) struct ResponsesRequest<'a> {
     reasoning: Option<ReasoningConfig>,
     stream: bool,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
 }
 
 impl<'a> ResponsesRequest<'a> {
@@ -328,7 +357,15 @@ impl<'a> ResponsesRequest<'a> {
             }),
             stream: true,
             store: false,
+            prompt_cache_key: None,
         }
+    }
+
+    /// OpenAI routes requests sharing a key to the same cache, so every turn
+    /// of a session reads the prefix the previous turn wrote.
+    pub(crate) const fn with_prompt_cache_key(mut self, key: Option<&'a str>) -> Self {
+        self.prompt_cache_key = key;
+        self
     }
 }
 
@@ -1285,6 +1322,73 @@ mod tests {
                 .unwrap()
                 .contains_key("max_output_tokens")
         );
+    }
+
+    /// A session's turns share one key so OpenAI routes them to the cache
+    /// holding their prefix; the ChatGPT Codex backend routes by the
+    /// `session-id` header as well. Without routing, or without a key,
+    /// neither is sent.
+    #[tokio::test]
+    async fn the_cache_key_routes_requests_only_when_enabled() {
+        let body = "data: {\"type\":\"response.completed\"}\n\n";
+        let keyed = || {
+            ModelRequest::new("gpt-test", vec![Message::user("ping")], 128)
+                .with_cache_key("0123456789abcdef0123456789abcdef")
+        };
+
+        let server = LoopbackServer::sse(body);
+        let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
+        let provider = codex_provider(&endpoint, false).with_prompt_cache_key(true);
+        provider.stream(keyed()).collect::<Vec<_>>().await;
+        let request = server.capture();
+        assert_eq!(
+            request.json_body()["prompt_cache_key"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            request.header("session-id"),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+
+        let server = LoopbackServer::sse(body);
+        let endpoint = format!("{}/v1/responses", server.base_url);
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true)
+            .unwrap()
+            .single_shot()
+            .with_prompt_cache_key(true);
+        provider.stream(keyed()).collect::<Vec<_>>().await;
+        let request = server.capture();
+        assert_eq!(
+            request.json_body()["prompt_cache_key"],
+            "0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            request.header("session-id"),
+            None,
+            "standard body sends no Codex header"
+        );
+
+        for (routing, request) in [
+            (false, keyed()),
+            (
+                true,
+                ModelRequest::new("gpt-test", vec![Message::user("ping")], 128),
+            ),
+        ] {
+            let server = LoopbackServer::sse(body);
+            let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
+            let provider = codex_provider(&endpoint, false).with_prompt_cache_key(routing);
+            provider.stream(request).collect::<Vec<_>>().await;
+            let request = server.capture();
+            assert!(
+                !request
+                    .json_body()
+                    .as_object()
+                    .unwrap()
+                    .contains_key("prompt_cache_key")
+            );
+            assert_eq!(request.header("session-id"), None);
+        }
     }
 
     #[tokio::test]

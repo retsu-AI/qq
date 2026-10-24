@@ -5490,6 +5490,14 @@ async fn an_in_run_summarizer_keeps_the_session_context_before_its_prompt() {
     assert_eq!(texts[0], "earlier work");
     assert_eq!(texts[1], "first answer");
     assert_eq!(texts[2], "do the task");
+    // It is routed to the cache of the turns it shares a prefix with.
+    let session = harness.session_id.to_string();
+    assert_eq!(summary.cache_key(), Some(session.as_str()));
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.cache_key() == Some(session.as_str()))
+    );
 }
 
 #[tokio::test]

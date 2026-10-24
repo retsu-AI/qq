@@ -183,6 +183,7 @@ struct RunEnvironment {
     model_max_output_tokens: u32,
     output_ceiling: u32,
     ceiling_by_policy: bool,
+    cache_key: Option<Arc<str>>,
 }
 struct PreparedTurn {
     turn_ordinal: u32,
@@ -530,6 +531,7 @@ impl plan::CompiledAgentPlan {
                        stall_exempt,
                        summarizer,
                        inherited_effects,
+                       cache_key,
                    } = capabilities;
                    let tool_tasks = tool_tasks.unwrap_or_default();
                    let steering = steering;
@@ -876,7 +878,7 @@ impl plan::CompiledAgentPlan {
 
         yield TurnStep::Ready(RunState {
            messages, steering, run, window, slice, recovery,
-           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, task_git, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy },
+           env: RunEnvironment { plan, cancelled, gate, file_state, spawner, history, goal_spend_tracking: goal_spend_tracking || goal.is_some(), goal_paid, goal, task_git, spills, compactor, audit_hook, tool_tasks, output, summarizer, inherited_effects, limits, deadline, system, system_prompt_hash, base_specs, static_filter, reducible_messages, audit_prompt, allow_tools, model_max_output_tokens, output_ceiling, ceiling_by_policy, cache_key },
         });
                }
     }
@@ -1480,7 +1482,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<StreamedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, goal, .. } = env;
+                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, goal_paid, goal, cache_key, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let provider = &plan.runtime.provider;
                     let model = &plan.runtime.model;
@@ -1583,6 +1585,10 @@ impl RunState {
                             Arc::clone(messages),
                             request_cap,
                         );
+                        let request = match cache_key {
+                            Some(key) => request.with_cache_key(Arc::clone(key)),
+                            None => request,
+                        };
                         let request = match reasoning_effort {
                             Some(effort) => request.with_reasoning_effort(effort),
                             None => request,
