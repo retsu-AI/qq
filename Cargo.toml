@@ -83,8 +83,9 @@ qq-reasoning = { path = "crates/qq-reasoning" }
 qq-server = { path = "crates/qq-server" }
 qq-tui = { path = "crates/qq-tui" }
 # The published 0.13 release moves SECURITY_CAPABILITIES after registering its
-# pointer. Pin the owned attribute-storage fix and explicit stdio handle list.
-rappct = { git = "https://github.com/cpjet64/rappct", rev = "c02f9dd960645522009da3827a79bdc99f50c9c1" }
+# pointer. Pin owned attribute storage, explicit stdio handles, and the
+# suspended launch with an owned primary token and private desktop.
+rappct = { git = "https://github.com/retsu-AI/rappct", rev = "1caaa4e2e4dd76895be98789a0284c9293137657" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 rustix = { version = "1", default-features = false, features = ["process", "std"] }
 seccompiler = { version = "0.5", default-features = false }

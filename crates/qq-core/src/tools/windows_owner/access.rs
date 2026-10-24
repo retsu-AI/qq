@@ -45,6 +45,26 @@ pub(super) fn identity(scope: &NativeFilesystem) -> io::Result<String> {
     ))
 }
 
+// This NT-authority group is a write-only restrictor, never an AppContainer
+// capability. Only held writable task objects receive an allow ACE for it.
+pub(super) fn task_write_sid(scope: &NativeFilesystem) -> io::Result<String> {
+    let name = format!("{}.write.v1", identity(scope)?);
+    let (groups, _) =
+        firehazard_sid::derive_capability_sids_from_name(name.as_str()).map_err(io::Error::from)?;
+    let [group] = groups.as_slice() else {
+        return Err(io::Error::other(
+            "task write authority requires exactly one group SID",
+        ));
+    };
+    let sid = firehazard_sid::convert_sid_to_string_sid_a(group)
+        .ok_or_else(|| io::Error::other("task write SID is unavailable"))?
+        .to_string();
+    if !sid.starts_with("S-1-5-") {
+        return Err(io::Error::other("task write SID must have NT authority"));
+    }
+    Ok(sid)
+}
+
 // Read-only authority belongs to a held directory identity, not to every task
 // that uses it. Writable authority remains tied to the task's package SID.
 fn read_capability_name(grant: &NativeDirectoryGrant) -> io::Result<String> {
@@ -121,6 +141,7 @@ pub(super) fn prepare(
         ));
     };
     let package_sid: LocalBox<Sid> = package.as_string().parse()?;
+    let write_sid: LocalBox<Sid> = task_write_sid(scope)?.parse()?;
     let system = system_root()?;
     let mut held = Vec::new();
     let mut count = 0;
@@ -149,11 +170,18 @@ pub(super) fn prepare(
                 shared_read = read_sid(grant)?;
                 &shared_read
             };
+            let writable_sids: [&Sid; 2] = [sid, &write_sid];
+            let read_sids: [&Sid; 1] = [sid];
+            let sids = if writable {
+                &writable_sids[..]
+            } else {
+                &read_sids[..]
+            };
             walk(
                 &grant.path,
                 root.try_clone()?,
                 writable,
-                sid,
+                sids,
                 &mut count,
                 deadline,
                 &lock_security,
@@ -242,7 +270,7 @@ fn walk(
     path: &Path,
     mut file: File,
     writable: bool,
-    sid: &Sid,
+    sids: &[&Sid],
     count: &mut usize,
     deadline: u64,
     lock_security: &win_custody::SecurityDescriptor,
@@ -267,63 +295,65 @@ fn walk(
         "lock native grant ACL",
         lock_acl(&info, deadline, lock_security),
     )?;
-    let security = at(
-        path,
-        "read native grant ACL",
-        GetSecurityInfo(
-            &file,
-            SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl,
-        ),
-    )?;
-    let dacl = security
-        .dacl()
-        .ok_or_else(|| io::Error::other("native file grant has no discretionary access list"))?;
-    let mask = if writable {
-        READ_WRITE_EXECUTE_DELETE
-    } else {
-        READ_EXECUTE
-    };
-    if !(0..dacl.len())
-        .filter_map(|index| dacl.get_ace(index))
-        .any(|entry| {
-            entry.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE
-                && entry.sid() == Some(sid)
-                && entry.mask().bits() & mask == mask
-                && !entry
-                    .flags()
-                    .intersects(AceFlags::InheritOnly | AceFlags::NoPropagateInherit)
-                && (!metadata.is_dir()
-                    || entry
-                        .flags()
-                        .contains(AceFlags::ObjectInherit | AceFlags::ContainerInherit))
-        })
-    {
-        let mut encoded = ConvertSecurityDescriptorToStringSecurityDescriptor(
-            &security,
-            SecurityInformation::Dacl,
-        )?
-        .into_string()
-        .map_err(|_| io::Error::other("native access list is not Unicode"))?;
-        // New objects need to inherit the package SID; the caller's default
-        // DACL need not contain it. Update only the held kernel object below,
-        // rather than asking the file-object adapter to walk existing children.
-        let inheritance = if metadata.is_dir() { "OICI" } else { "" };
-        encoded.push_str(&format!("(A;{inheritance};0x{mask:x};;;{sid})"));
-        let expanded: LocalBox<SecurityDescriptor> = encoded.parse()?;
-        at(
+    for &sid in sids {
+        let security = at(
             path,
-            "install native grant ACL",
-            SetSecurityInfo(
-                &mut file,
-                SeObjectType::SE_KERNEL_OBJECT,
+            "read native grant ACL",
+            GetSecurityInfo(
+                &file,
+                SeObjectType::SE_FILE_OBJECT,
                 SecurityInformation::Dacl,
-                None,
-                None,
-                expanded.dacl(),
-                None,
             ),
         )?;
+        let dacl = security.dacl().ok_or_else(|| {
+            io::Error::other("native file grant has no discretionary access list")
+        })?;
+        let mask = if writable {
+            READ_WRITE_EXECUTE_DELETE
+        } else {
+            READ_EXECUTE
+        };
+        if !(0..dacl.len())
+            .filter_map(|index| dacl.get_ace(index))
+            .any(|entry| {
+                entry.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE
+                    && entry.sid() == Some(sid)
+                    && entry.mask().bits() & mask == mask
+                    && !entry
+                        .flags()
+                        .intersects(AceFlags::InheritOnly | AceFlags::NoPropagateInherit)
+                    && (!metadata.is_dir()
+                        || entry
+                            .flags()
+                            .contains(AceFlags::ObjectInherit | AceFlags::ContainerInherit))
+            })
+        {
+            let mut encoded = ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &security,
+                SecurityInformation::Dacl,
+            )?
+            .into_string()
+            .map_err(|_| io::Error::other("native access list is not Unicode"))?;
+            // New objects need to inherit the package SID; the caller's default
+            // DACL need not contain it. Update only the held kernel object below,
+            // rather than asking the file-object adapter to walk existing children.
+            let inheritance = if metadata.is_dir() { "OICI" } else { "" };
+            encoded.push_str(&format!("(A;{inheritance};0x{mask:x};;;{sid})"));
+            let expanded: LocalBox<SecurityDescriptor> = encoded.parse()?;
+            at(
+                path,
+                "install native grant ACL",
+                SetSecurityInfo(
+                    &mut file,
+                    SeObjectType::SE_KERNEL_OBJECT,
+                    SecurityInformation::Dacl,
+                    None,
+                    None,
+                    expanded.dacl(),
+                    None,
+                ),
+            )?;
+        }
     }
     drop(updating);
     if metadata.is_dir() {
@@ -338,7 +368,7 @@ fn walk(
                 &path,
                 open_child(&parent, &name)?,
                 writable,
-                sid,
+                sids,
                 count,
                 deadline,
                 lock_security,
@@ -613,7 +643,7 @@ mod tests {
             &alias.join("tree"),
             held,
             false,
-            &sid,
+            &[&sid],
             &mut 0,
             super::super::unix_ms() + 15_000,
             &lock_security().unwrap(),
