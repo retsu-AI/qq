@@ -210,6 +210,11 @@ jobs:
           bash .github/scripts/test-exact.sh tools::macos_owner::tests::writable_grant_anchors_survive_content_edits_and_replacement_attempts
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
+      - name: Windows restricted token API
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: |
+          bash .github/scripts/test-exact.sh tools::windows_owner::legacy::tests::restricted_token_api_accepts_the_production_sid_and_flag_combination
       - name: Windows restricted payload boundary
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash

@@ -138,8 +138,9 @@ grants for every new session. See
 
 ### Approval mode
 
-How much a session may do without asking: `read_only`, `ask`, `auto` (the
-default), or `full`. Ask requires fresh human approval for each non-read action.
+How much a session may do without asking: `read_only`, `ask`,
+`auto` (the TUI default), or `full`. Ask requires fresh human approval for each
+non-read action.
 Auto executes within the native task policy without human or model approval;
 denied actions return tool errors so the agent can choose another permitted
 approach. Full bypasses Auto containment. Children retain the parent's authority

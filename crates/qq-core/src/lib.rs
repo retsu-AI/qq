@@ -9738,6 +9738,13 @@ mod tests {
             None,
             None,
         );
+        // Prompt 23 changes execution, questions and public-fetch guidance.
+        // Undo those declared changes before checking the historical v14 bytes.
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 23);
+        let prompt = prompt
+            .replacen("run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
+            .replacen("ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; ", "ask_user puts a bounded multiple-choice question to the user and waits for the answer; ", 1)
+            .replacen("fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused.", 1);
         // Reconstruct v19 by undoing AB2's explicitly scoped changes; the
         // older prompt-14 golden below stays unchanged.
         let prompt = prompt
@@ -9773,13 +9780,13 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Task-owned command deadlines update the shell description as well.
-        // Record the resulting schema identity including those descriptions.
+        // Native Auto updates the shell environment description as well.
+        // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "6f5ee886cbf2c09329fd373d88e1cb2091c8929a0fcb1f5de7e2ee2abfc7017f"
+            "521e3115c1cf748d75b32e337ce10c086b8e424d569a905238bd63e5917b32ef"
         );
         let spawn = specs.last().unwrap();
         assert!(

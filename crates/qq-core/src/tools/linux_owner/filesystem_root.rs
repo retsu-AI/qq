@@ -351,7 +351,7 @@ pub(super) fn enter(filesystem: &Filesystem) -> io::Result<()> {
     Ok(())
 }
 
-fn restrict_mount_tree(root: &Path, read_only: bool, device_root: &Path) -> io::Result<()> {
+fn restrict_mount_tree(root: &Path, read_only: bool, payload_root: &Path) -> io::Result<()> {
     use io::Read as _;
     const MAX_BYTES: u64 = 4 * 1024 * 1024;
     let mut bytes = Vec::new();
@@ -361,7 +361,8 @@ fn restrict_mount_tree(root: &Path, read_only: bool, device_root: &Path) -> io::
     if bytes.len() as u64 > MAX_BYTES {
         return Err(io::Error::other("host mount metadata exceeds its bound"));
     }
-    for path in mount_paths(&bytes)?
+    let device_root = payload_root.join("dev");
+    for path in mount_paths(&bytes, payload_root)?
         .into_iter()
         .filter(|path| path.starts_with(root))
     {
@@ -386,7 +387,8 @@ fn restrict_mount_tree(root: &Path, read_only: bool, device_root: &Path) -> io::
         let mut flags = mount_flags(&file)
             .map_err(|error| context("read nested mount flags", &path, error))?
             | MountFlags::BIND;
-        if path.starts_with(device_root) && !original.contains(rustix::fs::StatVfsMountFlags::NODEV)
+        if path.starts_with(&device_root)
+            && !original.contains(rustix::fs::StatVfsMountFlags::NODEV)
         {
             flags.remove(MountFlags::NODEV);
         }
@@ -399,8 +401,10 @@ fn restrict_mount_tree(root: &Path, read_only: bool, device_root: &Path) -> io::
     Ok(())
 }
 
-fn mount_paths(bytes: &[u8]) -> io::Result<Vec<PathBuf>> {
+fn mount_paths(bytes: &[u8], payload_root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut mounts = std::collections::BTreeSet::new();
+    let private_proc = payload_root.join("proc");
+    let private_queues = payload_root.join("dev/mqueue");
     for line in bytes
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -431,7 +435,13 @@ fn mount_paths(bytes: &[u8]) -> io::Result<Vec<PathBuf>> {
         }
         let path = PathBuf::from(std::ffi::OsString::from_vec(decoded));
         relative(&path)?;
-        if path == Path::new("/") || path.starts_with("/proc") || path.starts_with("/dev/mqueue") {
+        // These copied subtrees are covered by private replacements in enter().
+        // Do not remount their inherited children (for example binfmt_misc),
+        // whose locks or automount behavior can reject a redundant remount.
+        if path == Path::new("/")
+            || path.starts_with(&private_proc)
+            || path.starts_with(&private_queues)
+        {
             continue;
         }
         mounts.insert(path);
@@ -539,7 +549,7 @@ fn bind(
     )
     .map_err(|error| context("remount source", &mounted_path, error.into()))?;
     if !matches!(kind, BindKind::Single) {
-        restrict_mount_tree(&root.join(relative), read_only, &root.join("dev"))?;
+        restrict_mount_tree(&root.join(relative), read_only, root)?;
     }
     Ok(())
 }
@@ -616,6 +626,7 @@ mod tests {
               5 4 0:2 / /proc/host-input rw - tmpfs tmpfs rw\n\
               6 1 0:3 / /dev/mqueue rw - mqueue mqueue rw\n\
               7 1 0:4 / /dev rw - tmpfs tmpfs rw\n",
+            Path::new("/"),
         )
         .unwrap();
         assert_eq!(
@@ -630,8 +641,30 @@ mod tests {
             b"1 0 1:1 / /bad\\x40 rw".as_slice(),
             b"1 0 1:1 / /bad/../escape rw",
         ] {
-            assert!(mount_paths(invalid).is_err());
+            assert!(mount_paths(invalid, Path::new("/")).is_err());
         }
+    }
+
+    #[test]
+    fn copied_private_mounts_are_replaced_instead_of_remounted() {
+        let paths = mount_paths(
+            b"1 0 1:1 / /sandbox/payload rw - ext4 /dev/a rw\n\
+              2 1 0:1 / /sandbox/payload/proc rw - proc proc rw\n\
+              3 2 0:2 / /sandbox/payload/proc/sys/fs/binfmt_misc rw - autofs systemd-1 rw\n\
+              4 1 0:3 / /sandbox/payload/dev/mqueue rw - mqueue mqueue rw\n\
+              5 1 0:4 / /sandbox/payload/dev/pts rw - devpts devpts rw\n\
+              6 1 1:2 / /sandbox/payload/opt/installed rw - ext4 /dev/b rw\n",
+            Path::new("/sandbox/payload"),
+        )
+        .unwrap();
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/sandbox/payload"),
+                PathBuf::from("/sandbox/payload/dev/pts"),
+                PathBuf::from("/sandbox/payload/opt/installed"),
+            ]
+        );
     }
 
     #[test]

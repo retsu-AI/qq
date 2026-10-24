@@ -31,7 +31,11 @@ fn stage(operation: &'static str) -> impl FnOnce(firehazard::Error) -> io::Error
 fn restricted_token(capability: &str) -> io::Result<token::OwnedHandle> {
     let base = firehazard::open_process_token(
         firehazard::get_current_process(),
-        token::QUERY | token::DUPLICATE,
+        token::QUERY
+            | token::DUPLICATE
+            | token::ADJUST_DEFAULT
+            | token::ADJUST_PRIVILEGES
+            | token::ASSIGN_PRIMARY,
     )
     .map_err(stage("open caller token"))?;
     let groups = base.groups().map_err(stage("query caller token groups"))?;
@@ -259,6 +263,82 @@ mod tests {
             None,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn restricted_token_api_accepts_the_production_sid_and_flag_combination() {
+        let base = firehazard::open_process_token(
+            firehazard::get_current_process(),
+            token::QUERY
+                | token::DUPLICATE
+                | token::ADJUST_DEFAULT
+                | token::ADJUST_PRIVILEGES
+                | token::ASSIGN_PRIMARY,
+        )
+        .unwrap();
+        let groups = base.groups().unwrap();
+        let logon = groups
+            .groups()
+            .iter()
+            .find(|group| {
+                group.attributes & firehazard::sid::group::LOGON_ID
+                    == firehazard::sid::group::LOGON_ID
+            })
+            .unwrap();
+        let package = rappct::derive_sid_from_name("qq.legacy.token-api-proof").unwrap();
+        let capability = firehazard::sid::convert_string_sid_to_sid_a(package.as_string()).unwrap();
+        let parsed_world = firehazard::sid::convert_string_sid_to_sid_a("S-1-1-0").unwrap();
+        let attributes = |sid| firehazard::sid::AndAttributes::new(sid, None);
+        let world = [attributes(firehazard::sid!(S - 1 - 1 - 0))];
+        let parsed = [attributes(parsed_world.as_sid_ptr())];
+        let logon_only = [attributes(logon.sid)];
+        let capability_only = [attributes(capability.as_sid_ptr())];
+        let production = [
+            attributes(capability.as_sid_ptr()),
+            attributes(logon.sid),
+            world[0],
+        ];
+        let combinations: &[(&str, &[firehazard::sid::AndAttributes<'_>])] = &[
+            ("macro-world", &world),
+            ("parsed-world", &parsed),
+            ("logon", &logon_only),
+            ("workspace", &capability_only),
+            ("production", &production),
+        ];
+        let flags = [
+            token::RestrictedFlags::default(),
+            token::DISABLE_MAX_PRIVILEGE,
+            token::LUA_TOKEN,
+            token::WRITE_RESTRICTED,
+            token::DISABLE_MAX_PRIVILEGE | token::LUA_TOKEN | token::WRITE_RESTRICTED,
+        ];
+        let mut production_accepted = false;
+        for (label, sids) in combinations {
+            assert!(sids.iter().all(|sid| u32::from(sid.attributes) == 0));
+            for (index, flags) in flags.iter().copied().enumerate() {
+                let result =
+                    firehazard::create_restricted_token(&base, flags, None, None, Some(sids));
+                println!(
+                    "legacy_token_api sids={label} count={} flags=0x{:x} result={:?}",
+                    sids.len(),
+                    u32::from(flags),
+                    result
+                        .as_ref()
+                        .map(|_| ())
+                        .map_err(|error| io::Error::from(*error)),
+                );
+                if *label == "production" && index == 4 {
+                    production_accepted = result.is_ok();
+                }
+                // Candidate handles are closed immediately. No candidate token
+                // can launch or impersonate a payload, including weaker controls.
+                drop(result);
+            }
+        }
+        assert!(
+            production_accepted,
+            "production restricted-token combination was refused; see bounded token API cases above"
+        );
     }
 
     #[test]
