@@ -82,7 +82,7 @@ pub use workspaces::{
     MAX_WORKSPACE_PAGE, WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest,
 };
 
-pub const PROTOCOL_VERSION: u16 = 39;
+pub const PROTOCOL_VERSION: u16 = 40;
 
 /// SSE control frame requesting a fresh snapshot after journal expiry.
 pub const SNAPSHOT_REQUIRED_SSE_EVENT: &str = "snapshot_required";
