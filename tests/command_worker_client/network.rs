@@ -29,6 +29,18 @@ fn probe() {
         .unwrap()
         .send_to(b"probe", address(ports[1]))
         .is_ok();
+    // Integration-test servers and their clients share this command's private
+    // network. Host isolation must not disable their loopback interface.
+    let local = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut client =
+        TcpStream::connect_timeout(&local.local_addr().unwrap(), Duration::from_secs(1))
+            .expect("private commands must support local test servers");
+    let (mut accepted, _) = local.accept().unwrap();
+    client.write_all(b"local").unwrap();
+    let mut local_message = [0; 5];
+    accepted.read_exact(&mut local_message).unwrap();
+    assert_eq!(&local_message, b"local");
+    println!("native-loopback-ok");
     let unix = UnixStream::connect("host.sock").is_ok();
     let (mut writer, mut reader) = UnixStream::pair().unwrap();
     writer.write_all(b"ipc").unwrap();
@@ -67,6 +79,7 @@ async fn network_scope_denies_host_tcp_udp_and_unix_services_including_descendan
     std::fs::create_dir(&workspace).unwrap();
     let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
     let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp.set_nonblocking(true).unwrap();
     let _unix = UnixListener::bind(workspace.join("host.sock")).unwrap();
     let abstract_address = UnixAddress::from_abstract_name(
         format!("qq-network-{}", tcp.local_addr().unwrap().port()).as_bytes(),
@@ -101,12 +114,27 @@ async fn network_scope_denies_host_tcp_udp_and_unix_services_including_descendan
             serde_json::json!({"command": format!("'{quoted}' --exact network::probe --nocapture --skip '{marker}'")})
         }.to_string();
         let confined = finish(&client, isolated.clone()).await.result.unwrap();
+        let mut packet = [0; 16];
+        // A successful UDP send only queues a packet in its own namespace.
+        // Check delivery to the host listener rather than relying on lo being down.
+        assert_eq!(
+            udp.recv_from(&mut packet).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         isolated.network = NativeNetwork::Host;
         let changed = super::NativeCommandService::submit(&client, isolated.clone()).await;
         let mut missing = serde_json::to_value(&isolated).unwrap();
         missing.as_object_mut().unwrap().remove("network");
         isolated.id = qq_protocol::ToolCallId::generate().unwrap();
         let control = finish(&client, isolated).await.result.unwrap();
+        for _ in 0..2 {
+            let (bytes, _) = udp.recv_from(&mut packet).unwrap();
+            assert_eq!(&packet[..bytes], b"probe");
+        }
+        assert_eq!(
+            udp.recv_from(&mut packet).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         observations.push((confined, control, changed, missing));
     }
     client.stop_spawned().await;
@@ -136,7 +164,7 @@ async fn network_scope_denies_host_tcp_udp_and_unix_services_including_descendan
                 confined
                     .text()
                     .matches(
-                        "native-network tcp=false udp=false unix=false abstract=false ambient=false"
+                        "native-network tcp=false udp=true unix=false abstract=false ambient=false"
                     )
                     .count(),
                 2,

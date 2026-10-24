@@ -41,6 +41,13 @@ root, which makes Linux reject further user-namespace creation and prevents
 regaining mount authority to undo read-only mounts. Setup failures return a
 bounded refusal before the payload starts.
 
+Linux startup retains namespace identity capture through cancellation or deadline
+expiry, with at most two seconds of extra identity-handshake time for cleanup.
+The grace never authorizes payload execution: an expired request is refused
+before releasing the gate. Once identity is pinned, setup and refusal reporting
+remain interruptible. A helper that never supplies
+its identity leaves cleanup unconfirmed and stops further worker admission.
+
 This path requires fully enforced Landlock ABI 6. Where pathname Unix socket
 restrictions are available, an additional Landlock rule denies host socket
 connections. Otherwise a seccomp filter denies creation of addressable Unix
@@ -54,16 +61,16 @@ Unsupported required enforcement and unimplemented platform backends refuse
 execution. The safe Rust `landlock` and `seccompiler`
 dependencies supply the kernel interfaces.
 
-On Linux, the binary creates detached task scopes for ordinary Auto runs and
-their children. Built-ins use the private task tree; native commands receive its
+On Linux and macOS, the binary creates detached task scopes for ordinary Auto
+runs and their children. Built-ins use the private task tree; native commands receive its
 filesystem, network and resource scope. Configuration is loaded from the
 source project. Completed root runs publish checked file changes after their
 commands and children drain; failed or interrupted work stays private.
 Unsupported requested native restrictions fail closed. Default Auto integration
-is enabled on Linux first. Other platforms retain their existing permission
-behavior until macOS resource limits and Windows containment are implemented
-and qualified. Authorized network egress, credential brokering, per-task aggregate
-resource budgets and concurrent source writers still require further work.
+uses kernel resource limits on Linux and explicit sampled resource safeguards
+on macOS. Windows retains its existing permission behavior pending native
+containment integration and qualification. Authorized network egress, credential
+brokering, per-task aggregate resource budgets and concurrent source writers still require further work.
 No implicit home, toolchain, temporary or workspace roots are granted.
 
 Trusted embedding hosts can import an explicit file selection with
@@ -155,7 +162,7 @@ Linux Auto commands request enforced memory, process and CPU limits. Goal work
 retains its private tree across server restart without replaying the original
 command or resetting its goal budget. This integration does not yet qualify
 unattended safety: subsequent task output disk usage is unbounded and ordinary
-non-goal task continuation is unfinished. macOS limited-resource execution and
+non-goal task continuation is unfinished. macOS kernel-quota execution and
 default Windows Auto containment remain unavailable and fail closed. Source
 symlinks are omitted and hardlinked regular inputs are refused. Scoped network
 and credential operations still require separate trusted adapters.
@@ -201,9 +208,11 @@ implemented; this remains an opt-in host API, not qualified default Auto.
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
 sockets. It works with host filesystem access or explicit file-content grants.
-Loopback is not enabled in this initial offline backend; authorized egress and
-private local services still need implementation. Pipe and unnamed socket-pair
-IPC remain usable. The helper closes ambient inherited descriptors before
+The trusted helper enables loopback inside the new namespace before dropping
+its setup capabilities, so a command and its descendants can run local test
+servers. Host loopback services remain unreachable; authorized external egress
+still needs implementation. Pipe and unnamed socket-pair IPC remain usable.
+The helper closes ambient inherited descriptors before
 spawning any payload, including unrestricted payloads; only standard streams
 and the helper's owned launch descriptors survive the cleanup, with helper
 handles closed on payload exec. Network authority is part of the persisted
@@ -269,10 +278,26 @@ cleanup after exit and cancellation. Positive qualification requires a supported
 kernel and working user-manager delegation. Refusal tests cover unavailable
 delegation separately; they do not prove successful containment.
 
+On Windows, budgeted commands also share a per-owner kernel job envelope. It
+uses 75% of the smaller available physical-memory/commit budget at first use,
+4,096 active processes and a 90% CPU hard cap. The worker itself and Host-resource
+commands stay outside it. Every suspended helper joins this shared job before
+its independent command job, so cancelling one command preserves its peers.
+Per-command CPU rates account for the parent's allocation and never round above
+the requested machine share. Each budgeted command keeps one native exit wait,
+bounded by the worker's active-command limit, outside Tokio's blocking I/O pool.
+Native memory/process tests exercise independent commands sharing the envelope,
+capacity reuse and cleanup; exit-wait coverage includes dropped observation.
+
 ### Disk-space safeguard
 
-Restricted native commands check available space before launch and once per
-second while running. Below a 512 MiB free-space reserve, the independent
+Restricted native commands check available space on every declared writable
+root and the worker journal before launch and once per second while running.
+Checks also include the native helper's temporary storage on macOS/Windows and Windows' AppContainer
+profile storage, which can be on a different disk from task files. Each sampling
+pass batches its filesystem queries outside Tokio workers. Copying a trusted
+helper requires the reserve plus the image size; the macOS copy is bounded even
+if its source changes during preparation. Below a 512 MiB free-space reserve, the independent
 worker cancels the command, waits for native cleanup, and retains its captured
 output and stop reason. This continues while the coordinator is disconnected.
 The session runtime also stops private task work under disk pressure. Import
@@ -282,7 +307,7 @@ failed publication retains the private edits.
 This requires no volumes, administrator access or filesystem setup. It is a
 best-effort safeguard, not a quota: concurrent writers and writes between
 checks can overshoot the reserve. Host-authority native commands do not use
-this guard.
+this runtime reserve monitor.
 
 ## The Tool Loop
 
@@ -1372,18 +1397,35 @@ inherit. `/usr/bin/sandbox-exec` applies explicit directory grants and denies
 network operations when isolation is requested. Its loader baseline permits
 listing `/`; descendant file access and executable launches use the explicit
 directory grants.
-Descendants cannot call
-`setsid` or `setpgid`. The trusted guardian stays outside the payload's group,
-so terminating payloads cannot kill their cleanup owner. It retains the exited
-leader without reaping it, repeatedly terminates remaining members, and checks
-two kernel snapshots for exited process identities before reaping. This also
-covers forks racing with cancellation and worker loss. A terminal payload status
-is returned through the private channel only after cleanup; a missing or partial
-status never confirms quiescence. Exited zombies may await collection by the OS,
-but live members keep cleanup unconfirmed. Loader-injection environment
-variables are refused before helper startup. macOS does not create Linux-style
-mount or PID namespaces, and aggregate resource limits remain unavailable;
-requesting those limits fails closed.
+The profile denies direct `setsid` and `setpgid` syscalls. Darwin spawn
+attributes can still create a new process group or session; those descendants
+retain the same Seatbelt file and network restrictions. The trusted guardian
+stays outside the payload's group, so payload signals cannot kill it. It retains
+the exited leader without reaping it, repeatedly terminates remaining group
+members, and checks their exited process identities before reaping. Cancellation,
+deadlines and worker loss trigger this owned-group cleanup. The private terminal
+receipt confirms that cleanup and the guardian's exit, not the exit of detached
+descendants. Missing or partial receipts do not confirm owned-group cleanup.
+Exited zombies may await collection by the OS, but live group members keep cleanup
+unconfirmed. A deliberately detached process can survive command completion or
+cancellation while remaining sandboxed; QQ does not claim complete descendant
+custody on macOS. Loader-injection environment variables are refused before
+helper startup. macOS does not create Linux-style mount or PID namespaces.
+The payload inherits the launching process's per-process OS limits; QQ does not
+supply kernel aggregate resource quotas on this backend.
+
+An explicit `NativeResources::Guarded` request starts the payload with
+`taskpolicy -b` and samples the pinned process group's physical footprint and
+thread count every 250 ms using Darwin process accounting. The same check reads
+XNU's system-wide memory-pressure level and stops guarded work at warning or
+critical pressure; query failures and unrecognized levels also refuse execution. The existing owner
+liveness thread performs these checks; no extra per-command thread is created.
+Excess use or unavailable accounting stops the owned group and retains captured
+output. These safeguards can overshoot, exclude charged file cache and omit
+processes that detached from the group. They are not per-task aggregate quotas.
+Guarded commands require restricted filesystem authority. Default macOS Auto
+uses these safeguards with its detached task files.
+Requests for kernel aggregate quotas fail closed on macOS.
 
 The Windows adapter launches restricted requests in LPAC with `registryRead`
 for ordinary child-process creation and a directory-identity capability for each
@@ -1415,7 +1457,9 @@ callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,
 checks the kernel-retained memory/process limits, and includes the trusted
-helper in that budget. It limits committed private memory and processes, not
+helper in that budget. Memory ceilings are rounded down to whole native pages
+before setting and verifying them; budgets smaller than one page are refused.
+It limits committed private memory and processes, not
 threads or Linux charged file cache. The payload job applies a hard CPU cap as
 a percentage of all logical processors; the trusted helper is excluded from
 that CPU cap. No new VM, administrator setup or volume is needed. Default

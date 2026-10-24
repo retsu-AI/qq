@@ -477,7 +477,7 @@ pub(super) async fn run_shell(
     #[cfg(target_os = "macos")]
     if child.owns_payload_group() {
         // The guardian has its own group. Its private exit receipt proves
-        // payload cleanup; killing this group would destroy that guardian.
+        // owned payload-group cleanup; killing this group destroys the guardian.
         guard.disarm();
     }
     #[cfg(all(test, unix))]
@@ -673,13 +673,7 @@ pub(super) async fn run_shell(
                 // The exit observer terminates the group before reaping its
                 // leader, while that leader still pins the group identity.
                 // Confirm disappearance without ever signalling a saved PID.
-                if status.is_ok() {
-                    if let Err(error) = guard.confirm_stopped().await {
-                        break ShellOutcome::Exited(Err(error));
-                    }
-                    process.process_reaped();
-                }
-                break ShellOutcome::Exited(status);
+                break ShellOutcome::Exited(confirm_child_exit(status, &mut guard, process).await);
             }
         }
     };
@@ -687,6 +681,12 @@ pub(super) async fn run_shell(
     let outcome = match outcome {
         ShellOutcome::Cancelled if cancellation.timed_out() => ShellOutcome::TimedOut,
         outcome => outcome,
+    };
+    #[cfg(target_os = "macos")]
+    let hint = if child.resource_stopped() {
+        Some("native resource safeguard stopped the command group".to_owned())
+    } else {
+        hint
     };
     let elapsed = started.elapsed();
     let mut result = async {
@@ -700,7 +700,11 @@ pub(super) async fn run_shell(
                 hint.as_deref(),
             ),
             ShellOutcome::Exited(Err(error)) => {
-                ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
+                if super::native_exit::confirmed_launch_failure(&error) {
+                    ToolOutput::refused(error.to_string())
+                } else {
+                    ToolOutput::unobserved(format!("could not observe the command exit: {error}"))
+                }
             }
             ShellOutcome::ReadFailed { stream, source } => {
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
@@ -807,6 +811,22 @@ pub(super) async fn run_shell(
     result
 }
 
+pub(super) async fn confirm_child_exit(
+    status: std::io::Result<std::process::ExitStatus>,
+    guard: &mut ProcessGroupGuard,
+    process: &mut super::ToolTaskLease,
+) -> std::io::Result<std::process::ExitStatus> {
+    if status.is_ok()
+        || status
+            .as_ref()
+            .is_err_and(super::native_exit::confirmed_launch_failure)
+    {
+        guard.confirm_stopped().await?;
+        process.process_reaped();
+    }
+    status
+}
+
 async fn stop_shell(
     child: &mut NativeChild,
     guard: &mut ProcessGroupGuard,
@@ -823,12 +843,9 @@ async fn stop_shell(
     if let Err(error) = child.start_kill() {
         return Err(format!("could not terminate the command: {error}"));
     }
-    match child.wait().await {
+    let status = child.wait().await;
+    match confirm_child_exit(status, guard, process).await {
         Ok(_) => {
-            guard.confirm_stopped().await.map_err(|error| {
-                format!("could not confirm the command process group stopped: {error}")
-            })?;
-            process.process_reaped();
             #[cfg(test)]
             if let Some(pid) = observed_pid {
                 let sender = {
@@ -844,6 +861,7 @@ async fn stop_shell(
             }
             Ok(())
         }
+        Err(error) if super::native_exit::confirmed_launch_failure(&error) => Ok(()),
         Err(error) => Err(format!("could not confirm the command exit: {error}")),
     }
 }

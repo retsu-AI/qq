@@ -1,4 +1,4 @@
-//! Aggregate process-tree limits chosen by the trusted host.
+//! Process-tree resource policy chosen by the trusted host.
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -29,6 +29,14 @@ pub enum NativeResources {
         max_processes: u32,
         cpu_percent: u32,
     },
+    /// Sampled safeguards, not kernel quotas. Commands run at background priority;
+    /// their owned group is stopped when sampled footprint or task count exceeds
+    /// these thresholds. Detached descendants are outside the sampled group.
+    /// Sampling can overshoot and excludes charged file cache.
+    Guarded {
+        memory_bytes: u64,
+        max_tasks: u32,
+    },
 }
 
 impl NativeResources {
@@ -55,6 +63,17 @@ impl NativeResources {
                 "committed resource limits require memory, at least two processes and CPU percent in 1..=100",
             ));
         }
+        if let Self::Guarded {
+            memory_bytes,
+            max_tasks,
+        } = self
+            && (memory_bytes == 0 || max_tasks < 2)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "resource safeguards require memory and at least two native tasks",
+            ));
+        }
         Ok(())
     }
 }
@@ -62,6 +81,24 @@ impl NativeResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sampled_safeguards_preserve_their_contract_and_reject_empty_bounds() {
+        for (memory_bytes, max_tasks, valid) in [(0, 16, false), (1024, 1, false), (1024, 2, true)]
+        {
+            let policy = NativeResources::Guarded {
+                memory_bytes,
+                max_tasks,
+            };
+            assert_eq!(policy.validate().is_ok(), valid);
+            let encoded = serde_json::to_value(policy).unwrap();
+            assert_eq!(encoded["access"], "guarded");
+            assert_eq!(
+                serde_json::from_value::<NativeResources>(encoded).unwrap(),
+                policy
+            );
+        }
+    }
 
     #[test]
     fn committed_limits_reject_invalid_bounds_and_preserve_their_units() {
