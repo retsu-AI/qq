@@ -1,4 +1,4 @@
-//! A write-only restricting SID composes with LPAC's read and network boundary.
+//! A write-only restricting SID composes with AppContainer's read and network boundary.
 use firehazard_sid as fh;
 use std::io;
 

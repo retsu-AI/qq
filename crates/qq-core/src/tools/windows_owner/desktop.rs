@@ -44,7 +44,7 @@ impl ProcessDesktop {
             .map_err(io::Error::from)?;
         // CreateProcessAsUser requires full access for the trusted helper.
         // Its task SID is granted this only on the fresh private desktop;
-        // the LPAC package keeps the narrower participant rights.
+        // the AppContainer package keeps the narrower participant rights.
         desktop_acl
             .add_access_allowed_ace(ui::acl::REVISION, ui::access::GENERIC_ALL, &task)
             .map_err(io::Error::from)?;

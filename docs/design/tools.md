@@ -1470,14 +1470,18 @@ Guarded commands require restricted filesystem authority. Default macOS Auto
 uses these safeguards with its detached task files.
 Requests for kernel aggregate quotas fail closed on macOS.
 
-The Windows adapter launches restricted requests in LPAC with `registryRead`
-for ordinary child-process creation and a directory-identity capability for each
+The Windows adapter launches restricted requests in an ordinary AppContainer
+with `registryRead` for ordinary child-process creation and a directory-identity capability for each
 non-system read-only root, inside
 QQ's existing owned command job. Its trusted helper obtains the user's local
 application-data directory from Windows for its startup environment. The payload
 keeps its frozen environment, including Windows' required `SYSTEMROOT` and
-`LOCALAPPDATA`. These profile-path values do not grant file access: the LPAC token
-still denies the user's unrelated profile files. The trusted helper starts the payload suspended,
+`LOCALAPPDATA`. These profile-path values do not grant file access: the
+AppContainer token still denies private profile files. Reads that Windows
+already shares with sandboxed apps remain available. A task-specific
+`WRITE_RESTRICTED` SID adds a second access
+check for writes, so OS-shared read access does not grant unrelated writes.
+The trusted helper starts the payload suspended,
 with only its explicit stdin/stdout/stderr handles, then awaits the worker's
 release byte. Cancellation or a deadline during preparation drains the command
 job before returning. Captured user stdin begins after the exact unbuffered
@@ -1494,8 +1498,9 @@ grants. Non-system hardlinks and reparse points are refused. Directory grants
 are inherited by newly created objects. Grants update the held kernel object
 without requesting a recursive file-object ACL update; each existing object
 must pass the held-handle checks independently. Handles request only metadata
-and ACL rights, preserving the workspace's existing no-delete pins. Windows loader access uses the LPAC
-OS baseline and its per-package profile storage remain available. ACL authority follows objects rather than current pathnames, so
+and ACL rights, preserving the workspace's existing no-delete pins. Windows loader
+access uses the AppContainer OS baseline; its per-package profile storage remains
+available. ACL authority follows objects rather than current pathnames, so
 callers must supply private task inputs and publish by copying files. This
 adapter requires isolated networking and accepts Host or Committed resource
 policy. Committed policy installs a nested job before creating the payload,

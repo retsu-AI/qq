@@ -156,7 +156,7 @@ pub(super) fn prepare(
         let system_read = !writable && system_read(grant, system.as_deref());
         let root = open(&grant.path, !system_read)?;
         validate_root(grant, &root)?;
-        // LPAC's OS baseline already grants access to Windows system images.
+        // AppContainer's OS baseline already grants access to Windows system images.
         // Do not recursively change system ACLs or request administrator setup.
 
         // A duplicate read grant is already covered by the private writable
