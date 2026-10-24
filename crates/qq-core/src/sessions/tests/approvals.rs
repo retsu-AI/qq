@@ -4669,14 +4669,15 @@ async fn write_children_inherit_only_human_grants_and_keep_internal_review() {
                 .is_some_and(|result| result.contains(expected_reason)),
             "{child_events:#?}"
         );
+        let denied_id = denied.id;
         let persisted = harness
             .runtime
             .inner
             .store
             .call(Priority::Control, move |connection| {
                 Ok(connection.query_row(
-                    "SELECT state,is_error FROM tool_calls WHERE session_id=?1 AND name='fetch'",
-                    [child_id.to_string()],
+                    "SELECT state,is_error FROM tool_calls WHERE id=?1",
+                    [denied_id.to_string()],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
                 )?)
             })
