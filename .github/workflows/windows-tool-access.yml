@@ -1,0 +1,23 @@
+name: Windows ordinary-user tool metadata
+on:
+  push:
+    branches: [test/windows-tool-access]
+permissions:
+  contents: read
+jobs:
+  metadata:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: command-owner-${{ matrix.os }}
+          cache-on-failure: true
+      - name: Ordinary-user Node read and ACL-authority control
+        shell: bash
+        run: cargo run --locked -p qq-core --example windows_tool_access
