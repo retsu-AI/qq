@@ -39,6 +39,12 @@ jobs:
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/node-sdk-tests.txt"
           grep -Fx 'runtime::node::installed_node_builds_and_tests_in_default_auto: test' "$RUNNER_TEMP/node-sdk-tests.txt"
           cargo test --locked -p qq --no-default-features --test command_worker_client runtime::node::installed_node_builds_and_tests_in_default_auto -- --ignored --exact --nocapture
+      - name: Require and execute actual task Git commit integration
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/task-git-tests.txt"
+          grep -Fx 'task_git::default_auto_edits_and_commits_without_host_git_mutation_or_approvals: test' "$RUNNER_TEMP/task-git-tests.txt"
+          cargo test --locked -p qq --no-default-features --test command_worker_client task_git::default_auto_edits_and_commits_without_host_git_mutation_or_approvals -- --exact --nocapture
       - name: Lint native source
         if: ${{ !cancelled() }}
         run: cargo clippy --locked -p qq-core -p qq --all-targets --no-default-features -- -D warnings
