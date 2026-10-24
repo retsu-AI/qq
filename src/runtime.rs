@@ -54,6 +54,9 @@ use crate::{
     },
 };
 
+#[cfg(all(unix, any(target_os = "macos", test)))]
+#[path = "runtime/macos_sdk.rs"]
+mod macos_sdk;
 #[cfg(unix)]
 #[path = "runtime/unix_sdk.rs"]
 mod unix_sdk;
@@ -3537,6 +3540,12 @@ fn task_workspace_policy(
                 executable_directories.push(bin.clone());
             }
             read_only.extend(roots);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let inputs = macos_sdk::discover(&directory)?;
+            executable_directories.extend(inputs.executable_directories);
+            read_only.extend(inputs.read_only);
         }
         let cargo_cache = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)

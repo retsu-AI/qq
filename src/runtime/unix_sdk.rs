@@ -84,7 +84,20 @@ pub(super) fn discover(control: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(unix)]
-fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
+fn query(command: Command) -> io::Result<Option<Vec<u8>>> {
+    query_until(command, std::time::Instant::now() + Duration::from_secs(5))
+}
+
+pub(super) fn query_until(
+    mut command: Command,
+    deadline: std::time::Instant,
+) -> io::Result<Option<Vec<u8>>> {
+    if std::time::Instant::now() >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "SDK metadata deadline elapsed",
+        ));
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -97,13 +110,13 @@ fn query(mut command: Command) -> io::Result<Option<Vec<u8>>> {
             .ok_or_else(|| io::Error::other("rustup metadata output missing"))?;
         let (send, receive) = mpsc::sync_channel(1);
         let keepalive = send.clone();
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             let result = stdout.take(8193).read_to_end(&mut bytes).map(|_| bytes);
             let _ = send.send(result);
         });
-        let result = receive.recv_timeout(Duration::from_secs(5));
+        let result =
+            receive.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
         // Query stdout closing is not process completion.
         let mut status = child.try_wait()?;
         while status.is_none() && std::time::Instant::now() < deadline {
