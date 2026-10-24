@@ -3435,7 +3435,7 @@ dependencies = [
 [[package]]
 name = "rappct"
 version = "0.14.0"
-source = "git+https://github.com/retsu-AI/rappct?rev=1caaa4e2e4dd76895be98789a0284c9293137657#1caaa4e2e4dd76895be98789a0284c9293137657"
+source = "git+https://github.com/retsu-AI/rappct?rev=4f3449402a6cad646374404043cf90df4e090939#4f3449402a6cad646374404043cf90df4e090939"
 dependencies = [
  "thiserror 2.0.19",
  "windows 0.62.2",
