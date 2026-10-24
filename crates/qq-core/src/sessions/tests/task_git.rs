@@ -208,11 +208,20 @@ async fn task_hosting_reauthorizes_after_preparation_before_native_submission() 
         .await
         .unwrap()
         .unwrap();
+        let tools = crate::tools::ToolTasks::default();
+        let store = runtime.inner.store.clone();
+        let identity = claimed.identity;
+        tools
+            .set_native_recorder(move |id, owner| {
+                let store = store.clone();
+                async move { store.set_native_owner(identity, id, owner).await }
+            })
+            .unwrap();
         let input = super::super::task_git::TaskGitRunInput::new(
             runtime.inner.clone(),
             &claimed,
             task,
-            crate::tools::ToolTasks::default(),
+            tools,
         )
         .unwrap();
         let call = RuntimeToolCall {
@@ -232,9 +241,9 @@ async fn task_hosting_reauthorizes_after_preparation_before_native_submission() 
             2,
             "{change:?}"
         );
-        let submissions = spy.0.lock().unwrap();
+        let submissions = spy.0.lock().unwrap().clone();
         if matches!(change, HostingChange::Credential) {
-            assert_eq!(submissions.len(), 1, "{change:?}");
+            assert_eq!(submissions.len(), 1, "{change:?}: {}", output.model_text);
             assert_eq!(
                 submissions[0]
                     .environment
