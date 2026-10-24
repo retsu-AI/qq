@@ -55,6 +55,9 @@ use crate::{
 };
 
 #[cfg(all(unix, any(target_os = "macos", test)))]
+#[path = "runtime/macos_apple_sdk.rs"]
+mod macos_apple_sdk;
+#[cfg(all(unix, any(target_os = "macos", test)))]
 #[path = "runtime/macos_sdk.rs"]
 mod macos_sdk;
 #[cfg(unix)]
@@ -3545,6 +3548,9 @@ fn task_workspace_policy(
         }
         #[cfg(target_os = "macos")]
         {
+            let apple = macos_apple_sdk::discover(&directory)?;
+            executable_directories.extend(apple.executable_directories);
+            read_only.extend(apple.read_only);
             let inputs = macos_sdk::discover(&directory)?;
             executable_directories.extend(inputs.executable_directories);
             read_only.extend(inputs.read_only);

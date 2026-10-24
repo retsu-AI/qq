@@ -241,6 +241,16 @@ jobs:
           cargo build --locked -p qq-core --example windows_tool_access
           cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output: test'
           cargo test --locked -p qq --no-default-features --bin qq runtime::windows_auto_tests::default_auto_contains_shell_writes_and_publishes_detached_output -- --exact --nocapture
+      - name: macOS default Auto installed tool integration
+        if: ${{ !cancelled() && runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          cargo build --locked -p qq --no-default-features
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/auto-sdk-tests.txt"
+          for selector in runtime::cargo::cached_public_dependency_builds_in_default_auto runtime::node::installed_node_builds_and_tests_in_default_auto; do
+            grep -Fx "$selector: test" "$RUNNER_TEMP/auto-sdk-tests.txt"
+            cargo test --locked -p qq --no-default-features --test command_worker_client "$selector" -- --ignored --exact --nocapture
+          done
       - name: Native ownership, cancellation and durable observations
         if: ${{ !cancelled() }}
         shell: bash
