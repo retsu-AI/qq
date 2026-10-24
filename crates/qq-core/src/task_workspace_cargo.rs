@@ -164,12 +164,13 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = tempfile::tempdir().unwrap();
+            let directory = root.path().canonicalize().unwrap();
             for name in ["source", "cache", "task"] {
-                std::fs::create_dir(root.path().join(name)).unwrap();
+                std::fs::create_dir(directory.join(name)).unwrap();
             }
-            let source = Workspace::open(&root.path().join("source")).unwrap();
-            let cache = NativeDirectoryGrant::capture(&root.path().join("cache")).unwrap();
-            let task = open_dir_ambient(&root.path().join("task")).unwrap();
+            let source = Workspace::open(&directory.join("source")).unwrap();
+            let cache = NativeDirectoryGrant::capture(&directory.join("cache")).unwrap();
+            let task = open_dir_ambient(&directory.join("task")).unwrap();
             let bytes = b"public archive bytes";
             let checksum = format!("{:x}", Sha256::digest(bytes));
             source.root().write("Cargo.lock", format!("version=4\n[[package]]\nname='itoa'\nversion='1.0.18'\nsource='{PUBLIC_SOURCE}'\nchecksum='{checksum}'\n[[package]]\nname='private'\nversion='1.0.0'\nsource='registry+https://private.invalid/index'\nchecksum='{checksum}'\n")).unwrap();

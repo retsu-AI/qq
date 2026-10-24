@@ -210,6 +210,13 @@ async fn exercise_default_auto(check: Option<&str>, continuation: bool, check_sc
         "{}",
         captured[1].body()
     );
+    assert!(
+        !captured[1]
+            .body()
+            .contains("Error opening /private/var/select/sh"),
+        "the system shell must read its selector without a sandbox error: {}",
+        captured[1].body()
+    );
 }
 
 #[tokio::test]
@@ -351,7 +358,7 @@ pub(super) fn configured_cli(
     command
 }
 
-fn data_directory(home: &Path) -> std::path::PathBuf {
+pub(super) fn data_directory(home: &Path) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
     let relative = "data/qq";
     #[cfg(target_os = "macos")]

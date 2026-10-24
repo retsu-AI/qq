@@ -19,11 +19,15 @@ jobs:
           cache-on-failure: true
       - name: Build real CLI and public cache prerequisites
         run: cargo build --locked -p qq --no-default-features
-      - name: Check selected cache and installed toolchain resolver
+      - name: Check selected cache
         run: |
           cargo test --locked -p qq-core task_workspace::cargo::tests:: -- --nocapture
+      - name: Check installed toolchain resolver
+        if: ${{ !cancelled() }}
+        run: |
           cargo test --locked -p qq --no-default-features runtime::unix_sdk::tests:: -- --nocapture
       - name: Require and execute actual cached dependency Auto integration
+        if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/sdk-tests.txt"
           grep -Fx 'runtime::cargo::cached_public_dependency_builds_in_default_auto: test' "$RUNNER_TEMP/sdk-tests.txt"
@@ -39,6 +43,14 @@ jobs:
           cargo test --locked -p qq --no-default-features --test command_worker_client -- --list --ignored > "$RUNNER_TEMP/node-sdk-tests.txt"
           grep -Fx 'runtime::node::installed_node_builds_and_tests_in_default_auto: test' "$RUNNER_TEMP/node-sdk-tests.txt"
           cargo test --locked -p qq --no-default-features --test command_worker_client runtime::node::installed_node_builds_and_tests_in_default_auto -- --ignored --exact --nocapture
+      - name: Require ordinary Auto publication checks and goal continuation
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p qq --no-default-features --test command_worker_client -- --list > "$RUNNER_TEMP/auto-runtime-tests.txt"
+          for selector in default_auto_cannot_overwrite_host_files_through_a_project_symlink default_auto_completion_check_uses_the_detached_native_boundary default_auto_goal_continuations_reuse_the_same_private_task_files; do
+            grep -Fx "runtime::$selector: test" "$RUNNER_TEMP/auto-runtime-tests.txt"
+          done
+          cargo test --locked -p qq --no-default-features --test command_worker_client runtime::default_auto_ -- --nocapture
       - name: Require and execute actual task Git commit integration
         if: ${{ !cancelled() }}
         run: |
