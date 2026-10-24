@@ -424,14 +424,13 @@ fn validate_tool_roots(
     source: &Path,
 ) -> Result<(), TaskExecutionError> {
     let overlaps = |root: &Path| root.starts_with(source) || source.starts_with(root);
-    for bin in &policy.executable_directories {
-        let library = bin.parent().map(|parent| parent.join("lib"));
-        if overlaps(bin)
-            || policy
-                .read_only
-                .iter()
-                .any(|root| Some(&root.path) == library.as_ref() && overlaps(&root.path))
-        {
+    for root in policy
+        .executable_directories
+        .iter()
+        .map(PathBuf::as_path)
+        .chain(policy.read_only.iter().map(|root| root.path.as_path()))
+    {
+        if overlaps(root) {
             return Err(TaskExecutionError::Invalid(
                 "installed tool root overlaps task source",
             ));
