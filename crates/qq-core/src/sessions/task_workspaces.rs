@@ -52,6 +52,8 @@ pub(super) enum TaskExecutionError {
     #[error("invalid task execution state: {0}")]
     Invalid(&'static str),
     #[error(transparent)]
+    Git(#[from] crate::task_git::TaskGitError),
+    #[error(transparent)]
     Storage(#[from] crate::storage::Pressure),
     #[error("task workspace I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -84,6 +86,8 @@ struct TaskRecord {
     source: NativeDirectoryGrant,
     workspace: TaskWorkspace,
     scope: NativeCommandScope,
+    #[serde(default)]
+    git_base: Option<String>,
 }
 
 #[derive(Debug)]
@@ -166,12 +170,19 @@ impl TaskExecution {
             if NativeWorkspaceIdentity::held(root.root())? != self.scope.workspace.identity {
                 return Err(TaskExecutionError::Invalid("task commit root changed"));
             }
+            let base = record
+                .git_base
+                .clone()
+                .ok_or(TaskExecutionError::Invalid("task has no captured Git base"))?;
             let limits = record.workspace_limits();
             let mut paths: BTreeSet<_> = record.workspace.input_paths().cloned().collect();
             paths.extend(files_until(&root, limits, false, &stopped)?);
             // A preserved input can be protected against mutation.
             // Never turn its presence in the import manifest into commit authority.
             paths.retain(|path| root.check_write_path(&path.to_string_lossy(), path).is_ok());
+            let paths = record
+                .workspace
+                .changed_git_paths_until(&paths.into_iter().collect::<Vec<_>>(), &stopped)?;
             if paths.len() > limits.max_entries {
                 return Err(TaskExecutionError::Invalid("too many task commit paths"));
             }
@@ -184,6 +195,7 @@ impl TaskExecution {
                 call,
                 task: self.owner,
                 git_program,
+                base,
                 source: record.source.clone(),
                 control,
                 snapshot: self.scope.workspace.clone(),
@@ -192,7 +204,7 @@ impl TaskExecution {
                     max_bytes,
                     max_pack_bytes: max_bytes.min(128 * 1024 * 1024),
                 },
-                paths: paths.into_iter().collect(),
+                paths,
                 protected_paths,
                 message,
                 not_after_ms,
@@ -497,6 +509,7 @@ pub(super) async fn prepare(
         }
     };
     let stopped = cancellation.clone();
+    let git_program = inner.task_git.as_ref().map(|policy| policy.git.clone());
     let attachments = claimed
         .input
         .iter()
@@ -534,6 +547,24 @@ pub(super) async fn prepare(
                 }
                 let control = Workspace::open(&policy.directory.path)?;
                 crate::storage::check_blocking(&control, policy.limits.max_bytes)?;
+                let git_base = match &git_program {
+                    Some(program) => crate::task_git::TaskGit::capture_base(
+                        program,
+                        &source_grant,
+                        &policy.directory,
+                        &crate::task_git::Operation {
+                            cancellation: stopped.clone(),
+                            deadline: deadline
+                                .map(tokio::time::Instant::into_std)
+                                .unwrap_or_else(|| {
+                                    std::time::Instant::now() + Duration::from_secs(30)
+                                })
+                                .min(std::time::Instant::now() + Duration::from_secs(30)),
+                            worker_owned: false,
+                        },
+                    )?,
+                    None => None,
+                };
                 let mut inputs: BTreeSet<_> =
                     files_until(&source, policy.limits, true, &is_stopped)?
                         .into_iter()
@@ -578,13 +609,16 @@ pub(super) async fn prepare(
                         inputs.insert(relative);
                     }
                 }
-                let workspace = TaskWorkspace::import_until(
+                let mut workspace = TaskWorkspace::import_until(
                     &source_authority,
                     &policy.directory.path.join(owner.to_string()),
                     &inputs.into_iter().collect::<Vec<_>>(),
                     policy.limits,
                     &is_stopped,
                 )?;
+                if git_base.is_some() {
+                    workspace.enable_git_baseline();
+                }
                 let scope = NativeCommandScope {
                     workspace: workspace.directory_grant(),
                     read_only: policy.read_only.clone(),
@@ -595,6 +629,7 @@ pub(super) async fn prepare(
                     source: source_grant.clone(),
                     workspace,
                     scope,
+                    git_base,
                 }
             }
         };

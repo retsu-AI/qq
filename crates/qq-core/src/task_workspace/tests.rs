@@ -1148,3 +1148,38 @@ fn detached_task_workspace_rejects_filesystem_ancestor_aliases() {
     assert!(!destination.exists());
     assert_eq!(fs::read_dir(&nested).unwrap().count(), 0);
 }
+
+#[test]
+fn detached_task_git_manifest_keeps_immutable_import_baseline_after_publication() {
+    let fixture = Fixture::new();
+    fs::write(fixture.source.path.join("edit"), "initial").unwrap();
+    fs::write(fixture.source.path.join("dirty"), "existing user work").unwrap();
+    let mut workspace = fixture.import(&["edit", "dirty"], 1024).unwrap();
+    workspace.enable_git_baseline();
+    fs::write(fixture.destination.join("edit"), "agent work").unwrap();
+    let paths = [PathBuf::from("edit"), PathBuf::from("dirty")];
+    assert_eq!(
+        workspace
+            .changed_git_paths_until(&paths, &|| false)
+            .unwrap(),
+        [PathBuf::from("edit")]
+    );
+    workspace.publish(&[PathBuf::from("edit")]).unwrap();
+    assert_eq!(
+        workspace
+            .changed_git_paths_until(&paths, &|| false)
+            .unwrap(),
+        [PathBuf::from("edit")]
+    );
+    fs::write(fixture.destination.join("edit"), "initial").unwrap();
+    assert!(
+        workspace
+            .changed_git_paths_until(&paths, &|| false)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        workspace.changed_git_paths_until(&paths, &|| true),
+        Err(TaskWorkspaceError::Stopped)
+    ));
+}

@@ -26,10 +26,13 @@ pub struct TaskGitJob {
     pub call: ToolCallId,
     pub task: RunId,
     pub git_program: PathBuf,
+    /// Git HEAD captured before task import/model execution; never recaptured.
+    pub base: String,
     pub source: NativeDirectoryGrant,
     pub control: NativeDirectoryGrant,
     pub snapshot: NativeDirectoryGrant,
     pub limits: TaskGitLimits,
+    /// All current task changes versus immutable imported bytes.
     pub paths: Vec<PathBuf>,
     pub protected_paths: Vec<PathBuf>,
     pub message: String,
@@ -99,6 +102,7 @@ impl TaskGitJob {
 
     fn validate(&self) -> Result<(), TaskGitJobError> {
         self.digest()?;
+        task_git::oid(self.base.clone())?;
         if self.paths.len() > self.limits.max_entries
             || self.protected_paths.len() > self.limits.max_entries
             || self.message.is_empty()
@@ -208,7 +212,13 @@ fn execute_job_at(request: &Path, now_ms: u64) -> Result<TaskGitJobReceipt, Task
     if let Some(receipt) = read_receipt(&job)? {
         return Ok(receipt);
     }
-    let restored = TaskGit::restore_job(&job.git_program, &job.roots(), job.task, job.limits);
+    let restored = TaskGit::restore_job(
+        &job.git_program,
+        &job.roots(),
+        job.task,
+        job.base.clone(),
+        job.limits,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()?;
@@ -261,6 +271,7 @@ async fn commit(
                 job.git_program.clone(),
                 job.roots(),
                 job.task,
+                job.base.clone(),
                 job.limits,
                 operation.clone(),
             )
@@ -384,6 +395,18 @@ mod tests {
         let job = TaskGitJob {
             call: ToolCallId::generate().unwrap(),
             task: RunId::generate().unwrap(),
+            base: TaskGit::capture_base(
+                &program,
+                &NativeDirectoryGrant::capture(&source).unwrap(),
+                &NativeDirectoryGrant::capture(&control).unwrap(),
+                &Operation {
+                    cancellation: RunCancellation::new(),
+                    deadline: Instant::now() + Duration::from_secs(30),
+                    worker_owned: false,
+                },
+            )
+            .unwrap()
+            .unwrap(),
             git_program: program,
             source: NativeDirectoryGrant::capture(&source).unwrap(),
             control: NativeDirectoryGrant::capture(&control).unwrap(),
