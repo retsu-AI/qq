@@ -227,44 +227,8 @@ stopped; do not repeat what was already written.";
 /// blips while a provider that is down settles the run `paused` in minutes.
 pub use qq_protocol::MAX_TURN_RETRIES;
 
-/// Backoff between turn retries. The defaults are minute-scale because the
-/// provider's own sub-minute ledger has already been spent on anything that
-/// reaches the run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TurnRecoveryPolicy {
-    base_delay: Duration,
-    max_delay: Duration,
-}
+pub use qq_provider::TurnRecoveryPolicy;
 
-impl Default for TurnRecoveryPolicy {
-    fn default() -> Self {
-        Self {
-            base_delay: Duration::from_secs(2),
-            max_delay: Duration::from_secs(60),
-        }
-    }
-}
-
-impl TurnRecoveryPolicy {
-    /// Exponential backoff from `base_delay`, doubling per retry, capped at
-    /// `max_delay` (clamped to at least the base).
-    #[must_use]
-    pub fn new(base_delay: Duration, max_delay: Duration) -> Self {
-        Self {
-            base_delay,
-            max_delay: max_delay.max(base_delay),
-        }
-    }
-
-    /// The sleep before retry `attempt` (1-based).
-    #[must_use]
-    pub fn delay(self, attempt: u16) -> Duration {
-        let doublings = u32::from(attempt.saturating_sub(1)).min(31);
-        self.base_delay
-            .saturating_mul(1_u32 << doublings)
-            .min(self.max_delay)
-    }
-}
 /// Sent after a partial turn is committed when the provider fault cut the
 /// model off mid-reply. Alternation holds because the partial assistant
 /// message precedes it.
@@ -1215,6 +1179,7 @@ impl Runtime {
                     yield Err(runtime::SummarizeError::Transient {
                         kind: RunFailureKind::ProviderTransport,
                         message: "summarizer stream ended without completing".to_owned(),
+                        retry_after: None,
                     }); return;
                 };
                 match event {
@@ -1291,7 +1256,7 @@ impl Runtime {
                     // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
                         let rejected_before_work = matches!(&error,
-                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. } | qq_provider::ProviderError::Configuration(_)
+                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::RetryAfter { .. } | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. } | qq_provider::ProviderError::Configuration(_)
                             | qq_provider::ProviderError::CredentialsUnavailable(_))
                             && text.is_empty() && calls.is_empty() && replay.is_none()
                             && !reasoning_seen;
@@ -1314,11 +1279,11 @@ impl Runtime {
                             continue 'requests;
                         }
                         if rejected_before_work {
-                            yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message });
+                            yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message, retry_after: error.retry_after() });
                             return;
                         }
                         yield Err(if recoverable_turn_fault(kind) {
-                            runtime::SummarizeError::Transient { kind, message }
+                            runtime::SummarizeError::Transient { kind, message, retry_after: error.retry_after() }
                         } else {
                             runtime::SummarizeError::Rejected(message)
                         }); return;
@@ -11652,6 +11617,113 @@ mod tests {
         assert!(!tool_names(&restricted_requests[0]).contains(&"load_skill"));
         assert_eq!(plan.descriptor().skills.disclosed, 1);
         assert_eq!(plan.descriptor().skills.indexed, 2);
+    }
+    #[tokio::test]
+    async fn server_cooldown_survives_an_exhausted_http_retry_budget() {
+        let server = qq_provider::test_support::LoopbackServer::respond_with_headers(
+            429,
+            "application/json",
+            &[("Retry-After", "60")],
+            r#"{"error":{"message":"wait for capacity"}}"#,
+        );
+        let provider = qq_provider::ProviderCompiler::new()
+            .unwrap()
+            .with_attempt_policy(qq_provider::AttemptPolicy::disabled())
+            .compile(qq_provider::ProviderRecipe::http(
+                qq_provider::HttpProviderRecipe::new(
+                    qq_provider::EndpointSpec::base(&server.base_url, true),
+                    qq_provider::HttpProtocol::OpenAiResponses,
+                    qq_provider::HttpAuth::NoAuth,
+                ),
+            ))
+            .unwrap();
+        let runtime = Runtime::with_provider(provider, "test-model", 256).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut events = runtime.run_messages_in_workspace(
+            vec![Message::user("finish the task")],
+            directory.path().to_owned(),
+        );
+        let mut rejected_before_work = false;
+        let delay = loop {
+            let event = events
+                .next()
+                .await
+                .expect("the runtime must report the retry");
+            if let RuntimeEvent::AssistantTurnCompleted { model_work, .. } = &event {
+                assert_eq!(
+                    *model_work,
+                    crate::runtime::ModelWorkDisposition::RejectedBeforeWork
+                );
+                rejected_before_work = true;
+            }
+            if let RuntimeEvent::TurnRetrying { delay, kind, .. } = event {
+                assert_eq!(kind, RunFailureKind::ProviderRateLimited);
+                break delay;
+            }
+        };
+        assert!(
+            rejected_before_work,
+            "the rejected turn must commit its no-work disposition before retrying"
+        );
+        assert!(
+            delay >= Duration::from_secs(60),
+            "server requested 60 seconds; runtime scheduled {delay:?}"
+        );
+        assert!(delay <= Duration::from_secs(62));
+        drop(events);
+        assert!(
+            server
+                .capture()
+                .request_line()
+                .unwrap()
+                .starts_with("POST ")
+        );
+    }
+    #[tokio::test]
+    async fn summarizer_errors_keep_server_cooldown_before_and_after_partial_output() {
+        struct ThrottledSummary(bool);
+        impl Provider for ThrottledSummary {
+            fn stream(&self, _: ModelRequest) -> ProviderStream {
+                let mut events = Vec::new();
+                if self.0 {
+                    events.push(Ok(ProviderEvent::OutputTextDelta {
+                        text: "partial summary".to_owned(),
+                    }));
+                }
+                events.push(Err(ProviderError::RetryAfter {
+                    status: 429,
+                    message: "capacity".to_owned(),
+                    retry_after: Duration::from_secs(60),
+                }));
+                Box::pin(stream::iter(events))
+            }
+        }
+        for partial in [false, true] {
+            let runtime = Runtime::new(ThrottledSummary(partial), "test-model", 256).unwrap();
+            let mut summary = Box::pin(runtime.summarize(
+                vec![Message::user("summarize")],
+                Arc::from("system"),
+                Arc::from([]),
+                256,
+                None,
+            ));
+            let error = loop {
+                if let Err(error) = summary.next().await.unwrap() {
+                    break error;
+                }
+            };
+            let (kind, retry_after) = match error {
+                runtime::SummarizeError::RejectedBeforeWork {
+                    kind, retry_after, ..
+                } if !partial => (kind, retry_after),
+                runtime::SummarizeError::Transient {
+                    kind, retry_after, ..
+                } if partial => (kind, retry_after),
+                other => panic!("wrong summary fault: {other:?}"),
+            };
+            assert_eq!(kind, RunFailureKind::ProviderRateLimited);
+            assert_eq!(retry_after, Some(Duration::from_secs(60)));
+        }
     }
 }
 

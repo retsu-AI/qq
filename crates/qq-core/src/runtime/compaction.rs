@@ -176,6 +176,7 @@ pub(crate) enum InRunCompactionError {
     SummarizerUnavailable {
         kind: RunFailureKind,
         message: String,
+        retry_after: Option<std::time::Duration>,
         usage: Option<qq_protocol::TokenUsage>,
         estimated_cost_usd_nanos: Option<u64>,
     },
@@ -228,12 +229,14 @@ pub(crate) enum SummarizeError {
     RejectedBeforeWork {
         kind: RunFailureKind,
         message: String,
+        retry_after: Option<std::time::Duration>,
     },
     /// A provider fault worth re-issuing the request for, as for a model turn.
     #[error("{message}")]
     Transient {
         kind: RunFailureKind,
         message: String,
+        retry_after: Option<std::time::Duration>,
     },
     /// The reply itself is unusable, or the provider refused the request in
     /// a way a retry would repeat.

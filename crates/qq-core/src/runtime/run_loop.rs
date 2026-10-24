@@ -218,6 +218,7 @@ struct AttemptScope {
     truncation_reason: qq_provider::IncompleteReason,
     streamed_visible_output: bool,
     turn_fault: Option<(RunFailureKind, String)>,
+    retry_after: Option<std::time::Duration>,
 }
 struct StreamedTurn {
     prepared: PreparedTurn,
@@ -1336,8 +1337,8 @@ impl RunState {
                                             budget: allowance,
                                         })
                                         .await;
-                                    let (kind, message) = match attempt {
-                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message, usage, estimated_cost_usd_nanos }) => {
+                                    let (kind, message, retry_after) = match attempt {
+                                        Err(runtime::InRunCompactionError::SummarizerUnavailable { kind, message, retry_after, usage, estimated_cost_usd_nanos }) => {
                                             run.budget.charge_child(usage, estimated_cost_usd_nanos);
                                             if let Err(limit) = run.budget.remaining(tokio::time::Instant::now()) {
                                                 yield TurnStep::Emit(RuntimeEvent::BudgetExhausted {
@@ -1345,7 +1346,7 @@ impl RunState {
                                                 });
                                                 yield TurnStep::Stop; return;
                                             }
-                                            (kind, message)
+                                            (kind, message, retry_after)
                                         }
                                         Err(runtime::InRunCompactionError::BudgetExhausted { kind, usage, estimated_cost_usd_nanos }) => {
                                             run.budget.charge_child(usage, estimated_cost_usd_nanos);
@@ -1368,7 +1369,7 @@ impl RunState {
                                         yield TurnStep::Stop; return;
                                     }
                                     summarizer_retries += 1;
-                                    let delay = turn_recovery.delay(summarizer_retries);
+                                    let delay = turn_recovery.delay_after(summarizer_retries,retry_after);
                                     yield TurnStep::Emit(RuntimeEvent::TurnRetrying {
                                         turn_ordinal,
                                         attempt: summarizer_retries,
@@ -1619,6 +1620,7 @@ impl RunState {
                         truncation_reason: qq_provider::IncompleteReason::OutputTokens,
                         streamed_visible_output: false,
                         turn_fault: None,
+                        retry_after: None,
                     };
                         loop {
                             // An interrupting steer ends the stream here. Text that
@@ -1944,7 +1946,7 @@ impl RunState {
                                 }
                                 Err(error) => {
                                     attempt.rejected_before_work = matches!(&error,
-                                        qq_provider::ProviderError::Api { .. }
+                                        qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::RetryAfter { .. }
                                         | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. }
                                         | qq_provider::ProviderError::Configuration(_)
                                         | qq_provider::ProviderError::CredentialsUnavailable(_))
@@ -2022,6 +2024,7 @@ impl RunState {
                                     if let Some(kind) = attempt.open_reasoning.take() {
                                         yield TurnStep::Emit( RuntimeEvent::ReasoningCompleted { kind });
                                     }
+                                    attempt.retry_after = error.retry_after();
                                     attempt.turn_fault = Some((kind, error.to_string()));
                                     attempt.completed = true;
                                     break;
@@ -2117,7 +2120,7 @@ impl RunState {
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
                     let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
-                    let AttemptScope { rejected_before_work, reasoning_bytes, reasoning_observed, pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, .. } = attempt;
+                    let AttemptScope { rejected_before_work, reasoning_bytes, reasoning_observed, pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, retry_after, .. } = attempt;
                         window.compatible_request = terminal_usage.map(|usage| {
                             (
                                 system_bytes,
@@ -2291,7 +2294,7 @@ impl RunState {
                                 yield TurnStep::Stop; return;
                             }
                             recovery.turn_retries += 1;
-                            let delay = turn_recovery.delay(recovery.turn_retries);
+                            let delay = turn_recovery.delay_after(recovery.turn_retries,retry_after);
                             yield TurnStep::Emit( RuntimeEvent::TurnRetrying {
                                 turn_ordinal,
                                 attempt: recovery.turn_retries,

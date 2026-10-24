@@ -1324,9 +1324,11 @@ resends of one request while its stream has yielded nothing; once the run
 loop receives `provider_unavailable`, `provider_rate_limited`, or
 `provider_transport` (including a stream that ends after events without a
 terminal event), it commits whatever streamed as a partial assistant turn,
-publishes `run_turn_retrying`, sleeps under `TurnRecoveryPolicy` (2 s
-doubling to 60 s; cancellation and the run deadline cut it short), and
-re-issues the turn with a continue notice after any partial text. The
+publishes `run_turn_retrying`, waits under `TurnRecoveryPolicy`, and re-issues
+the turn with a continue notice after any partial text. The exponential delay
+starts at 2 s and caps at 60 s; equal jitter chooses between half and all of
+that delay. Server-directed cooldowns, capped at 60 s, remain a minimum with
+jitter above it. Cancellation and the run deadline interrupt the wait. The
 allowance is `MAX_TURN_RETRIES` (5) per turn and resets when a turn
 completes. Exhaustion settles the run `paused`: every completed turn is
 durable and the next prompt continues the session. Faults that would recur

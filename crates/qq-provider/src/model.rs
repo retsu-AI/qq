@@ -620,6 +620,12 @@ pub enum ProviderError {
     Transport(String),
     #[error("provider returned HTTP {status}: {message}")]
     Api { status: u16, message: String },
+    #[error("provider returned HTTP {status}: {message}")]
+    RetryAfter {
+        status: u16,
+        message: String,
+        retry_after: std::time::Duration,
+    },
     #[error("provider response failed: {message}")]
     ResponseFailed {
         kind: ProviderErrorKind,
@@ -632,13 +638,22 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
+    /// Server-directed cooldown retained when the HTTP attempt ledger stops.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            Self::RetryAfter { retry_after, .. } => Some(*retry_after),
+            _ => None,
+        }
+    }
+
     #[must_use]
     pub const fn kind(&self) -> ProviderErrorKind {
         match self {
             Self::Configuration(_) => ProviderErrorKind::Configuration,
             Self::CredentialsUnavailable(_) => ProviderErrorKind::Authentication,
             Self::Transport(_) => ProviderErrorKind::Transport,
-            Self::Api { status, .. } => match *status {
+            Self::Api { status, .. } | Self::RetryAfter { status, .. } => match *status {
                 400 | 404 | 409 | 422 => ProviderErrorKind::InvalidRequest,
                 401 | 403 => ProviderErrorKind::Authentication,
                 429 => ProviderErrorKind::RateLimited,
