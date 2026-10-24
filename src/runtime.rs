@@ -3440,7 +3440,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 pub enum RuntimeHandlerError {
     #[error(transparent)]
     TaskGitHelper(#[from] qq_core::task_git_job::HelperImageError),
->>>>>>> 43a3f085 (fix(core): launch scoped task commits through the durable worker)    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[error("task workspace preparation stopped: {0}")]
     TaskPreparation(#[source] tokio::task::JoinError),
     #[error("native command service failed: {0}")]
