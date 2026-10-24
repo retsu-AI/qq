@@ -14,8 +14,10 @@ use qq_config as config;
 use qq_protocol::{RunCommand, RunEvent};
 use qq_server as server;
 
+mod builtin_auth;
 mod catalog;
 mod cli;
+mod command_owner;
 #[cfg(test)]
 mod docs_truth;
 mod doctor;
@@ -30,6 +32,32 @@ mod plan;
 mod runtime;
 
 fn main() -> ExitCode {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("_command-exec")) {
+        return match std::env::args_os()
+            .nth(2)
+            .ok_or_else(|| io::Error::other("missing native launch descriptors"))
+            .and_then(|encoded| {
+                let encoded = encoded
+                    .to_str()
+                    .ok_or_else(|| io::Error::other("invalid native launch descriptors"))?;
+                qq_core::command_owner::execute_native_launch(encoded)
+            }) {
+            Ok(code) => ExitCode::from(code),
+            Err(error) => {
+                eprintln!("native launch: {error}");
+                let mut cause = std::error::Error::source(&error);
+                for _ in 0..8 {
+                    let Some(source) = cause else {
+                        break;
+                    };
+                    eprintln!("caused by: {source}");
+                    cause = source.source();
+                }
+                ExitCode::FAILURE
+            }
+        };
+    }
     let logging_enabled = match logging::enabled(std::env::var_os("QQ_LOG").as_deref()) {
         Ok(enabled) => enabled,
         Err(error) => {
@@ -127,6 +155,7 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             allow_origins,
             exit_on_stdin_close,
         }) => serve(bind, &allow_origins, &overrides, exit_on_stdin_close).await?,
+        Some(cli::Command::NativeWorker { state_dir }) => command_owner::run(state_dir).await?,
         Some(cli::Command::Config { command }) => config_command(command, &overrides)?,
         Some(cli::Command::Auth { command }) => {
             run_blocking_command(move || auth_command(command)).await?
@@ -533,12 +562,15 @@ async fn prepare_headless(
         ),
         organization: snapshot.organization().map(str::to_owned),
     };
-    let handler = runtime::RuntimeHandler::open_with(factory, snapshot.approval_timeout())
+    let handler = runtime::RuntimeHandler::open_owned(factory, snapshot.approval_timeout())
         .await
         .map_err(|error| match error {
             runtime::RuntimeHandlerError::Build(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Config(error) => invalid(error.to_string()),
             runtime::RuntimeHandlerError::Sessions(error) => harness(error.to_string()),
+            runtime::RuntimeHandlerError::NativeCommands(error) => harness(error.to_string()),
+            #[cfg(target_os = "linux")]
+            runtime::RuntimeHandlerError::TaskPreparation(error) => harness(error.to_string()),
         })?;
 
     let (reviewer_configured, configured_delegate) =
@@ -558,7 +590,10 @@ async fn prepare_headless(
         session: args.session,
         model,
         profile,
-        context_window: model_metadata.and_then(qq_config::ModelMetadata::context_window),
+        context_window: snapshot
+            .providers()
+            .get(snapshot.model().provider())
+            .and_then(|provider| provider.model_context_window(snapshot.model().model())),
         pricing_provenance: model_metadata
             .and_then(qq_config::ModelMetadata::pricing)
             .map(|pricing| pricing.provenance.clone()),
@@ -641,7 +676,7 @@ async fn serve(
                 .await?
             };
             let handler =
-                Arc::new(runtime::RuntimeHandler::open_with(factory, approval_timeout).await?);
+                Arc::new(runtime::RuntimeHandler::open_owned(factory, approval_timeout).await?);
             let identity = handler.server_identity(None);
             let server = match reservation.start(handler.clone(), identity) {
                 Ok(server) => server,
@@ -856,7 +891,7 @@ async fn interactive(
                 server::ReserveOutcome::Reserved(reservation) => {
                     owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
-                        runtime::RuntimeHandler::open_with(factory.clone(), approval_timeout)
+                        runtime::RuntimeHandler::open_owned(factory.clone(), approval_timeout)
                             .await
                             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))?,
                     );
@@ -2047,7 +2082,7 @@ fn login_providers() -> Vec<&'static str> {
 /// to: the table's for an API-key preset, `qq-auth`'s for a provider whose
 /// credential it owns (ADR-0064 §1).
 fn built_in_endpoint(provider: &str) -> Option<&'static str> {
-    Some(runtime::builtin_audience(&login_provider(provider)?))
+    Some(builtin_auth::BuiltinAuth::of(&login_provider(provider)?).audience())
 }
 
 async fn run_blocking_command(

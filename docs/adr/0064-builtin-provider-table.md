@@ -1,6 +1,6 @@
 # ADR-0064 — Built-in HTTP providers are rows in one table
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-10-19
 **Deciders:** ENG-1066 (auth-providers AP7)
 **Implements:** [Auth and provider credentials](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/auth-providers.md) § AP7

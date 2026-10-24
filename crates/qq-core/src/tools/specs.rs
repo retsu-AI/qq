@@ -15,10 +15,7 @@ use super::{
         MAX_CONTEXT, MAX_CURSOR_BYTES, MAX_GLOB_BYTES, MAX_GLOBS, MAX_LIMIT, MAX_PER_FILE,
         MAX_QUERY_BYTES,
     },
-    shell::{
-        MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES,
-        MAX_SHELL_TIMEOUT_SECS,
-    },
+    shell::{MAX_EXEC_ARG_BYTES, MAX_EXEC_ARGS, MAX_EXEC_PROGRAM_BYTES, MAX_EXEC_STDIN_BYTES},
     tree::{MAX_DEPTH, MAX_ENTRIES},
 };
 use crate::{
@@ -35,9 +32,9 @@ pub(crate) const SPAWN_AGENT_TOOL: &str = "spawn_agent";
 const WAIT_AGENTS_TOOL: &str = "wait_agents";
 /// Cancels one background sub-agent (ADR-0054 § 4).
 const CANCEL_AGENT_TOOL: &str = "cancel_agent";
-/// The longest one `wait_agents` call blocks its turn: a shell command's
-/// own ceiling, so a wait is never the longest thing a turn can do.
-pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = MAX_SHELL_TIMEOUT_SECS;
+/// The longest one `wait_agents` call blocks its turn. Command execution
+/// deadlines are independent of this observation bound.
+pub(crate) const MAX_WAIT_AGENTS_SECS: u64 = 600;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BuiltInTool {
@@ -216,7 +213,16 @@ impl BuiltInTool {
             ),
             Self::Shell => ToolSpec::new(
                 "shell",
-                "Run one shell command in the workspace via `sh -c`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus PATH HOME LANG TERM TMPDIR; name allowlisted variables in env. Timeout 120 s by default; the process group is killed on timeout or cancel.",
+                format!(
+                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). The child starts from a cleared environment plus {}; name allowlisted variables in env. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. The {} is killed on timeout or cancel.",
+                    if cfg!(windows) { "cmd /C" } else { "sh -c" },
+                    crate::BASE_ENV.join(" "),
+                    if cfg!(windows) {
+                        "owned process tree"
+                    } else {
+                        "process group"
+                    }
+                ),
                 json!({
                     "type": "object",
                     "properties": {
@@ -227,8 +233,7 @@ impl BuiltInTool {
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_SHELL_TIMEOUT_SECS
+                            "minimum": 1
                         },
                         "env": {
                             "type": "array",
@@ -256,8 +261,7 @@ impl BuiltInTool {
                         "stdin": { "type": "string", "maxLength": MAX_EXEC_STDIN_BYTES },
                         "timeout_seconds": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": MAX_SHELL_TIMEOUT_SECS
+                            "minimum": 1
                         },
                         "env": {
                             "type": "array",
@@ -327,6 +331,22 @@ impl BuiltInTool {
 /// past what every turn should pay for.
 pub(crate) const MAX_SPAWN_AGENT_SCHEMA_BYTES: usize = 2 * 1024;
 
+/// The exact overrides the tool advertises, retained unchanged for admission.
+pub(crate) fn spawn_model_routes<'a>(
+    model_routes: &'a [String],
+    delegation: &'a DelegationRoster,
+) -> Vec<&'a str> {
+    if delegation.roster.is_empty() {
+        model_routes.iter().map(String::as_str).collect()
+    } else {
+        delegation
+            .roster
+            .iter()
+            .map(|entry| entry.route.as_str())
+            .collect()
+    }
+}
+
 /// The declaration for [`SPAWN_AGENT_TOOL`]. Kept out of [`specs`] because it
 /// joins the tool list only when the run may spawn: child sessions and
 /// session-less runs never see it. With a roster, `role` is the model's
@@ -376,15 +396,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             }),
         );
     }
-    let override_routes: Vec<&str> = if has_roster {
-        delegation
-            .roster
-            .iter()
-            .map(|entry| entry.route.as_str())
-            .collect()
-    } else {
-        model_routes.iter().map(String::as_str).collect()
-    };
+    let override_routes = spawn_model_routes(model_routes, delegation);
     if !override_routes.is_empty() {
         properties.insert(
             "model".to_owned(),

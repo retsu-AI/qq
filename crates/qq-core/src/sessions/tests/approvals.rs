@@ -3947,6 +3947,175 @@ async fn goal_approval_wait_pauses_without_another_request_even_at_deadline() {
     }
 }
 
+// Poll the gate independently of the session's outer cancellation select: both
+// consume the same watch signal, so either may observe cancellation first.
+#[tokio::test]
+async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
+    for question in [true, false] {
+        for (expired, user_cancel) in [(true, false), (false, false), (true, true)] {
+            let mut harness = scripted_runs_harness(ApprovalMode::Ask, Vec::new()).await;
+            let inner = &harness.runtime.inner;
+            let permits = inner
+                .permits
+                .acquire_many(inner.max_active_runs as u32)
+                .await
+                .unwrap();
+            harness
+                .runtime
+                .command(
+                    CommandId::generate().unwrap(),
+                    serde_json::from_value(serde_json::json!({
+                        "type":"set_goal", "session_id":harness.session_id,
+                        "objective":"retain the unanswered hold",
+                        "budget":{"max_goal_runs":2,"deadline_ms":now_ms()+7_200_000}
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            inner.store.drive_goals(now_ms()).await.unwrap();
+            let claimed = inner.store.claim_next_run(false).await.unwrap().unwrap();
+            let call = RuntimeToolCall {
+                id: ToolCallId::generate().unwrap(),
+                turn_ordinal: 1,
+                call_ordinal: 1,
+                provider_call_id: "call_1".to_owned(),
+                name: if question {
+                    "ask_user"
+                } else {
+                    "__test_mutate"
+                }
+                .to_owned(),
+                effect: crate::catalog::EffectClass::Mutating,
+                arguments: if question { ASK_ARGUMENTS } else { "{}" }.to_owned(),
+                rejection: None,
+            };
+            inner
+                .store
+                .persist_model_turn(
+                    &claimed,
+                    ModelTurnCommit {
+                        model_work: crate::runtime::ModelWorkDisposition::Committed,
+                        goal_notices: Vec::new(),
+                        reserved_goal_notices: 0,
+                        turn_ordinal: 1,
+                        message: Message::new(
+                            Role::Assistant,
+                            vec![ContentBlock::ToolCall {
+                                id: call.provider_call_id.clone(),
+                                name: call.name.clone(),
+                                arguments: serde_json::from_str(&call.arguments).unwrap(),
+                            }],
+                        ),
+                        calls: vec![call.clone()],
+                        turn_message: None,
+                        context_tokens: None,
+                        occupancy_basis: None,
+                        usage: None,
+                        estimated_cost_usd_nanos: None,
+                        accounting: None,
+                        truncated: false,
+                        notice: None,
+                    },
+                )
+                .await
+                .unwrap();
+            let (cancel, cancellation) = watch::channel(false);
+            let gate = crate::sessions::approvals::SessionToolGate::new(
+                Arc::clone(inner),
+                claimed.clone(),
+                cancellation,
+                Arc::new(crate::tools::network::NetworkPolicy::default()),
+                approval::ApprovalDelegate::Off,
+                false,
+            );
+            let decision = tokio::spawn(gate.resolve(&call));
+            collect_until_approval_requested(&mut harness.events).await;
+            if expired {
+                inner.goal_deadlines.lock().unwrap().insert(
+                    claimed.identity.run_id,
+                    crate::runtime::RunDeadline::new(
+                        RunLimits {
+                            max_duration_ms: Some(1),
+                            ..RunLimits::default()
+                        },
+                        tokio::time::Instant::now() - Duration::from_millis(2),
+                    )
+                    .unwrap(),
+                );
+            }
+            if user_cancel {
+                harness
+                    .runtime
+                    .command(
+                        CommandId::generate().unwrap(),
+                        SessionCommand::CancelRun {
+                            run_id: claimed.identity.run_id,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            cancel.send_replace(true);
+            assert!(matches!(decision.await.unwrap(), GateDecision::Deny { .. }));
+            let goal = harness
+                .runtime
+                .snapshot(SnapshotRequest::new(
+                    harness.workspace_id,
+                    Some(harness.session_id),
+                    1,
+                    1,
+                ))
+                .await
+                .unwrap()
+                .focused
+                .unwrap()
+                .goal
+                .unwrap();
+            if expired && !user_cancel {
+                assert!(
+                    matches!(goal.status, qq_protocol::GoalStatus::Paused {
+                    reason: qq_protocol::GoalPauseReason::NeedsUser {
+                        cause: qq_protocol::GoalNeedsUser::Approval { tool_call_id }
+                    }
+                } if tool_call_id == call.id),
+                    "the gate discarded its unanswered hold: {:?}",
+                    goal.status
+                );
+            } else {
+                assert_eq!(
+                    goal.status,
+                    if user_cancel {
+                        qq_protocol::GoalStatus::Paused {
+                            reason: qq_protocol::GoalPauseReason::User,
+                        }
+                    } else {
+                        qq_protocol::GoalStatus::Active
+                    },
+                    "ordinary cancellation must not invent a deadline hold"
+                );
+            }
+            inner
+                .goal_deadlines
+                .lock()
+                .unwrap()
+                .remove(&claimed.identity.run_id);
+            inner
+                .store
+                .finish_run(
+                    &claimed,
+                    RunOutcome::Cancelled,
+                    None,
+                    TeardownComplete::nothing_ran(),
+                )
+                .await
+                .unwrap();
+            drop(permits);
+            harness.runtime.shutdown().await.unwrap();
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn goal_parent_deadline_preserves_a_sponsored_childs_unanswered_approval() {
     for (run_duration, preparation_ms, wall_clock_lags) in [
@@ -4308,4 +4477,32 @@ async fn selecting_equivalent_delegate_policy_preserves_an_inflight_reviewer_app
         Some(RunOutcome::Completed)
     ));
     harness.runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_close_observes_termination_without_a_settlement() {
+    for shutdown in [false, true] {
+        let (directory, runtime) = test_runtime().await;
+        super::execution_context::process_call_fixture(&runtime.inner.store, directory.path())
+            .await;
+        let mut closing = Box::pin(runtime.close_when_idle(std::future::pending()));
+        assert!(futures_util::poll!(closing.as_mut()).is_pending());
+        runtime
+            .inner
+            .store
+            .call(Priority::Control, |_| Ok(()))
+            .await
+            .unwrap();
+        assert!(futures_util::poll!(closing.as_mut()).is_pending());
+
+        if shutdown {
+            runtime.inner.shutdown.send_replace(true);
+        } else {
+            runtime.inner.failed.send_replace(true);
+        }
+        assert!(matches!(
+            futures_util::poll!(closing.as_mut()),
+            std::task::Poll::Ready(Err(SessionRuntimeError::Unavailable))
+        ));
+    }
 }

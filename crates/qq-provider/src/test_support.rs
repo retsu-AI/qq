@@ -136,6 +136,14 @@ impl LoopbackServer {
 
     /// Serves several responses on one listener and captures each request.
     pub fn respond_sequence(responses: Vec<LoopbackResponse>) -> Self {
+        Self::respond_sequence_with_timeout(responses, Duration::from_secs(5))
+    }
+
+    /// Sets the idle acceptance deadline for fixtures that execute work between turns.
+    pub fn respond_sequence_with_timeout(
+        responses: Vec<LoopbackResponse>,
+        timeout: Duration,
+    ) -> Self {
         assert!(
             !responses.is_empty(),
             "a loopback sequence needs a response"
@@ -148,7 +156,7 @@ impl LoopbackServer {
         let requests = thread::spawn(move || {
             let mut captured = Vec::with_capacity(responses.len());
             for (status, content_type, chunks) in responses {
-                let mut stream = accept_before(&listener, Duration::from_secs(5));
+                let mut stream = accept_before(&listener, timeout);
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("loopback read timeout must be configurable");

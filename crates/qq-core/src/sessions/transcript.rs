@@ -639,7 +639,14 @@ fn assemble_model_context(
     if let Some(compaction) = compaction {
         context.push(Message::user(format!(
             "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
-            compaction.summary
+            with_exact_inputs(
+                transaction,
+                &session_id.to_string(),
+                RecordScope::Session {
+                    cutoff_ordinal: compaction.cutoff_ordinal,
+                },
+                compaction.summary
+            )?
         )));
     }
     for prompt in prompts {
@@ -1301,178 +1308,6 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
         )
 }
 
-/// Searches the session's complete durable transcript for a case-insensitive
-/// literal: each user prompt, then that run's assistant turns and tool
-/// results. Compaction markers and assembly-time pruning are deliberately
-/// ignored — this is the recall path that makes aggressive compaction safe.
-/// Each match yields one bounded excerpt with a citation naming its durable
-/// coordinates; at most `limit` matches are returned, in transcript order.
-/// The calling run is excluded: its own `search_history` arguments would
-/// otherwise match every query.
-///
-/// The walk runs newest prompt first and stops once it has examined
-/// [`HISTORY_SCAN_BUDGET_BYTES`] of transcript, so a rare or absent term
-/// costs a bounded amount of store-worker time however long the session is;
-/// the result says when the oldest history went unexamined. Every statement
-/// is prepared once per search, not once per run.
-pub(super) fn search_session_history(
-    transaction: &Connection,
-    session_id: SessionId,
-    calling_run: RunId,
-    query: &str,
-    limit: usize,
-) -> Result<HistorySearch, SessionRuntimeError> {
-    let needle = query.to_lowercase();
-    // Newest first, so a budget-truncated search has covered the recent
-    // spans a follow-up most often needs. Matches are reversed at the end
-    // to keep transcript order for the reader.
-    let mut statement = transaction.prepare_cached(
-        "SELECT id, ordinal, run_id FROM messages
-             WHERE session_id = ?1 AND role = 'user' AND run_id != ?2 AND steering = 0
-               AND state IN ('complete', 'cancelled', 'failed', 'interrupted')
-             ORDER BY ordinal DESC",
-    )?;
-    let prompts = statement
-        .query_map(
-            params![session_id.to_string(), calling_run.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(statement);
-    let mut turns_statement = transaction.prepare_cached(
-        "SELECT turn_ordinal, assistant_content_json FROM model_turns
-             WHERE run_id = ?1 ORDER BY turn_ordinal DESC",
-    )?;
-    let mut results_statement = transaction.prepare_cached(
-        "SELECT name, call_ordinal, result FROM tool_calls
-             WHERE run_id = ?1 AND turn_ordinal = ?2 AND result IS NOT NULL
-             ORDER BY call_ordinal DESC",
-    )?;
-
-    // Per run, hits are collected newest-turn-first and reversed before they
-    // join the overall list, so each run's span reads in transcript order
-    // once the whole list is reversed.
-    let mut newest_first: Vec<HistoryMatch> = Vec::new();
-    let mut scanned: usize = 0;
-    let mut truncated = false;
-    'prompts: for (message_id, ordinal, run_id) in prompts {
-        if newest_first.len() >= limit {
-            break;
-        }
-        if scanned >= HISTORY_SCAN_BUDGET_BYTES {
-            truncated = true;
-            break;
-        }
-        let mut run_hits: Vec<HistoryMatch> = Vec::new();
-        let record = |scanned: &mut usize,
-                      run_hits: &mut Vec<HistoryMatch>,
-                      citation: String,
-                      text: &str| {
-            *scanned = scanned.saturating_add(text.len());
-            if let Some(excerpt) = excerpt_around(text, &needle) {
-                run_hits.push(HistoryMatch { citation, excerpt });
-            }
-        };
-        let mut turns = turns_statement.query([&run_id])?;
-        while let Some(row) = turns.next()? {
-            let turn_ordinal: u32 = row.get(0)?;
-            let raw = row
-                .get_ref(1)?
-                .as_str()
-                .map_err(|_| SessionRuntimeError::CONSTRAINT)?;
-            if raw.len() > HISTORY_SCAN_BUDGET_BYTES.saturating_sub(scanned) {
-                truncated = true;
-                break 'prompts;
-            }
-            scanned += raw.len();
-            let content_json = raw.to_owned();
-            let results = results_statement
-                .query_map(params![&run_id, turn_ordinal], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, u16>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            for (name, call_ordinal, result) in results {
-                record(
-                    &mut scanned,
-                    &mut run_hits,
-                    format!(
-                        "{name} result, user message #{ordinal} turn {turn_ordinal} call {call_ordinal}"
-                    ),
-                    &result,
-                );
-            }
-            let content = match serde_json::from_str::<super::codec::PersistedTurn>(&content_json)?
-            {
-                super::codec::PersistedTurn::Legacy(content)
-                | super::codec::PersistedTurn::Replay { content, .. } => content,
-            };
-            for block in content.into_iter().rev() {
-                match ContentBlock::from(block) {
-                    ContentBlock::Text { text } => record(
-                        &mut scanned,
-                        &mut run_hits,
-                        format!("assistant, user message #{ordinal} turn {turn_ordinal}"),
-                        &text,
-                    ),
-                    ContentBlock::ToolCall {
-                        name, arguments, ..
-                    } => record(
-                        &mut scanned,
-                        &mut run_hits,
-                        format!("tool call {name}, user message #{ordinal} turn {turn_ordinal}"),
-                        &arguments.to_string(),
-                    ),
-                    ContentBlock::ToolResult { .. } => {}
-                }
-            }
-            if scanned >= HISTORY_SCAN_BUDGET_BYTES {
-                // Finish this prompt's own text so its citation set is
-                // whole, then stop.
-                let prompt = load_message(transaction, parse_id(&message_id)?)?;
-                record(
-                    &mut scanned,
-                    &mut run_hits,
-                    format!("user message #{ordinal}"),
-                    &prompt.output,
-                );
-                run_hits.reverse();
-                newest_first.extend(run_hits);
-                truncated = true;
-                break 'prompts;
-            }
-        }
-        let prompt = load_message(transaction, parse_id(&message_id)?)?;
-        record(
-            &mut scanned,
-            &mut run_hits,
-            format!("user message #{ordinal}"),
-            &prompt.output,
-        );
-        run_hits.reverse();
-        newest_first.extend(run_hits);
-    }
-    if newest_first.len() > limit {
-        // Keep the newest `limit` hits: the walk collected whole runs past
-        // the cap so a run's span is never split mid-way.
-        newest_first.truncate(limit);
-    }
-    newest_first.reverse();
-    Ok(HistorySearch {
-        matches: newest_first,
-        truncated,
-    })
-}
-
 /// Measures the session's context as the next run would assemble it —
 /// summary plus post-cutoff transcript with pruning applied — plus any text
 /// still streaming into the current turn's message, which has not joined a
@@ -1497,6 +1332,27 @@ pub(super) fn assembled_context_bytes(
     )?;
     Ok(context_bytes(&context)
         .saturating_add(usize::try_from(streaming_bytes).unwrap_or(usize::MAX)))
+}
+
+/// Empty truncated/faulted attempts never joined the live transcript.
+/// Use the same predicate when choosing the first kept turn and replaying it.
+pub(super) fn turn_is_replayed(
+    content_json: &str,
+    truncated: bool,
+) -> Result<bool, SessionRuntimeError> {
+    if !truncated {
+        return Ok(true);
+    }
+    let content = match serde_json::from_str::<codec::PersistedTurn>(content_json)? {
+        codec::PersistedTurn::Legacy(content) | codec::PersistedTurn::Replay { content, .. } => {
+            content
+        }
+    };
+    Ok(Message::new(
+        Role::Assistant,
+        content.into_iter().map(ContentBlock::from).collect(),
+    )
+    .has_content())
 }
 
 /// One committed model turn as context assembly reads it.
@@ -1561,14 +1417,21 @@ pub(super) fn append_run_turns(
             // assistant message, which includes the steering and the runtime
             // notice that preceded that kept turn's request
             // (`in_run_compaction_boundary`). Drop them here too.
-            let first_kept = match turns.first_mut() {
-                Some(first) => {
-                    first.notice = None;
-                    first.goal_notices.clear();
-                    first.ordinal
+            let mut first_kept_index = None;
+            for (index, turn) in turns.iter().enumerate() {
+                if turn_is_replayed(&turn.content_json, turn.truncated)? {
+                    first_kept_index = Some(index);
+                    break;
                 }
-                None => marker.turn_cutoff,
-            };
+            }
+            let first_kept =
+                first_kept_index.map_or(marker.turn_cutoff, |index| turns[index].ordinal);
+            if let Some(index) = first_kept_index {
+                for turn in &mut turns[..=index] {
+                    turn.notice = None;
+                    turn.goal_notices.clear();
+                }
+            }
             while steering
                 .front()
                 .is_some_and(|(applied_before, _)| *applied_before <= first_kept)

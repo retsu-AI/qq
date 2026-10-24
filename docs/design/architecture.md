@@ -203,6 +203,13 @@ xtask/
   for the surface to act on. It reads a `ReduceContext` (focused session,
   attentiveness, workspace, capabilities, model catalog) and never touches
   the network, the clock, or rendering state.
+  `SessionClient::workspaces` discovers registered roots through authenticated
+  `POST /v1/workspaces/list`, without resolving a path on the client machine.
+  Pages contain the persistent store ID, workspace IDs and host-side display
+  paths; continuation cursors belong to that store. Clients must qualify a
+  workspace by its server connection and store/workspace IDs, rather than
+  merge entries by path. Listing is metadata-only and does not register roots,
+  load project configuration, or authorize execution.
   Views retain the observed foreground run identity across idle summaries,
   keeping late identified internal completions out of attention and draft
   handoff. Body snapshots preserve observed timing and priced-turn ordinals;
@@ -290,6 +297,13 @@ xtask/
   [`transcript.md`](transcript.md), and colors in [`theme.md`](theme.md).
 - `xtask` contains repository maintenance tasks and is not shipped as part of
   QQ.
+- `apps/desktop` is a Windows Tauri client in its own Cargo workspace. Its
+  native project actors reuse `qq-client` and its reducer, publishing coalesced
+  DTOs to a React/TypeScript renderer. It discovers the user-scoped server or
+  supervises the same `qq serve` binary; it does not embed another runtime.
+  File mentions reuse `qq-core::mentions` on bounded blocking work. Desktop
+  preferences, aliases and archive flags do not alter authoritative sessions.
+  See ADR-0065 and the desktop README for native integration and packaging.
 
 The direct workspace dependency graph is:
 
@@ -948,10 +962,19 @@ One durable run follows a guarded loop:
    a step fails, or `MAX_COMPACTION_STEPS` (32) is spent.
    `runs.context_compaction_attempted` counts the steps; a restart resumes
    from the durable marker. A single unit larger than the budget is still
-   sent (the estimate is conservative); if the provider rejects it the
-   prompt fails naming that unit and its size, distinct from a spent step
-   count. Manual `/compact` on an oversized transcript takes one bounded
-   step per command. Within a run, before a later turn is refused for the
+   sent (the estimate is conservative). If a summarizer request is rejected
+   before work for context overflow, it folds the complete transcript as inert
+   text in smaller UTF-8-safe portions. Every remaining portion stays queued;
+   each successful partial summary is folded with the next portion, and no
+   marker commits until all portions have been consumed. The instruction's
+   position is captured before any model output; an echoed instruction cannot
+   replace it. The fold owns the 32-split limit independently of continuation
+   turns; an irreducible fixed prefix or exhausted fold fails without
+   replacing history. Manual `/compact` uses the same recovery.
+   Known gateway model aliases inherit the smallest bundled context limit
+   unless the deployment explicitly configures a limit; unknown names remain
+   unknown. No pricing or wire capabilities are inferred from an alias.
+   Within a run, before a later turn is refused for the
    window, the loop first stubs its own read-only results older than the
    recency window in memory (the same rewrite assembly applies between
    runs) and re-plans. Both that decision and the in-run compaction below
@@ -971,7 +994,16 @@ One durable run follows a guarded loop:
    the stored text, so the live splice and replay render the same bytes.
    The loop splices the summary in where the replaced turns stood and
    continues in the same run; a later overflow folds the previous summary
-   with the next turns. Each in-run compaction opens a new *window* for the
+   with the next turns. When a provider rejects a request before work and
+   there are no own turns to replace, recovery can compact the inherited
+   session prefix. The helper reads its complete durable span, even when a
+   summary-only admission omitted part of it from the live request. The input
+   and cutoff are captured in the same transaction. The marker covers only
+   the ordinals before the active prompt; the prompt, goal notice, current
+   turns and queued future prompts stay verbatim. The live prefix is replaced
+   only after commit, matching session-marker replay. Manual `/compact` is
+   optional; an exhausted recovery reports its cause and preserves history.
+   Each in-run compaction opens a new *window* for the
    run's harness bounds (ADR-0048 § 1): the marker's transaction re-bases
    the run's 4 MiB context reservation to the retained request plus the
    framed summary (the loop sends the retained weight in
@@ -1440,9 +1472,11 @@ Local tool ownership extends through blocking file work and shell termination
 and reap. A parent, or a replacement run in its session, cannot start another
 write while a supervised child is draining. Cancellation does not undo a native
 write already inside its atomic apply step. Unix shell process groups are killed
-on interruption; Windows explicitly terminates the owned child process. Detached
-or escaped processes and remote MCP effects are not proven undone by stopping
-QQ dispatch, and uncertain effects are never implicitly retried.
+before settling a command. Windows assigns each suspended command to a kernel
+job before resuming it, forbids breakaway, and confirms the job is empty after
+termination. Unix descendants that escape their process group and remote MCP
+effects are not proven undone by stopping QQ dispatch, and uncertain effects
+are never implicitly retried.
 
 Which model a child runs is decided at one choke point from the delegation
 roster. The root translates the configured `delegation` section (or, as sugar,
@@ -1550,13 +1584,20 @@ read to; an unbounded one covers everything settled; an in-run marker names
 the run and the turn ordinal it covers, and assembly renders that run as
 prompt, summary, then its later turns verbatim). A between-run marker
 supersedes any in-run markers behind its cutoff; rollback pops the newest
-marker of either kind. Three compactions are retained per session for
-`RollbackCompaction`, and a summary that is empty, missing a required section,
-or fails to shrink the measured assembly settles as a policy failure while the
-prior compaction stays in force. `search_history` is the recall path that makes
-aggressive compaction safe: session runs may search the complete durable
-transcript, including spans compaction replaced, for bounded cited excerpts.
-Direct runs have no durable transcript and do not see the tool.
+marker of either kind. The three newest checkpoints are retained along with
+the session prefix and per-run markers needed to replay their baseline, so
+compacting one run cannot evict another run's live summary. Superseded versions
+and runs covered by that baseline prefix are reclaimed. A summary that is empty,
+missing a required section, or fails to shrink the measured assembly settles as
+a policy failure while the prior compaction stays in force. `search_history`
+searches persisted user inputs, applied steering, assistant replies and tool results,
+including compacted spans and earlier committed work in the current run. Retrieval
+calls and results are excluded to avoid matching query echoes. Each page uses
+indexed keyset seeks with byte and step budgets; `next_cursor` continues from the
+next unvisited source when either budget or the match limit ends the page. One
+persisted unit may exceed the byte budget; it is examined before advancing so
+large turns cannot hide older history. Direct runs have no durable transcript
+and do not see the tool.
 
 Future model requests, capacity accounting, and compaction all consume the same
 provider-neutral projection of that durable state. The projection retains
@@ -2194,13 +2235,14 @@ Targets the executable budgets and benchmarks enforce or approach:
 
 ## Intentionally Deferred
 
-The repository is pure Rust. It contains none of the following, and none is
+The engine and terminal remain Rust. The following are deferred and are not
 scaffolded:
 
 - Web and mobile client surfaces beyond `qq-client`'s transport and state
   (the WASM client crate and shared reducer exist); ADR-0015 records the
   proposed enrollment design.
-- JavaScript/TypeScript packages or package workspace.
+- A shared web/mobile JavaScript package workspace. The desktop renderer is
+  a separate package under `apps/desktop`.
 - Separate server executable.
 - Distributed workers or cloud control plane. These belong to a supervisor
   above the headless contract; see "Hosting Boundary".

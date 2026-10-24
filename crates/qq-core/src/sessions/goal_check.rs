@@ -1,3 +1,4 @@
+mod native;
 use super::store::Priority;
 use super::*;
 #[cfg(unix)]
@@ -6,6 +7,7 @@ use crate::tools::process_context;
 use crate::tools::{ProcessGroupGuard, ToolCancellation};
 #[cfg(unix)]
 use crate::workspace::Workspace;
+pub(super) use native::recover_result;
 #[cfg(unix)]
 use std::collections::VecDeque;
 #[cfg(unix)]
@@ -70,6 +72,8 @@ pub(super) struct ProcessResult {
 
 #[derive(Debug, Error)]
 pub(super) enum ProcessError {
+    #[error("scoped completion checks require durable native command routing")]
+    ScopedExecutionUnavailable,
     #[cfg(not(unix))]
     #[error("completion-check process supervision is unavailable on this platform")]
     UnsupportedPlatform,
@@ -162,14 +166,35 @@ pub(super) async fn confirm_reaped_group_exit(pgid: rustix::process::Pid) -> std
 
 #[cfg(target_os = "linux")]
 fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
-    use std::io::Read;
     let file = match std::fs::File::open(format!("/proc/{pid}/stat")) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+        {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
+    read_group_member_identity(file)
+}
+
+#[cfg(target_os = "linux")]
+fn read_group_member_identity(file: std::fs::File) -> std::io::Result<Option<(i32, u64)>> {
+    use std::io::Read;
     let mut stat = Vec::new();
-    file.take(4097).read_to_end(&mut stat)?;
+    match file.take(4097).read_to_end(&mut stat) {
+        Ok(_) => {}
+        // procfs can retain an open inode after its task is reaped. That
+        // task is gone, even though opening stat succeeded moments earlier.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    }
     if stat.len() > 4096 {
         return Err(std::io::Error::other(
             "check group member stat exceeds bound",
@@ -193,6 +218,23 @@ fn group_member_identity(pid: u32) -> std::io::Result<Option<(i32, u64)>> {
         .parse()
         .map_err(|_| malformed())?;
     Ok(Some((group, started)))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn an_exited_process_stat_does_not_fail_group_cleanup() {
+    let mut child = std::process::Command::new("/bin/sh")
+        .env_clear()
+        .args(["-c", "read token"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let stat = std::fs::File::open(format!("/proc/{}/stat", child.id())).unwrap();
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    assert_eq!(read_group_member_identity(stat).unwrap(), None);
 }
 
 #[cfg(target_os = "linux")]
@@ -310,10 +352,34 @@ fn confirm_linux_group_exit(
     }
 }
 
+/// A scoped task must never reach the legacy host launcher. Durable check
+/// identities and terminal outcomes must be persisted before enabling this path.
+pub(super) async fn run_process(
+    workspace: PathBuf,
+    command: String,
+    deadline: tokio::time::Instant,
+    cancellation: RunCancellation,
+    producer: Arc<crate::ProcessProducer>,
+    resources: execution::RunResources,
+) -> Result<ProcessResult, ProcessError> {
+    if resources.has_native_scope() {
+        return Err(ProcessError::ScopedExecutionUnavailable);
+    }
+    run_host_process(
+        workspace,
+        command,
+        deadline,
+        cancellation,
+        producer,
+        resources,
+    )
+    .await
+}
+
 /// The caller holds workspace exclusion and has committed exact check
 /// authorization. This task retains process ownership until confirmed reap.
 #[cfg(unix)]
-pub(super) async fn run_process(
+async fn run_host_process(
     workspace: PathBuf,
     command: String,
     deadline: tokio::time::Instant,
@@ -374,7 +440,15 @@ pub(super) async fn run_process(
             tail: String::new(),
         });
     }
-    let mut child = match prepared.spawn(false) {
+    let mut child = match prepared
+        .spawn(
+            false,
+            &lease,
+            &ToolCancellation::new(cancellation.clone()),
+            deadline.into_std(),
+        )
+        .await
+    {
         Ok((child, _receipt)) => child,
         Err(error) => return Err(ProcessError::Spawn(error)),
     };
@@ -595,18 +669,19 @@ pub(super) fn queue(
     ])
 }
 
-enum Start {
+pub(super) enum Start {
     Expired,
     Waiting,
-    Started(Vec<SessionEventEnvelope>),
+    Started(Vec<SessionEventEnvelope>, Option<ToolCallId>),
     Stop,
 }
 
-fn try_start(
+pub(super) fn try_start(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
     deadline_ms: u64,
+    native: bool,
 ) -> Result<Start, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
     let now = now_ms();
@@ -646,7 +721,9 @@ fn try_start(
         AND (s.active_run_id IS NOT NULL OR (s.preparing_run_id IS NOT NULL AND s.preparing_run_id!=?2 AND EXISTS(SELECT 1 FROM runs preparing WHERE preparing.id=s.preparing_run_id AND preparing.kind!='goal_check'))))
         OR EXISTS(SELECT 1 FROM side_questions q JOIN sessions s ON s.id=q.session_id WHERE s.workspace_id=?1 AND q.state='running')",
         params![claimed.identity.workspace_id.to_string(),claimed.identity.run_id.to_string()],|row|row.get(0))?;
-    if busy {
+    if busy
+        || super::native_recovery::workspace_blocked(&transaction, claimed.identity.workspace_id)?
+    {
         return Ok(Start::Waiting);
     }
     let started = transaction.execute(
@@ -669,7 +746,7 @@ fn try_start(
     goal.counters.audits += 1;
     goals::save(&transaction, &goal)?;
     let context = EventContext::for_run(store_id, claimed.identity, now);
-    let events = vec![
+    let mut events = vec![
         append_event(
             &transaction,
             context,
@@ -691,8 +768,15 @@ fn try_start(
             },
         )?,
     ];
+    let call = if native {
+        let (id, call_events) = native::record_call(&transaction, store_id, claimed, now)?;
+        events.extend(call_events);
+        Some(id)
+    } else {
+        None
+    };
     transaction.commit()?;
-    Ok(Start::Started(events))
+    Ok(Start::Started(events, call))
 }
 
 enum Completion {
@@ -706,16 +790,36 @@ fn finish(
     connection: &mut Connection,
     store_id: StoreId,
     claimed: &ClaimedRun,
-    mut completion: Completion,
+    completion: Completion,
     deadline_ms: u64,
     _teardown: TeardownComplete,
 ) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
     let transaction = store::begin_unit(connection)?;
-    if run_is_settled(&transaction, claimed.identity.run_id)? {
+    let events = finish_in_transaction(
+        &transaction,
+        store_id,
+        claimed,
+        completion,
+        deadline_ms,
+        SettlementCause::Executor,
+    )?;
+    transaction.commit()?;
+    Ok(events)
+}
+
+fn finish_in_transaction(
+    transaction: &Connection,
+    store_id: StoreId,
+    claimed: &ClaimedRun,
+    mut completion: Completion,
+    deadline_ms: u64,
+    cause: SettlementCause,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    if run_is_settled(transaction, claimed.identity.run_id)? {
         return Ok(Vec::new());
     }
     let now = now_ms();
-    let cancelled = run_cancel_requested(&transaction, claimed.identity.run_id)?;
+    let cancelled = run_cancel_requested(transaction, claimed.identity.run_id)?;
     if now >= deadline_ms
         && let Completion::Process(result) = &mut completion
         && matches!(result.outcome, ProcessOutcome::Exited { .. })
@@ -761,13 +865,13 @@ fn finish(
             claimed.identity.run_id.to_string(), if queued { "queued" } else { "streaming" }, output, now],
     )?;
     let mut events = vec![append_event(
-        &transaction,
+        transaction,
         EventContext::for_run(store_id, claimed.identity, now),
         SessionEvent::AssistantMessageStarted {
-            message: load_message(&transaction, message_id)?,
+            message: load_message(transaction, message_id)?,
         },
     )?];
-    if let Some(mut goal) = goals::load_live(&transaction, claimed.identity.session_id)?
+    if let Some(mut goal) = goals::load_live(transaction, claimed.identity.session_id)?
         && claimed
             .goal
             .as_ref()
@@ -853,9 +957,9 @@ fn finish(
                 }
             }
         }
-        goals::save(&transaction, &goal)?;
+        goals::save(transaction, &goal)?;
         events.push(append_event(
-            &transaction,
+            transaction,
             EventContext::for_run(store_id, claimed.identity, now),
             SessionEvent::GoalUpdated {
                 goal: Box::new(goal),
@@ -879,7 +983,7 @@ fn finish(
     };
     let settled = if queued {
         finish_queued_run_with_outcome(
-            &transaction,
+            transaction,
             store_id,
             claimed.identity.workspace_id,
             claimed.identity.session_id,
@@ -888,19 +992,13 @@ fn finish(
             now,
         )?
     } else {
-        settle_run(
-            &transaction,
-            store_id,
-            claimed,
-            outcome,
-            None,
-            SettlementCause::Executor,
-        )?
+        settle_run(transaction, store_id, claimed, outcome, None, cause)?
     };
     if let Some(settled) = settled {
         events.extend(settled)
     }
-    transaction.commit()?;
+    // Reclaim the worker result only once the goal and run settlement are durable.
+    transaction.execute("UPDATE native_command_owners SET result_saved=1 WHERE tool_call_id IN (SELECT id FROM tool_calls WHERE run_id=?1 AND state IN ('completed','failed'))", [claimed.identity.run_id.to_string()])?;
     Ok(events)
 }
 
@@ -908,7 +1006,7 @@ pub(super) async fn execute(
     inner: Arc<runtime::SessionRuntimeInner>,
     claimed: ClaimedRun,
     mut cancellation: watch::Receiver<bool>,
-    resources: execution::RunResources,
+    mut resources: execution::RunResources,
 ) {
     let Some(captured) = claimed.goal.as_ref() else {
         inner.failed.send_replace(true);
@@ -965,10 +1063,11 @@ pub(super) async fn execute(
             }
         }
         let claim = claimed.clone();
+        let native = inner.native_commands.is_some();
         let started = inner
             .store
             .call(Priority::AwaitControl, move |connection| {
-                try_start(connection, store_id, &claim, deadline_ms)
+                try_start(connection, store_id, &claim, deadline_ms, native)
             })
             .await;
         match started {
@@ -995,19 +1094,34 @@ pub(super) async fn execute(
                     ()=tokio::time::sleep_until(deadline)=>{},
                 }
             }
-            Ok(Start::Started(events)) => {
+            Ok(Start::Started(events, call)) => {
                 for event in events {
                     inner.notify(event.cursor)
                 }
                 let cancelled = RunCancellation::new();
-                let process = run_process(
-                    PathBuf::from(&claimed.workspace),
-                    check.command.clone(),
-                    deadline,
-                    cancelled.clone(),
-                    Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
-                    resources.clone(),
-                );
+                let process = async {
+                    if let Some(call) = call {
+                        Ok(native::run(
+                            &inner,
+                            &claimed,
+                            call,
+                            deadline_ms,
+                            cancelled.clone(),
+                            &mut resources,
+                        )
+                        .await)
+                    } else {
+                        run_process(
+                            PathBuf::from(&claimed.workspace),
+                            check.command.clone(),
+                            deadline,
+                            cancelled.clone(),
+                            Arc::new(crate::ProcessProducer::new(env!("CARGO_PKG_VERSION"))),
+                            resources.clone(),
+                        )
+                        .await
+                    }
+                };
                 tokio::pin!(process);
                 let result = tokio::select! {
                     biased;
@@ -1017,7 +1131,8 @@ pub(super) async fn execute(
                 match result {
                     Ok(result) => break Completion::Process(result),
                     #[cfg(unix)]
-                    Err(ProcessError::Cleanup { .. }) => {
+                    Err(error @ ProcessError::Cleanup { .. }) => {
+                        tracing::error!(target: "qq::goal_check", error = %error, "completion check cleanup failed");
                         inner.failed.send_replace(true);
                         return;
                     }
@@ -1035,13 +1150,20 @@ pub(super) async fn execute(
             }
         }
     };
-    let teardown = match resources.drain().await {
+    let mut teardown = match resources.drain().await {
         Ok(teardown) => teardown,
         Err(_) => {
             inner.failed.send_replace(true);
             return;
         }
     };
+    if execution::persist_native_results(&inner, &claimed, &mut teardown)
+        .await
+        .is_err()
+    {
+        inner.failed.send_replace(true);
+        return;
+    }
     #[cfg(all(test, unix))]
     pause_result(claimed.identity.session_id).await;
     let claim = claimed.clone();
@@ -1062,6 +1184,9 @@ pub(super) async fn execute(
         Ok(events) => {
             for event in events {
                 inner.notify(event.cursor)
+            }
+            if let Some(ack) = &inner.native_ack {
+                ack.wake();
             }
         }
         Err(_) => {
@@ -1094,32 +1219,53 @@ pub(super) fn recover(
     transaction: &Connection,
     store_id: StoreId,
 ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
-    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0")?;
+    Ok(recover_checks(transaction, store_id, None)?
+        .into_iter()
+        .map(|event| event.cursor)
+        .collect())
+}
+
+pub(super) fn interrupt_native(
+    transaction: &Connection,
+    store_id: StoreId,
+    run: RunId,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    transaction.execute(
+        "DELETE FROM temp.native_observation_runs WHERE run_id=?1",
+        [run.to_string()],
+    )?;
+    recover_checks(transaction, store_id, Some(run))
+}
+
+fn recover_checks(
+    transaction: &Connection,
+    store_id: StoreId,
+    run: Option<RunId>,
+) -> Result<Vec<SessionEventEnvelope>, SessionRuntimeError> {
+    let run = run.map(|run| run.to_string());
+    let mut workspaces = transaction.prepare("SELECT DISTINCT s.workspace_id FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND r.check_acknowledgment_pending=0 AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
     let ids = workspaces
-        .query_map([], |row| row.get::<_, String>(0))?
+        .query_map([&run], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(workspaces);
-    transaction.execute("UPDATE runs SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running'",[])?;
+    transaction.execute("UPDATE runs AS r SET check_acknowledgment_pending=1 WHERE kind='goal_check' AND status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)",[&run])?;
     let mut hold_cursors = Vec::new();
     for workspace in ids {
         let workspace = parse_id(&workspace)?;
         if let Some(hold) = interruption(transaction, workspace)? {
-            hold_cursors.push(
-                append_event(
-                    transaction,
-                    EventContext::for_session(store_id, workspace, hold.session_id, None, now_ms()),
-                    SessionEvent::CheckInterruptionChanged {
-                        interruption: Some(hold),
-                    },
-                )?
-                .cursor,
-            );
+            hold_cursors.push(append_event(
+                transaction,
+                EventContext::for_session(store_id, workspace, hold.session_id, None, now_ms()),
+                SessionEvent::CheckInterruptionChanged {
+                    interruption: Some(hold),
+                },
+            )?);
         }
     }
     let mut statement=transaction.prepare("SELECT r.id,r.session_id,s.workspace_id,r.goal_id,r.goal_revision
-        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running'")?;
+        FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.kind='goal_check' AND r.status='running' AND (?1 IS NULL OR r.id=?1) AND NOT EXISTS(SELECT 1 FROM temp.native_observation_runs n WHERE n.run_id=r.id)")?;
     let rows = statement
-        .query_map([], |row| {
+        .query_map([&run], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1152,22 +1298,19 @@ pub(super) fn recover(
             };
         }
         goals::save(transaction, &goal)?;
-        cursors.push(
-            append_event(
-                transaction,
-                EventContext::for_session(store_id, parse_id(&workspace)?, session, None, now_ms()),
-                SessionEvent::GoalUpdated {
-                    goal: Box::new(goal),
-                },
-            )?
-            .cursor,
-        );
+        cursors.push(append_event(
+            transaction,
+            EventContext::for_session(store_id, parse_id(&workspace)?, session, None, now_ms()),
+            SessionEvent::GoalUpdated {
+                goal: Box::new(goal),
+            },
+        )?);
     }
     Ok(cursors)
 }
 
 #[cfg(not(unix))]
-pub(super) async fn run_process(
+async fn run_host_process(
     _workspace: PathBuf,
     _command: String,
     _deadline: tokio::time::Instant,

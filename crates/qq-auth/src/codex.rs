@@ -1090,6 +1090,15 @@ impl CredentialStore {
             .map(|(credential, _epoch)| credential)
     }
 
+    /// Whether `profile` has a stored Codex login that a request could use:
+    /// present, bound to the Codex audience, and parseable. An expired one
+    /// passes, since a request refreshes it; this check never does, so it
+    /// performs no network I/O.
+    pub fn check_codex_login(&self, profile: &str) -> Result<(), AuthError> {
+        self.load_codex_with_epoch(&credential_name(profile)?)
+            .map(|_| ())
+    }
+
     fn resolve_codex_with_epoch(
         &self,
         profile: &str,
@@ -1283,14 +1292,13 @@ fn map_request_credential_error(
     remedies: &MissingCredentialRemedies,
 ) -> RequestCredentialError {
     match error {
+        // Only the refresh path reaches here; login-only errors such as a
+        // denied authorization or a callback timeout cannot.
+        AuthError::Codex(CodexAuthError::TokenRequestRejected { .. }) => {
+            RequestCredentialError::RefreshRejected
+        }
         AuthError::Codex(
-            CodexAuthError::TokenRequestRejected { .. }
-            | CodexAuthError::AuthorizationDenied { .. },
-        ) => RequestCredentialError::RefreshRejected,
-        AuthError::Codex(
-            CodexAuthError::TokenRequestFailed { .. }
-            | CodexAuthError::TokenResponseInvalid { .. }
-            | CodexAuthError::CallbackTimedOut,
+            CodexAuthError::TokenRequestFailed { .. } | CodexAuthError::TokenResponseInvalid { .. },
         ) => RequestCredentialError::RefreshUnavailable,
         AuthError::StoredCredentialNotRegistered { .. }
         | AuthError::StoredCredentialMissing { .. } => remedies.missing(&error),

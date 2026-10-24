@@ -17,13 +17,12 @@ use ignore::{
     overrides::{Override, OverrideBuilder},
 };
 
-use super::dispatch::ToolCancellation;
 use crate::workspace::Workspace;
 
 /// Directories qq never lists or searches by default, regardless of ignore
 /// files: build output and dependency caches. `.git` is excluded even with
 /// `include_ignored`; its objects are never useful results.
-pub(super) const GENERATED_DIRECTORIES: [&str; 7] = [
+pub(crate) const GENERATED_DIRECTORIES: [&str; 7] = [
     "target",
     "node_modules",
     "dist",
@@ -107,20 +106,23 @@ pub(crate) enum ListingStop {
     Time,
 }
 
-pub(super) struct ListingLimits<'a> {
-    pub(super) max_entries: usize,
-    pub(super) max_bytes: usize,
-    pub(super) deadline: Instant,
-    pub(super) cancelled: &'a ToolCancellation,
+pub(crate) struct ListingLimits<'a> {
+    pub(crate) max_entries: usize,
+    pub(crate) max_bytes: usize,
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) cancelled: Option<&'a dyn Fn() -> bool>,
     #[cfg(test)]
-    pub(super) observe: Option<&'a dyn Fn(usize)>,
+    pub(crate) observe: Option<&'a dyn Fn(usize)>,
 }
 
 impl ListingLimits<'_> {
     fn check(&self, dir: &str, entries: usize, bytes: usize) -> Result<(), ListError> {
-        let reason = if self.cancelled.is_cancelled() {
+        let reason = if self.cancelled.is_some_and(|cancelled| cancelled()) {
             ListingStop::Cancelled
-        } else if Instant::now() >= self.deadline {
+        } else if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             ListingStop::Time
         } else if entries > self.max_entries {
             ListingStop::Entries
@@ -162,6 +164,7 @@ impl StopReason {
 pub(crate) struct IgnoreStack {
     matchers: Vec<Option<Gitignore>>,
     include_ignored: bool,
+    tool_defaults: bool,
 }
 
 impl IgnoreStack {
@@ -173,6 +176,7 @@ impl IgnoreStack {
         let mut stack = Self {
             matchers: Vec::new(),
             include_ignored,
+            tool_defaults: true,
         };
         if include_ignored {
             return stack;
@@ -199,6 +203,15 @@ impl IgnoreStack {
         stack
     }
 
+    /// Task imports honor ignore rules while retaining ordinary dotfiles.
+    /// Publication includes newly created ignored outputs; the caller excludes
+    /// generated directories and private task control files independently.
+    pub(crate) fn for_task_files(workspace: &Workspace, inputs: bool) -> Self {
+        let mut stack = Self::open(workspace, ".", !inputs);
+        stack.tool_defaults = false;
+        stack
+    }
+
     fn is_ignored(&self, path: &str, name: &str, is_dir: bool) -> bool {
         if is_dir && name == ".git" {
             return true;
@@ -206,7 +219,9 @@ impl IgnoreStack {
         if self.include_ignored {
             return false;
         }
-        if name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name)) {
+        if self.tool_defaults
+            && (name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name)))
+        {
             return true;
         }
         for matcher in self.matchers.iter().rev().flatten() {
@@ -298,7 +313,7 @@ pub(crate) fn list_children(
     list_children_bounded(workspace, dir, stack, unreadable, None)
 }
 
-pub(super) fn list_children_bounded(
+pub(crate) fn list_children_bounded(
     workspace: &Workspace,
     dir: &str,
     stack: &mut IgnoreStack,
@@ -527,6 +542,7 @@ impl ScanBudget {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::tools::dispatch::ToolCancellation;
 
     #[test]
     fn ab2_directory_listing_stops_at_mid_enumeration_cancellation() {
@@ -552,8 +568,8 @@ mod tests {
             Some(ListingLimits {
                 max_entries: 100,
                 max_bytes: 100_000,
-                deadline: Instant::now() + std::time::Duration::from_secs(10),
-                cancelled: &cancelled,
+                deadline: Some(Instant::now() + std::time::Duration::from_secs(10)),
+                cancelled: Some(&|| cancelled.is_cancelled()),
                 observe: Some(&observe),
             }),
         )
@@ -607,8 +623,8 @@ mod tests {
                     Some(ListingLimits {
                         max_entries,
                         max_bytes,
-                        deadline,
-                        cancelled: &cancelled,
+                        deadline: Some(deadline),
+                        cancelled: Some(&|| cancelled.is_cancelled()),
                         observe: None,
                     })
                 )

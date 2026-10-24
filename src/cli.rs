@@ -113,6 +113,13 @@ pub enum Command {
         exit_on_stdin_close: bool,
     },
 
+    /// Private native command worker, launched by the trusted host.
+    #[command(name = "_command-owner", hide = true)]
+    NativeWorker {
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+
     /// Inspect and validate effective configuration.
     Config {
         #[command(subcommand)]

@@ -1,6 +1,10 @@
-//! A credential-free durable session, including an approved file write.
+//! A credential-free durable session editing a detached task workspace.
 use futures_util::StreamExt;
 use qq_core::*;
+use qq_core::{
+    command_owner::{NativeCommandScope, NativeNetwork, NativeResourceLimits, NativeResources},
+    task_workspace::{TaskWorkspace, TaskWorkspaceLimits, TaskWorkspaceSource},
+};
 use qq_protocol::*;
 use qq_provider::test_support::ScriptedProvider;
 use std::{sync::Arc, time::Duration};
@@ -14,7 +18,35 @@ impl RuntimeLoader for Loader {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;
-    let workspace = directory.path().canonicalize()?;
+    let root = directory.path().canonicalize()?;
+    let staged_root = root.clone();
+    let mut detached = tokio::task::spawn_blocking(move || {
+        let source = staged_root.join("source");
+        std::fs::create_dir(&source)?;
+        std::fs::write(source.join("input.txt"), "local uncommitted bytes")?;
+        let source_runtime = qq_core::Runtime::new(
+            qq_provider::test_support::ScriptedProvider::new(vec![]),
+            "demo",
+            256,
+        )
+        .map_err(std::io::Error::other)?;
+        let source_plan = qq_core::plan::CompiledAgentPlan::compile_blocking(
+            qq_core::plan::AgentProfile::embedded(&source_runtime, source.clone()),
+        )
+        .map_err(std::io::Error::other)?;
+        TaskWorkspace::import(
+            &TaskWorkspaceSource::from_plan(&source_plan)?,
+            &staged_root.join("task"),
+            &["input.txt".into()],
+            TaskWorkspaceLimits {
+                max_entries: 16,
+                max_bytes: 1024,
+            },
+        )
+        .map_err(std::io::Error::other)
+    })
+    .await??;
+    let workspace = detached.path().to_owned();
     let provider = ScriptedProvider::tool_then_text(
         "write_file",
         r#"{"path":"hello.txt","content":"hello","create_only":true}"#,
@@ -26,11 +58,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspace.clone(),
     )
     .await?;
-    let sessions = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
-        Arc::new(Loader(loaded)),
-    )
-    .await?;
+    let mut session_options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
+    session_options.native_scopes.push(NativeCommandScope {
+        workspace: detached.directory_grant(),
+        read_only: vec![],
+        network: NativeNetwork::Isolated,
+        resources: NativeResources::Limited {
+            limits: NativeResourceLimits {
+                memory_bytes: 128 * 1024 * 1024,
+                max_processes: 32,
+                cpu_millicores: 500,
+            },
+        },
+    });
+    let sessions = SessionRuntime::open(session_options, Arc::new(Loader(loaded))).await?;
     let command = |command| sessions.command(CommandId::generate().expect("command id"), command);
     let resolved = command(SessionCommand::ResolveWorkspace {
         path: workspace.to_string_lossy().into_owned(),
@@ -92,8 +133,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if outcome != RunOutcome::Completed {
         return Err(format!("run stopped: {outcome:?}").into());
     }
-    let text = std::fs::read_to_string(workspace.join("hello.txt"))?;
+    let text = tokio::task::spawn_blocking(move || {
+        assert!(!root.join("source/hello.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("input.txt"))?,
+            "local uncommitted bytes"
+        );
+        assert_eq!(
+            detached
+                .publish(&["hello.txt".into()])
+                .map_err(std::io::Error::other)?,
+            [std::path::PathBuf::from("hello.txt")]
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("source/input.txt"))?,
+            "local uncommitted bytes"
+        );
+        std::fs::read_to_string(root.join("source/hello.txt"))
+    })
+    .await??;
     assert_eq!(text, "hello");
-    println!("completed: wrote hello.txt after approval");
+    println!("completed: published hello.txt; source input unchanged");
     Ok(())
 }

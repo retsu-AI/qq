@@ -63,6 +63,12 @@ pub(super) struct RunIdentity {
     pub(super) child: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum HistoryAdmissionFailure {
+    MissingToolProjection(RunId),
+    ContextTooLarge,
+}
+
 #[derive(Clone)]
 pub(super) struct ClaimedRun {
     pub(super) identity: RunIdentity,
@@ -101,8 +107,8 @@ pub(super) struct ClaimedRun {
     /// The stored effect of each tool result in `messages`, in block order,
     /// so the run's live prune classifies them as assembly did.
     pub(super) message_effects: ResultEffects,
-    /// A known unresolved history blocks only this reservation, before loading.
-    pub(super) unresolved_tool_projection: Option<RunId>,
+    /// An unusable history blocks only this reservation, before loading.
+    pub(super) history_admission_failure: Option<HistoryAdmissionFailure>,
     /// Summarizer steps already spent admitting this prompt. Zero until the
     /// first automatic compaction starts.
     pub(super) context_compaction_attempted: u32,
@@ -181,7 +187,7 @@ impl ClaimedRun {
             model: self.model.clone(),
             messages: Vec::new(),
             message_effects: Vec::new(),
-            unresolved_tool_projection: None,
+            history_admission_failure: None,
             context_compaction_attempted: self.context_compaction_attempted,
             context_compaction_failed: self.context_compaction_failed,
             context_compaction_remaining: self.context_compaction_remaining,
@@ -493,6 +499,13 @@ pub(super) fn reserve_next_run_recoverable(
              LEFT JOIN session_goals g ON g.session_id = s.id AND g.live = 1
              WHERE r.status = 'queued' AND s.active_run_id IS NULL
                AND s.preparing_run_id IS NULL
+               AND NOT EXISTS(SELECT 1 FROM native_command_owners native
+                   JOIN tool_calls call ON call.id=native.tool_call_id
+                   JOIN runs previous ON previous.id=call.run_id
+                   JOIN sessions previous_session ON previous_session.id=previous.session_id
+                   WHERE previous_session.workspace_id=s.workspace_id AND native.result_saved=0
+                     AND (previous.outcome_json IS NOT NULL OR EXISTS(
+                         SELECT 1 FROM temp.native_observation_runs observed WHERE observed.run_id=previous.id)))
                AND NOT EXISTS(SELECT 1 FROM runs check_run JOIN sessions check_session ON check_session.id=check_run.session_id
                    WHERE check_session.workspace_id=s.workspace_id AND check_run.kind='goal_check' AND (check_run.status='running' OR check_run.check_acknowledgment_pending=1))
                AND s.depth = ?1
@@ -701,7 +714,7 @@ pub(super) fn reserve_next_run_recoverable(
     if reserved != 1 {
         return Ok(None);
     }
-    let mut unresolved_tool_projection = None;
+    let mut history_admission_failure = None;
     let (messages, message_effects) = match kind {
         RunKind::GoalCheck => (Vec::new(), Vec::new()),
         RunKind::Prompt => {
@@ -722,7 +735,13 @@ pub(super) fn reserve_next_run_recoverable(
             ) {
                 Ok(context) => context,
                 Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
-                    unresolved_tool_projection = Some(parse_id(&run)?);
+                    history_admission_failure = Some(
+                        HistoryAdmissionFailure::MissingToolProjection(parse_id(&run)?),
+                    );
+                    (Vec::new(), Vec::new())
+                }
+                Err(SessionRuntimeError::ContextTooLarge) => {
+                    history_admission_failure = Some(HistoryAdmissionFailure::ContextTooLarge);
                     (Vec::new(), Vec::new())
                 }
                 Err(error) => return Err(error),
@@ -739,7 +758,13 @@ pub(super) fn reserve_next_run_recoverable(
                 match load_model_context_with_effects(&transaction, session_id, u64::MAX) {
                     Ok(context) => context,
                     Err(SessionRuntimeError::ToolProjectionUnavailable { run }) => {
-                        unresolved_tool_projection = Some(parse_id(&run)?);
+                        history_admission_failure = Some(
+                            HistoryAdmissionFailure::MissingToolProjection(parse_id(&run)?),
+                        );
+                        (Vec::new(), Vec::new())
+                    }
+                    Err(SessionRuntimeError::ContextTooLarge) => {
+                        history_admission_failure = Some(HistoryAdmissionFailure::ContextTooLarge);
                         (Vec::new(), Vec::new())
                     }
                     Err(error) => return Err(error),
@@ -895,7 +920,7 @@ pub(super) fn reserve_next_run_recoverable(
         model,
         messages,
         message_effects,
-        unresolved_tool_projection,
+        history_admission_failure,
         context_compaction_attempted,
         context_compaction_failed,
         context_compaction_remaining,
@@ -935,6 +960,7 @@ pub(super) fn prepared_context_bytes(
 
 #[derive(Debug)]
 pub(super) enum GoalStartRefusal {
+    NativeRecoveryPending,
     PerRunDuration,
     Reprepare {
         limits: Box<RunLimits>,
@@ -1047,6 +1073,14 @@ pub(super) fn start_reserved_run(
     let context_base_bytes = prepared_context_bytes(audit.weight)?;
     let now = now_ms();
     let transaction = store::begin_unit(connection)?;
+    if super::native_recovery::workspace_blocked(&transaction, identity.workspace_id)? {
+        transaction.execute(
+            "UPDATE sessions SET preparing_run_id=NULL WHERE id=?1 AND preparing_run_id=?2",
+            params![identity.session_id.to_string(), identity.run_id.to_string()],
+        )?;
+        transaction.commit()?;
+        return Ok(Err(GoalStartRefusal::NativeRecoveryPending));
+    }
     if goal.is_some() || goal_spend_owner.is_some() {
         let (refreshed, final_slot) =
             match refresh_goal_limits(&transaction, identity, &metadata, now)? {

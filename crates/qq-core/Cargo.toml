@@ -18,6 +18,7 @@ cap-primitives.workspace = true
 crossbeam-channel.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
+fs4.workspace = true
 htmd = { workspace = true, optional = true }
 ignore.workspace = true
 ipnet.workspace = true
@@ -38,7 +39,34 @@ tree-sitter-bash.workspace = true
 url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { workspace = true, features = ["fs", "event"] }
+rustix = { workspace = true, features = ["fs", "event", "pipe", "thread", "net"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+command-fds.workspace = true
+libproc.workspace = true
+nix.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { workspace = true, features = ["mount"] }
+command-fds.workspace = true
+landlock.workspace = true
+goblin.workspace = true
+nix.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_endian = "little", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))'.dependencies]
+seccompiler.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+dunce.workspace = true
+directories.workspace = true
+rappct.workspace = true
+tempfile.workspace = true
+subc-jobobject.workspace = true
+win32job.workspace = true
+win-custody.workspace = true
+windows-permissions.workspace = true
+winapi-util.workspace = true
 
 [build-dependencies]
 sha2.workspace = true
@@ -48,6 +76,9 @@ qq-provider = { workspace = true, features = ["test-support"] }
 axum.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { workspace = true, features = ["net"] }
 
 [[bench]]
 name = "tool_dispatch"

@@ -34,7 +34,7 @@ fn compile(
     attempts: AttemptPolicy,
 ) -> std::sync::Arc<dyn Provider> {
     let endpoint = match &auth {
-        HttpAuth::Codex { .. } | HttpAuth::RequestTimeCodex(_) => EndpointSpec::exact(
+        HttpAuth::RequestTimeCodex(_) => EndpointSpec::exact(
             format!("{}/backend-api/codex/responses", server.base_url),
             true,
         ),
@@ -71,14 +71,6 @@ async fn send(
     server.capture_all()
 }
 
-fn static_codex_auth() -> HttpAuth {
-    HttpAuth::Codex {
-        access_token: "test-codex-token".into(),
-        account_id: "test-account".into(),
-        is_fedramp: false,
-    }
-}
-
 struct StaticCodexRequestCredentials;
 
 impl RequestCredentialProvider for StaticCodexRequestCredentials {
@@ -102,12 +94,6 @@ async fn every_effort_reaches_responses_standard_codex_and_chat_transport() {
                 HttpAuth::NoAuth,
                 RESPONSES_DONE,
                 "responses",
-            ),
-            (
-                HttpProtocol::OpenAiResponses,
-                static_codex_auth(),
-                RESPONSES_DONE,
-                "codex",
             ),
             (
                 HttpProtocol::OpenAiResponses,
@@ -152,12 +138,6 @@ async fn omitted_effort_keeps_legacy_transport_bodies_byte_exact() {
         ),
         (
             HttpProtocol::OpenAiResponses,
-            static_codex_auth(),
-            RESPONSES_DONE,
-            r#"{"model":"test-model","input":[{"role":"user","content":"hello"}],"stream":true,"store":false}"#,
-        ),
-        (
-            HttpProtocol::OpenAiResponses,
             request_time_codex_auth(),
             RESPONSES_DONE,
             r#"{"model":"test-model","input":[{"role":"user","content":"hello"}],"stream":true,"store":false}"#,
@@ -188,12 +168,6 @@ async fn actual_retry_preserves_effort_in_every_openai_request() {
         (
             HttpProtocol::OpenAiResponses,
             HttpAuth::NoAuth,
-            RESPONSES_DONE,
-            false,
-        ),
-        (
-            HttpProtocol::OpenAiResponses,
-            static_codex_auth(),
             RESPONSES_DONE,
             false,
         ),
@@ -280,7 +254,7 @@ async fn explicit_provider_default_omits_effort_on_every_supported_wire() {
         ),
         (
             HttpProtocol::OpenAiResponses,
-            static_codex_auth(),
+            request_time_codex_auth(),
             RESPONSES_DONE,
         ),
         (

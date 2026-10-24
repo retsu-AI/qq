@@ -47,10 +47,13 @@ pub use xai::XaiLogin;
 pub const OPENAI_CODEX_CREDENTIAL_ENDPOINT: &str = "https://chatgpt.com";
 /// Credential audience of the built-in xAI deployment, for API keys and OAuth.
 pub const XAI_CREDENTIAL_ENDPOINT: &str = "https://api.x.ai";
+/// The variable xAI resolution falls back to when nothing is stored. The
+/// provider table names the same variable; a root test keeps them equal.
+pub const XAI_API_KEY_VARIABLE: &str = "XAI_API_KEY";
 
-pub const KEYRING_SERVICE: &str = "dev.qq";
-pub const MAX_CREDENTIAL_NAME_LEN: usize = 128;
-pub const MAX_STATE_BYTES: usize = 1024 * 1024;
+pub(crate) const KEYRING_SERVICE: &str = "dev.qq";
+pub(crate) const MAX_CREDENTIAL_NAME_LEN: usize = 128;
+pub(crate) const MAX_STATE_BYTES: usize = 1024 * 1024;
 
 const MAX_KIND_LEN: usize = 128;
 const MAX_ENDPOINT_LEN: usize = 4096;
@@ -169,12 +172,12 @@ impl CredentialPaths {
     }
 
     #[must_use]
-    pub fn fallback_file(&self) -> &Path {
+    pub(crate) fn fallback_file(&self) -> &Path {
         &self.fallback_file
     }
 
     #[must_use]
-    pub fn lock_file(&self) -> &Path {
+    pub(crate) fn lock_file(&self) -> &Path {
         &self.lock_file
     }
 
@@ -187,7 +190,11 @@ impl CredentialPaths {
     }
 
     #[must_use]
-    pub fn windows_credential_dir(&self) -> &Path {
+    #[cfg_attr(
+        not(windows),
+        allow(dead_code, reason = "read only by the Windows backend")
+    )]
+    pub(crate) fn windows_credential_dir(&self) -> &Path {
         &self.windows_credential_dir
     }
 }
@@ -558,7 +565,7 @@ impl CredentialStore {
     /// cache) otherwise takes the state lock once for the epoch and again
     /// per secret. For a non-stored reference the epoch is read on its own,
     /// so the caller sees one value whatever the reference kind.
-    pub fn resolve_with_epoch(
+    pub(crate) fn resolve_with_epoch(
         &self,
         reference: &SecretRef,
         expected_endpoint: Option<&str>,
@@ -1581,7 +1588,7 @@ impl CredentialStore {
 
 /// Resolves provider credentials in precedence order: explicit reference,
 /// registered stored credential, then provider environment variable.
-pub fn resolve_provider_credential(
+pub(crate) fn resolve_provider_credential(
     store: &CredentialStore,
     explicit: Option<&SecretRef>,
     stored_name: &str,

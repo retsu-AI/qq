@@ -1,0 +1,13 @@
+{
+  "command_id": "7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a",
+  "committed_through": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 1
+  },
+  "outcome": {
+    "type": "side_question_submitted",
+    "side_question_id": "04040404040404040404040404040404",
+    "thread_id": "04040404040404040404040404040404"
+  }
+}

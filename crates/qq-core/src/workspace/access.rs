@@ -72,13 +72,13 @@ fn same_directory(left: &Dir, right: &Dir) -> std::io::Result<bool> {
 static OPEN_OBSERVERS: Mutex<Vec<(PathBuf, tokio::sync::oneshot::Sender<std::thread::ThreadId>)>> =
     Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 type WriteCheckedHook = (PathBuf, Box<dyn FnOnce() + Send>);
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static WRITE_CHECKED_HOOKS: Mutex<Vec<WriteCheckedHook>> = Mutex::new(Vec::new());
 
 impl Workspace {
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn on_write_path_checked(&self, hook: impl FnOnce() + Send + 'static) {
         WRITE_CHECKED_HOOKS
             .lock()
@@ -345,9 +345,11 @@ impl Workspace {
                     match components.peek() {
                         None => return true,
                         Some(std::path::Component::Normal(next))
-                            if ["config.ron", "config.d", "packs"].iter().any(|protected| {
-                                next.to_string_lossy().eq_ignore_ascii_case(protected)
-                            }) =>
+                            if ["config.ron", "config.d", "packs", "task-publication.lock"]
+                                .iter()
+                                .any(|protected| {
+                                    next.to_string_lossy().eq_ignore_ascii_case(protected)
+                                }) =>
                         {
                             return true;
                         }
@@ -368,7 +370,7 @@ impl Workspace {
         }
         self.capture_protected_directories()
             .map_err(|source| WorkspacePathError::Resolve { source })?;
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         {
             let hook = {
                 let mut hooks = WRITE_CHECKED_HOOKS.lock().unwrap();
@@ -426,7 +428,7 @@ pub(crate) fn blocking_permits() -> Arc<Semaphore> {
 #[derive(Debug, Error)]
 pub enum WorkspacePathError {
     #[error(
-        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
+        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, the task publication lock, or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
     )]
     ProtectedMutation,
     #[error("path must not be empty")]

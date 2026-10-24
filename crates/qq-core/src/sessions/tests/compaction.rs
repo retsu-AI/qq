@@ -504,10 +504,10 @@ async fn compaction_runs_account_usage_and_cost_but_join_no_transcript() {
         )),
         "{summary_excerpt}"
     );
-    assert_eq!(
-        after_bytes,
-        (COMPACTION_SUMMARY_PREAMBLE.len() + 2 + summary_excerpt.len()) as u64
-    );
+    let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let context = load_model_context(&connection, session_id, u64::MAX).unwrap();
+    assert_eq!(after_bytes, context_bytes(&context) as u64);
+    assert!(request_texts_of(&context[0])[0].contains("--- user message #1 ---"));
     assert_eq!(context_tokens, None);
 
     // The transcript is untouched: no new message rows, one more run,
@@ -717,7 +717,7 @@ fn insert_record_call(
 }
 
 #[test]
-fn the_compaction_record_is_exact_bounded_and_cites_what_it_omits() {
+fn metadata_is_bounded_while_exact_inputs_are_not_cut_by_the_record_budget() {
     let prompts: Vec<String> = (0..40)
         .map(|index| format!("USER {index:02} 目录 {}", "é".repeat(1_500)))
         .collect();
@@ -795,17 +795,24 @@ fn the_compaction_record_is_exact_bounded_and_cites_what_it_omits() {
         record.len()
     );
     assert!(record.starts_with(COMPACTION_RECORD_HEADER));
-    // The newest prompts are verbatim; the oldest are cited for recall.
-    assert!(record.contains(&format!("--- user message #79 ---\n{}\n", prompts[39])));
-    assert!(!record.contains(&prompts[0]));
-    assert!(
-        record.contains("search_history searches user messages #1, #3"),
-        "{record}"
-    );
-    // Kept messages print oldest first.
-    let older = record.find("USER 38").unwrap();
-    let newer = record.find("USER 39").unwrap();
-    assert!(older < newer);
+    // Inputs are projected separately, without a lossy record budget.
+    assert!(!record.contains("USER "));
+    let exact = with_exact_inputs(
+        &connection,
+        &session_id.to_string(),
+        RecordScope::Session {
+            cutoff_ordinal: cutoff,
+        },
+        record.clone(),
+    )
+    .unwrap();
+    let mut previous = 0;
+    for prompt in &prompts {
+        let at = exact.find(prompt).unwrap();
+        assert!(at > previous);
+        previous = at;
+    }
+    assert!(!exact.contains("omitted for space"));
     assert!(record.contains("Last assistant reply, to user message #79:\nreply 39\n"));
     // Written files are modified, read-only files are listed once, a dry run
     // modifies nothing.
@@ -836,23 +843,19 @@ fn the_compaction_record_is_exact_bounded_and_cites_what_it_omits() {
     assert_eq!(record_budget(Some(16 * 1024)), 8 * 1024);
     assert_eq!(record_budget(None), context::COMPACTION_RECORD_BYTES);
     assert!(small.len() <= 8 * 1024, "{}", small.len());
-    assert!(
-        small.contains("USER 39"),
-        "the newest message survives a small record"
-    );
-    assert!(small.contains("search_history searches user messages"));
-
-    // One message larger than the whole budget is cut, not dropped.
-    let (_directory, connection, session_id, _) = record_fixture(&["z".repeat(100_000)]);
-    let cut = render_compaction_record(
+    assert!(!small.contains("USER "));
+    let exact_small = with_exact_inputs(
         &connection,
-        session_id,
-        RecordScope::Session { cutoff_ordinal: 2 },
-        context::COMPACTION_RECORD_BYTES,
+        &session_id.to_string(),
+        RecordScope::Session {
+            cutoff_ordinal: cutoff,
+        },
+        small,
     )
     .unwrap();
-    assert!(cut.len() <= context::COMPACTION_RECORD_BYTES);
-    assert!(cut.contains("[cut for space; search_history matches against the full message]"));
+    for prompt in &prompts {
+        assert!(exact_small.contains(prompt));
+    }
 
     // Nothing to record renders nothing.
     let (_directory, connection, session_id, _) = record_fixture(&[]);
@@ -962,16 +965,18 @@ fn an_in_run_record_holds_the_replaced_turns_steering_files_and_failures() {
             .unwrap();
     }
     let render = |turn_cutoff| {
-        render_compaction_record(
+        let scope = RecordScope::Run {
+            run_id: run,
+            turn_cutoff,
+        };
+        let metadata = render_compaction_record(
             &connection,
             session_id,
-            RecordScope::Run {
-                run_id: run,
-                turn_cutoff,
-            },
+            scope,
             context::COMPACTION_RECORD_BYTES,
         )
-        .unwrap()
+        .unwrap();
+        with_exact_inputs(&connection, &session_id.to_string(), scope, metadata).unwrap()
     };
 
     let record = render(2);
@@ -979,7 +984,7 @@ fn an_in_run_record_holds_the_replaced_turns_steering_files_and_failures() {
     for kept in ["steer one", "steer in the gap", "steer before kept"] {
         assert_eq!(record.matches(kept).count(), 1, "{kept}: {record}");
     }
-    assert!(record.contains("--- steering before turn 5 ---\nsteer before kept\n"));
+    assert!(record.contains("--- steering during user message #1 turn 5 ---\nsteer before kept\n"));
     assert!(!record.contains("steer later"));
     // The prompt and the last reply stay verbatim in the kept transcript.
     assert!(!record.contains("do the task"));
@@ -1060,8 +1065,10 @@ fn small_records_stay_within_budget_and_end_on_a_line() {
         }
         assert!(record.starts_with(COMPACTION_RECORD_HEADER), "{window}");
         assert!(record.ends_with('\n'), "{window}: {record}");
-        // The newest user message (the late steering) always survives.
-        assert!(record.contains("steer late"), "{window}: {record}");
+        assert!(
+            !record.contains("steer late"),
+            "inputs are outside the metadata budget"
+        );
     }
     let record = render_compaction_record(
         &connection,
@@ -1075,20 +1082,17 @@ fn small_records_stay_within_budget_and_end_on_a_line() {
     // Lists that do not fit say how much they left out.
     assert!(record.contains(" more\n"), "{record}");
     assert!(record.contains(" older\n"), "{record}");
-    // Session-scope steering is labelled with its prompt and turn.
-    let full = render_compaction_record(
+    // Session-scope steering is preserved outside the record budget.
+    let full = with_exact_inputs(
         &connection,
-        session_id,
+        &session_id.to_string(),
         RecordScope::Session {
             cutoff_ordinal: cutoff,
         },
-        context::COMPACTION_RECORD_BYTES,
+        record,
     )
     .unwrap();
-    assert!(
-        full.contains("--- steering during user message #23 turn 2 ---\nsteer late\n"),
-        "{full}"
-    );
+    assert!(full.contains("--- steering during user message #23 turn 2 ---\nsteer late\n"));
 }
 
 #[test]
@@ -1121,6 +1125,13 @@ fn a_summary_that_echoes_a_record_keeps_only_its_narrative() {
     assert_eq!(
         narrative_of(format!(
             "{narrative}\n\n{COMPACTION_RECORD_HEADER}\nUser messages, verbatim:\nstale"
+        )),
+        narrative
+    );
+    assert_eq!(
+        narrative_of(format!(
+            "{narrative}\n\n{}\nstale instructions",
+            EXACT_INPUTS_HEADER
         )),
         narrative
     );
@@ -1545,6 +1556,310 @@ async fn permanent_reserved_reload_failure_settles_only_that_prompt() {
 }
 
 #[tokio::test]
+async fn manual_compaction_transport_retry_preserves_the_visible_prefix() {
+    const PREFIX: &str = "RECOVERED_PREFIX: staging only; never modify production.\n";
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("session evidence".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::TextThenTransportFault(PREFIX.to_owned()),
+            AutoCompactScript::Text(valid_summary("continued summary")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "seed, faulted summary, successful continuation"
+        );
+        let continuation = request_texts(&requests[2]).join("\n");
+        assert!(
+            continuation.contains(PREFIX),
+            "provider received the persisted partial reply"
+        );
+        assert!(
+            continuation.contains(crate::TURN_RETRY_CONTINUE_NOTICE),
+            "runtime explicitly asked for continuation"
+        );
+    }
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("continued summary"));
+    assert!(
+        summary.contains(PREFIX),
+        "committed summary lost the prefix even though the retry continued it; stored summary: {summary}"
+    );
+}
+
+#[tokio::test]
+async fn manual_compaction_folds_all_portions_and_commits_only_the_final_summary() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text(format!("BEGIN {} END", "evidence ".repeat(12_000))),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("PARTIAL_ONLY")),
+            AutoCompactScript::Text(valid_summary("FINAL_ONLY")),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_through_compacted(&mut harness.events).await;
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    let first = request_texts(&requests[2]).join("\n");
+    let last = request_texts(&requests[3]).join("\n");
+    assert!(first.contains("BEGIN"));
+    assert!(last.contains("END"));
+    assert!(last.contains("PARTIAL_ONLY"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let summary: String = connection
+        .query_row(
+            "SELECT summary FROM session_compactions WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(summary.contains("FINAL_ONLY"));
+    assert!(!summary.contains("PARTIAL_ONLY"));
+}
+
+#[tokio::test]
+async fn manual_fold_restart_resets_abandoned_response_recovery() {
+    for transport_fault in [true, false] {
+        let fragment = |text: &str| {
+            if transport_fault {
+                AutoCompactScript::TextThenTransportFault(text.to_owned())
+            } else {
+                AutoCompactScript::Truncated(text.to_owned())
+            }
+        };
+        let allowance = usize::from(if transport_fault {
+            crate::MAX_TURN_RETRIES
+        } else {
+            crate::MAX_OUTPUT_CONTINUATIONS
+        });
+        let mut script = (0..allowance)
+            .map(|_| fragment("ABANDONED partial summary"))
+            .collect::<Vec<_>>();
+        script.extend([
+            AutoCompactScript::ContextOverflow,
+            fragment("RESTARTED prefix\n"),
+            AutoCompactScript::Text(valid_summary("intermediate")),
+            AutoCompactScript::Text(valid_summary("FINAL_RESTART")),
+        ]);
+        let mut harness = auto_compact_harness(vec![
+            AutoCompactScript::Text("evidence ".repeat(12_000)),
+            AutoCompactScript::Sequence(script),
+        ])
+        .await;
+        let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+        collect_until(&mut harness.events, finished_for(seed)).await;
+        let run = compact_session(&harness.runtime, harness.session_id).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert!(observed.iter().any(|event| matches!(event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run
+    )), "{observed:?}");
+        let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+        let summary: String = connection
+            .query_row(
+                "SELECT summary FROM session_compactions WHERE run_id=?1",
+                [run.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(summary.contains("FINAL_RESTART"));
+        assert!(!summary.contains("ABANDONED"));
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), allowance + 5);
+        assert!(
+            !request_texts(requests.last().unwrap())
+                .join("\n")
+                .contains("ABANDONED")
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_single_inherited_summary_recovers_at_the_same_cutoff() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Text(valid_summary("old summary")),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("replacement summary")),
+            AutoCompactScript::Text("recovered".to_owned()),
+        ]),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    compact_session(&harness.runtime, harness.session_id).await;
+    collect_through_compacted(&mut harness.events).await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "continue".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests[2].messages().len(), 2);
+    assert_eq!(requests.len(), 5);
+    assert!(request_texts(&requests[4])[0].contains("replacement summary"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let cutoffs = connection
+        .prepare("SELECT cutoff_ordinal FROM session_compactions ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get::<_, u64>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(cutoffs.len(), 2);
+    assert_eq!(cutoffs[0], cutoffs[1]);
+}
+
+#[tokio::test]
+async fn inherited_context_overflow_recovers_the_same_prompt_without_manual_compaction() {
+    let mut harness = auto_compact_harness(vec![
+        AutoCompactScript::Text("evidence ".repeat(12_000)),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("first portion recovered")),
+            AutoCompactScript::Text(valid_summary("inherited history recovered")),
+            AutoCompactScript::Text("continued automatically".to_owned()),
+        ]),
+        AutoCompactScript::Text("follow up".to_owned()),
+    ])
+    .await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = queue_prompt(&harness.runtime, harness.session_id, "continue".to_owned()).await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert!(observed.iter().any(|event| matches!(&event.event,
+        SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if *run_id == run
+    )), "{:?}", observed.iter().filter_map(|event| match &event.event { SessionEvent::RunFinished { outcome, .. } => Some(outcome), _ => None }).collect::<Vec<_>>());
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(
+            crate::measure_messages(requests[3].messages())
+                < crate::measure_messages(requests[2].messages())
+        );
+        assert!(
+            request_texts(&requests[5])
+                .iter()
+                .any(|text| text == "continue")
+        );
+    }
+    let next = queue_prompt(&harness.runtime, harness.session_id, "after".to_owned()).await;
+    collect_until(&mut harness.events, finished_for(next)).await;
+    let requests = harness.requests.lock().unwrap();
+    let replay = request_texts(requests.last().unwrap());
+    assert!(
+        replay
+            .iter()
+            .any(|text| text.contains("inherited history recovered")),
+        "{replay:?}"
+    );
+    assert!(replay.iter().any(|text| text == "continue"));
+    assert!(
+        !replay
+            .iter()
+            .any(|text| text == &"evidence ".repeat(12_000))
+    );
+}
+
+#[tokio::test]
+async fn provider_overflow_can_compact_active_turns_then_the_inherited_prefix() {
+    let mut steps = vec![
+        AutoCompactScript::WritesRepeatedlyWithSummaries {
+            turns: 12,
+            text: "unused".to_owned(),
+            summary: valid_summary("unused"),
+        };
+        12
+    ];
+    steps.extend([
+        AutoCompactScript::ContextOverflow,
+        AutoCompactScript::Text(valid_summary("active summary")),
+        AutoCompactScript::ContextOverflow,
+        AutoCompactScript::Text(valid_summary("inherited summary")),
+        AutoCompactScript::Text("recovered".to_owned()),
+    ]);
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![
+                AutoCompactScript::Text("history ".repeat(12_000)),
+                AutoCompactScript::Sequence(steps),
+            ],
+            loads: StdMutex::new(0),
+            context_window: None,
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let seed = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "first task".to_owned(),
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "finish the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    let requests = harness.requests.lock().unwrap();
+    let final_context = request_texts(requests.last().unwrap()).join("\n");
+    assert!(final_context.contains("inherited summary"));
+    assert!(final_context.contains("active summary"));
+    drop(requests);
+    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+    let calls: u32 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id=?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 12);
+}
+
+#[tokio::test]
 async fn a_context_overflow_failure_compacts_before_the_next_prompt() {
     // The provider rejects the first prompt as exceeding the model
     // context window while the session is still under the byte
@@ -1678,9 +1993,12 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
     let mut scripts = vec![AutoCompactScript::ReadNoteThenText("read it".to_owned())];
     scripts.extend((0..CONTEXT_PRUNE_KEEP_TURNS).map(|_| AutoCompactScript::Text("ok".to_owned())));
     scripts.extend([
-        AutoCompactScript::ContextOverflow,
-        AutoCompactScript::Text(valid_summary("the summary")),
-        AutoCompactScript::Text("recovered".to_owned()),
+        AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary("the summary")),
+            AutoCompactScript::Text("recovered".to_owned()),
+        ]),
+        AutoCompactScript::Text("follow up".to_owned()),
     ]);
     let mut harness = auto_compact_harness(scripts).await;
     std::fs::write(harness.workspace_path.join("note.txt"), "n".repeat(600)).unwrap();
@@ -1701,14 +2019,19 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
         &event.event,
         SessionEvent::RunFinished {
             run_id,
-            outcome: RunOutcome::Failed { failure },
+            outcome: RunOutcome::Completed,
             ..
-        } if *run_id == overflow && failure.kind == RunFailureKind::ProviderContextExceeded
+        } if *run_id == overflow
     )));
+    assert!(
+        observed
+            .iter()
+            .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+    );
     let requests_before_retry = harness.requests.lock().unwrap().len();
     {
         let requests = harness.requests.lock().unwrap();
-        let overflowing = requests.last().unwrap();
+        let overflowing = &requests[requests.len() - 3];
         assert!(
             overflowing
                 .messages()
@@ -1724,18 +2047,15 @@ async fn pruned_history_still_compacts_a_known_overflow_before_the_retry() {
 
     let retry = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
     let observed = collect_until(&mut harness.events, finished_for(retry)).await;
-    let compacted = position_of(&observed, |event| {
-        matches!(event, SessionEvent::SessionCompacted { .. })
-    });
-    let prompt_started = position_of(
-        &observed,
-        |event| matches!(event, SessionEvent::RunStarted { run_id, .. } if *run_id == retry),
+    assert!(
+        observed
+            .iter()
+            .all(|event| !matches!(event.event, SessionEvent::SessionCompacted { .. }))
     );
-    assert!(compacted < prompt_started);
     assert_eq!(
         harness.requests.lock().unwrap().len(),
-        requests_before_retry + 2,
-        "compaction then the retry: the known overflow is never re-sent"
+        requests_before_retry + 1,
+        "the follow-up needs no manual retry or second compaction"
     );
 }
 
@@ -2122,7 +2442,9 @@ async fn a_prompt_still_over_budget_after_compacting_runs_from_the_summary_alone
     assert_eq!(requests.len(), 3);
     let texts = request_texts(requests.last().unwrap());
     assert_eq!(texts.len(), 2, "{}", texts.len());
-    assert_eq!(texts[0], crate::sessions::SUMMARY_ONLY_NOTICE);
+    assert!(texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
+    assert!(texts[0].contains("--- user message #1 ---\ngrow\n"));
+    assert!(!texts[0].contains(&"x".repeat(20 * 1024 * 4)));
     assert_eq!(texts[1], "y".repeat(10 * 1024 * 4));
 }
 
@@ -2227,7 +2549,9 @@ async fn a_failed_auto_compaction_does_not_strand_the_queued_prompt() {
     let requests = harness.requests.lock().unwrap();
     assert_eq!(requests.len(), 3 + usize::from(crate::MAX_TURN_RETRIES));
     let texts = request_texts(requests.last().unwrap());
-    assert_eq!(texts[0], crate::sessions::SUMMARY_ONLY_NOTICE);
+    assert!(texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
+    assert!(texts[0].contains("--- user message #1 ---\ngrow\n"));
+    assert!(!texts[0].contains(&"x".repeat(20 * 1024 * 4)));
     assert!(!texts.iter().any(|text| text.starts_with("grow")));
 }
 
@@ -3026,16 +3350,13 @@ async fn repeated_compactions_keep_every_user_message_verbatim_without_the_model
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(retained, COMPACTION_HISTORY_ROWS);
+    assert_eq!(retained, COMPACTION_HISTORY_ROWS + 1);
 }
 
 #[tokio::test]
-async fn an_old_format_summary_folds_into_the_new_format_even_when_the_record_is_larger() {
-    // A session compacted before ADR-0056 holds a small six-section
-    // summary that hid a long first message. The next record restores that
-    // message from rows, so the assembly grows past what the old summary
-    // left. Shrinkage is required of the narrative only, so the fold still
-    // commits, in the new format, with every user message exact.
+async fn an_old_format_summary_recovers_inputs_before_a_later_fold() {
+    // Legacy markers recover their exact inputs at assembly time. A later
+    // fold can only shrink actual work evidence, never those inputs.
     let hidden = format!("hidden{} end", " alpha".repeat(5_000));
     let span = [
         format!("second{} end", " beta".repeat(1_800)),
@@ -3044,8 +3365,8 @@ async fn an_old_format_summary_folds_into_the_new_format_even_when_the_record_is
     let mut harness = auto_compact_harness(vec![
         AutoCompactScript::Text("first answer".to_owned()),
         AutoCompactScript::Text(old_format_summary("old")),
-        AutoCompactScript::Text("second answer".to_owned()),
-        AutoCompactScript::Text("third answer".to_owned()),
+        AutoCompactScript::Text("second answer ".repeat(4_000)),
+        AutoCompactScript::Text("third answer ".repeat(4_000)),
         AutoCompactScript::Text(valid_summary("folded")),
         AutoCompactScript::Text("after".to_owned()),
     ])
@@ -3108,8 +3429,8 @@ async fn an_old_format_summary_folds_into_the_new_format_even_when_the_record_is
         .unwrap();
     assert!(before_bytes > COMPACTION_SHRINKAGE_FLOOR_BYTES as u64);
     assert!(
-        after_bytes > before_bytes,
-        "the fixture must make the record outgrow the old assembly: {before_bytes} -> {after_bytes} ({before})"
+        after_bytes < before_bytes,
+        "exact inputs remain while work evidence shrinks: {before_bytes} -> {after_bytes} ({before})"
     );
 
     let next = queue_prompt(&harness.runtime, harness.session_id, "next".to_owned()).await;
@@ -3220,18 +3541,40 @@ async fn search_history_recalls_compacted_transcript_with_bounded_citations() {
         })
         .expect("search_history must dispatch in a session run");
     assert!(!is_error, "{result}");
-    // Limit 2 caps the three transcript hits (prompt, tool result,
-    // assistant text), in transcript order.
+    // The prompt and newest assistant reply fill the first page. The
+    // remaining earlier tool result must be reachable using its cursor.
     assert!(result.starts_with("2 history match(es)"), "{result}");
     assert!(
         result.contains("[user message #1]\nnever touch"),
         "{result}"
     );
-    assert!(
-        result.contains("[read_file result, user message #1 turn 1 call 1]\nread "),
-        "{result}"
+    assert!(result.contains("noted: the parser"), "{result}");
+    let cursor_json = result
+        .rsplit_once("next_cursor: ")
+        .unwrap()
+        .1
+        .strip_suffix("]\n")
+        .unwrap();
+    let cursor = serde_json::from_str(cursor_json).unwrap();
+    let page = harness
+        .runtime
+        .inner
+        .store
+        .search_history(
+            harness.session_id,
+            "LEGACY/PARSER".to_owned(),
+            2,
+            Some(cursor),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.matches.len(), 1, "{page:?}");
+    assert_eq!(
+        page.matches[0].citation,
+        "read_file result, user message #1 turn 1 call 1"
     );
-    assert!(!result.contains("noted: the parser"), "{result}");
+    assert!(page.matches[0].excerpt.contains("src/legacy/parser.rs"));
+    assert!(page.next_cursor.is_none());
     {
         let requests = harness.requests.lock().unwrap();
         let request = requests.last().unwrap();
@@ -3978,26 +4321,40 @@ fn history_search_is_scan_bounded_and_newest_first() {
         3,
         8 * 1024,
     );
-    let calling_run = RunId::from_bytes([9; 16]);
 
-    let absent =
-        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+    let absent = search_session_history(&connection, session_id, "no-such-term", 8, None).unwrap();
     assert!(absent.matches.is_empty());
-    assert!(absent.truncated, "an absent term must hit the scan budget");
+    assert!(
+        absent.next_cursor.is_some(),
+        "an absent term must hit the scan budget"
+    );
 
     // The newest prompt's needle is found; the oldest prompt's needle lies
     // behind the budget and is reported as unexamined rather than absent.
-    let newest =
-        search_session_history(&connection, session_id, calling_run, "needle-1999", 8).unwrap();
+    let newest = search_session_history(&connection, session_id, "needle-1999", 8, None).unwrap();
     assert_eq!(newest.matches.len(), 1, "{newest:?}");
     assert!(newest.matches[0].citation.starts_with("user message #"));
-    let oldest =
-        search_session_history(&connection, session_id, calling_run, "needle-0 ", 8).unwrap();
+    let oldest = search_session_history(&connection, session_id, "needle-0", 8, None).unwrap();
     assert!(oldest.matches.is_empty());
-    assert!(oldest.truncated);
+    assert!(oldest.next_cursor.is_some());
+    let mut cursor = oldest.next_cursor;
+    let mut pages = 1;
+    loop {
+        let page = search_session_history(&connection, session_id, "needle-0", 8, cursor).unwrap();
+        pages += 1;
+        if !page.matches.is_empty() {
+            assert_eq!(page.matches.len(), 1);
+            assert!(page.matches[0].excerpt.contains("needle-0"));
+            break;
+        }
+        cursor = page.next_cursor;
+        assert!(cursor.is_some(), "pagination lost the oldest prompt");
+        assert!(pages < 1_000, "cursor failed to make progress");
+    }
+    assert!(pages > 1);
 
-    // A common term returns the newest `limit` hits in transcript order.
-    let common = search_session_history(&connection, session_id, calling_run, "prompt", 5).unwrap();
+    // A common term returns the newest `limit` hits first.
+    let common = search_session_history(&connection, session_id, "prompt", 5, None).unwrap();
     assert_eq!(common.matches.len(), 5);
     let ordinals: Vec<u64> = common
         .matches
@@ -4010,10 +4367,10 @@ fn history_search_is_scan_bounded_and_newest_first() {
         })
         .collect();
     assert!(
-        ordinals.windows(2).all(|pair| pair[0] < pair[1]),
+        ordinals.windows(2).all(|pair| pair[0] > pair[1]),
         "{ordinals:?}"
     );
-    assert!(ordinals[4] > 3_990, "newest first: {ordinals:?}");
+    assert!(ordinals[0] > 3_990, "newest first: {ordinals:?}");
 
     // A small session searches to the end and is not marked truncated.
     let directory = tempfile::tempdir().unwrap();
@@ -4025,9 +4382,9 @@ fn history_search_is_scan_bounded_and_newest_first() {
         128,
     );
     let complete =
-        search_session_history(&connection, session_id, calling_run, "no-such-term", 8).unwrap();
+        search_session_history(&connection, session_id, "no-such-term", 8, None).unwrap();
     assert!(complete.matches.is_empty());
-    assert!(!complete.truncated);
+    assert!(complete.next_cursor.is_none());
 }
 
 /// Every provider request the summarizer sent, in order, with the message
@@ -4190,8 +4547,15 @@ async fn one_run_larger_than_the_window_fails_as_irreducible_not_already_attempt
         !message.contains("summarizer step"),
         "an oversized unit is not a spent retry: {message}"
     );
-    // Seed, one summarizer attempt, nothing else.
-    assert_eq!(harness.requests.lock().unwrap().len(), 2);
+    // Seed plus the initial summarizer request and three strictly smaller attempts.
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 9);
+    for pair in requests[1..].windows(2) {
+        assert!(
+            crate::measure_messages(pair[1].messages())
+                < crate::measure_messages(pair[0].messages())
+        );
+    }
 }
 
 #[tokio::test]
@@ -4214,11 +4578,17 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
             AutoCompactScript::Sequence(vec![
                 AutoCompactScript::Text(valid_summary("step one")),
                 AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text("invalid summary".to_owned()),
             ]),
             // The retry compacts first: step two ("b" folded with the
             // summary) is rejected; the retry then runs from the summary
             // alone and the provider rejects that too.
-            AutoCompactScript::ContextOverflow,
+            // The next admission sees the failed fold, rejects an invalid
+            // summary, then sends the summary-only downgrade.
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::Text("invalid summary".to_owned()),
+                AutoCompactScript::ContextOverflow,
+            ]),
         ],
         Some(window),
     )
@@ -4265,14 +4635,23 @@ async fn a_bounded_step_that_fails_stops_the_fold_without_repeating_its_input() 
         ),
         "{outcome:?}"
     );
-    // Two seeds; step one; prompt three's rejected send; step two; the
-    // summary-only retry. The known-overflowing shape was never resent, and
-    // the downgraded request carried the summary in place of "b".
+    // Recovery reloads the complete inherited span. Its provider rejects
+    // every portion too; each retry must shrink and the split budget bounds it.
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 6);
     let steps = summarizer_requests(&requests);
-    assert_eq!(steps.len(), 2, "{steps:?}");
-    let downgraded = request_texts(requests.last().unwrap());
+    assert_eq!(requests.len(), steps.len() + 4, "only four prompt sends");
+    let recovery = &steps[3..];
+    assert!((2..=33).contains(&recovery.len()), "{recovery:?}");
+    assert!(
+        recovery.windows(2).all(|pair| pair[1].1 < pair[0].1),
+        "{recovery:?}"
+    );
+    assert!(
+        request_texts(&requests[recovery[0].0])
+            .iter()
+            .any(|text| text.contains(&"b".repeat(run_bytes)))
+    );
+    let downgraded = request_texts(&requests[6]);
     assert!(downgraded[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE));
     assert!(downgraded[0].contains("step one"));
     assert!(
@@ -5254,7 +5633,7 @@ async fn a_rejected_in_run_summary_fails_the_run_closed_without_resending_the_ov
         matches!(
             &outcome,
             RunOutcome::Failed { failure: RunFailure { kind: RunFailureKind::Policy, message } }
-                if message.contains("in-run compaction did not produce") && message.contains("summarizer failed")
+                if message.contains("automatic context recovery") && message.contains("summarizer failed")
         ),
         "{outcome:?}"
     );
@@ -5453,6 +5832,215 @@ async fn cancelling_during_in_run_compaction_settles_both_runs_once() {
 
 /// Marker text the scripted summarizer treats as "never reply".
 const STALL_SUMMARY: &str = "__STALL__";
+
+#[test]
+fn compaction_retention_preserves_recent_rollback_views_and_reclaims_covered_runs() {
+    let (_directory, mut connection, session, runs) =
+        record_fixture(&(0..6).map(|i| format!("task {i}")).collect::<Vec<_>>());
+    for run in &runs {
+        for turn in 1..=5 {
+            connection
+                .execute(
+                    "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json)
+                 VALUES (?1, ?2, ?3)",
+                    params![
+                        run.to_string(),
+                        turn,
+                        serde_json::to_string(&vec![PersistedContentBlock::Text {
+                            text: format!("raw turn {turn}")
+                        }])
+                        .unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+    }
+    let markers = [
+        (Some(0), 1),
+        (None, 2),
+        (Some(1), 1),
+        (Some(1), 2),
+        (Some(1), 3),
+        (Some(1), 4),
+        (Some(2), 1),
+        (Some(3), 1),
+        (Some(4), 1),
+        (Some(4), 2),
+        (Some(4), 3),
+        (Some(4), 4),
+        (None, 10),
+        (Some(5), 1),
+        (Some(5), 2),
+        (Some(5), 3),
+        (Some(5), 4),
+        (None, 12),
+        (None, 12),
+        (None, 12),
+        (None, 12),
+    ];
+    for (index, (scope, cutoff)) in markers.into_iter().enumerate() {
+        connection.execute(
+            "INSERT INTO session_compactions(session_id, run_id, summary,
+                 cutoff_ordinal, before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7)",
+            params![session.to_string(), RunId::generate().unwrap().to_string(), format!("marker {index}"),
+                if scope.is_none() { cutoff } else { 0 }, index,
+                scope.map(|i| runs[i].to_string()), scope.map(|_| cutoff)],
+        ).unwrap();
+
+        // Compare actual assembled messages before and after collection,
+        // including each of the three rollback states, in one transaction.
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch("SAVEPOINT before_collection")
+            .unwrap();
+        let mut expected = Vec::new();
+        for _ in 0..=COMPACTION_HISTORY_ROWS {
+            expected.push(load_model_context(&transaction, session, u64::MAX).unwrap());
+            transaction
+                .execute(
+                    "DELETE FROM session_compactions WHERE session_id = ?1
+                AND rowid = (SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1)",
+                    [session.to_string()],
+                )
+                .unwrap();
+        }
+        transaction
+            .execute_batch("ROLLBACK TO before_collection; RELEASE before_collection")
+            .unwrap();
+        prune_compaction_history(&transaction, session).unwrap();
+        let retained: usize = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+                [session.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained <= 4 + runs.len(), "step {index}: {retained}");
+        transaction
+            .execute_batch("SAVEPOINT after_collection")
+            .unwrap();
+        for (rollback, expected) in expected.iter().enumerate() {
+            assert_eq!(
+                &load_model_context(&transaction, session, u64::MAX).unwrap(),
+                expected,
+                "step {index}, rollback {rollback}"
+            );
+            transaction
+                .execute(
+                    "DELETE FROM session_compactions WHERE session_id = ?1
+                AND rowid = (SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1)",
+                    [session.to_string()],
+                )
+                .unwrap();
+        }
+        transaction
+            .execute_batch("ROLLBACK TO after_collection; RELEASE after_collection")
+            .unwrap();
+        transaction.commit().unwrap();
+    }
+    let (total, scoped): (u32, u32) = connection
+        .query_row(
+            "SELECT COUNT(*), COUNT(scope_run_id) FROM session_compactions WHERE session_id = ?1",
+            [session.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (total, scoped),
+        (4, 0),
+        "covered runs and obsolete marker versions are reclaimed"
+    );
+}
+
+#[tokio::test]
+async fn repeated_in_run_compaction_retains_the_session_prefix_after_restart() {
+    let mut harness = auto_compact_harness_with_loader_and_mode(
+        AutoCompactLoader {
+            requests: Arc::new(StdMutex::new(Vec::new())),
+            scripts: vec![
+                AutoCompactScript::Text("initial reply".to_owned()),
+                AutoCompactScript::Text(valid_summary("session prefix")),
+                AutoCompactScript::WritesRepeatedlyWithSummaries {
+                    turns: 32,
+                    text: "task complete".to_owned(),
+                    summary: valid_summary("active work"),
+                },
+            ],
+            loads: StdMutex::new(0),
+            context_window: Some(12 * 1024),
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        },
+        ApprovalMode::Full,
+    )
+    .await;
+    let initial = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "original task".to_owned(),
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(initial)).await;
+    let prefix = compact_session(&harness.runtime, harness.session_id).await;
+    let observed = collect_until(&mut harness.events, finished_for(prefix)).await;
+    assert_eq!(
+        finished_outcome(&observed, prefix),
+        Some(RunOutcome::Completed)
+    );
+    collect_through_compacted(&mut harness.events).await;
+
+    let run = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "continue the task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    assert!(
+        observed
+            .iter()
+            .filter(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+            .count()
+            >= 3
+    );
+    let mut expected = harness
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .messages()
+        .to_vec();
+    expected.push(Message::assistant("task complete"));
+    let session = harness.session_id;
+    let database = harness.workspace_path.join("sessions.sqlite3");
+    harness.runtime.close().await.unwrap();
+
+    let (mut connection, _) = open_database(&database).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let prefix = latest_compaction(&transaction, session)
+        .unwrap()
+        .expect("in-run compaction must retain the session prefix");
+    assert!(prefix.summary.contains("session prefix"));
+    let replayed = load_model_context(&transaction, session, u64::MAX).unwrap();
+    assert_eq!(
+        replayed, expected,
+        "restart must preserve the live request and completed reply"
+    );
+    let calls: u32 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?1",
+            [run.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(calls, 32, "compaction must not repeat tool effects");
+}
 
 #[tokio::test]
 async fn an_in_run_marker_survives_restart_and_folds_into_a_later_between_run_compaction() {
@@ -5750,75 +6338,100 @@ async fn an_exhausted_fold_admits_the_prompt_with_summary_only_history() {
     // summarizer steps ... start a new session" — and every later prompt hit
     // the same wall (3 sessions wedged in the audit). Now the run starts
     // from the latest summary alone with a notice; nothing is deleted.
-    let window: u32 = 32 * 1024;
-    let run_bytes = 20 * 1024 * 4;
-    let mut harness = auto_compact_harness_with_window(
-        vec![
-            AutoCompactScript::Text("a".repeat(run_bytes)),
-            AutoCompactScript::Text("b".repeat(run_bytes)),
-            // Prompt three: step one summarizes "a" and commits; the
-            // prompt's own send is rejected by the provider.
-            AutoCompactScript::Sequence(vec![
-                AutoCompactScript::Text(valid_summary("step one")),
+    for reject_prefix in [false, true] {
+        let window: u32 = 32 * 1024;
+        let mut retry_steps = vec![AutoCompactScript::Text("invalid summary".to_owned())];
+        if reject_prefix {
+            retry_steps.extend([
                 AutoCompactScript::ContextOverflow,
-            ]),
-            // The retry's step two is rejected too: the fold is exhausted.
-            // The retry then runs from the summary alone and completes.
-            AutoCompactScript::Sequence(vec![
-                AutoCompactScript::ContextOverflow,
-                AutoCompactScript::Text("recovered".to_owned()),
-            ]),
-        ],
-        Some(window),
-    )
-    .await;
-    for prompt in ["one", "two"] {
-        let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
-        collect_until(&mut harness.events, finished_for(run)).await;
-    }
-    let third = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
-    collect_until(&mut harness.events, finished_for(third)).await;
-    let retry = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
-    let observed = collect_until(&mut harness.events, finished_for(retry)).await;
-    let outcome = observed
-        .iter()
-        .find_map(|event| match &event.event {
-            SessionEvent::RunFinished {
-                run_id, outcome, ..
-            } if *run_id == retry => Some(outcome.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
-    let requests = harness.requests.lock().unwrap();
-    let texts = request_texts(requests.last().unwrap());
-    // Notice, then the summary, then the prompt; none of the verbatim
-    // 80 KiB runs.
-    assert_eq!(texts.len(), 2, "{texts:?}");
-    assert!(
-        texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE),
-        "{}",
-        texts[0]
-    );
-    assert!(texts[0].contains(COMPACTION_SUMMARY_PREAMBLE));
-    assert!(texts[0].contains("step one"));
-    assert_eq!(texts[1], "retry");
-    assert!(
-        !texts
+                AutoCompactScript::Text(valid_summary("recovered prefix")),
+            ]);
+        }
+        retry_steps.push(AutoCompactScript::Text("recovered".to_owned()));
+        let run_bytes = 20 * 1024 * 4;
+        let mut harness = auto_compact_harness_with_window(
+            vec![
+                AutoCompactScript::Text("a".repeat(run_bytes)),
+                AutoCompactScript::Text("b".repeat(run_bytes)),
+                // Prompt three: step one summarizes "a" and commits; the
+                // prompt's own send is rejected by the provider.
+                AutoCompactScript::Sequence(vec![
+                    AutoCompactScript::Text(valid_summary("step one")),
+                    AutoCompactScript::ContextOverflow,
+                    AutoCompactScript::Text("invalid summary".to_owned()),
+                ]),
+                // The retry's step two is rejected too: the fold is exhausted.
+                // The retry then runs from the summary alone and completes.
+                AutoCompactScript::Sequence(retry_steps),
+            ],
+            Some(window),
+        )
+        .await;
+        for prompt in ["one", "two"] {
+            let run = queue_prompt(&harness.runtime, harness.session_id, prompt.to_owned()).await;
+            collect_until(&mut harness.events, finished_for(run)).await;
+        }
+        let third = queue_prompt(&harness.runtime, harness.session_id, "three".to_owned()).await;
+        collect_until(&mut harness.events, finished_for(third)).await;
+        let retry = queue_prompt(&harness.runtime, harness.session_id, "retry".to_owned()).await;
+        let observed = collect_until(&mut harness.events, finished_for(retry)).await;
+        let outcome = observed
             .iter()
-            .any(|text| text.contains(&"b".repeat(run_bytes)))
-    );
-    drop(requests);
-    // Nothing was deleted: the session still holds every prompt.
-    let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
-    let prompts: u64 = connection
+            .find_map(|event| match &event.event {
+                SessionEvent::RunFinished {
+                    run_id, outcome, ..
+                } if *run_id == retry => Some(outcome.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(outcome, RunOutcome::Completed), "{outcome:?}");
+        let requests = harness.requests.lock().unwrap();
+        let texts = request_texts(requests.last().unwrap());
+        // Notice, then the summary, then the prompt; none of the verbatim
+        // 80 KiB runs.
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        if reject_prefix {
+            assert!(texts[0].contains("recovered prefix"));
+            let summarizer = request_texts(&requests[requests.len() - 2]);
+            assert!(
+                summarizer
+                    .iter()
+                    .any(|text| text.contains(&"b".repeat(run_bytes))),
+                "a summary-only overflow must read the omitted history before advancing its cutoff"
+            );
+        } else {
+            assert!(
+                texts[0].starts_with(crate::sessions::SUMMARY_ONLY_NOTICE),
+                "{}",
+                texts[0]
+            );
+            assert!(texts[0].contains("step one"));
+        }
+        assert!(texts[0].contains(COMPACTION_SUMMARY_PREAMBLE));
+        for (ordinal, input) in [(1, "one"), (3, "two"), (5, "three")] {
+            assert!(
+                texts[0].contains(&format!("--- user message #{ordinal} ---\n{input}\n")),
+                "summary-only admission must preserve even inputs after the latest marker"
+            );
+        }
+        assert_eq!(texts[1], "retry");
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains(&"b".repeat(run_bytes)))
+        );
+        drop(requests);
+        // Nothing was deleted: the session still holds every prompt.
+        let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+        let prompts: u64 = connection
         .query_row(
             "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND role = 'user' AND steering = 0",
             [harness.session_id.to_string()],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(prompts, 4);
+        assert_eq!(prompts, 4);
+    }
 }
 
 /// The live splice removes every message before the first kept assistant
@@ -6430,4 +7043,578 @@ async fn a_later_queued_cancellation_cannot_evict_receipts_for_displayed_message
         .await
         .unwrap();
     store.close().await.unwrap();
+}
+
+#[test]
+fn history_recall_includes_applied_steering_and_live_run_evidence_without_search_echoes() {
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, session) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        1,
+        0,
+        1,
+        128,
+    );
+    connection
+        .execute("UPDATE runs SET status = 'running'", [])
+        .unwrap();
+    for (ordinal, state, text) in [
+        (10, "complete", "APPLIED_CONSTRAINT"),
+        (11, "queued", "PENDING_CONSTRAINT"),
+    ] {
+        connection.execute(
+            "INSERT INTO messages(id, session_id, run_id, ordinal, turn_ordinal, role, state, output, created_at_ms, steering)
+             SELECT ?1, session_id, run_id, ?2, 2, 'user', ?3, ?4, 1, 1 FROM messages WHERE ordinal = 1",
+            params![MessageId::generate().unwrap().to_string(), ordinal, state, text],
+        ).unwrap();
+    }
+    connection
+        .execute("UPDATE tool_calls SET result = 'EARLIER_LIVE_RESULT'", [])
+        .unwrap();
+    let live =
+        search_session_history(&connection, session, "EARLIER_LIVE_RESULT", 20, None).unwrap();
+    assert!(
+        live.matches
+            .iter()
+            .any(|hit| hit.citation.contains("result")),
+        "{live:?}"
+    );
+    let applied =
+        search_session_history(&connection, session, "APPLIED_CONSTRAINT", 8, None).unwrap();
+    assert_eq!(applied.matches.len(), 1);
+    assert_eq!(applied.matches[0].citation, "user message #10");
+    assert!(
+        search_session_history(&connection, session, "PENDING_CONSTRAINT", 8, None)
+            .unwrap()
+            .matches
+            .is_empty()
+    );
+
+    let raw: String = connection
+        .query_row(
+            "SELECT assistant_content_json FROM model_turns",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut blocks: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    blocks.as_array_mut().unwrap().push(serde_json::json!({
+        "type": "tool_call", "id": "history-call", "name": "search_history", "arguments": {"query": "SEARCH_ECHO"}
+    }));
+    connection
+        .execute(
+            "UPDATE model_turns SET assistant_content_json = ?1",
+            [blocks.to_string()],
+        )
+        .unwrap();
+    connection.execute(
+        "INSERT INTO tool_calls(id, run_id, turn_ordinal, call_ordinal, provider_call_id, name, arguments_json, state, result, requested_at_ms, effect)
+         SELECT ?1, run_id, turn_ordinal, 2, 'history-call', 'search_history', ?2, 'completed', 'SEARCH_ECHO', 1, 'read_only'
+         FROM tool_calls WHERE call_ordinal = 1",
+        params![ToolCallId::generate().unwrap().to_string(), serde_json::json!({"query": "SEARCH_ECHO"}).to_string()],
+    ).unwrap();
+    assert!(
+        search_session_history(&connection, session, "SEARCH_ECHO", 8, None)
+            .unwrap()
+            .matches
+            .is_empty()
+    );
+    let foreign = search_session_history(
+        &connection,
+        SessionId::from_bytes([7; 16]),
+        "read_file",
+        8,
+        Some(HistoryCursor::Result {
+            prompt: 1,
+            turn: 1,
+            before: u16::MAX,
+        }),
+    )
+    .unwrap();
+    assert!(foreign.matches.is_empty());
+    assert!(foreign.next_cursor.is_none());
+}
+
+#[test]
+fn history_pages_cover_oversized_turns_without_skipping_older_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    let (connection, session) = bench_support::seed_compacted_session(
+        &directory.path().join("sessions.sqlite3"),
+        2,
+        0,
+        1,
+        128,
+    );
+    connection
+        .execute(
+            "UPDATE messages SET output = 'PAGED_NEEDLE oldest constraint' WHERE ordinal = 1",
+            [],
+        )
+        .unwrap();
+    let raw: String = connection.query_row(
+        "SELECT assistant_content_json FROM model_turns WHERE run_id = (SELECT run_id FROM messages WHERE ordinal = 3)",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut blocks: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    blocks[0]["text"] = serde_json::Value::String(format!(
+        "{} PAGED_NEEDLE",
+        "x".repeat(HISTORY_SCAN_BUDGET_BYTES + 1)
+    ));
+    connection.execute(
+        "UPDATE model_turns SET assistant_content_json = ?1 WHERE run_id = (SELECT run_id FROM messages WHERE ordinal = 3)",
+        [blocks.to_string()],
+    ).unwrap();
+    let first = search_session_history(&connection, session, "PAGED_NEEDLE", 8, None).unwrap();
+    assert_eq!(first.matches.len(), 1);
+    assert!(first.matches[0].citation.starts_with("assistant"));
+    let next = first
+        .next_cursor
+        .expect("large row must stop the page after examining it");
+    let second =
+        search_session_history(&connection, session, "PAGED_NEEDLE", 8, Some(next)).unwrap();
+    assert_eq!(
+        second.matches.len(),
+        1,
+        "the large row must not be searched twice"
+    );
+    assert_eq!(second.matches[0].citation, "user message #1");
+    assert!(second.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn an_empty_fold_preserves_the_uncompacted_transcript() {
+    for (partial, final_text, requests) in [
+        (
+            String::new(),
+            valid_summary("FINAL WITHOUT EARLIER EVIDENCE"),
+            3,
+        ),
+        (
+            " \n\t".to_owned(),
+            valid_summary("FINAL WITHOUT EARLIER EVIDENCE"),
+            3,
+        ),
+        (valid_summary("PRECEDING PORTION ONLY"), String::new(), 4),
+    ] {
+        let evidence = "UNSUMMARIZED FINAL PORTION ".repeat(6_000);
+        let mut harness = auto_compact_harness(vec![
+            AutoCompactScript::Text(evidence.clone()),
+            AutoCompactScript::Sequence(vec![
+                AutoCompactScript::ContextOverflow,
+                AutoCompactScript::Text(partial),
+                AutoCompactScript::Text(final_text),
+            ]),
+        ])
+        .await;
+        let seed = queue_prompt(&harness.runtime, harness.session_id, "seed".to_owned()).await;
+        collect_until(&mut harness.events, finished_for(seed)).await;
+        let run = compact_session(&harness.runtime, harness.session_id).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert!(
+            !observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. })),
+            "an empty portion must not advance the cutoff: {observed:?}"
+        );
+        assert!(
+            observed.iter().any(|event| matches!(&event.event,
+                SessionEvent::RunFinished { run_id, outcome: RunOutcome::Failed { failure }, .. }
+                    if *run_id == run && failure.message.contains("empty summary")
+            )),
+            "{observed:?}"
+        );
+        let connection = Connection::open(harness.workspace_path.join("sessions.sqlite3")).unwrap();
+        let markers: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+                [harness.session_id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(markers, 0, "failed folds must leave the cutoff unchanged");
+        let context = load_model_context(&connection, harness.session_id, u64::MAX).unwrap();
+        assert!(
+            context
+                .iter()
+                .flat_map(Message::content)
+                .any(|block| matches!(block, ContentBlock::Text { text } if text == &evidence))
+        );
+        assert_eq!(harness.requests.lock().unwrap().len(), requests);
+    }
+}
+
+#[test]
+fn legacy_summary_projection_recovers_exact_inputs_without_another_compaction() {
+    let early = format!(
+        "Original task: preserve the protected files.\n{}\nNEVER_MODIFY_PRODUCTION_TAIL",
+        "é".repeat(40_000)
+    );
+    let correction =
+        "Correction: write the report to staging/new.txt instead of staging/old.txt.".to_owned();
+    let (_directory, connection, session, _) = record_fixture(&[early.clone(), correction.clone()]);
+    connection.execute(
+        "INSERT INTO session_compactions(session_id, run_id, summary, cutoff_ordinal, before_bytes, after_bytes, created_at_ms)
+         VALUES (?1, ?2, ?3, 4, 1, 1, 1)",
+        params![session.to_string(), RunId::generate().unwrap().to_string(), valid_summary("legacy narrative omitted the original instructions")],
+    ).unwrap();
+    let context = load_model_context(&connection, session, u64::MAX).unwrap();
+    assert_eq!(context.len(), 1);
+    assert_eq!(context[0].role(), Role::User);
+    let ContentBlock::Text { text } = &context[0].content()[0] else {
+        panic!("user context");
+    };
+    assert!(
+        text.contains(&early),
+        "legacy summaries must recover complete durable instructions without a manual compaction"
+    );
+    assert!(text.rfind(&correction).unwrap() > text.find(&early).unwrap());
+}
+
+#[tokio::test]
+async fn early_constraints_and_corrections_survive_repeated_automatic_compaction() {
+    let early = format!(
+        "Original task: preserve protected files.\n{}\nNEVER_MODIFY_PRODUCTION_TAIL",
+        "é".repeat(40_000)
+    );
+    let evidence = "work evidence ".repeat(8_000);
+    let mut scripts = vec![AutoCompactScript::Text(evidence.clone())];
+    for _ in 0..4 {
+        scripts.push(AutoCompactScript::Sequence(vec![
+            AutoCompactScript::ContextOverflow,
+            AutoCompactScript::Text(valid_summary(
+                "work saved; exact inputs deliberately omitted",
+            )),
+            AutoCompactScript::Text(evidence.clone()),
+        ]));
+    }
+    scripts.push(AutoCompactScript::Sequence(vec![
+        AutoCompactScript::ContextOverflow,
+        AutoCompactScript::Text("   ".to_owned()),
+    ]));
+    let mut harness = auto_compact_harness(scripts).await;
+    let seed = queue_prompt(&harness.runtime, harness.session_id, early.clone()).await;
+    collect_until(&mut harness.events, finished_for(seed)).await;
+    let mut corrections = Vec::new();
+    for index in 0..4 {
+        let correction = format!(
+            "Correction {index}: write only staging/report-{index}.txt; preserve production."
+        );
+        corrections.push(correction.clone());
+        let run = queue_prompt(&harness.runtime, harness.session_id, correction).await;
+        let observed = collect_until(&mut harness.events, finished_for(run)).await;
+        assert!(observed.iter().any(|event| matches!(event.event,
+            SessionEvent::RunFinished { run_id, outcome: RunOutcome::Completed, .. } if run_id == run
+        )), "automatic recovery failed in round {index}");
+        assert!(
+            observed
+                .iter()
+                .any(|event| matches!(event.event, SessionEvent::SessionCompacted { .. }))
+        );
+        let requests = harness.requests.lock().unwrap();
+        let texts = request_texts(requests.last().unwrap());
+        let text = texts.join("\n");
+        assert!(
+            text.contains(&early),
+            "compaction discarded an early instruction beyond the old record cap in round {index}"
+        );
+        assert_eq!(text.matches("NEVER_MODIFY_PRODUCTION_TAIL").count(), 1);
+        let mut previous = text.find(&early).unwrap();
+        for correction in &corrections {
+            let position = text.rfind(correction).unwrap();
+            assert!(position > previous, "corrections must keep their order");
+            previous = position;
+        }
+    }
+    let database = harness.workspace_path.join("sessions.sqlite3");
+    let marker = || {
+        Connection::open(&database)
+            .unwrap()
+            .query_row(
+                "SELECT MAX(rowid) FROM session_compactions WHERE session_id = ?1",
+                [harness.session_id.to_string()],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap()
+    };
+    let before_failure = marker();
+    let failed = queue_prompt(
+        &harness.runtime,
+        harness.session_id,
+        "continue the same task".to_owned(),
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(failed)).await;
+    assert!(matches!(
+        finished_outcome(&observed, failed),
+        Some(RunOutcome::Failed { .. })
+    ));
+    assert_eq!(
+        marker(),
+        before_failure,
+        "a failed summary cannot advance the cutoff"
+    );
+    assert!(!*harness.runtime.inner.failed.borrow());
+    harness.runtime.shutdown().await.unwrap();
+    let replay = load_model_context(
+        &Connection::open(&database).unwrap(),
+        harness.session_id,
+        u64::MAX,
+    )
+    .unwrap();
+    let text = replay
+        .iter()
+        .flat_map(request_texts_of)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains(&early));
+    assert_eq!(text.matches("NEVER_MODIFY_PRODUCTION_TAIL").count(), 1);
+    for correction in &corrections {
+        assert!(text.contains(correction));
+    }
+}
+
+#[test]
+fn scoped_inputs_cover_steering_before_a_kept_turn_after_an_empty_fault() {
+    let (_directory, connection, session, runs) = record_fixture(&["task".to_owned()]);
+    let run = runs[0];
+    for (turn, content, truncated) in [
+        (1, r#"[{"type":"text","text":"replaced work"}]"#, false),
+        (2, "[]", true),
+        (3, r#"[{"type":"text","text":"kept work"}]"#, false),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO model_turns(run_id, turn_ordinal, assistant_content_json, truncated)
+            VALUES (?1, ?2, ?3, ?4)",
+                params![run.to_string(), turn, content, truncated],
+            )
+            .unwrap();
+    }
+    insert_record_steering(
+        &connection,
+        session,
+        run,
+        5,
+        3,
+        "Correction before kept work",
+    );
+    let summary = with_exact_inputs(
+        &connection,
+        &session.to_string(),
+        RecordScope::Run {
+            run_id: run,
+            turn_cutoff: 1,
+        },
+        valid_summary("narrative"),
+    )
+    .unwrap();
+    assert!(
+        summary.contains("Correction before kept work"),
+        "the live splice replaces this input"
+    );
+    connection.execute("INSERT INTO session_compactions(session_id, run_id, summary, cutoff_ordinal, before_bytes, after_bytes, created_at_ms, scope_run_id, turn_cutoff)
+        VALUES (?1, ?2, ?3, 0, 1, 1, 1, ?4, 1)",
+        params![session.to_string(), RunId::generate().unwrap().to_string(), valid_summary("narrative"), run.to_string()]).unwrap();
+    let replay = load_model_context(&connection, session, u64::MAX).unwrap();
+    let texts: Vec<_> = replay.iter().flat_map(request_texts_of).collect();
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| text.contains("Correction before kept work"))
+            .count(),
+        1
+    );
+    assert!(
+        !texts.contains(&"Correction before kept work"),
+        "the retained prefix must not repeat steering"
+    );
+}
+
+#[test]
+fn exact_inputs_preserve_applied_corrections_and_answers_in_conversation_order() {
+    let (_directory, connection, session, runs) = record_fixture(&[
+        "original task".to_owned(),
+        "newer queued prompt".to_owned(),
+        "generated continuation".to_owned(),
+    ]);
+    insert_record_steering(
+        &connection,
+        session,
+        runs[0],
+        7,
+        2,
+        "late correction to first task",
+    );
+    insert_record_steering(&connection, session, runs[0], 8, 3, "unapplied correction");
+    connection
+        .execute("UPDATE messages SET state = 'queued' WHERE ordinal = 8", [])
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE runs SET origin_json = '{\"type\":\"goal\"}' WHERE id = ?1",
+            [runs[2].to_string()],
+        )
+        .unwrap();
+    insert_record_steering(
+        &connection,
+        session,
+        runs[2],
+        9,
+        1,
+        "human steering during continuation",
+    );
+    for (call, resolution, text) in [
+        (1, "answered", "Q1: Which path?\nA: staging/report.txt\n"),
+        (2, "denied", "not an answer"),
+    ] {
+        insert_record_call(
+            &connection,
+            runs[0],
+            call,
+            "ask_user",
+            serde_json::json!({}),
+            "completed",
+            text,
+        );
+        connection.execute("UPDATE tool_calls SET approval_resolution = ?2 WHERE run_id = ?1 AND call_ordinal = ?3",
+            params![runs[0].to_string(), resolution, call]).unwrap();
+    }
+    let text = with_exact_inputs(
+        &connection,
+        &session.to_string(),
+        RecordScope::Session { cutoff_ordinal: 6 },
+        String::new(),
+    )
+    .unwrap();
+    let mut last = 0;
+    for input in [
+        "original task",
+        "Q1: Which path?\nA: staging/report.txt\n",
+        "late correction to first task",
+        "newer queued prompt",
+        "human steering during continuation",
+    ] {
+        let at = text.find(input).unwrap();
+        assert!(at > last, "{input}: {text}");
+        last = at;
+    }
+    for omitted in [
+        "unapplied correction",
+        "generated continuation",
+        "not an answer",
+    ] {
+        assert!(!text.contains(omitted), "{text}");
+    }
+}
+
+#[test]
+fn exact_inputs_reject_capacity_overflow_without_cutting_or_deleting_sources() {
+    let input = format!("{} protected tail", "é".repeat(MAX_CONTEXT_BYTES / 2));
+    let (_directory, connection, session, _) = record_fixture(std::slice::from_ref(&input));
+    assert!(matches!(
+        with_exact_inputs(
+            &connection,
+            &session.to_string(),
+            RecordScope::Session { cutoff_ordinal: 2 },
+            valid_summary("narrative")
+        ),
+        Err(SessionRuntimeError::ContextTooLarge)
+    ));
+    let stored: String = connection
+        .query_row(
+            "SELECT output FROM messages WHERE role = 'user'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, input);
+}
+
+#[tokio::test]
+async fn oversized_legacy_inputs_fail_only_the_affected_run() {
+    // Older capped records could cover more exact input than the storage
+    // window. Upgrading must preserve those rows and keep the fleet usable.
+    let inputs = vec!["original constraint ".repeat(8_000); 40];
+    let (directory, connection, session, _) = record_fixture(&inputs);
+    let workspace: String = connection
+        .query_row(
+            "SELECT workspace_id FROM sessions WHERE id = ?1",
+            [session.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE workspaces SET path = ?1",
+            [directory.path().to_str().unwrap()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO session_compactions(session_id, run_id, summary, cutoff_ordinal, before_bytes, after_bytes, created_at_ms)
+        VALUES (?1, ?2, ?3, 80, 1, 1, 1)", params![session.to_string(), RunId::generate().unwrap().to_string(), valid_summary("legacy narrative")]).unwrap();
+    drop(connection);
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
+        Arc::new(AutoCompactLoader {
+            requests: Arc::clone(&requests),
+            scripts: vec![AutoCompactScript::Text("healthy".to_owned())],
+            loads: StdMutex::new(0),
+            context_window: None,
+            max_output_tokens: 1_024,
+            provider_identity: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let workspace_id: WorkspaceId = workspace.parse().unwrap();
+    let (_, after) = resolve_workspace(&runtime, directory.path()).await;
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after,
+        })
+        .unwrap();
+    for manual in [false, true] {
+        let run = if manual {
+            compact_session(&runtime, session).await
+        } else {
+            queue_prompt(&runtime, session, "continue".to_owned()).await
+        };
+        let observed = collect_until(&mut events, finished_for(run)).await;
+        assert!(
+            matches!(finished_outcome(&observed, run), Some(RunOutcome::Failed { failure })
+            if failure.kind == RunFailureKind::Policy && failure.message.contains("4 MiB"))
+        );
+        assert!(!*runtime.inner.failed.borrow());
+    }
+    let healthy = create_session(&runtime, workspace_id, None).await;
+    let CommandOutcome::SessionCreated {
+        session_id: healthy,
+    } = healthy.outcome
+    else {
+        panic!("session");
+    };
+    let run = queue_prompt(&runtime, healthy, "healthy session".to_owned()).await;
+    let observed = collect_until(&mut events, finished_for(run)).await;
+    assert_eq!(
+        finished_outcome(&observed, run),
+        Some(RunOutcome::Completed)
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "blocked inputs must not reach a provider"
+    );
+    runtime.shutdown().await.unwrap();
+    let connection = Connection::open(directory.path().join("sessions.sqlite3")).unwrap();
+    let saved: u64 = connection.query_row("SELECT SUM(length(CAST(output AS BLOB))) FROM messages WHERE session_id = ?1 AND role = 'user'", [session.to_string()], |row| row.get(0)).unwrap();
+    assert!(saved > MAX_CONTEXT_BYTES as u64);
+    let markers: u64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_compactions WHERE session_id = ?1",
+            [session.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(markers, 1);
 }

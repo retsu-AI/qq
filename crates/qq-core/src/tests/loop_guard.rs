@@ -628,7 +628,12 @@ struct RecallFailure {
 }
 
 impl runtime::HistorySearcher for RecallFailure {
-    fn search(&self, _: String, _: usize) -> runtime::HistorySearchFuture {
+    fn search(
+        &self,
+        _: String,
+        _: usize,
+        _: Option<runtime::HistoryCursor>,
+    ) -> runtime::HistorySearchFuture {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(std::future::ready(Err(
             "history backing store unavailable".to_owned()

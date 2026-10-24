@@ -3,19 +3,16 @@
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
     ContentBlock, IncompleteReason, ModelRequest, Provider, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderStream, ProviderUsage, ResponsesBodyShape, Role,
-    SharedRequestCredentialProvider, ToolSpec,
-    credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
+    ProviderEvent, ProviderStream, ProviderUsage, ResponsesBodyShape, Role, ToolSpec,
+    credentials::StaticAuth,
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
-    http::{
-        ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
-    },
+    http::{ExchangeMessages, HttpExchange, HttpRejection, build_static_headers},
     limits::{ByteCounter, StreamLimits},
     providers::support::{self, Text, ToolCallLedger},
     request_auth::RequestAuthorizer,
@@ -29,32 +26,10 @@ use crate::http::validate_endpoint;
 #[cfg(test)]
 const RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
-/// Authentication applied by an OpenAI-compatible Responses client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ResponsesAuth {
-    NoAuth,
-    Bearer(SecretLiteral),
-    Header(String, SecretLiteral),
-    Codex {
-        access_token: SecretLiteral,
-        account_id: SecretLiteral,
-        is_fedramp: bool,
-    },
-}
-
 #[derive(Clone, Copy)]
 pub(crate) enum ResponsesRequestKind {
     Standard,
     Codex,
-}
-
-/// Coherent static or request-time construction inputs for a compiled
-/// Responses adapter.
-pub(crate) enum ResponsesConstructionAuth {
-    Static(ResponsesAuth),
-    RequestTimeBearer(SharedRequestCredentialProvider),
-    RequestTimeCodex(SharedRequestCredentialProvider),
-    MantleSigV4(RequestAuthorizer),
 }
 
 /// A client for OpenAI-compatible Responses endpoints.
@@ -82,7 +57,7 @@ impl OpenAi {
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
             RESPONSES_ENDPOINT,
-            ResponsesAuth::Bearer(api_key.into()),
+            StaticAuth::Bearer(api_key.into()),
             [],
             false,
         )
@@ -95,62 +70,39 @@ impl OpenAi {
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         exact_endpoint: &str,
-        auth: ResponsesAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         allow_http: bool,
     ) -> Result<Self, ProviderError> {
         let endpoint = validate_endpoint(exact_endpoint, allow_http)?;
         let client = support::client_for_endpoint(&endpoint)?;
-        let body_shape = if matches!(auth, ResponsesAuth::Codex { .. }) {
-            ResponsesBodyShape::Codex
-        } else {
-            ResponsesBodyShape::Standard
-        };
-        Self::with_client_and_auth(
+        Self::with_client(
             client,
             endpoint,
-            ResponsesConstructionAuth::Static(auth),
+            auth,
             static_headers,
-            body_shape,
+            RequestAuthorizer::default(),
+            ResponsesBodyShape::Standard,
         )
         .map(Self::single_shot)
     }
 
     /// `body_shape` is the recipe's explicit Responses body; the auth intent
-    /// no longer selects it.
-    pub(crate) fn with_client_and_auth(
+    /// does not select it.
+    pub(crate) fn with_client(
         client: reqwest::Client,
         endpoint: reqwest::Url,
-        auth: ResponsesConstructionAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
+        authorizer: RequestAuthorizer,
         body_shape: ResponsesBodyShape,
     ) -> Result<Self, ProviderError> {
-        // Headers a request-time Codex credential owns are protected from
-        // static configuration exactly as a static Codex credential's are.
-        let codex_headers = matches!(
-            &auth,
-            ResponsesConstructionAuth::RequestTimeCodex(_)
-                | ResponsesConstructionAuth::Static(ResponsesAuth::Codex { .. })
-        );
         let request_kind = match body_shape {
             ResponsesBodyShape::Standard => ResponsesRequestKind::Standard,
             ResponsesBodyShape::Codex => ResponsesRequestKind::Codex,
         };
-        let (auth, authorizer) = match auth {
-            ResponsesConstructionAuth::Static(auth) => (auth, RequestAuthorizer::default()),
-            ResponsesConstructionAuth::RequestTimeBearer(credentials) => (
-                ResponsesAuth::NoAuth,
-                RequestAuthorizer::request_time_bearer(credentials),
-            ),
-            ResponsesConstructionAuth::RequestTimeCodex(credentials) => (
-                ResponsesAuth::NoAuth,
-                RequestAuthorizer::request_time_codex(credentials),
-            ),
-            ResponsesConstructionAuth::MantleSigV4(authorizer) => {
-                (ResponsesAuth::NoAuth, authorizer)
-            }
-        };
-        let (headers, redactions) = build_headers_for(auth, codex_headers, static_headers)?;
+        let (headers, redactions) =
+            build_static_headers(auth, static_headers, &[AUTHORIZATION], &authorizer, &[])?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
@@ -279,92 +231,6 @@ impl Provider for OpenAi {
             })
         })
     }
-}
-
-#[cfg(test)]
-fn build_headers(
-    auth: ResponsesAuth,
-    static_headers: impl IntoIterator<Item = (String, String)>,
-) -> Result<(HeaderMap, Vec<String>), ProviderError> {
-    let codex_headers = matches!(&auth, ResponsesAuth::Codex { .. });
-    build_headers_for(auth, codex_headers, static_headers)
-}
-
-/// `codex_headers` protects the Codex credential's headers from static
-/// configuration; it is set for both the static and the request-time Codex
-/// intents, since the latter adds them only per attempt.
-fn build_headers_for(
-    auth: ResponsesAuth,
-    codex_headers: bool,
-    static_headers: impl IntoIterator<Item = (String, String)>,
-) -> Result<(HeaderMap, Vec<String>), ProviderError> {
-    let mut redactions = Vec::new();
-    let codex_auth = codex_headers;
-    let mut auth_headers = HeaderMap::new();
-    match auth {
-        ResponsesAuth::NoAuth => {}
-        ResponsesAuth::Bearer(secret) => {
-            let value = sensitive_bearer_value(&secret, "Bearer secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            auth_headers.insert(AUTHORIZATION, value);
-        }
-        ResponsesAuth::Header(name, secret) => {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                ProviderError::Configuration("authentication header name is invalid".to_owned())
-            })?;
-            if is_request_controlled_header(&name) {
-                return Err(ProviderError::Configuration(
-                    "authentication header is controlled by the HTTP client".to_owned(),
-                ));
-            }
-            let value = sensitive_header_value(&secret, "authentication header secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            auth_headers.insert(name, value);
-        }
-        ResponsesAuth::Codex {
-            access_token,
-            account_id,
-            is_fedramp,
-        } => {
-            let authorization = sensitive_bearer_value(&access_token, "Codex access token")?;
-            let account_id_header = sensitive_header_value(&account_id, "Codex account ID")?;
-
-            redactions.push(access_token.expose_secret().to_owned());
-            redactions.push(account_id.expose_secret().to_owned());
-            auth_headers.insert(AUTHORIZATION, authorization);
-            auth_headers.insert(
-                HeaderName::from_static("chatgpt-account-id"),
-                account_id_header,
-            );
-            auth_headers.insert(
-                HeaderName::from_static("originator"),
-                HeaderValue::from_static("qq"),
-            );
-            if is_fedramp {
-                auth_headers.insert(
-                    HeaderName::from_static("x-openai-fedramp"),
-                    HeaderValue::from_static("true"),
-                );
-            }
-        }
-    }
-
-    let mut protocol_owned = vec![AUTHORIZATION];
-    protocol_owned.extend(auth_headers.keys().cloned());
-    if codex_auth {
-        protocol_owned.extend([
-            HeaderName::from_static("chatgpt-account-id"),
-            HeaderName::from_static("originator"),
-            HeaderName::from_static("x-openai-fedramp"),
-        ]);
-    }
-    let mut headers = SafeHeaders::new(protocol_owned);
-    headers.insert_configured(static_headers, true)?;
-    headers.extend_owned(auth_headers);
-    for redaction in redactions {
-        headers.push_redaction(redaction);
-    }
-    Ok(headers.finish())
 }
 
 /// Builds the exchange spec for one request. ChatGPT Codex streams valid SSE
@@ -853,8 +719,8 @@ mod tests {
     #[test]
     fn default_constructor_uses_openai_endpoint_and_redacts_auth_debug() {
         let provider = OpenAi::new("openai-test-secret").unwrap();
-        let bearer = ResponsesAuth::Bearer("openai-test-secret".into());
-        let header = ResponsesAuth::Header("x-api-key".to_owned(), "custom-test-secret".into());
+        let bearer = StaticAuth::Bearer("openai-test-secret".into());
+        let header = StaticAuth::header("x-api-key", "custom-test-secret".into());
 
         assert_eq!(provider.endpoint.as_str(), RESPONSES_ENDPOINT);
         assert!(!format!("{bearer:?}").contains("openai-test-secret"));
@@ -869,13 +735,13 @@ mod tests {
             ("https://user:password@example.com/v1/responses", false),
             ("https://example.com/v1/responses#fragment", false),
         ] {
-            let error = OpenAi::with_endpoint(endpoint, ResponsesAuth::NoAuth, [], allow_http)
+            let error = OpenAi::with_endpoint(endpoint, StaticAuth::None, [], allow_http)
                 .err()
                 .expect("endpoint must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
 
-        OpenAi::with_endpoint("http://[::1]/v1/responses", ResponsesAuth::NoAuth, [], true)
+        OpenAi::with_endpoint("http://[::1]/v1/responses", StaticAuth::None, [], true)
             .expect("IPv6 loopback HTTP should be accepted");
     }
 
@@ -902,7 +768,7 @@ mod tests {
         ] {
             let error = OpenAi::with_endpoint(
                 "https://example.com/v1/responses",
-                ResponsesAuth::NoAuth,
+                StaticAuth::None,
                 [(name.to_owned(), "value".to_owned())],
                 false,
             )
@@ -913,7 +779,7 @@ mod tests {
 
         let error = OpenAi::with_endpoint(
             "https://example.com/v1/responses",
-            ResponsesAuth::Header("x-api-key".to_owned(), "secret".into()),
+            StaticAuth::header("x-api-key", "secret".into()),
             [("x-api-key".to_owned(), "override".to_owned())],
             false,
         )
@@ -931,7 +797,7 @@ mod tests {
         ] {
             let error = OpenAi::with_endpoint(
                 "https://example.com/v1/responses",
-                ResponsesAuth::NoAuth,
+                StaticAuth::None,
                 headers,
                 false,
             )
@@ -939,33 +805,6 @@ mod tests {
             .expect("invalid or duplicate header must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
-    }
-
-    #[test]
-    fn preserves_nonempty_auth_secrets_without_trimming() {
-        let (headers, redactions) = build_headers(
-            ResponsesAuth::Header("x-api-key".to_owned(), " padded secret ".into()),
-            [],
-        )
-        .unwrap();
-
-        assert_eq!(headers["x-api-key"], " padded secret ");
-        assert_eq!(redactions, [" padded secret "]);
-    }
-
-    #[test]
-    fn rejects_blank_auth_secrets() {
-        let error = build_headers(
-            ResponsesAuth::Header("x-api-key".to_owned(), " ".into()),
-            [],
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            ProviderError::Configuration(message)
-                if message == "authentication header secret must not be empty"
-        ));
     }
 
     #[test]
@@ -1071,7 +910,7 @@ mod tests {
         let body = "data: {\"type\":\"response.completed\"}\n\n";
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let request = ModelRequest::new(
             "gpt-test",
             vec![
@@ -1323,7 +1162,7 @@ mod tests {
         let endpoint = format!("{}/custom/responses?api-version=42", server.base_url);
         let provider = OpenAi::with_endpoint(
             &endpoint,
-            ResponsesAuth::Header("x-api-key".to_owned(), "custom-test-secret".into()),
+            StaticAuth::header("x-api-key", "custom-test-secret".into()),
             [("x-client".to_owned(), "qq-tests".to_owned())],
             true,
         )
@@ -1370,22 +1209,48 @@ mod tests {
         assert_eq!(request_body["store"], false);
     }
 
+    struct CodexCredentials {
+        is_fedramp: bool,
+    }
+
+    impl crate::RequestCredentialProvider for CodexCredentials {
+        fn credential(&self) -> crate::RequestCredentialFuture<'_> {
+            let is_fedramp = self.is_fedramp;
+            Box::pin(async move {
+                crate::RequestCredential::codex(
+                    "codex-test-access-token",
+                    "workspace-test-id",
+                    is_fedramp,
+                )
+            })
+        }
+    }
+
+    /// A single-shot Codex adapter authorized per attempt, as the runtime
+    /// builds it for `openai-codex`.
+    fn codex_provider(endpoint: &str, is_fedramp: bool) -> OpenAi {
+        let endpoint = validate_endpoint(endpoint, true).unwrap();
+        let client = support::client_for_endpoint(&endpoint).unwrap();
+        OpenAi::with_client(
+            client,
+            endpoint,
+            StaticAuth::None,
+            [],
+            RequestAuthorizer::request_time_codex(crate::SharedRequestCredentialProvider::new(
+                CodexCredentials { is_fedramp },
+            )),
+            ResponsesBodyShape::Codex,
+        )
+        .unwrap()
+        .single_shot()
+    }
+
     #[tokio::test]
     async fn codex_auth_adds_backend_headers_and_omits_max_output_tokens() {
         let body = "data: {\"type\":\"response.completed\"}\n\n";
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(
-            &endpoint,
-            ResponsesAuth::Codex {
-                access_token: "codex-test-access-token".into(),
-                account_id: "workspace-test-id".into(),
-                is_fedramp: true,
-            },
-            [],
-            true,
-        )
-        .unwrap();
+        let provider = codex_provider(&endpoint, true);
 
         let events = provider
             .stream(ModelRequest::new(
@@ -1433,17 +1298,7 @@ mod tests {
         );
         let server = LoopbackServer::respond_chunks(200, None, vec![body.as_bytes().to_vec()]);
         let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(
-            &endpoint,
-            ResponsesAuth::Codex {
-                access_token: "codex-test-access-token".into(),
-                account_id: "workspace-test-id".into(),
-                is_fedramp: false,
-            },
-            [],
-            true,
-        )
-        .unwrap();
+        let provider = codex_provider(&endpoint, false);
 
         let events = provider
             .stream(ModelRequest::new(
@@ -1474,7 +1329,7 @@ mod tests {
         let body = "data: {\"type\":\"response.completed\"}\n\n";
         let server = LoopbackServer::respond_chunks(200, None, vec![body.as_bytes().to_vec()]);
         let endpoint = format!("{}/v1/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
 
         let events = provider
             .stream(ModelRequest::new(
@@ -1517,7 +1372,7 @@ mod tests {
         );
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(ModelRequest::new(
                 "gpt-test",
@@ -1602,7 +1457,7 @@ mod tests {
         );
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/backend-api/codex/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(ModelRequest::new(
                 "gpt-test",
@@ -1654,7 +1509,7 @@ mod tests {
         );
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(&endpoint, ResponsesAuth::NoAuth, [], true).unwrap();
+        let provider = OpenAi::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let error = provider
             .stream(ModelRequest::new(
                 "gpt-test",
@@ -1675,13 +1530,9 @@ mod tests {
         let body = r#"{"error":{"message":"invalid key"}}"#;
         let server = LoopbackServer::respond(401, "application/json", body);
         let endpoint = format!("{}/v1/responses", server.base_url);
-        let provider = OpenAi::with_endpoint(
-            &endpoint,
-            ResponsesAuth::Bearer("test-key".into()),
-            [],
-            true,
-        )
-        .unwrap();
+        let provider =
+            OpenAi::with_endpoint(&endpoint, StaticAuth::Bearer("test-key".into()), [], true)
+                .unwrap();
         let error = provider
             .stream(ModelRequest::new(
                 "gpt-test",
@@ -1712,7 +1563,7 @@ mod tests {
         let endpoint = format!("{}/v1/responses", server.base_url);
         let provider = OpenAi::with_endpoint(
             &endpoint,
-            ResponsesAuth::Bearer("auth-test-secret".into()),
+            StaticAuth::Bearer("auth-test-secret".into()),
             [("x-tenant".to_owned(), "tenant-test-secret".to_owned())],
             true,
         )

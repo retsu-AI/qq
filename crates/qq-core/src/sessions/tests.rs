@@ -19,6 +19,7 @@ mod execution_context;
 mod feeds;
 mod goal_admission;
 mod goal_check;
+mod goal_check_recovery;
 mod goal_driver_soak;
 mod goal_final_slot;
 mod goal_model_audit;
@@ -28,6 +29,8 @@ mod goal_upgrade;
 mod goals;
 mod loop_guard;
 mod migrations;
+mod native_recovery;
+mod native_scope;
 mod nonblocking;
 mod progress;
 mod projection;
@@ -47,6 +50,10 @@ use qq_protocol::{BudgetExhaustion, BudgetLimitKind};
 use qq_provider::{ModelRequest, Provider, ProviderStream};
 
 use tempfile::TempDir;
+
+fn test_directory() -> TempDir {
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+}
 
 fn usage(input_tokens: u64, output_tokens: u64) -> TokenUsage {
     TokenUsage {
@@ -1278,11 +1285,22 @@ async fn scripted_runs_harness_with(
     grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
 ) -> ScriptedRunsHarness {
-    let directory = tempfile::tempdir().unwrap();
+    scripted_runs_harness_with_commands(mode, runs, grant_authority, approval_reviewer, None).await
+}
+
+async fn scripted_runs_harness_with_commands(
+    mode: ApprovalMode,
+    runs: Vec<Vec<(&'static str, String)>>,
+    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
+    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
+    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+) -> ScriptedRunsHarness {
+    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.grant_authority = grant_authority;
     options.approval_reviewer = approval_reviewer;
+    options.native_commands = native_commands;
     let runtime = SessionRuntime::open(
         options,
         Arc::new(ScriptedRunsLoader {
@@ -1455,10 +1473,13 @@ async fn approval_harness_with_clocks(
     approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
     delegate: approval::ApprovalDelegate,
 ) -> ApprovalHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
+            task_workspaces: None,
+            native_scopes: Vec::new(),
+            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,
@@ -1593,7 +1614,7 @@ async fn steer(
 }
 
 async fn test_runtime() -> (TempDir, SessionRuntime) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(ScriptedLoader),
@@ -1652,7 +1673,7 @@ struct SessionManagementHarness {
 }
 
 async fn session_management_harness() -> SessionManagementHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let models = Arc::new(StdMutex::new(Vec::new()));
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
@@ -1820,6 +1841,7 @@ async fn spill_one_call(
                 omitted_from_line: 2,
             }),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1924,7 +1946,7 @@ fn r4_current_rss_bytes() -> u64 {
 
 #[cfg(target_os = "linux")]
 fn measure_r4_append_only_stream(bytes: usize) -> R4StreamMeasurement {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("sessions.sqlite3");
     let (mut connection, _) = open_database(&path).unwrap();
     let workspace_id = WorkspaceId::from_bytes([1; 16]);
@@ -2097,7 +2119,7 @@ fn denial_capacity_fixture(
     path: DenialCapacityPath,
     context_base_bytes: usize,
 ) -> (TempDir, Connection, StoreId, ClaimedRun, ToolCallId, String) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let database_path = directory.path().join("sessions.sqlite3");
     let (connection, store_id) = open_database(&database_path).unwrap();
     let workspace_id = WorkspaceId::from_bytes([1; 16]);
@@ -2176,7 +2198,7 @@ fn denial_capacity_fixture(
         model: ModelSelection::default(),
         messages: Vec::new(),
         message_effects: Vec::new(),
-        unresolved_tool_projection: None,
+        history_admission_failure: None,
         context_compaction_attempted: 0,
         context_compaction_failed: false,
         context_compaction_remaining: false,
@@ -2280,7 +2302,7 @@ fn denial_capacity_state(
 }
 
 async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let store = Store::open(directory.path().join("sessions.sqlite3"))
         .await
         .unwrap();
@@ -2544,7 +2566,14 @@ mod reference_assembly {
         if let Some(compaction) = compaction {
             context.push(Message::user(format!(
                 "{COMPACTION_SUMMARY_PREAMBLE}\n\n{}",
-                compaction.summary
+                with_exact_inputs(
+                    transaction,
+                    &session_id.to_string(),
+                    RecordScope::Session {
+                        cutoff_ordinal: compaction.cutoff_ordinal
+                    },
+                    compaction.summary
+                )?
             )));
         }
         for id in message_ids {
@@ -3188,6 +3217,8 @@ enum AutoCompactScript {
     /// Streams the text and stops at the output token limit, so the runtime
     /// continues the turn with the next scripted request.
     Truncated(String),
+    /// Streams visible text before a recoverable transport fault.
+    TextThenTransportFault(String),
     /// Reads `note.txt` on the first turn, then streams the text: seeds a
     /// prunable read-only result into the transcript.
     ReadNoteThenText(String),
@@ -3268,6 +3299,7 @@ enum AutoCompactScript {
     /// calls `read_tool_result` with the `t:` handle found in that
     /// result's marker and the given JSON arguments, then streams the
     /// text. The handle is discovered the way a model would.
+    #[cfg(unix)]
     ShellThenRecall {
         command: String,
         recall: serde_json::Value,
@@ -3451,6 +3483,12 @@ impl Provider for AutoCompactProvider {
             AutoCompactScript::Text(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
                 Ok(qq_provider::ProviderEvent::Completed { usage: None }),
+            ])),
+            AutoCompactScript::TextThenTransportFault(text) => Box::pin(stream::iter([
+                Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
+                Err(qq_provider::ProviderError::Transport(
+                    "connection reset after visible summary text".to_owned(),
+                )),
             ])),
             AutoCompactScript::Truncated(text) => Box::pin(stream::iter([
                 Ok(qq_provider::ProviderEvent::OutputTextDelta { text: text.clone() }),
@@ -3873,6 +3911,7 @@ impl Provider for AutoCompactProvider {
                     ]))
                 }
             }
+            #[cfg(unix)]
             AutoCompactScript::ShellThenRecall {
                 command,
                 recall,
@@ -3986,7 +4025,7 @@ async fn auto_compact_harness_with_loader_and_mode(
     loader: AutoCompactLoader,
     approval_mode: ApprovalMode,
 ) -> AutoCompactHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let requests = Arc::clone(&loader.requests);
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
@@ -4082,7 +4121,7 @@ fn over_threshold_output() -> String {
 async fn project_terminal_run_with_tool_boundaries(
     outcome: RunOutcome,
 ) -> (Vec<Message>, Vec<Message>) {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let database_path = directory.path().join("sessions.sqlite3");
     let store = Store::open(database_path.clone()).await.unwrap();
     let resolved = store
@@ -4226,6 +4265,7 @@ async fn project_terminal_run_with_tool_boundaries(
             "persisted result".to_owned(),
             false,
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4785,7 +4825,9 @@ impl RuntimeLoader for ValidatingLoader {
         &self,
         _workspace: String,
         selection: ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
+        assert_eq!(advertised.as_ref(), ["test/child", "test/model"]);
         self.validations.lock().unwrap().push(selection);
         let result = match &self.rejection {
             Some(error) => Err(error.clone()),
@@ -4803,7 +4845,16 @@ impl RuntimeLoader for ValidatingLoader {
         };
         Box::pin(async move {
             Runtime::with_provider(provider, "test-model", 256)
-                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map(|runtime| {
+                    loaded_runtime(
+                        runtime.with_spawn_model_routes(vec![
+                            "test/child".to_owned(),
+                            "test/model".to_owned(),
+                        ]),
+                        &request.workspace,
+                        None,
+                    )
+                })
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
@@ -5145,7 +5196,7 @@ async fn spawn_harness_with_loader(
     loader: Arc<dyn RuntimeLoader>,
     max_active_runs: usize,
 ) -> SpawnHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = max_active_runs;
     let runtime = SessionRuntime::open(options, loader).await.unwrap();
@@ -5330,7 +5381,7 @@ struct OutputContractHarness {
 }
 
 async fn output_contract_harness(answers: &[&'static str]) -> OutputContractHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
@@ -5492,7 +5543,7 @@ async fn write_child_harness(
         script: parent_script,
         turn: StdMutex::new(0),
     });
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
     options.approval_timeout = Some(Duration::from_secs(2));
@@ -5769,6 +5820,21 @@ struct AuditLoader {
 }
 
 impl RuntimeLoader for AuditLoader {
+    fn validate_spawn_model(
+        &self,
+        _workspace: String,
+        selection: ModelSelection,
+        advertised: Arc<[String]>,
+    ) -> SpawnModelValidationFuture {
+        assert!(
+            advertised
+                .iter()
+                .any(|route| Some(route) == selection.model.as_ref()),
+            "the auditor's roster route was not retained: {advertised:?}"
+        );
+        Box::pin(std::future::ready(Ok(())))
+    }
+
     fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
         let provider = self.inner.next_provider(&request);
         let mode = self.mode;
@@ -6049,7 +6115,7 @@ async fn child_budget_harness_with_window(
     audit: crate::runtime::AuditMode,
     child_context_window: Option<u32>,
 ) -> SpawnHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut verdict = ReviewVerdict::free(ReviewDecision::Approve);
     if child_context_window.is_some() {
         verdict.spend.usage = Some(TokenUsage::default());
@@ -6192,7 +6258,7 @@ struct BudgetHarness {
 }
 
 async fn budget_harness(loader: BudgetLoopLoader) -> BudgetHarness {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     std::fs::write(directory.path().join("note.txt"), "note").unwrap();
     let requests = Arc::clone(&loader.requests);
     let database_path = directory.path().join("sessions.sqlite3");
@@ -6254,7 +6320,7 @@ fn exhaustion_of(observed: &[SessionEventEnvelope], run_id: RunId) -> BudgetExha
 
 #[test]
 fn side_capture_is_bounded_and_preserves_complete_tool_units() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("capture.sqlite"),
         0,
@@ -6287,7 +6353,7 @@ fn side_capture_is_bounded_and_preserves_complete_tool_units() {
 
 #[test]
 fn side_capture_omits_an_oversized_unit_before_loading_payload() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("capture.sqlite"),
         0,
@@ -6489,7 +6555,7 @@ async fn side_threads_continue_explicitly_reset_and_persist_before_return() {
 
 #[test]
 fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("capture.sqlite"),
         0,
@@ -6507,7 +6573,7 @@ fn side_capture_excludes_unfinished_runs_and_reports_missing_context() {
 #[tokio::test]
 async fn recovered_internal_summary_settles_durable_session_cost_once() {
     for state in 0..4 {
-        let directory = TempDir::new().unwrap();
+        let directory = test_directory();
         let path = directory.path().join("recovered-summary.sqlite");
         let store = Store::open(path.clone()).await.unwrap();
         let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
@@ -6603,7 +6669,7 @@ async fn recovered_internal_summary_settles_durable_session_cost_once() {
 async fn prompt_terminal_receipt_waits_for_abandoned_owned_summary() {
     for panicked in [false, true] {
         for sent in [false, true] {
-            let directory = TempDir::new().unwrap();
+            let directory = test_directory();
             let path = directory.path().join("abandoned-summary.sqlite");
             let store = Store::open(path.clone()).await.unwrap();
             let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
@@ -6711,7 +6777,7 @@ async fn prompt_terminal_receipt_waits_for_abandoned_owned_summary() {
 
 #[tokio::test]
 async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("queued-summary.sqlite");
     let store = Store::open(path.clone()).await.unwrap();
     let (_, session_id, parent) = create_claimed_parent(&store, directory.path()).await;
@@ -6815,7 +6881,7 @@ async fn admitted_summary_turn_survives_a_dropped_waiter_before_settlement() {
 
 #[tokio::test]
 async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let store = Store::open(directory.path().join("settled-summary.sqlite"))
         .await
         .unwrap();
@@ -6902,7 +6968,7 @@ async fn settled_internal_summary_rejects_stale_turns_without_recharging() {
 #[test]
 fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
     for previous in ["44", "45"] {
-        let directory = TempDir::new().unwrap();
+        let directory = test_directory();
         let path = directory.path().join("owner-index.sqlite");
         let (connection, _) = super::bench_support::seed_compacted_session(&path, 3, 2, 2, 100);
         let store_id: String = connection
@@ -6974,7 +7040,7 @@ fn owned_compaction_index_upgrades_preserves_rows_and_reopens() {
 
 #[test]
 fn owned_compaction_index_migration_failure_preserves_previous_version() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("owner-index-failure.sqlite");
     let (connection, _) = open_database(&path).unwrap();
     connection.execute_batch("DROP INDEX runs_owned_compaction; UPDATE metadata SET value = '45' WHERE key = 'schema_version'; CREATE TABLE runs_owned_compaction(protected TEXT); INSERT INTO runs_owned_compaction VALUES ('retained');").unwrap();
@@ -6999,7 +7065,7 @@ fn owned_compaction_index_migration_failure_preserves_previous_version() {
 
 #[test]
 fn owned_compaction_index_rejects_wrong_existing_predicate() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("wrong-owner-index.sqlite");
     let (connection, _) = open_database(&path).unwrap();
     connection.execute_batch("DROP INDEX runs_owned_compaction; CREATE INDEX runs_owned_compaction ON runs(auto_compaction_for_run_id) WHERE kind = 'prompt'; UPDATE metadata SET value = '45' WHERE key = 'schema_version';").unwrap();
@@ -7026,7 +7092,7 @@ fn owned_compaction_index_rejects_wrong_existing_predicate() {
 
 #[test]
 fn side_schema_upgrades_reopens_and_rejects_invalid_capture_shape() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("migration.sqlite");
     let (connection, _) = open_database(&path).unwrap();
     connection.execute_batch("DROP TABLE side_questions; UPDATE metadata SET value = '43' WHERE key = 'schema_version';").unwrap();
@@ -7132,7 +7198,7 @@ async fn side_answer_finishes_while_main_provider_is_active_without_main_request
 
 #[tokio::test]
 async fn side_recovery_marks_interrupted_without_replaying_provider_work() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let path = directory.path().join("recover.sqlite");
     let store = Store::open(path.clone()).await.unwrap();
     let (_, session, _) = create_claimed_parent(&store, directory.path()).await;
@@ -7270,7 +7336,7 @@ async fn side_failure_with_a_request_in_flight_reports_unknown_spend_without_cha
 
 #[tokio::test]
 async fn side_capture_latency_diagnostic() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("capture.sqlite"),
         256,
@@ -7446,7 +7512,7 @@ async fn side_submit_then_immediate_shutdown_settles_accepted_work() {
 
 #[tokio::test]
 async fn side_capture_latency_relative_to_full_context_diagnostic() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("capture.sqlite"),
         256,
@@ -7712,7 +7778,7 @@ async fn side_public_provider_panic_settles_interrupted_and_shutdown_drains() {
 
 #[test]
 fn side_capture_current_task_is_last_and_bounded_without_synthetic_results() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("current.sqlite"),
         0,
@@ -8251,18 +8317,11 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
             tokio::task::yield_now().await;
         }
     });
-    let (stop_watchdog, stopped) = std::sync::mpsc::channel();
-    let (expired, watchdog) = tokio::sync::oneshot::channel();
-    let watchdog_thread = std::thread::spawn(move || {
-        if stopped.recv_timeout(Duration::from_secs(10)).is_err() {
-            let _ = expired.send(());
-        }
-    });
     let cancellation = RunCancellation::new();
     let deadline_cancelled = cancellation.clone();
     let mut first = side_tool_call("read_file", r#"{"path":"note.txt"}"#);
     first.push(side_done());
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.side_query_limits.max_duration_ms = Some(200);
     let runtime = SessionRuntime::open(options, SideScriptLoader::new(vec![(first, false)], false))
@@ -8277,7 +8336,7 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     let workspace = runtime.workspace_path(workspace_id).await.unwrap();
     std::fs::write(Path::new(&workspace).join("note.txt"), "evidence").unwrap();
     let (entered, release) = crate::tools::hold_tool_read(Path::new(&workspace));
-    let task = {
+    let mut task = {
         let runtime = runtime.clone();
         tokio::spawn(async move {
             runtime
@@ -8287,13 +8346,11 @@ async fn side_timeout_drains_a_blocked_inspection_tool_before_the_answer_returns
     };
     tokio::select! {
         result = entered => result.unwrap(),
-        _ = watchdog => {
+        result = &mut task => {
             keep_clock.abort();
-            panic!("blocked inspection did not enter before the independent watchdog");
+            panic!("side question completed before the blocked inspection entered: {result:?}");
         }
     }
-    stop_watchdog.send(()).unwrap();
-    watchdog_thread.join().unwrap();
     // Past the deadline with the read still blocked, nothing has settled.
     tokio::time::advance(Duration::from_millis(400)).await;
     keep_clock.abort();
@@ -8539,7 +8596,7 @@ async fn side_running_question_survives_a_snapshot_over_the_body_budget() {
 
 #[test]
 fn side_capture_reads_streamed_chunks_of_active_run_assistant_turns() {
-    let directory = TempDir::new().unwrap();
+    let directory = test_directory();
     let (connection, session) = super::bench_support::seed_compacted_session(
         &directory.path().join("chunks.sqlite"),
         0,
@@ -8758,7 +8815,7 @@ async fn side_query_limits_validate_and_a_lowered_turn_limit_applies() {
             ..SideQueryLimits::default()
         },
     ] {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = test_directory();
         let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
         options.side_query_limits = limits;
         assert!(matches!(
@@ -8771,7 +8828,7 @@ async fn side_query_limits_validate_and_a_lowered_turn_limit_applies() {
         turn.push(side_done());
         (turn, false)
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = test_directory();
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.side_query_limits.max_model_turns = Some(1);
     let loader = SideScriptLoader::new(vec![turn(), turn()], false);
@@ -8908,4 +8965,156 @@ async fn side_cancel_of_an_unknown_id_is_a_typed_not_found() {
         )
         .await;
     assert_eq!(result, Err(SessionRuntimeError::SideQuestionNotFound));
+}
+
+#[tokio::test]
+async fn workspace_catalog_pages_registered_roots_and_preserves_identity_after_restart() {
+    use qq_protocol::{WorkspaceCatalogCursor, WorkspaceCatalogRequest};
+    let directory = test_directory();
+    let database = directory.path().join("sessions.sqlite3");
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(database.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let empty = runtime
+        .workspace_catalog(WorkspaceCatalogRequest::default())
+        .await
+        .unwrap();
+    assert!(empty.workspaces.is_empty());
+    assert_eq!(empty.next, None);
+    assert_eq!(empty.store_id, runtime.store_id());
+    let mut expected = Vec::new();
+    for name in ["api", "frontend", "worker"] {
+        let path = directory.path().join(name);
+        std::fs::create_dir(&path).unwrap();
+        let (id, _) = resolve_workspace(&runtime, &path).await;
+        expected.push(WorkspaceSummary {
+            id,
+            path: std::fs::canonicalize(&path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        });
+    }
+    expected.sort_by_key(|workspace| workspace.id);
+    let first = runtime
+        .workspace_catalog(WorkspaceCatalogRequest {
+            after: None,
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(first.workspaces, expected[..2]);
+    let cursor = first.next.unwrap();
+    assert_eq!(
+        cursor,
+        WorkspaceCatalogCursor {
+            store_id: runtime.store_id(),
+            workspace_id: expected[1].id
+        }
+    );
+    for limit in [0, qq_protocol::MAX_WORKSPACE_PAGE + 1] {
+        assert!(matches!(
+            runtime
+                .workspace_catalog(WorkspaceCatalogRequest { after: None, limit })
+                .await,
+            Err(SessionRuntimeError::InvalidPageLimit)
+        ));
+    }
+    let foreign = WorkspaceCatalogCursor {
+        store_id: StoreId::generate().unwrap(),
+        ..cursor
+    };
+    assert!(matches!(
+        runtime
+            .workspace_catalog(WorkspaceCatalogRequest {
+                after: Some(foreign),
+                limit: 2
+            })
+            .await,
+        Err(SessionRuntimeError::CursorStoreMismatch)
+    ));
+    let store_id = runtime.store_id();
+    runtime.shutdown().await.unwrap();
+    drop(runtime);
+    // Listing metadata neither opens a root nor depends on its availability.
+    std::fs::remove_dir(directory.path().join("worker")).unwrap();
+    let reopened = SessionRuntime::open(
+        SessionRuntimeOptions::new(database),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let second = reopened
+        .workspace_catalog(WorkspaceCatalogRequest {
+            after: Some(cursor),
+            limit: 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.store_id, store_id);
+    assert_eq!(second.workspaces, expected[2..]);
+    assert_eq!(second.next, None);
+    assert_eq!(
+        reopened
+            .workspace_catalog(WorkspaceCatalogRequest::default())
+            .await
+            .unwrap()
+            .workspaces,
+        expected
+    );
+    reopened.shutdown().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_session_harnesses_accept_an_aliased_temporary_base() {
+    const CHILD: &str = "QQ_TEST_ALIASED_TEMP_HARNESS";
+    if std::env::var_os(CHILD).is_some() {
+        let (_directory, runtime) = test_runtime().await;
+        runtime.close().await.unwrap();
+        let mut harness = scripted_runs_harness(ApprovalMode::Full, vec![vec![]]).await;
+        let run = submit_prompt(&harness, "finish the fixture").await;
+        let events = collect_until(&mut harness.events, finished_for(run)).await;
+        assert!(matches!(
+            events.last().unwrap().event,
+            SessionEvent::RunFinished {
+                outcome: RunOutcome::Completed,
+                ..
+            }
+        ));
+        harness.runtime.close().await.unwrap();
+        let harness = session_management_harness().await;
+        harness.runtime.close().await.unwrap();
+        return;
+    }
+    let directory = test_directory();
+    let root = directory.path().canonicalize().unwrap();
+    let alias = root.join("temporary-base-alias");
+    std::os::unix::fs::symlink(&root, &alias).unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sessions::tests::shared_session_harnesses_accept_an_aliased_temporary_base",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("TMPDIR", &alias)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "aliased temporary base broke a shared harness:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

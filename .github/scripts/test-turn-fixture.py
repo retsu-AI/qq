@@ -43,7 +43,7 @@ class FixtureTests(unittest.TestCase):
     def test_benchmark_arm_comparison_rejects_debuginfo_mismatch(self):
         import textwrap
         workflow = Path(__file__).parents[1].joinpath("workflows/ci.yml").read_text()
-        start = workflow.index("              for key in (")
+        start = workflow.index("              for key in ('debug_assertions',")
         end = workflow.index("          PYTHON", start)
         code = textwrap.dedent(workflow[start:end])
         profile = {"debug_assertions": False, "overflow_checks": False, "test": False, "debuginfo": 0}

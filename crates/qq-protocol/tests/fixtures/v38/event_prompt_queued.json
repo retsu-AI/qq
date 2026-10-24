@@ -1,0 +1,55 @@
+{
+  "cursor": {
+    "store_id": "01010101010101010101010101010101",
+    "workspace_id": "02020202020202020202020202020202",
+    "sequence": 10
+  },
+  "session_id": "03030303030303030303030303030303",
+  "run_id": "04040404040404040404040404040404",
+  "caused_by": "07070707070707070707070707070707",
+  "occurred_at_ms": 1700000000000,
+  "event": {
+    "type": "prompt_queued",
+    "session": {
+      "id": "03030303030303030303030303030303",
+      "workspace_id": "02020202020202020202020202020202",
+      "title": "Fix the login redirect",
+      "status": "running",
+      "active_run_id": "04040404040404040404040404040404",
+      "activity": "generating_response",
+      "queued_prompts": 1,
+      "model": "openai/gpt-5.6",
+      "profile": "review",
+      "approval_mode": "read_only",
+      "correlation": {
+        "thread": "t-1"
+      },
+      "context_tokens": 1200,
+      "estimated_cost_usd_nanos": 42,
+      "updated_at_ms": 1700000000000
+    },
+    "message": {
+      "id": "20202020202020202020202020202020",
+      "session_id": "03030303030303030303030303030303",
+      "run_id": "04040404040404040404040404040404",
+      "turn_ordinal": 0,
+      "role": "user",
+      "state": "queued",
+      "output": "Fix the login redirect\n@src/auth.rs",
+      "refusal": "",
+      "created_at_ms": 1700000000000
+    },
+    "run": {
+      "id": "04040404040404040404040404040404",
+      "session_id": "03030303030303030303030303030303",
+      "status": "queued",
+      "correlation": {
+        "job": "j-1"
+      },
+      "limits": {
+        "max_model_turns": 40
+      }
+    },
+    "queue_position": 1
+  }
+}

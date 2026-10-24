@@ -3,18 +3,16 @@
 use std::{borrow::Cow, sync::Arc};
 
 use async_stream::try_stream;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};
+use reqwest::header::{AUTHORIZATION, HeaderMap};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
 use crate::{
     ContentBlock, IncompleteReason, Message, ModelRequest, Provider, ProviderError,
     ProviderErrorKind, ProviderEvent, ProviderStream, ProviderUsage, Role, ToolSpec,
-    credentials::{SecretLiteral, sensitive_bearer_value, sensitive_header_value},
+    credentials::StaticAuth,
     exchange::{ContentTypeGate, SseExchangeSpec, sse_exchange, with_restart},
-    http::{
-        ExchangeMessages, HttpExchange, HttpRejection, SafeHeaders, is_request_controlled_header,
-    },
+    http::{ExchangeMessages, HttpExchange, HttpRejection, build_static_headers},
     limits::{ByteCounter, StreamLimits},
     providers::support::{
         self, OwnedOrBorrowedText, ToolCallLedger, UsageOnce, status_error_kind,
@@ -40,14 +38,6 @@ const SSE_SPEC: SseExchangeSpec = SseExchangeSpec {
     content_type_gate: ContentTypeGate::Strict,
 };
 
-/// Authentication applied by an OpenAI-compatible Chat Completions client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChatCompletionsAuth {
-    NoAuth,
-    Bearer(SecretLiteral),
-    Header(String, SecretLiteral),
-}
-
 /// A client for OpenAI-compatible Chat Completions endpoints.
 pub(crate) struct OpenAiChatCompletions {
     pub(crate) exchange: HttpExchange,
@@ -72,7 +62,7 @@ impl OpenAiChatCompletions {
     pub(crate) fn new(api_key: &str) -> Result<Self, ProviderError> {
         Self::with_endpoint(
             CHAT_COMPLETIONS_ENDPOINT,
-            ChatCompletionsAuth::Bearer(api_key.into()),
+            StaticAuth::Bearer(api_key.into()),
             [],
             false,
         )
@@ -85,13 +75,13 @@ impl OpenAiChatCompletions {
     #[cfg(test)]
     pub(crate) fn with_endpoint(
         endpoint: &str,
-        auth: ChatCompletionsAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         allow_http: bool,
     ) -> Result<Self, ProviderError> {
         let endpoint = validate_endpoint(endpoint, allow_http)?;
         let client = support::client_for_endpoint(&endpoint)?;
-        Self::with_client_and_authorizer(
+        Self::with_client(
             client,
             endpoint,
             auth,
@@ -101,14 +91,15 @@ impl OpenAiChatCompletions {
         .map(Self::single_shot)
     }
 
-    pub(crate) fn with_client_and_authorizer(
+    pub(crate) fn with_client(
         client: reqwest::Client,
         endpoint: reqwest::Url,
-        auth: ChatCompletionsAuth,
+        auth: StaticAuth,
         static_headers: impl IntoIterator<Item = (String, String)>,
         authorizer: RequestAuthorizer,
     ) -> Result<Self, ProviderError> {
-        let (headers, redactions) = build_headers(auth, static_headers)?;
+        let (headers, redactions) =
+            build_static_headers(auth, static_headers, &[AUTHORIZATION], &authorizer, &[])?;
 
         Ok(Self {
             exchange: HttpExchange::new(client, authorizer, Arc::from(redactions)),
@@ -249,44 +240,6 @@ impl Provider for OpenAiChatCompletions {
             })
         })
     }
-}
-
-fn build_headers(
-    auth: ChatCompletionsAuth,
-    static_headers: impl IntoIterator<Item = (String, String)>,
-) -> Result<(HeaderMap, Vec<String>), ProviderError> {
-    let mut redactions = Vec::new();
-    let auth_header = match auth {
-        ChatCompletionsAuth::NoAuth => None,
-        ChatCompletionsAuth::Bearer(secret) => {
-            let value = sensitive_bearer_value(&secret, "Bearer secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((AUTHORIZATION, value))
-        }
-        ChatCompletionsAuth::Header(name, secret) => {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                ProviderError::Configuration("authentication header name is invalid".to_owned())
-            })?;
-            if is_request_controlled_header(&name) {
-                return Err(ProviderError::Configuration(
-                    "authentication header is controlled by the HTTP client".to_owned(),
-                ));
-            }
-            let value = sensitive_header_value(&secret, "authentication header secret")?;
-            redactions.push(secret.expose_secret().to_owned());
-            Some((name, value))
-        }
-    };
-    let auth_name = auth_header.as_ref().map(|(name, _)| name.clone());
-    let mut headers = SafeHeaders::new(std::iter::once(AUTHORIZATION).chain(auth_name));
-    headers.insert_configured(static_headers, false)?;
-    if let Some((name, value)) = auth_header {
-        headers.insert_owned(name, value);
-    }
-    for redaction in redactions {
-        headers.push_redaction(redaction);
-    }
-    Ok(headers.finish())
 }
 
 fn sse_decoder(max_event_bytes: usize) -> SseDecoder {
@@ -768,7 +721,7 @@ mod tests {
     #[test]
     fn default_constructor_uses_openai_endpoint_and_redacts_auth_debug() {
         let provider = OpenAiChatCompletions::new("openai-test-secret").unwrap();
-        let auth = ChatCompletionsAuth::Bearer("openai-test-secret".into());
+        let auth = StaticAuth::Bearer("openai-test-secret".into());
 
         assert_eq!(provider.endpoint.as_str(), CHAT_COMPLETIONS_ENDPOINT);
         assert!(!format!("{auth:?}").contains("openai-test-secret"));
@@ -785,20 +738,16 @@ mod tests {
             ),
             ("https://example.com/v1/chat/completions#fragment", false),
         ] {
-            let error = OpenAiChatCompletions::with_endpoint(
-                endpoint,
-                ChatCompletionsAuth::NoAuth,
-                [],
-                allow_http,
-            )
-            .err()
-            .expect("endpoint must be rejected");
+            let error =
+                OpenAiChatCompletions::with_endpoint(endpoint, StaticAuth::None, [], allow_http)
+                    .err()
+                    .expect("endpoint must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
 
         OpenAiChatCompletions::with_endpoint(
             "http://[::1]/v1/chat/completions",
-            ChatCompletionsAuth::NoAuth,
+            StaticAuth::None,
             [],
             true,
         )
@@ -828,7 +777,7 @@ mod tests {
         ] {
             let error = OpenAiChatCompletions::with_endpoint(
                 "https://example.com/v1/chat/completions",
-                ChatCompletionsAuth::NoAuth,
+                StaticAuth::None,
                 [(name.to_owned(), "value".to_owned())],
                 false,
             )
@@ -839,7 +788,7 @@ mod tests {
 
         let error = OpenAiChatCompletions::with_endpoint(
             "https://example.com/v1/chat/completions",
-            ChatCompletionsAuth::Header("x-api-key".to_owned(), "secret".into()),
+            StaticAuth::header("x-api-key", "secret".into()),
             [("x-api-key".to_owned(), "override".to_owned())],
             false,
         )
@@ -857,7 +806,7 @@ mod tests {
         ] {
             let error = OpenAiChatCompletions::with_endpoint(
                 "https://example.com/v1/chat/completions",
-                ChatCompletionsAuth::NoAuth,
+                StaticAuth::None,
                 headers,
                 false,
             )
@@ -865,30 +814,6 @@ mod tests {
             .expect("invalid header must be rejected");
             assert!(matches!(error, ProviderError::Configuration(_)));
         }
-    }
-
-    #[test]
-    fn configured_headers_are_sensitive_and_redactions_are_normalized() {
-        let (headers, redactions) = build_headers(
-            ChatCompletionsAuth::Header("x-auth".to_owned(), "long-test-secret".into()),
-            [
-                ("x-first".to_owned(), "test-secret".to_owned()),
-                ("x-second".to_owned(), "long-test-secret".to_owned()),
-                ("x-third".to_owned(), "alpha".to_owned()),
-            ],
-        )
-        .unwrap();
-
-        assert!(
-            headers
-                .values()
-                .all(reqwest::header::HeaderValue::is_sensitive)
-        );
-        assert_eq!(redactions, ["long-test-secret", "test-secret", "alpha"]);
-        assert_eq!(
-            sanitize_message("long-test-secret test-secret alpha", &redactions),
-            "[REDACTED] [REDACTED] [REDACTED]"
-        );
     }
 
     #[test]
@@ -1099,7 +1024,7 @@ mod tests {
         let endpoint = format!("{}/custom/chat/completions?api-version=42", server.base_url);
         let provider = OpenAiChatCompletions::with_endpoint(
             &endpoint,
-            ChatCompletionsAuth::Header("x-api-key".to_owned(), "custom-test-secret".into()),
+            StaticAuth::header("x-api-key", "custom-test-secret".into()),
             [("x-client".to_owned(), "qq-tests".to_owned())],
             true,
         )
@@ -1228,8 +1153,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let request = ModelRequest::new(
             "chat-test",
             vec![
@@ -1315,8 +1239,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(test_request())
             .collect::<Vec<_>>()
@@ -1364,8 +1287,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(test_request())
             .collect::<Vec<_>>()
@@ -1410,8 +1332,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider
             .stream(test_request())
             .collect::<Vec<_>>()
@@ -1450,8 +1371,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let error = provider
             .stream(test_request())
             .next()
@@ -1470,7 +1390,7 @@ mod tests {
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider = OpenAiChatCompletions::with_endpoint(
             &endpoint,
-            ChatCompletionsAuth::Bearer("test-api-secret".into()),
+            StaticAuth::Bearer("test-api-secret".into()),
             [],
             true,
         )
@@ -1504,10 +1424,10 @@ mod tests {
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let credentials =
             crate::SharedRequestCredentialProvider::new(StaticBearerCredential(SECRET));
-        let provider = OpenAiChatCompletions::with_client_and_authorizer(
+        let provider = OpenAiChatCompletions::with_client(
             build_direct_client().unwrap(),
             reqwest::Url::parse(&endpoint).unwrap(),
-            ChatCompletionsAuth::NoAuth,
+            StaticAuth::None,
             [],
             RequestAuthorizer::request_time_bearer(credentials),
         )
@@ -1544,8 +1464,7 @@ mod tests {
         let server = LoopbackServer::respond(200, "application/json", "{}");
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let error = provider
             .stream(test_request())
             .next()
@@ -1563,8 +1482,7 @@ mod tests {
         let server = LoopbackServer::sse(body);
         let endpoint = format!("{}/v1/chat/completions", server.base_url);
         let provider =
-            OpenAiChatCompletions::with_endpoint(&endpoint, ChatCompletionsAuth::NoAuth, [], true)
-                .unwrap();
+            OpenAiChatCompletions::with_endpoint(&endpoint, StaticAuth::None, [], true).unwrap();
         let events = provider.stream(test_request()).collect::<Vec<_>>().await;
 
         assert!(matches!(

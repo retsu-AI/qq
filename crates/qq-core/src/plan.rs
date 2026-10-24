@@ -1175,6 +1175,14 @@ impl CompiledAgentPlan {
         self.workspace.path()
     }
 
+    /// Identity of the directory this plan actually holds, independent of
+    /// replacements at its pathname. Performs blocking filesystem metadata I/O.
+    pub fn workspace_identity(
+        &self,
+    ) -> std::io::Result<crate::command_owner::NativeWorkspaceIdentity> {
+        crate::command_owner::NativeWorkspaceIdentity::held(self.workspace.root())
+    }
+
     /// The opened workspace capability, for resolving input attachments.
     /// The network policy the plan's `fetch` calls are judged by.
     pub(crate) fn network_policy(&self) -> Arc<crate::tools::network::NetworkPolicy> {

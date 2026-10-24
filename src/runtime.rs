@@ -7,12 +7,11 @@ use std::{
     sync::Arc,
 };
 
-use qq_auth::{AuthError, CredentialStore, Secret, resolve_provider_credential_with_aliases};
+use qq_auth::{AuthError, CredentialStore, Secret};
 use qq_config::{
-    AwsAuth, BedrockAuth, BuiltinAudience, BuiltinProvider, ClientSnapshot, ConfigError,
-    ConfigLoader, ConfigSnapshot, EndpointMode, HttpAccess, HttpCredential, LoadRequest,
-    ProcessTrust, PromotionOutcome, ProviderAccess, ProviderApi, ProviderAuth, ProviderConfig,
-    RuntimeOverrides, WorkspaceGrant,
+    AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
+    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
+    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
@@ -44,6 +43,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
+    builtin_auth::{self, BuiltinAuth},
     catalog::{DiscoveredModel, ModelDiscovery},
     plan::{
         CompiledGeneration, LiveBindings, PlanCache, PlanCacheError, PlanCacheLimits, PlanKey,
@@ -529,7 +529,10 @@ impl RuntimeFactory {
         if self.is_isolated_tui_qa() {
             vec![Self::isolated_tui_qa_model_option(snapshot)]
         } else {
-            self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+            self.model_options_with_discovery(
+                &CatalogSource::from(snapshot),
+                &self.cached_model_discovery(snapshot.providers()),
+            )
         }
     }
 
@@ -543,7 +546,10 @@ impl RuntimeFactory {
                 .map(|route| vec![Self::isolated_tui_qa_model_option_for(snapshot, route)])
                 .unwrap_or_default();
         }
-        self.model_options_with_discovery(&CatalogSource::from(snapshot), &BTreeMap::new())
+        self.model_options_with_discovery(
+            &CatalogSource::from(snapshot),
+            &self.cached_model_discovery(snapshot.providers()),
+        )
     }
 
     /// Built-in providers the policy admits that have no resolvable
@@ -631,7 +637,10 @@ impl RuntimeFactory {
             name: metadata
                 .and_then(|metadata| metadata.name())
                 .map(str::to_owned),
-            context_window: metadata.and_then(|metadata| metadata.context_window()),
+            context_window: snapshot
+                .providers
+                .get(route.provider())
+                .and_then(|provider| provider.model_context_window(route.model())),
             reasoning_efforts: metadata
                 .map(|metadata| metadata.reasoning_efforts().to_vec())
                 .unwrap_or_default(),
@@ -672,11 +681,27 @@ impl RuntimeFactory {
             Ok(records) => records.into_iter().map(|record| record.name).collect(),
             Err(_) => BTreeSet::new(),
         };
+        let discovered = self.cached_model_discovery(snapshot.providers());
         self.model_options_with_discovery_impl(
             &CatalogSource::from(snapshot),
-            &BTreeMap::new(),
+            &discovered,
             RouteAdmission::CredentialPresent(&registered),
         )
+    }
+
+    fn cached_model_discovery(
+        &self,
+        providers: &BTreeMap<String, ProviderConfig>,
+    ) -> BTreeMap<String, Vec<DiscoveredModel>> {
+        providers
+            .iter()
+            .filter_map(|(id, provider)| {
+                self.inner
+                    .discovery
+                    .cached(id, provider, &self.inner.credentials)
+                    .map(|models| (id.clone(), models))
+            })
+            .collect()
     }
 
     fn model_options_with_discovery_impl(
@@ -702,12 +727,11 @@ impl RuntimeFactory {
                 continue;
             }
             for (model_id, metadata) in provider.models() {
-                if provider.kind().discovery().is_authoritative()
-                    && !metadata.explicitly_configured()
-                    && discovered
-                        .get(provider_id)
-                        .is_some_and(|models| !models.iter().any(|model| &model.id == model_id))
-                {
+                if !model_in_catalog(
+                    provider,
+                    model_id,
+                    discovered.get(provider_id).map(Vec::as_slice),
+                ) {
                     continue;
                 }
                 if options.len() >= MAX_MODEL_OPTIONS {
@@ -717,7 +741,7 @@ impl RuntimeFactory {
                     provider: provider_id.clone(),
                     model: model_id.clone(),
                     name: metadata.name().map(str::to_owned),
-                    context_window: metadata.context_window(),
+                    context_window: provider.model_context_window(model_id),
                     reasoning_efforts: discovered
                         .get(provider_id)
                         .and_then(|models| models.iter().find(|model| &model.id == model_id))
@@ -748,7 +772,7 @@ impl RuntimeFactory {
                         provider: provider_id.clone(),
                         model: model.id.clone(),
                         name: model.name.clone(),
-                        context_window: None,
+                        context_window: provider.model_context_window(&model.id),
                         reasoning_efforts: model.efforts.clone().unwrap_or_default(),
                         selection: qq_protocol::ModelSelection {
                             model_is_fallback: false,
@@ -767,6 +791,8 @@ impl RuntimeFactory {
             && !options
                 .iter()
                 .any(|option| option.selection.model.as_deref() == Some(route.as_str()))
+            && allowed.is_none_or(|allowed| allowed.iter().any(|id| id == route.provider()))
+            && !denied.iter().any(|id| id == route.provider())
             && let Some(provider) = snapshot.providers.get(route.provider())
             && admitted(route.provider(), provider)
         {
@@ -775,7 +801,7 @@ impl RuntimeFactory {
                 provider: route.provider().to_owned(),
                 model: route.model().to_owned(),
                 name: None,
-                context_window: metadata.and_then(|metadata| metadata.context_window()),
+                context_window: provider.model_context_window(route.model()),
                 reasoning_efforts: metadata
                     .map(|metadata| metadata.reasoning_efforts().to_vec())
                     .unwrap_or_default(),
@@ -1091,9 +1117,6 @@ impl RuntimeFactory {
         let mut load =
             self.request_for_workspace(&workspace, request.selection.max_output_tokens)?;
         let mut overrides = load.overrides().clone();
-        if let Some(model) = &request.selection.model {
-            overrides = overrides.with_model(model.clone());
-        }
         if let Some(organization) = &request.selection.organization {
             overrides = overrides.with_organization(organization.clone());
         }
@@ -1121,23 +1144,14 @@ impl RuntimeFactory {
                     provider,
                     api_key,
                     profile,
-                } => match provider.audience {
-                    BuiltinAudience::OpenAiCodex => self
-                        .inner
-                        .credentials
-                        .resolve_with_endpoint(
-                            &qq_config::SecretRef::Stored(provider.stored_name(profile.as_deref())),
-                            Some(qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT),
-                        )
-                        .is_ok(),
-                    BuiltinAudience::Table(_) | BuiltinAudience::XAi => resolve_builtin_api_key(
+                } => BuiltinAuth::of(provider)
+                    .check(
                         &self.inner.credentials,
                         provider,
                         api_key.as_ref(),
                         profile.as_deref(),
                     )
                     .is_ok(),
-                },
             },
             Some(
                 ProviderAccess::AmazonBedrock { auth, .. }
@@ -1184,14 +1198,20 @@ impl RuntimeFactory {
     }
 
     /// The spawn-time model gate: accepts exactly the routes the served
-    /// model list (`POST /v1/models` and the pickers) would show right now.
+    /// model list (`POST /v1/models` and the pickers) serves, plus routes
+    /// retained by the parent's compiled catalog.
     /// Route syntax, provider existence, and provider policy were already
     /// rejected by the configuration load that produced `snapshot`; this
     /// adds the authentication check that gates the served list and the
     /// model-id membership check against the builtin catalog union the
-    /// cached discovery list. The default-API fallback for unknown model
-    /// ids never applies on this path.
-    fn validate_spawn_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
+    /// cached discovery list, or the workspace's configured route. A requested
+    /// selection cannot add itself to that list.
+    fn validate_spawn_snapshot(
+        &self,
+        snapshot: &ConfigSnapshot,
+        workspace: &str,
+        advertised: &[String],
+    ) -> Result<(), RuntimeBuildError> {
         let provider_id = snapshot.model().provider();
         let model_id = snapshot.model().model();
         let provider = snapshot
@@ -1203,23 +1223,33 @@ impl RuntimeFactory {
                 provider_id.to_owned(),
             ));
         }
-        if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured() || !provider.kind().discovery().is_authoritative()
-        }) {
+        if advertised
+            .iter()
+            .any(|route| route == snapshot.model().as_str())
+        {
             return Ok(());
         }
-        let discovered =
+        let cached = self
+            .inner
+            .discovery
+            .cached(provider_id, provider, &self.inner.credentials);
+        if model_in_catalog(provider, model_id, cached.as_deref()) {
+            return Ok(());
+        }
+        let configured =
+            self.load_for_client(&self.request_for_workspace(Path::new(workspace), None)?)?;
+        if configured.model() == Some(snapshot.model()) {
+            return Ok(());
+        }
+        // Only an unknown route needs fresh discovery. A known fallback
+        // route must not be invalidated by a different snapshot fetched
+        // during admission itself.
+        let discovered = cached.or_else(|| {
             self.inner
                 .discovery
-                .discover(provider_id, provider, &self.inner.credentials);
-        if provider.models().get(model_id).is_some_and(|metadata| {
-            metadata.explicitly_configured()
-                || !provider.kind().discovery().is_authoritative()
-                || discovered.is_none()
-        }) || discovered
-            .as_ref()
-            .is_some_and(|models| models.iter().any(|model| model.id == model_id))
-        {
+                .discover(provider_id, provider, &self.inner.credentials)
+        });
+        if model_in_catalog(provider, model_id, discovered.as_deref()) {
             return Ok(());
         }
         Err(RuntimeBuildError::UnknownModel {
@@ -1236,6 +1266,7 @@ impl RuntimeFactory {
         &self,
         workspace: &str,
         selection: &qq_protocol::ModelSelection,
+        advertised: &[String],
     ) -> Result<(), RuntimeLoadError> {
         let snapshot = self
             .snapshot_for_selection(workspace, selection)
@@ -1243,19 +1274,20 @@ impl RuntimeFactory {
                 kind: error.failure_kind(),
                 message: error.to_string(),
             })?;
-        self.validate_spawn_snapshot(&snapshot).map_err(|error| {
-            let mut message = error.to_string();
-            if matches!(error, RuntimeBuildError::UnknownModel { .. })
-                && let Some(routes) = self.served_route_hint(&snapshot)
-            {
-                message.push_str("; available routes: ");
-                message.push_str(&routes);
-            }
-            RuntimeLoadError {
-                kind: error.failure_kind(),
-                message,
-            }
-        })
+        self.validate_spawn_snapshot(&snapshot, workspace, advertised)
+            .map_err(|error| {
+                let mut message = error.to_string();
+                if matches!(error, RuntimeBuildError::UnknownModel { .. })
+                    && let Some(routes) = self.served_route_hint(&snapshot)
+                {
+                    message.push_str("; available routes: ");
+                    message.push_str(&routes);
+                }
+                RuntimeLoadError {
+                    kind: error.failure_kind(),
+                    message,
+                }
+            })
     }
 
     /// A short listing of the selected provider's served routes for
@@ -1268,16 +1300,9 @@ impl RuntimeFactory {
         if let Some(discovered) =
             self.inner
                 .discovery
-                .discover(provider_id, provider, &self.inner.credentials)
+                .cached(provider_id, provider, &self.inner.credentials)
         {
-            if provider.kind().discovery().is_authoritative() {
-                ids.retain(|id| {
-                    provider
-                        .models()
-                        .get(id)
-                        .is_some_and(|model| model.explicitly_configured())
-                });
-            }
+            ids.retain(|id| model_in_catalog(provider, id, Some(&discovered)));
             ids.extend(discovered.into_iter().map(|model| model.id));
         }
         if ids.is_empty() || ids.len() > MAX_LISTED_ROUTES {
@@ -1311,7 +1336,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None)
+        self.plan_with_lookup_progress(request, profile, None, None)
             .map(|(plan, _)| plan)
     }
 
@@ -1320,8 +1345,9 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: &qq_core::RuntimeLoadProgress,
+        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<Arc<CompiledAgentPlan>, RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, Some(progress))
+        self.plan_with_lookup_progress(request, profile, Some(progress), execution_workspace)
             .map(|(plan, _)| plan)
     }
 
@@ -1332,7 +1358,7 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
-        self.plan_with_lookup_progress(request, profile, None)
+        self.plan_with_lookup_progress(request, profile, None, None)
     }
 
     fn plan_with_lookup_progress(
@@ -1340,13 +1366,37 @@ impl RuntimeFactory {
         request: &LoadRequest,
         profile: &AgentProfileId,
         progress: Option<&qq_core::RuntimeLoadProgress>,
+        execution_workspace: Option<&qq_core::command_owner::NativeDirectoryGrant>,
     ) -> Result<(Arc<CompiledAgentPlan>, PlanLookup), RuntimeBuildError> {
         preparation_phase(progress, qq_core::RuntimeLoadStage::CanonicalizingWorkspace)?;
         self.validate_isolated_tui_qa_state()?;
         self.validate_tui_qa_workspace(request.cwd())?;
-        let workspace = qq_config::canonical_working_directory(request.cwd())?;
+        let configuration_workspace = qq_config::canonical_working_directory(request.cwd())?;
+        let workspace = if let Some(grant) = execution_workspace {
+            let validate = || {
+                let canonical = std::fs::canonicalize(&grant.path)?;
+                if canonical != grant.path
+                    || qq_core::command_owner::NativeWorkspaceIdentity::capture(&canonical)?
+                        != grant.identity
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "task execution workspace changed",
+                    ));
+                }
+                Ok(canonical)
+            };
+            validate().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
+                path: grant.path.clone(),
+                source,
+            })?
+        } else {
+            configuration_workspace.clone()
+        };
         let key = PlanKey {
+            configuration_workspace,
             workspace: workspace.clone(),
+            execution_workspace_identity: execution_workspace.map(|grant| grant.identity),
             model: ModelSelection {
                 model_is_fallback: false,
                 model: request.overrides().model().map(str::to_owned),
@@ -1364,7 +1414,26 @@ impl RuntimeFactory {
             self.compile_generation(request, profile, &workspace, progress)
         });
         match lookup {
-            Ok(result) => Ok(result),
+            Ok((plan, lookup)) => {
+                if let Some(grant) = execution_workspace {
+                    let held = plan.workspace_identity().map_err(|source| {
+                        RuntimeBuildError::ExecutionWorkspace {
+                            path: grant.path.clone(),
+                            source,
+                        }
+                    })?;
+                    if plan.workspace_path() != grant.path || held != grant.identity {
+                        return Err(RuntimeBuildError::ExecutionWorkspace {
+                            path: grant.path.clone(),
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "compiled plan does not hold the admitted task workspace",
+                            ),
+                        });
+                    }
+                }
+                Ok((plan, lookup))
+            }
             Err(PlanCacheError::Compile(error)) => Err(error),
             Err(PlanCacheError::Capacity { .. }) => Err(RuntimeBuildError::PlanCacheFull),
             Err(PlanCacheError::ShutDown) => Err(RuntimeBuildError::PlanCacheShutDown),
@@ -1636,7 +1705,10 @@ impl RuntimeFactory {
                     snapshot
                         .packs()
                         .values()
-                        .map(|pack| pack.directory().to_owned())
+                        .map(|pack| match pack.directory().strip_prefix(request.cwd()) {
+                            Ok(relative) => workspace.join(relative),
+                            Err(_) => pack.directory().to_owned(),
+                        })
                         .collect(),
                 );
         if let Some(effort) = snapshot.reasoning_effort() {
@@ -1789,12 +1861,9 @@ impl RuntimeFactory {
             ProviderAccess::Http(access) => match access.auth() {
                 HttpCredential::Builtin {
                     provider, profile, ..
-                } => match provider.audience {
-                    BuiltinAudience::OpenAiCodex | BuiltinAudience::XAi => {
-                        Some(profile.as_deref().unwrap_or("default").to_owned())
-                    }
-                    BuiltinAudience::Table(_) => None,
-                },
+                } => BuiltinAuth::of(provider)
+                    .is_profile_scoped()
+                    .then(|| builtin_auth::profile_name(profile.as_deref()).to_owned()),
                 HttpCredential::Configured(_) => None,
             },
             ProviderAccess::AmazonBedrock { auth, .. }
@@ -1812,7 +1881,7 @@ impl RuntimeFactory {
             organization: snapshot.organization().map(str::to_owned),
             credential_profile,
             max_output_tokens,
-            context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
+            context_window: provider.model_context_window(snapshot.model().model()),
             pricing: metadata
                 .and_then(qq_config::ModelMetadata::pricing)
                 .cloned()
@@ -1895,9 +1964,9 @@ impl RuntimeFactory {
                 provider,
                 api_key,
                 profile,
-            } => match provider.audience {
-                BuiltinAudience::Table(_) => {
-                    let secret = resolve_builtin_api_key(
+            } => match BuiltinAuth::of(provider) {
+                BuiltinAuth::ApiKey { .. } => {
+                    let secret = builtin_auth::resolve_api_key(
                         &self.inner.credentials,
                         provider,
                         api_key.as_ref(),
@@ -1931,8 +2000,8 @@ impl RuntimeFactory {
                         credential,
                     )
                 }
-                BuiltinAudience::OpenAiCodex => {
-                    let profile = profile.as_deref().unwrap_or("default");
+                BuiltinAuth::OpenAiCodex => {
+                    let profile = builtin_auth::profile_name(profile.as_deref());
                     (
                         HttpAuth::RequestTimeCodex(
                             self.inner.credentials.codex_request_credentials(profile),
@@ -1941,16 +2010,22 @@ impl RuntimeFactory {
                         CredentialReference::Profile(profile.to_owned()),
                     )
                 }
-                BuiltinAudience::XAi => {
-                    let profile = profile.as_deref().unwrap_or("default");
+                BuiltinAuth::XAi => {
+                    let profile_name = builtin_auth::profile_name(profile.as_deref());
+                    // An explicit `api_key:` is the credential; otherwise the
+                    // profile names it.
+                    let credential = api_key.as_ref().map_or_else(
+                        || CredentialReference::Profile(profile_name.to_owned()),
+                        credential_reference,
+                    );
                     (
                         HttpAuth::RequestTimeBearer(
                             self.inner
                                 .credentials
-                                .xai_request_credentials(profile, api_key.clone()),
+                                .xai_request_credentials(profile_name, api_key.clone()),
                         ),
                         "bearer".to_owned(),
-                        CredentialReference::Profile(profile.to_owned()),
+                        credential,
                     )
                 }
             },
@@ -2155,9 +2230,19 @@ fn effective_provider_api(
     }
 }
 
-/// Which input the AWS default credential chain would pick up from this
-/// process's environment, named for a human, without calling AWS. `None`
-/// means the chain has nothing local to start from (IMDS is not probed).
+/// Shared membership rule for discovery, delegation and spawn admission.
+fn model_in_catalog(
+    provider: &ProviderConfig,
+    model: &str,
+    discovered: Option<&[DiscoveredModel]>,
+) -> bool {
+    provider.models().get(model).is_some_and(|metadata| {
+        metadata.explicitly_configured()
+            || !provider.kind().discovery().is_authoritative()
+            || discovered.is_none()
+    }) || discovered.is_some_and(|models| models.iter().any(|candidate| candidate.id == model))
+}
+
 /// How a model catalog admits a provider's routes.
 #[derive(Clone, Copy)]
 enum RouteAdmission<'a> {
@@ -2220,6 +2305,8 @@ fn environment_variable_set(variable: &str) -> bool {
     std::env::var_os(variable).is_some_and(|value| !value.is_empty())
 }
 
+/// Which input the AWS default credential chain would pick up locally,
+/// without calling AWS or probing IMDS.
 pub(crate) fn aws_default_chain_source() -> Option<&'static str> {
     if std::env::var_os("AWS_ACCESS_KEY_ID").is_some()
         && std::env::var_os("AWS_SECRET_ACCESS_KEY").is_some()
@@ -2312,11 +2399,12 @@ impl RuntimeLoader for RuntimeFactory {
         &self,
         workspace: String,
         selection: qq_protocol::ModelSelection,
+        advertised: Arc<[String]>,
     ) -> SpawnModelValidationFuture {
         let factory = self.clone();
         Box::pin(async move {
             let build = tokio::task::spawn_blocking(move || {
-                factory.validate_spawn_selection(&workspace, &selection)
+                factory.validate_spawn_selection(&workspace, &selection, &advertised)
             })
             .await;
             match build {
@@ -2383,8 +2471,12 @@ impl RuntimeLoader for RuntimeFactory {
                     overrides = overrides.with_organization(organization);
                 }
                 load = load.with_overrides(overrides);
-                let plan =
-                    factory.plan_for_profile_with_progress(&load, &request.profile, &progress)?;
+                let plan = factory.plan_for_profile_with_progress(
+                    &load,
+                    &request.profile,
+                    &progress,
+                    request.execution_workspace.as_ref(),
+                )?;
                 Ok::<_, RuntimeBuildError>(LoadedRuntime::new(plan))
             })
             .await;
@@ -2972,9 +3064,39 @@ impl RuntimeHandler {
     /// Opens the durable runtime with the server-side approval wait chosen
     /// by the caller: `None` is no deadline (the interactive default); a
     /// headless supervisor passes what its configuration asked for.
+    pub async fn open_owned(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+        let commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>> =
+            Some(Arc::new(crate::command_owner::client::CommandWorker::new(
+                factory
+                    .inner
+                    .config
+                    .paths()
+                    .data_dir()
+                    .join("command-owner-v3"),
+                std::env::current_exe().map_err(qq_core::command_owner::CommandOwnerError::Io)?,
+                crate::cli::BUILD_VERSION,
+            )?));
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        let commands = None;
+        Self::open_with_commands(factory, approval_timeout, commands).await
+    }
+
+    #[cfg(test)]
     pub async fn open_with(
         factory: RuntimeFactory,
         approval_timeout: Option<std::time::Duration>,
+    ) -> Result<Self, RuntimeHandlerError> {
+        Self::open_with_commands(factory, approval_timeout, None).await
+    }
+
+    async fn open_with_commands(
+        factory: RuntimeFactory,
+        approval_timeout: Option<std::time::Duration>,
+        native_commands: Option<Arc<dyn qq_core::command_owner::NativeCommandService>>,
     ) -> Result<Self, RuntimeHandlerError> {
         factory.validate_isolated_tui_qa_state()?;
         let database_path = factory.inner.config.session_database_path()?;
@@ -2987,10 +3109,28 @@ impl RuntimeHandler {
         // about it.
         let reviewer: Arc<dyn ApprovalReviewer> =
             Arc::new(ModelApprovalReviewer::new(factory.clone()));
-        let options = SessionRuntimeOptions::new(database_path)
+        let mut options = SessionRuntimeOptions::new(database_path)
             .with_approval_timeout(approval_timeout)
             .with_grant_authority(Arc::new(factory.clone()))
             .with_approval_reviewer(reviewer);
+        // Enable ordinary Auto containment only after its native backend is
+        // qualified. Other platforms retain their existing permission behavior
+        // until their adapters implement the same resource contract.
+        #[cfg(target_os = "linux")]
+        if native_commands.is_some() {
+            let directory = factory
+                .inner
+                .config
+                .paths()
+                .data_dir()
+                .join("task-workspaces");
+            options.task_workspaces = Some(
+                tokio::task::spawn_blocking(move || task_workspace_policy(&directory))
+                    .await
+                    .map_err(RuntimeHandlerError::TaskPreparation)??,
+            );
+        }
+        options.native_commands = native_commands;
         let durable = SessionRuntime::open(options, Arc::new(factory.clone())).await?;
         Ok(Self { durable, factory })
     }
@@ -3076,6 +3216,19 @@ impl ServerHandler for RuntimeHandler {
         Box::pin(async move {
             runtime
                 .command(request.command_id, request.command)
+                .await
+                .map_err(map_session_runtime_error)
+        })
+    }
+
+    fn workspace_catalog(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> qq_server::WorkspaceCatalogFuture {
+        let runtime = self.durable.clone();
+        Box::pin(async move {
+            runtime
+                .workspace_catalog(request)
                 .await
                 .map_err(map_session_runtime_error)
         })
@@ -3242,6 +3395,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         )
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Unavailable)
         | SessionRuntimeError::GoalCheckPolicy(qq_core::GoalCheckPolicyError::Overloaded)
+        | SessionRuntimeError::NativeCommandCapacity
         | SessionRuntimeError::QueueFull
         | SessionRuntimeError::SteeringQueueFull
         | SessionRuntimeError::WorkspaceLimitReached
@@ -3249,6 +3403,7 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
         | SessionRuntimeError::CommandLimitReached
         | SessionRuntimeError::Overloaded => ServerHandlerError::Unavailable,
         SessionRuntimeError::InvalidRunLimit
+        | SessionRuntimeError::InvalidNativeScope { .. }
         | SessionRuntimeError::OutputTooLarge
         | SessionRuntimeError::AccountingUnavailable
         | SessionRuntimeError::ShutdownTimedOut
@@ -3260,12 +3415,95 @@ fn map_session_runtime_error(error: SessionRuntimeError) -> ServerHandlerError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeHandlerError {
+    #[cfg(target_os = "linux")]
+    #[error("task workspace preparation stopped: {0}")]
+    TaskPreparation(#[source] tokio::task::JoinError),
+    #[error("native command service failed: {0}")]
+    NativeCommands(#[from] qq_core::command_owner::CommandOwnerError),
     #[error(transparent)]
     Build(#[from] RuntimeBuildError),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
     Sessions(#[from] SessionRuntimeError),
+}
+
+#[cfg(target_os = "linux")]
+fn task_workspace_policy(
+    directory: &Path,
+) -> Result<qq_core::TaskWorkspacePolicy, RuntimeBuildError> {
+    let prepare = || -> std::io::Result<_> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(directory)?;
+        let directory = directory.canonicalize()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = std::fs::metadata(&directory)?;
+            if metadata.mode() & 0o077 != 0 || metadata.uid() != rustix::process::getuid().as_raw()
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "task control directory must be private and owned by this user",
+                ));
+            }
+        }
+        let mut read_only = std::collections::BTreeSet::new();
+        #[cfg(unix)]
+        for candidate in [
+            "/usr/bin",
+            "/usr/sbin",
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/share",
+            "/bin",
+            "/sbin",
+            "/lib",
+            "/lib64",
+            "/nix/store",
+            "/System/Library",
+            "/Library/Developer/CommandLineTools",
+        ] {
+            match std::fs::canonicalize(candidate) {
+                Ok(path) => {
+                    read_only.insert(path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(qq_core::TaskWorkspacePolicy {
+            directory: qq_core::command_owner::NativeDirectoryGrant::capture(&directory)?,
+            read_only: read_only
+                .into_iter()
+                .map(|path| qq_core::command_owner::NativeDirectoryGrant::capture(&path))
+                .collect::<Result<_, _>>()?,
+            resources: qq_core::command_owner::NativeResources::Limited {
+                limits: qq_core::command_owner::NativeResourceLimits {
+                    memory_bytes: 4 * 1024 * 1024 * 1024,
+                    max_processes: 512,
+                    cpu_millicores: u32::try_from(std::thread::available_parallelism()?.get())
+                        .map_err(std::io::Error::other)?
+                        .saturating_mul(1000)
+                        .min(1_000_000),
+                },
+            },
+            limits: qq_core::task_workspace::TaskWorkspaceLimits {
+                max_entries: 16_384,
+                max_bytes: 256 * 1024 * 1024,
+            },
+        })
+    };
+    prepare().map_err(|source| RuntimeBuildError::ExecutionWorkspace {
+        path: directory.to_owned(),
+        source,
+    })
 }
 
 /// Translates the configured roster into the protocol shape, decorating each
@@ -3305,7 +3543,10 @@ fn delegation_roster(
                     role: delegation_role(entry.role()),
                     note: entry.note().map(str::to_owned),
                     effort: entry.effort(),
-                    context_window: metadata.and_then(qq_config::ModelMetadata::context_window),
+                    context_window: snapshot
+                        .providers()
+                        .get(entry.route().provider())
+                        .and_then(|provider| provider.model_context_window(entry.route().model())),
                     max_output_tokens: metadata
                         .and_then(qq_config::ModelMetadata::max_output_tokens),
                     relative_cost_permille: match (
@@ -3500,18 +3741,13 @@ fn provider_request_shape_identity(
                 }
                 // Each row keeps the marker its pre-ADR-0064 credential
                 // variant wrote, so every version 1 identity stands.
-                HttpCredential::Builtin { provider, .. } => match provider.audience {
-                    BuiltinAudience::Table(audience) => {
-                        update_digest(&mut digest, b"built-in-api-key");
+                HttpCredential::Builtin { provider, .. } => {
+                    let auth = BuiltinAuth::of(provider);
+                    update_digest(&mut digest, auth.digest_marker());
+                    if let BuiltinAuth::ApiKey { audience } = auth {
                         update_digest(&mut digest, audience.as_bytes());
                     }
-                    BuiltinAudience::OpenAiCodex => {
-                        update_digest(&mut digest, b"request-time-codex");
-                    }
-                    BuiltinAudience::XAi => {
-                        update_digest(&mut digest, b"request-time-bearer");
-                    }
-                },
+                }
             }
             // The body shape is digested in its own right, so two routes that
             // send different Responses bodies can never share an identity.
@@ -3552,7 +3788,7 @@ fn responses_body_shape(access: &HttpAccess) -> ResponsesBodyShape {
 fn implied_body_shape(auth: &HttpCredential) -> ResponsesBodyShape {
     match auth {
         HttpCredential::Builtin { provider, .. }
-            if provider.audience == BuiltinAudience::OpenAiCodex =>
+            if BuiltinAuth::of(provider) == BuiltinAuth::OpenAiCodex =>
         {
             ResponsesBodyShape::Codex
         }
@@ -3606,40 +3842,6 @@ fn update_digest(digest: &mut Sha256, value: &[u8]) {
     digest.update(value);
 }
 
-/// The audience a built-in provider's credential is bound to: the table's
-/// for an API-key preset, `qq-auth`'s for a provider whose credential it
-/// owns (ADR-0064 §1). The root is the only place the two meet.
-pub(crate) const fn builtin_audience(provider: &BuiltinProvider) -> &'static str {
-    match provider.audience {
-        BuiltinAudience::Table(audience) => audience,
-        BuiltinAudience::OpenAiCodex => qq_auth::OPENAI_CODEX_CREDENTIAL_ENDPOINT,
-        BuiltinAudience::XAi => qq_auth::XAI_CREDENTIAL_ENDPOINT,
-    }
-}
-
-/// Resolves a built-in provider's API key in precedence order: the explicit
-/// reference, the stored `<id>/<profile>` credential, then the row's
-/// variables, all bound to the row's audience.
-pub(crate) fn resolve_builtin_api_key(
-    store: &CredentialStore,
-    provider: &BuiltinProvider,
-    api_key: Option<&qq_config::SecretRef>,
-    profile: Option<&str>,
-) -> Result<Secret, AuthError> {
-    let (variable, aliases) = provider
-        .variables
-        .split_first()
-        .map_or(("", &[][..]), |(first, rest)| (*first, rest));
-    resolve_provider_credential_with_aliases(
-        store,
-        api_key,
-        &provider.stored_name(profile),
-        variable,
-        aliases,
-        Some(builtin_audience(provider)),
-    )
-}
-
 /// Checks cancellation before starting the next blocking preparation phase.
 fn preparation_phase(
     progress: Option<&qq_core::RuntimeLoadProgress>,
@@ -3656,6 +3858,12 @@ fn preparation_phase(
 
 #[derive(Debug, Error)]
 pub enum RuntimeBuildError {
+    #[error("could not admit task execution workspace {path}: {source}")]
+    ExecutionWorkspace {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("runtime preparation was cancelled")]
     PreparationCancelled,
     #[error(transparent)]
@@ -3730,7 +3938,7 @@ impl RuntimeBuildError {
     fn failure_kind(&self) -> RunFailureKind {
         match self {
             Self::Config(ConfigError::PolicyViolation { .. }) => RunFailureKind::Policy,
-            Self::Config(_) => RunFailureKind::Configuration,
+            Self::Config(_) | Self::ExecutionWorkspace { .. } => RunFailureKind::Configuration,
             Self::Auth(_) => RunFailureKind::Authentication,
             Self::Provider(error) => match error.kind() {
                 qq_provider::ProviderErrorKind::Configuration => {
@@ -3827,6 +4035,28 @@ mod tests {
     #[derive(Default)]
     pub(super) struct MemoryKeyring(Mutex<BTreeMap<String, Vec<u8>>>);
 
+    /// A stored Codex login for `account_id` that parses as a request would
+    /// read it: an ID token whose claims name the account.
+    pub(super) fn stored_codex_login(account_id: &str) -> Vec<u8> {
+        let claims = serde_json::to_vec(&serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "chatgpt_account_is_fedramp": false
+            }
+        }))
+        .unwrap();
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "id_token": format!("e30.{}.signature", URL_SAFE_NO_PAD.encode(claims)),
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "account_id": account_id,
+            "is_fedramp": false,
+            "refreshed_at": 1
+        }))
+        .unwrap()
+    }
+
     impl KeyringBackend for MemoryKeyring {
         fn get(&self, name: &str) -> Result<Vec<u8>, KeyringError> {
             self.0
@@ -3918,6 +4148,7 @@ mod tests {
             for directory in [".git", "global", "data", "managed", "work"] {
                 fs::create_dir_all(root.join(directory)).unwrap();
             }
+            let root = root.canonicalize().unwrap();
             Self { root }
         }
 
@@ -5164,6 +5395,44 @@ mod tests {
     }
 
     #[test]
+    fn litellm_bedrock_alias_keeps_automatic_compaction_enabled() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        for (model, configured, expected) in [
+            ("us.anthropic.claude-opus-5-5", "", Some(1_000_000)),
+            (
+                "us.anthropic.claude-opus-5-5",
+                "context_window: 200000,",
+                Some(200_000),
+            ),
+            ("unknown-deployment", "", None),
+        ] {
+            let request = LoadRequest::new(fixture.path("work")).with_explicit_content(format!(
+                r#"(
+                        version: 1,
+                        model: "gateway/{model}",
+                        providers: {{
+                            "gateway": LiteLlm(
+                                connection: (
+                                    base_url: "http://127.0.0.1:1/v1",
+                                    api: OpenAiChatCompletions,
+                                    auth: NoAuth,
+                                ),
+                                models: {{"{model}": (name: "Gateway model", {configured})}},
+                            ),
+                        }},
+                    )"#
+            ));
+            let snapshot = factory.load(&request).unwrap();
+            let resolved = factory.resolved_model_for_snapshot(&snapshot).unwrap();
+            assert_eq!(resolved.context_window, expected, "{model}: {configured}");
+            assert_eq!(resolved.provider_model, model);
+            assert_eq!(resolved.max_output_tokens, 16_384);
+            assert!(resolved.pricing.is_none());
+        }
+    }
+
+    #[test]
     fn resolved_model_is_secret_free_and_carries_effective_metadata() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -5508,6 +5777,41 @@ mod tests {
     }
 
     #[test]
+    fn delegation_roster_uses_effective_gateway_limits_without_inventing_other_metadata() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory();
+        for (model, configured, expected) in [
+            (
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "",
+                Some(200_000),
+            ),
+            (
+                "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+                "context_window: 64000,",
+                Some(64_000),
+            ),
+            ("unknown-deployment", "", None),
+        ] {
+            let config = format!(
+                r#"(
+                version: 1, model: "custom/main",
+                delegation: (roster: [(route: "custom/{model}", role: balanced)]),
+                providers: {{"custom": Custom(
+                    connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                    models: {{"main": (name: "Main"), "{model}": (name: "Child", {configured})}},
+                )}},
+            )"#
+            );
+            let snapshot = factory.load(&fixture.request(&config)).unwrap();
+            let roster = delegation_roster(&snapshot, snapshot.model());
+            assert_eq!(roster.roster[0].context_window, expected, "{model}");
+            assert_eq!(roster.roster[0].max_output_tokens, None);
+            assert_eq!(roster.roster[0].relative_cost_permille, None);
+        }
+    }
+
+    #[test]
     fn delegation_roster_carries_catalog_metadata_and_relative_cost() {
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
@@ -5775,6 +6079,152 @@ mod tests {
         assert_eq!(fallback, parent);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn task_runtime_works_below_a_symlinked_temporary_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::tests::task_runtime_uses_detached_files_and_source_configuration",
+                "--nocapture",
+            ])
+            .env("TMPDIR", &alias)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+    }
+
+    #[tokio::test]
+    async fn task_runtime_uses_detached_files_and_source_configuration() {
+        let fixture = RuntimeFixture::new();
+        let source = fixture.path("work").canonicalize().unwrap();
+        let task = fixture.path("task");
+        fs::create_dir(&task).unwrap();
+        let task = task.canonicalize().unwrap();
+        fs::create_dir(task.join(".qq")).unwrap();
+        fs::write(
+            task.join(".qq/config.ron"),
+            "invalid task-controlled configuration",
+        )
+        .unwrap();
+        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
+        let factory = fixture.factory();
+        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        let request = RuntimeLoadRequest {
+            execution_workspace: Some(grant),
+            workspace: source.to_string_lossy().into_owned(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+            reasoning_effort: None,
+        };
+        let loaded = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(loaded.plan.workspace_path(), task);
+        assert_eq!(loaded.resolved_model().route, "custom/host");
+        let other_source = fixture.path("other-source");
+        fs::create_dir_all(other_source.join(".qq")).unwrap();
+        fs::write(
+            other_source.join(".qq/config.ron"),
+            r#"(version:1,model:"custom/other")"#,
+        )
+        .unwrap();
+        factory
+            .inner
+            .config
+            .grant_pending_trust(&LoadRequest::new(other_source.canonicalize().unwrap()))
+            .unwrap();
+        let mut other_request = request.clone();
+        other_request.workspace = other_source
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let other = RuntimeLoader::load(&factory, other_request).await.unwrap();
+        assert_eq!(other.plan.workspace_path(), task);
+        assert_eq!(
+            other.resolved_model().route,
+            "custom/other",
+            "a shared physical root must not reuse another project's configuration"
+        );
+        #[cfg(windows)]
+        let factory = {
+            // Windows directory capabilities pin their names while cached.
+            // First prove replacement is refused, then release those handles
+            // to exercise admission against the saved identity after replacement.
+            let error = fs::rename(&task, fixture.path("held-task")).unwrap_err();
+            assert!(!fixture.path("held-task").exists(), "{error:?}");
+            assert_eq!(
+                &qq_core::command_owner::NativeWorkspaceIdentity::capture(&task).unwrap(),
+                &request.execution_workspace.as_ref().unwrap().identity,
+                "a refused rename must retain the admitted directory identity"
+            );
+            drop(loaded);
+            drop(other);
+            factory.shutdown_plans();
+            drop(factory);
+            fixture.factory()
+        };
+        fs::rename(&task, fixture.path("held-task")).unwrap();
+        fs::create_dir(&task).unwrap();
+        let result = RuntimeLoader::load(&factory, request).await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeLoadError {
+                    kind: RunFailureKind::Configuration,
+                    ..
+                })
+            ),
+            "replaced task roots must not use cached authority"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory() {
+        let fixture = RuntimeFixture::new();
+        let source = fixture.path("work").canonicalize().unwrap();
+        let task = fixture.path("task");
+        fs::create_dir(&task).unwrap();
+        let task = task.canonicalize().unwrap();
+        fs::write(fixture.path("global/config.ron"), r#"(version:1, model:"custom/host", providers:{"custom": Custom(connection:(base_url:"http://127.0.0.1:1/v1",api:OpenAiResponses,auth:NoAuth))})"#).unwrap();
+        let factory = fixture.factory();
+        let grant = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        let mut request = RuntimeLoadRequest {
+            execution_workspace: Some(grant.clone()),
+            workspace: source.to_string_lossy().into_owned(),
+            model: ModelSelection::default(),
+            profile: AgentProfileId::default(),
+            reasoning_effort: None,
+        };
+        let original = RuntimeLoader::load(&factory, request.clone())
+            .await
+            .unwrap();
+        fs::rename(&task, fixture.path("original-task")).unwrap();
+        fs::create_dir(&task).unwrap();
+        let replacement = qq_core::command_owner::NativeDirectoryGrant::capture(&task).unwrap();
+        assert_ne!(grant.identity, replacement.identity);
+        request.execution_workspace = Some(replacement.clone());
+        let loaded = RuntimeLoader::load(&factory, request).await.unwrap();
+        assert_eq!(
+            loaded.plan.workspace_identity().unwrap(),
+            replacement.identity
+        );
+        assert_eq!(original.plan.workspace_identity().unwrap(), grant.identity);
+    }
+
     #[tokio::test]
     async fn session_model_fallback_resolves_config_but_explicit_pin_wins() {
         let fixture = RuntimeFixture::new();
@@ -5797,6 +6247,7 @@ mod tests {
             let loaded = RuntimeLoader::load(
                 &factory,
                 RuntimeLoadRequest {
+                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: workspace.display().to_string(),
                     model: ModelSelection {
@@ -5834,8 +6285,134 @@ mod tests {
                 max_output_tokens: Some(128),
                 organization: None,
             },
+            Arc::from([]),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn spawn_admission_keeps_the_parent_runs_advertised_selection() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+            version: 1, model: "custom/configured",
+            providers: {"custom": Custom(
+                connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                models: {"configured": (name: "Configured")},
+            )},
+        )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let request = LoadRequest::new(workspace.clone())
+            .with_overrides(RuntimeOverrides::new().with_model("custom/selected-for-this-run"));
+        let plan = factory.plan_for(&request).unwrap();
+        assert!(
+            plan.descriptor()
+                .tools
+                .spawn_model_routes
+                .iter()
+                .any(|route| route == "custom/selected-for-this-run")
+        );
+        RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            ModelSelection {
+                model: Some("custom/selected-for-this-run".to_owned()),
+                ..ModelSelection::default()
+            },
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            validate_route(&factory, &workspace, "custom/selected-for-this-run")
+                .await
+                .is_err()
+        );
+        let configuration = fs::read_to_string(fixture.path("global/config.ron")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            configuration.replace("auth: NoAuth", "auth: Bearer(Stored(\"lost\"))"),
+        )
+        .unwrap();
+        let selection = ModelSelection {
+            model: Some("custom/selected-for-this-run".to_owned()),
+            ..ModelSelection::default()
+        };
+        let error = RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            selection.clone(),
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, RunFailureKind::Authentication);
+        fs::write(
+            fixture.path("managed/managed.ron"),
+            r#"(version: 1, policy: (denied_providers: ["custom"]))"#,
+        )
+        .unwrap();
+        let error = RuntimeLoader::validate_spawn_model(
+            &factory,
+            workspace.display().to_string(),
+            selection,
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind, RunFailureKind::Policy);
+    }
+
+    #[tokio::test]
+    async fn model_catalog_selection_does_not_advertise_an_unadmitted_route() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+            version: 1, model: "custom/selected",
+            providers: {"custom": Custom(
+                connection: (base_url: "http://127.0.0.1:1/v1", api: OpenAiResponses, auth: NoAuth),
+                models: {"known": (name: "Known")},
+            )},
+        )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory();
+        let catalog_factory = factory.clone();
+        let catalog_workspace = workspace.display().to_string();
+        let models = tokio::task::spawn_blocking(move || {
+            catalog_factory.models_for(&ModelCatalogRequest {
+                workspace: catalog_workspace,
+                selection: ModelSelection {
+                    model: Some("custom/typo".to_owned()),
+                    ..ModelSelection::default()
+                },
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(!models.iter().any(|model| model.model == "typo"));
+        assert!(models.iter().any(|model| model.model == "selected"));
+        for model in models {
+            validate_route(
+                &factory,
+                &workspace,
+                model.selection.model.as_deref().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            validate_route(&factory, &workspace, "custom/typo")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -6031,6 +6608,74 @@ mod tests {
             .unwrap();
     }
 
+    /// A stored OAuth login counts as authenticated only if a request could
+    /// use it: unreadable stored bytes fail the spawn gate up front instead
+    /// of failing the first request. An expired login still passes, because
+    /// a request refreshes it, and the gate itself never refreshes.
+    #[tokio::test]
+    async fn spawn_validation_rejects_unreadable_stored_oauth_logins() {
+        let fixture = RuntimeFixture::new();
+        let workspace = fs::canonicalize(fixture.path("work")).unwrap();
+        let credentials = CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        );
+        fs::write(
+            fixture.path("global/config.ron"),
+            r#"(
+                version: 1,
+                model: "openai/gpt-5.6",
+                providers: {
+                    "openai-codex": OpenAiCodex(
+                        profile: "work",
+                        models: {"gpt-test": (name: "Codex test")},
+                    ),
+                    "xai": XAi(profile: "work"),
+                },
+            )"#,
+        )
+        .unwrap();
+        let factory = fixture.factory_with_credentials(credentials.clone());
+        for (name, kind, audience) in [
+            ("xai/work", "xai-oauth", "https://api.x.ai"),
+            ("openai-codex/work", "openai-codex", "https://chatgpt.com"),
+        ] {
+            credentials
+                .set_with_metadata(
+                    name,
+                    b"not a stored login",
+                    false,
+                    Some(kind),
+                    Some(audience),
+                )
+                .unwrap();
+        }
+        for route in ["xai/grok-4.5", "openai-codex/gpt-test"] {
+            let error = validate_route(&factory, &workspace, route)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind, RunFailureKind::Authentication, "{route}");
+        }
+
+        let expired = serde_json::json!({
+            "version": 1,
+            "access_token": "expired-access-token",
+            "refresh_token": "refresh-token",
+            "expires_at": 1,
+        });
+        credentials
+            .set_with_metadata(
+                "xai/work",
+                serde_json::to_vec(&expired).unwrap(),
+                false,
+                Some("xai-oauth"),
+                Some("https://api.x.ai"),
+            )
+            .unwrap();
+        validate_route(&factory, &workspace, "xai/grok-4.5")
+            .await
+            .unwrap();
+    }
     #[tokio::test]
     async fn spawn_validation_rejects_policy_denied_providers() {
         let fixture = RuntimeFixture::new();
@@ -6130,6 +6775,15 @@ mod tests {
             .await
             .unwrap();
         server.join().unwrap();
+
+        let snapshot = factory
+            .snapshot_for_selection(&workspace.display().to_string(), &ModelSelection::default())
+            .unwrap();
+        let routes = factory.model_options_for_plan(&snapshot);
+        assert!(
+            routes.iter().any(|model| model.model == "live-model"),
+            "{routes:?}"
+        );
 
         // The endpoint is gone: a second validation can only succeed from
         // the warm cache, proving no network round trip is required.
@@ -6483,6 +7137,7 @@ mod tests {
                 model: Some("custom/test-model".to_owned()),
                 ..ModelSelection::default()
             },
+            plan.descriptor().tools.spawn_model_routes.clone().into(),
         )
         .await
         .unwrap();
@@ -6517,6 +7172,7 @@ mod tests {
         RuntimeLoader::load(
             &factory,
             RuntimeLoadRequest {
+                execution_workspace: None,
                 reasoning_effort: None,
                 workspace: workspace.display().to_string(),
                 model: ModelSelection::default(),
@@ -6990,10 +7646,15 @@ mod tests {
             CredentialPaths::new(fixture.path("data")),
             Arc::new(MemoryKeyring::default()),
         );
-        credentials.set_with_metadata("openai-codex/default", serde_json::to_vec(&serde_json::json!({
-            "version": 1, "id_token": "id", "access_token": "access", "refresh_token": "refresh",
-            "account_id": "test", "is_fedramp": false, "refreshed_at": 1
-        })).unwrap(), false, Some("openai-codex"), Some("https://chatgpt.com")).unwrap();
+        credentials
+            .set_with_metadata(
+                "openai-codex/default",
+                stored_codex_login("test"),
+                false,
+                Some("openai-codex"),
+                Some("https://chatgpt.com"),
+            )
+            .unwrap();
         let factory = fixture.factory_with_credentials(credentials);
         let snapshot = factory
             .load(&fixture.request(
@@ -7191,6 +7852,38 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &second));
     }
 
+    /// The plan descriptor names the credential that applies: an explicit
+    /// xAI `api_key:` reference when one is configured, otherwise the
+    /// profile `qq-auth` resolves.
+    #[test]
+    fn xai_descriptor_names_an_explicit_reference_over_the_profile() {
+        let fixture = RuntimeFixture::new();
+        let factory = fixture.factory_with_credentials(CredentialStore::with_backend(
+            CredentialPaths::new(fixture.path("data")),
+            Arc::new(MemoryKeyring::default()),
+        ));
+        for (providers, expected) in [
+            (
+                r#""xai": XAi(api_key: Env("MY_XAI_KEY"), profile: "work")"#,
+                CredentialReference::Environment("MY_XAI_KEY".to_owned()),
+            ),
+            (
+                r#""xai": XAi(profile: "work")"#,
+                CredentialReference::Profile("work".to_owned()),
+            ),
+        ] {
+            let request = fixture.request(format!(
+                r#"(version: 1, model: "xai/grok-4.6", providers: {{ {providers} }})"#
+            ));
+            let plan = factory.plan_for(&request).unwrap();
+            assert_eq!(
+                plan.descriptor().provider.credential,
+                expected,
+                "{providers}"
+            );
+            assert_eq!(plan.descriptor().provider.auth_scheme, "bearer");
+        }
+    }
     #[test]
     fn runtime_cache_identity_includes_effective_context_window() {
         let fixture = RuntimeFixture::new();
@@ -7814,7 +8507,9 @@ mod tests {
         let workspace = qq_config::canonical_working_directory(request.cwd()).unwrap();
         let profile = AgentProfileId::default();
         let key = PlanKey {
+            configuration_workspace: workspace.clone(),
             workspace: workspace.clone(),
+            execution_workspace_identity: None,
             model: ModelSelection::default(),
             profile: profile.clone(),
             explicit_config_path: None,
@@ -8548,8 +9243,12 @@ mod tests {
         });
         let factory = factory_with_stored_credential_providers(&fixture, keyring.clone(), 1);
         let request = fixture.request(r#"(version: 1, model: "p0/m")"#);
-        let result =
-            factory.plan_for_profile_with_progress(&request, &AgentProfileId::default(), &progress);
+        let result = factory.plan_for_profile_with_progress(
+            &request,
+            &AgentProfileId::default(),
+            &progress,
+            None,
+        );
         assert!(
             matches!(result, Err(RuntimeBuildError::PreparationCancelled)),
             "{result:?}"
@@ -8583,6 +9282,7 @@ mod tests {
             &fixture.request("invalid"),
             &AgentProfileId::default(),
             &progress,
+            None,
         );
         assert!(matches!(
             result,
@@ -8600,6 +9300,7 @@ mod tests {
             .factory()
             .load_with_progress(
                 RuntimeLoadRequest {
+                    execution_workspace: None,
                     reasoning_effort: None,
                     workspace: fixture.path("missing").to_string_lossy().into_owned(),
                     model: ModelSelection::default(),

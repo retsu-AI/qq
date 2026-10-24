@@ -262,6 +262,46 @@ impl SessionClient {
         .await
     }
 
+    /// Discover roots on this connection's server, without local path resolution.
+    pub async fn workspaces(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> Result<qq_protocol::WorkspaceCatalog, ClientError> {
+        let store_id = self.connection.server_info().server_id;
+        if request.limit == 0
+            || request.limit > qq_protocol::MAX_WORKSPACE_PAGE
+            || request
+                .after
+                .is_some_and(|cursor| cursor.store_id != store_id)
+        {
+            return Err(ClientError::InvalidCursor);
+        }
+        let catalog: qq_protocol::WorkspaceCatalog = self
+            .post_json("/v1/workspaces/list", &request, MAX_SNAPSHOT_BYTES)
+            .await?;
+        let mut previous = request.after.map(|cursor| cursor.workspace_id);
+        if catalog.store_id != store_id || catalog.workspaces.len() > usize::from(request.limit) {
+            return Err(ClientError::InvalidCursor);
+        }
+        for workspace in &catalog.workspaces {
+            if previous.is_some_and(|id| workspace.id <= id)
+                || workspace.path.is_empty()
+                || workspace.path.len() > qq_protocol::MAX_WORKSPACE_BYTES
+            {
+                return Err(ClientError::InvalidCursor);
+            }
+            previous = Some(workspace.id);
+        }
+        if catalog.next.is_some_and(|next| {
+            next.store_id != store_id
+                || Some(next.workspace_id) != previous
+                || catalog.workspaces.len() != usize::from(request.limit)
+        }) {
+            return Err(ClientError::InvalidCursor);
+        }
+        Ok(catalog)
+    }
+
     pub async fn snapshot(
         &self,
         request: SnapshotRequest,
@@ -1061,6 +1101,92 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, ClientError::Unavailable);
+    }
+    struct WorkspacePageHandler(qq_protocol::WorkspaceCatalog);
+    impl ServerHandler for WorkspacePageHandler {
+        fn workspace_catalog(
+            &self,
+            _request: qq_protocol::WorkspaceCatalogRequest,
+        ) -> qq_server::WorkspaceCatalogFuture {
+            let page = self.0.clone();
+            Box::pin(async move { Ok(page) })
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_catalog_keeps_server_paths_and_rejects_foreign_or_invalid_pages() {
+        use qq_protocol::{
+            WorkspaceCatalog, WorkspaceCatalogCursor, WorkspaceCatalogRequest, WorkspaceSummary,
+        };
+        let store_id = StoreId::from_bytes([0xAA; 16]);
+        let id = WorkspaceId::from_bytes([2; 16]);
+        let root = WorkspaceSummary {
+            id,
+            path: "C:\\remote\\project".to_owned(),
+        };
+        let valid = WorkspaceCatalog {
+            store_id,
+            workspaces: vec![root.clone()],
+            next: Some(WorkspaceCatalogCursor {
+                store_id,
+                workspace_id: id,
+            }),
+        };
+        let (_directory, server) =
+            start_test_server(Arc::new(WorkspacePageHandler(valid.clone()))).await;
+        let client = SessionClient::new(server.connection().clone()).unwrap();
+        let request = WorkspaceCatalogRequest {
+            after: None,
+            limit: 1,
+        };
+        assert_eq!(client.workspaces(request.clone()).await.unwrap(), valid);
+        for limit in [0, qq_protocol::MAX_WORKSPACE_PAGE + 1] {
+            assert!(matches!(
+                client
+                    .workspaces(WorkspaceCatalogRequest { after: None, limit })
+                    .await,
+                Err(ClientError::InvalidCursor)
+            ));
+        }
+        assert!(matches!(
+            client
+                .workspaces(WorkspaceCatalogRequest {
+                    after: Some(WorkspaceCatalogCursor {
+                        store_id: StoreId::from_bytes([0xBB; 16]),
+                        workspace_id: id
+                    }),
+                    limit: 1
+                })
+                .await,
+            Err(ClientError::InvalidCursor)
+        ));
+        server.shutdown().await.unwrap();
+        let mut pages = Vec::new();
+        let mut foreign = valid.clone();
+        foreign.store_id = StoreId::from_bytes([0xBB; 16]);
+        pages.push(foreign);
+        let mut duplicate = valid.clone();
+        duplicate.workspaces.push(root.clone());
+        pages.push(duplicate);
+        let mut wrong_next = valid.clone();
+        wrong_next.next.as_mut().unwrap().workspace_id = WorkspaceId::from_bytes([3; 16]);
+        pages.push(wrong_next);
+        let mut empty = valid.clone();
+        empty.workspaces.clear();
+        pages.push(empty);
+        let mut bad_path = valid.clone();
+        bad_path.workspaces[0].path.clear();
+        pages.push(bad_path);
+        for page in pages {
+            let (_directory, server) =
+                start_test_server(Arc::new(WorkspacePageHandler(page))).await;
+            let client = SessionClient::new(server.connection().clone()).unwrap();
+            assert!(matches!(
+                client.workspaces(request.clone()).await,
+                Err(ClientError::InvalidCursor)
+            ));
+            server.shutdown().await.unwrap();
+        }
     }
 }
 

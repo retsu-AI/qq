@@ -1,12 +1,9 @@
-#[cfg(test)]
-use std::sync::OnceLock;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-#[cfg(test)]
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, mpsc};
 
 use qq_protocol::ToolCallDisplay;
@@ -37,25 +34,214 @@ static TEST_EXECUTION_BARRIER: OnceLock<std::sync::Barrier> = OnceLock::new();
 /// Tracks actual local execution, including work whose result waiter was
 /// dropped. Stop dispatching into the scope before awaiting its drain.
 #[derive(Clone, Default)]
-pub(crate) struct ToolTasks(Arc<ToolTaskState>);
+pub(crate) struct ToolTasks(
+    Arc<ToolTaskState>,
+    Option<Arc<crate::sessions::native_scope::NativeScopes>>,
+);
 
 #[derive(Default)]
 struct ToolTaskState {
+    #[cfg(target_os = "linux")]
+    linux_owner: Option<super::linux_owner::LinuxOwner>,
+    #[cfg(target_os = "macos")]
+    macos_owner: Option<super::macos_owner::MacosOwner>,
+    #[cfg(windows)]
+    windows_owner: Option<super::windows_owner::WindowsOwner>,
+    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    native_deadline_ms: std::sync::atomic::AtomicU64,
+    task_home: OnceLock<std::path::PathBuf>,
+    process_recorder: OnceLock<ProcessRecorder>,
+    native_recorder: OnceLock<NativeRecorder>,
+    native_results:
+        std::sync::Mutex<std::collections::HashMap<qq_protocol::ToolCallId, ToolOutput>>,
+    output_recorder: OnceLock<OutputRecorder>,
+    unrecorded_process: AtomicBool,
+    unrecorded_output: AtomicBool,
     active: AtomicUsize,
     idle: Notify,
     unconfirmed_process_exit: AtomicBool,
 }
 
+pub(super) type RecordFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>> + Send>,
+>;
+type ProcessRecorder = Box<
+    dyn Fn(
+            qq_protocol::ToolCallId,
+            Box<super::process_context::ExecutionContextReceipt>,
+        ) -> RecordFuture
+        + Send
+        + Sync,
+>;
+
+type NativeRecorder = Box<
+    dyn Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> RecordFuture + Send + Sync,
+>;
+
+type OutputRecorder = Box<dyn Fn(qq_protocol::ToolCallId, Vec<u8>) -> RecordFuture + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum ToolDrainError {
+pub enum ToolDrainError {
+    #[error("the command process receipt could not be persisted")]
+    UnrecordedProcess,
+    #[error("command output could not be persisted")]
+    UnrecordedOutput,
     #[error("local shell process termination could not be confirmed")]
     UnconfirmedProcessExit,
 }
 
 impl ToolTasks {
+    pub(crate) fn set_task_home(&self, home: std::path::PathBuf) -> bool {
+        self.0.task_home.set(home).is_ok()
+    }
+
+    pub(crate) fn with_native_scopes(
+        &self,
+        scopes: Option<Arc<crate::sessions::native_scope::NativeScopes>>,
+    ) -> Self {
+        Self(Arc::clone(&self.0), scopes)
+    }
+    pub(crate) fn saved_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .get(&id)
+            .cloned()
+    }
+    pub(crate) fn drain_native_results(&self) -> Vec<(qq_protocol::ToolCallId, ToolOutput)> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .drain()
+            .collect()
+    }
+    pub(crate) fn take_native_result(&self, id: qq_protocol::ToolCallId) -> Option<ToolOutput> {
+        self.0
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .remove(&id)
+    }
+
+    pub(crate) fn shorten_native_deadline(&self, deadline: Option<u64>) {
+        if let Some(deadline) = deadline {
+            let _ = self.0.native_deadline_ms.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |saved| {
+                    Some(if saved == 0 {
+                        deadline
+                    } else {
+                        saved.min(deadline)
+                    })
+                },
+            );
+        }
+    }
+
+    pub(crate) fn has_native_scope(&self) -> bool {
+        self.1.is_some()
+    }
+
+    pub(crate) fn with_native_commands(
+        service: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    ) -> Self {
+        Self(
+            Arc::new(ToolTaskState {
+                native_commands: service,
+                ..ToolTaskState::default()
+            }),
+            None,
+        )
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn owned_linux(
+        launcher: crate::command_owner::CommandLauncher,
+    ) -> std::io::Result<Self> {
+        Ok(Self(
+            Arc::new(ToolTaskState {
+                linux_owner: Some(super::linux_owner::LinuxOwner::discover(launcher)?),
+                ..ToolTaskState::default()
+            }),
+            None,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn owned_macos(
+        launcher: crate::command_owner::CommandLauncher,
+    ) -> std::io::Result<Self> {
+        Ok(Self(
+            Arc::new(ToolTaskState {
+                macos_owner: Some(super::macos_owner::MacosOwner::discover(launcher)?),
+                ..ToolTaskState::default()
+            }),
+            None,
+        ))
+    }
+    #[cfg(windows)]
+    pub(crate) fn owned_windows(
+        launcher: crate::command_owner::CommandLauncher,
+    ) -> std::io::Result<Self> {
+        Ok(Self(
+            Arc::new(ToolTaskState {
+                windows_owner: Some(super::windows_owner::WindowsOwner::discover(launcher)?),
+                ..ToolTaskState::default()
+            }),
+            None,
+        ))
+    }
+    pub(crate) fn set_native_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Option<qq_protocol::StoreId>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .native_recorder
+            .set(Box::new(move |id, owner| Box::pin(recorder(id, owner))))
+            .map_err(|_| ToolDrainError::UnrecordedProcess)
+    }
+
+    pub(crate) fn set_process_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Box<super::process_context::ExecutionContextReceipt>) -> Fut
+            + Send
+            + Sync
+            + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .process_recorder
+            .set(Box::new(move |id, receipt| Box::pin(recorder(id, receipt))))
+            .map_err(|_| ToolDrainError::UnrecordedProcess)
+    }
+
+    pub(crate) fn set_output_recorder<F, Fut>(&self, recorder: F) -> Result<(), ToolDrainError>
+    where
+        F: Fn(qq_protocol::ToolCallId, Vec<u8>) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), crate::sessions::SessionRuntimeError>>
+            + Send
+            + 'static,
+    {
+        self.0
+            .output_recorder
+            .set(Box::new(move |id, chunk| Box::pin(recorder(id, chunk))))
+            .map_err(|_| ToolDrainError::UnrecordedOutput)
+    }
+
     pub(crate) fn check(&self) -> Result<(), ToolDrainError> {
         if self.0.unconfirmed_process_exit.load(Ordering::Acquire) {
             Err(ToolDrainError::UnconfirmedProcessExit)
+        } else if self.0.unrecorded_process.load(Ordering::Acquire) {
+            Err(ToolDrainError::UnrecordedProcess)
+        } else if self.0.unrecorded_output.load(Ordering::Acquire) {
+            Err(ToolDrainError::UnrecordedOutput)
         } else {
             Ok(())
         }
@@ -88,11 +274,108 @@ pub(crate) struct ToolTaskLease {
 }
 
 impl ToolTaskLease {
+    pub(crate) fn save_native_result(&self, id: qq_protocol::ToolCallId, result: &ToolOutput) {
+        self.tasks
+            .native_results
+            .lock()
+            .expect("native result lock")
+            .insert(id, result.clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn linux_owner(&self) -> Option<&super::linux_owner::LinuxOwner> {
+        self.tasks.linux_owner.as_ref()
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn macos_owner(&self) -> Option<&super::macos_owner::MacosOwner> {
+        self.tasks.macos_owner.as_ref()
+    }
+    #[cfg(windows)]
+    pub(super) fn windows_owner(&self) -> Option<&super::windows_owner::WindowsOwner> {
+        self.tasks.windows_owner.as_ref()
+    }
+    /// Keep native startup and its child tracked if the awaiting task unwinds.
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+    pub(super) fn fork(&self) -> Self {
+        self.tasks.active.fetch_add(1, Ordering::AcqRel);
+        Self {
+            tasks: Arc::clone(&self.tasks),
+            process_pending: false,
+        }
+    }
+
+    pub(crate) fn set_native_owner(
+        &self,
+        id: qq_protocol::ToolCallId,
+        owner: Option<qq_protocol::StoreId>,
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.native_recorder.get() else {
+            return Box::pin(async { Err(crate::sessions::SessionRuntimeError::Unavailable) });
+        };
+        self.record(recorder(id, owner), RecordKind::Process)
+    }
+
+    pub(crate) fn record_process(
+        &self,
+        id: qq_protocol::ToolCallId,
+        receipt: Box<super::process_context::ExecutionContextReceipt>,
+    ) -> RecordFuture {
+        let Some(recorder) = self.tasks.process_recorder.get() else {
+            return Box::pin(async { Ok(()) });
+        };
+        self.record(recorder(id, receipt), RecordKind::Process)
+    }
+
+    pub(super) fn output_record(
+        &self,
+        id: qq_protocol::ToolCallId,
+        bytes: &[u8],
+    ) -> Option<RecordFuture> {
+        let recorder = self.tasks.output_recorder.get()?;
+        Some(self.record(recorder(id, bytes.to_vec()), RecordKind::Output))
+    }
+
+    fn record(&self, write: RecordFuture, kind: RecordKind) -> RecordFuture {
+        let mut record = RecordGuard {
+            tasks: Arc::clone(&self.tasks),
+            completed: false,
+            kind,
+        };
+        Box::pin(async move {
+            let result = write.await;
+            record.completed = result.is_ok();
+            drop(record);
+            result
+        })
+    }
+
     pub(crate) fn process_started(&mut self) {
         self.process_pending = true;
     }
     pub(crate) fn process_reaped(&mut self) {
         self.process_pending = false;
+    }
+}
+
+enum RecordKind {
+    Process,
+    Output,
+}
+
+struct RecordGuard {
+    tasks: Arc<ToolTaskState>,
+    completed: bool,
+    kind: RecordKind,
+}
+impl Drop for RecordGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            let failed = match self.kind {
+                RecordKind::Process => &self.tasks.unrecorded_process,
+                RecordKind::Output => &self.tasks.unrecorded_output,
+            };
+            failed.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -131,6 +414,10 @@ impl ToolCancellation {
             run,
             call: Arc::new(CallCancellation::default()),
         }
+    }
+
+    pub(crate) fn timed_out(&self) -> bool {
+        self.run.timed_out()
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -180,6 +467,7 @@ pub(crate) async fn execute(
     network_policy: Arc<super::network::NetworkPolicy>,
 ) -> ToolOutput {
     execute_with_images(
+        None,
         workspace,
         file_state,
         name,
@@ -201,6 +489,7 @@ pub(crate) async fn execute(
     reason = "one dispatch per call; every argument is a distinct capability the tool receives"
 )]
 pub(crate) async fn execute_with_images(
+    native: Option<Arc<super::process_context::NativeExecution>>,
     workspace: Workspace,
     file_state: Arc<FileState>,
     name: String,
@@ -217,6 +506,15 @@ pub(crate) async fn execute_with_images(
     if arguments.len() > MAX_ARGUMENT_BYTES {
         return ToolOutput::refused("tool arguments exceed the 64 KiB limit");
     }
+    let scope = match tasks
+        .1
+        .as_ref()
+        .map(|scopes| scopes.get(workspace.path()))
+        .transpose()
+    {
+        Ok(scope) => scope,
+        Err(reason) => return ToolOutput::refused(reason),
+    };
     let cancelled = ToolCancellation::new(cancelled);
     let _cancel_on_drop = CancelCallOnDrop(Arc::clone(&cancelled.call));
     // Fetch awaits sockets, not files: it runs on the async runtime like
@@ -262,14 +560,115 @@ pub(crate) async fn execute_with_images(
             (false, _) => None,
         };
         let lease = tasks.enter();
+        let native_commands = tasks.0.native_commands.clone();
+        let deadline_ms = tasks.0.native_deadline_ms.load(Ordering::Acquire);
+        let not_after_ms = if native_commands.is_some() {
+            let launch = match (&shell_arguments, &exec_arguments) {
+                (Some(shell), _) => Launch::Shell(shell),
+                (_, Some(exec)) => Launch::Exec(exec),
+                (None, None) => unreachable!("one launch shape was parsed"),
+            };
+            let task_deadline = (deadline_ms != 0).then_some(deadline_ms);
+            match launch.timeout_seconds() {
+                None => task_deadline,
+                Some(timeout) => {
+                    let call_deadline = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .ok()
+                        .and_then(|now| u64::try_from(now.as_millis()).ok())
+                        .and_then(|now| {
+                            timeout
+                                .checked_mul(1000)
+                                .and_then(|duration| now.checked_add(duration))
+                        });
+                    let Some(call_deadline) = call_deadline.filter(|_| timeout > 0) else {
+                        return ToolOutput::refused(
+                            "timeout_seconds must be positive and fit a command deadline",
+                        );
+                    };
+                    // Freeze before preparation/connection so retries cannot renew it.
+                    Some(task_deadline.map_or(call_deadline, |task| task.min(call_deadline)))
+                }
+            }
+        } else {
+            None
+        };
         return match tokio::spawn(async move {
             let mut lease = lease;
+            if let Some(service) = native_commands {
+                let Some(id) = call_id else {
+                    return ToolOutput::refused(
+                        "native execution requires a persisted call identity",
+                    );
+                };
+                let requested = shell_arguments
+                    .as_ref()
+                    .map(|args| args.env.as_slice())
+                    .or_else(|| exec_arguments.as_ref().map(|args| args.env.as_slice()))
+                    .unwrap_or(&[]);
+                if let Some(name) = requested.iter().find(|name| !shell_policy.permits_env(name)) {
+                    return ToolOutput::refused(format!(
+                        "env_not_allowed: {name} is not in policy.shell_env; the child sees only {} plus allowlisted names",
+                        crate::BASE_ENV.join(" ")
+                    ));
+                }
+                let environment = match crate::command_owner::NativeEnvironment::capture(requested)
+                {
+                    Ok(environment) => environment,
+                    Err(error) => return ToolOutput::refused(error.to_string()),
+                };
+                let environment = if let Some(home) = tasks.0.task_home.get() {
+                    match environment.with_task_home(home) {
+                        Ok(environment) => environment,
+                        Err(error) => return ToolOutput::refused(error.to_string()),
+                    }
+                } else { environment };
+                let held_workspace = workspace.clone();
+                let workspace_identity = match tokio::task::spawn_blocking(move || {
+                    crate::command_owner::NativeWorkspaceIdentity::held(held_workspace.root())
+                }).await {
+                    Ok(Ok(identity)) => identity,
+                    Ok(Err(error)) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                    Err(error) => return ToolOutput::refused(format!("could not capture command workspace: {error}")),
+                };
+                if let Some(scope) = &scope
+                    && let Err(error) = scope.validate_workspace(workspace.path(), workspace_identity) {
+                    return ToolOutput::refused(error.to_string());
+                }
+                let request = crate::command_owner::NativeCommand {
+                    environment,
+                    network: scope.as_ref().map_or(crate::command_owner::NativeNetwork::Host, |scope| scope.network),
+                    resources: scope.as_ref().map_or(crate::command_owner::NativeResources::Host, |scope| scope.resources),
+                    filesystem: scope.as_ref().map_or(crate::command_owner::NativeFilesystem::Host, |scope| scope.filesystem()),
+                    id,
+                    workspace: workspace.path().to_owned(),
+                    workspace_identity,
+                    tool: name,
+                    arguments,
+                    shell_policy: shell_policy.as_ref().clone(),
+                    approved_images: approved_read_images.entries().to_vec(),
+                    not_after_ms,
+                };
+                return crate::command_owner::observe(
+                    service,
+                    request,
+                    &cancelled,
+                    output.as_ref(),
+                    &mut lease,
+                )
+                .await;
+            }
+
+            if tasks.1.is_some() {
+                return ToolOutput::refused("scoped execution requires the durable native command service");
+            }
             let launch = match (&shell_arguments, &exec_arguments) {
                 (Some(shell), _) => Launch::Shell(shell),
                 (_, Some(exec)) => Launch::Exec(exec),
                 (None, None) => unreachable!("one launch shape was parsed"),
             };
             run_shell(
+                native,
                 &workspace,
                 &shell_policy,
                 approved_read_images,
@@ -278,7 +677,7 @@ pub(crate) async fn execute_with_images(
                 launch,
                 &cancelled,
                 output.as_ref(),
-                &mut lease.process_pending,
+                &mut lease,
             )
             .await
         })
@@ -296,6 +695,13 @@ pub(crate) async fn execute_with_images(
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _lease = lease;
+        if let Some(scope) = scope {
+            let checked = crate::command_owner::NativeWorkspaceIdentity::held(workspace.root())
+                .and_then(|identity| scope.validate_workspace(workspace.path(), identity));
+            if let Err(error) = checked {
+                return ToolOutput::refused(error.to_string());
+            }
+        }
         execute_blocking(&workspace, &file_state, &name, &arguments, &cancelled)
     })
     .await
@@ -319,7 +725,7 @@ pub(crate) fn bounded_result(content: String, is_error: bool) -> ToolOutput {
 /// model context; `ui_payload` is persisted for clients and never sent back
 /// to the model. Constructors are the one bounding boundary: they mask
 /// secrets, then bound the text to the tool's [`Bounds`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum ResultDisposition {
     Observed,
     Refused,
@@ -328,8 +734,13 @@ pub(crate) enum ResultDisposition {
     Interrupted,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ToolOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_outcome: Option<crate::command_owner::NativeCommandOutcome>,
+    /// Only the observer can attest that this is the worker's terminal result.
+    #[serde(skip)]
+    pub(crate) native_owner: Option<qq_protocol::StoreId>,
     pub(crate) disposition: ResultDisposition,
     /// Result identity before masking, output bounds or citations.
     /// Constructors hash their input; producers that clip earlier override it.
@@ -403,7 +814,7 @@ impl ReadSideOutput {
 /// A complete tool output awaiting storage: the text, its SHA-256 (the
 /// handle's digest), and the line the bounded text omits from so the marker
 /// can point at it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SpillRecord {
     pub(crate) text: String,
     pub(crate) digest: String,
@@ -447,6 +858,41 @@ impl ToolOutput {
         result
     }
 
+    pub(crate) fn stopped_for_storage(mut self, reason: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"qq-storage-stop-v1");
+        digest.update(self.result_digest);
+        digest.update(reason.as_bytes());
+        self.result_digest = digest.finalize().into();
+        self.model_text = bound_text(
+            format!("{reason}\n{}", self.model_text),
+            &Bounds::DEFAULT,
+            None,
+        )
+        .text;
+        self.is_error = true;
+        self
+    }
+
+    /// Normalize worker expiry before the shell's capture loop has a result.
+    pub(crate) fn expired_before_capture(self, tool: &str, elapsed: std::time::Duration) -> Self {
+        let content = super::output::Header::new(tool, None)
+            .field("exit", "timeout")
+            .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+            .field("bytes", 0)
+            .into_line()
+            + "command deadline expired during preparation";
+        let mut result = Self::bounded(content, &super::shell::SHELL_BOUNDS, true);
+        // No output was observed before capture; elapsed time is not progress.
+        result.result_digest = Sha256::digest(b"qq-native-preparation-timeout-v1").into();
+        result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::TimedOut);
+        result.execution_context = self.execution_context;
+        if result.execution_context.is_none() {
+            result.disposition = ResultDisposition::Refused;
+        }
+        result
+    }
+
     pub(super) fn bounded(text: String, bounds: &Bounds, is_error: bool) -> Self {
         // The complete text is kept only when the size alone says a cut may
         // happen: cloning every small result would cost on the hot path for
@@ -473,6 +919,8 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill,
             execution_context: None,
+            native_owner: None,
+            native_outcome: None,
         }
     }
 
@@ -489,6 +937,8 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
+            native_outcome: None,
         }
     }
 
@@ -504,6 +954,8 @@ impl ToolOutput {
             file_states: Vec::new(),
             spill: None,
             execution_context: None,
+            native_owner: None,
+            native_outcome: None,
         }
     }
 }

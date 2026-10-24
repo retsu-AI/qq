@@ -695,6 +695,7 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) async fn recover_interrupted_runs(
         &self,
     ) -> Result<Vec<EventCursor>, SessionRuntimeError> {
@@ -981,6 +982,17 @@ impl Store {
         let store_id = self.store_id;
         self.call(Priority::Output, move |connection| {
             settle_grant_promotion(connection, store_id, &promotion, outcome)
+        })
+        .await
+    }
+
+    pub(super) async fn workspace_catalog(
+        &self,
+        request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> Result<qq_protocol::WorkspaceCatalog, SessionRuntimeError> {
+        let store_id = self.store_id;
+        self.call(Priority::Control, move |connection| {
+            snapshots::load_workspace_catalog(connection, store_id, request)
         })
         .await
     }
@@ -1412,14 +1424,28 @@ impl Store {
         .await
     }
 
-    /// The newest between-run summary, for a prompt whose fold is exhausted
-    /// yet still over the window: the run starts from the summary alone.
-    pub(super) async fn latest_compaction_summary(
+    /// A reduced history for exhausted admission: narrative plus every
+    /// earlier task input, including inputs after the summary's cutoff.
+    pub(super) async fn summary_only_history(
         &self,
-        session_id: SessionId,
+        identity: RunIdentity,
     ) -> Result<Option<String>, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
-            Ok(latest_compaction(connection, session_id)?.map(|row| row.summary))
+            let cutoff_ordinal = connection.query_row(
+                "SELECT m.ordinal - 1 FROM messages m JOIN runs r ON r.user_message_id = m.id
+                 WHERE r.id = ?1 AND m.session_id = ?2",
+                params![identity.run_id.to_string(), identity.session_id.to_string()],
+                |row| row.get::<_, u64>(0),
+            )?;
+            let narrative = latest_compaction(connection, identity.session_id)?
+                .map_or_else(String::new, |row| row.summary);
+            let summary = with_exact_inputs(
+                connection,
+                &identity.session_id.to_string(),
+                RecordScope::Session { cutoff_ordinal },
+                narrative,
+            )?;
+            Ok((!summary.is_empty()).then_some(summary))
         })
         .await
     }
@@ -1429,13 +1455,13 @@ impl Store {
     pub(super) async fn search_history(
         &self,
         session_id: SessionId,
-        calling_run: RunId,
         query: String,
         limit: usize,
+        cursor: Option<HistoryCursor>,
     ) -> Result<HistorySearch, SessionRuntimeError> {
         self.call(Priority::AwaitControl, move |connection| {
             let transaction = connection.transaction()?;
-            search_session_history(&transaction, session_id, calling_run, &query, limit)
+            search_session_history(&transaction, session_id, &query, limit, cursor)
         })
         .await
     }
@@ -1826,6 +1852,30 @@ impl Store {
         .await
     }
 
+    pub(super) async fn set_native_owner(
+        &self,
+        identity: RunIdentity,
+        id: ToolCallId,
+        owner: Option<StoreId>,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call_write(Priority::AwaitControl, move |connection| {
+            super::tool_calls::set_native_owner(connection, identity, id, owner)
+        })
+        .await
+    }
+
+    pub(super) async fn record_tool_process(
+        &self,
+        identity: RunIdentity,
+        id: ToolCallId,
+        receipt: Box<crate::tools::process_context::ExecutionContextReceipt>,
+    ) -> Result<(), SessionRuntimeError> {
+        self.call(Priority::Control, move |connection| {
+            record_tool_process(connection, identity, id, &receipt)
+        })
+        .await
+    }
+
     /// Publishes one batched chunk of live tool output. Chunks are
     /// display/replay events only: they never touch the tool_call row, whose
     /// bounded result is persisted by `finish_tool_call`.
@@ -1859,7 +1909,8 @@ impl Store {
         display: Option<ToolCallDisplay>,
         spill: Option<crate::tools::SpillRecord>,
         execution_context: Option<Box<crate::tools::process_context::ExecutionContextReceipt>>,
-    ) -> Result<SessionEventEnvelope, SessionRuntimeError> {
+        native_owner: Option<StoreId>,
+    ) -> Result<ToolCallCommit, SessionRuntimeError> {
         let store_id = self.store_id;
         let identity = claimed.identity;
         self.call(Priority::Output, move |connection| {
@@ -1874,6 +1925,7 @@ impl Store {
                 display,
                 spill,
                 execution_context,
+                native_owner,
             )
         })
         .await
@@ -2141,11 +2193,23 @@ impl Store {
 
     /// Starts the internal run of an in-run compaction for a `running`
     /// prompt run. Never takes the session's active-run slot.
+    #[cfg(test)]
     pub(super) async fn start_in_run_compaction(
         &self,
         prompt_run: &ClaimedRun,
         resolved_model: &Arc<ResolvedModel>,
         turn_cutoff: u32,
+    ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
+        self.start_in_run_compaction_target(prompt_run, resolved_model, turn_cutoff, false)
+            .await
+    }
+
+    pub(super) async fn start_in_run_compaction_target(
+        &self,
+        prompt_run: &ClaimedRun,
+        resolved_model: &Arc<ResolvedModel>,
+        turn_cutoff: u32,
+        inherited_prefix: bool,
     ) -> Result<Option<(ClaimedRun, SessionEventEnvelope)>, SessionRuntimeError> {
         let store_id = self.store_id;
         let prompt_run = prompt_run.clone();
@@ -2157,6 +2221,7 @@ impl Store {
                 &prompt_run,
                 &resolved_model,
                 turn_cutoff,
+                inherited_prefix,
             )
         })
         .await
@@ -2997,8 +3062,7 @@ mod tests {
         let run_id = RunId::generate().unwrap();
         let session_id = SessionId::generate().unwrap();
         let mut cancellation = Box::pin(store.cancellation_requested(run_id));
-        let mut search =
-            Box::pin(store.search_history(session_id, run_id, "anything".to_owned(), 4));
+        let mut search = Box::pin(store.search_history(session_id, "anything".to_owned(), 4, None));
         let mut reload = Box::pin(store.load_summarizer_input(session_id, None));
         assert!(futures_util::poll!(cancellation.as_mut()).is_pending());
         assert!(futures_util::poll!(search.as_mut()).is_pending());

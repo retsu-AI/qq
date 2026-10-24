@@ -1,6 +1,6 @@
-use std::{future::Future, pin::Pin};
+use std::{collections::VecDeque, future::Future, pin::Pin};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use qq_provider::ToolSpec;
@@ -12,8 +12,8 @@ pub(crate) const MAX_HISTORY_MATCHES: usize = 20;
 pub(crate) const HISTORY_EXCERPT_BYTES: usize = 240;
 /// Transcript bytes one search may visit. A result-count cap alone lets a
 /// rare or absent term walk the whole archive on the store's control lane;
-/// this bounds the work instead. Newest history is searched first, so a
-/// search that hits the budget has already covered the most recent spans.
+/// this bounds the work between persisted units instead. A large unit is
+/// examined once, then pagination continues at the next unit.
 pub(crate) const HISTORY_SCAN_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -22,11 +22,84 @@ pub(crate) struct SearchHistoryArgs {
     pub(crate) query: String,
     #[serde(default = "default_history_limit")]
     pub(crate) limit: usize,
+    pub(crate) cursor: Option<HistoryCursor>,
 }
 
 const fn default_history_limit() -> usize {
     8
 }
+
+/// A keyset into one session. Copy the returned string unchanged to continue
+/// a search; coordinates never select a different session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) enum HistoryCursor {
+    Prompt { before: u64 },
+    Turn { prompt: u64, before: u32 },
+    Result { prompt: u64, turn: u32, before: u16 },
+    Assistant { prompt: u64, turn: u32 },
+}
+
+impl From<HistoryCursor> for String {
+    fn from(cursor: HistoryCursor) -> Self {
+        match cursor {
+            HistoryCursor::Prompt { before } => format!("u:{before}"),
+            HistoryCursor::Turn { prompt, before } => format!("r:{prompt}:{before}"),
+            HistoryCursor::Result {
+                prompt,
+                turn,
+                before,
+            } => format!("t:{prompt}:{turn}:{before}"),
+            HistoryCursor::Assistant { prompt, turn } => format!("a:{prompt}:{turn}"),
+        }
+    }
+}
+
+impl TryFrom<String> for HistoryCursor {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let invalid = "invalid history cursor; copy next_cursor from a search result";
+        let parts: Vec<_> = value.split(':').take(5).collect();
+        let ordinal = |s: &str| {
+            s.parse::<u64>()
+                .ok()
+                .filter(|n| *n <= i64::MAX as u64)
+                .ok_or(invalid)
+        };
+        match parts.as_slice() {
+            ["u", before] => Ok(Self::Prompt {
+                before: ordinal(before)?,
+            }),
+            ["r", prompt, before] => Ok(Self::Turn {
+                prompt: ordinal(prompt)?,
+                before: before.parse().map_err(|_| invalid)?,
+            }),
+            ["t", prompt, turn, before] => Ok(Self::Result {
+                prompt: ordinal(prompt)?,
+                turn: turn.parse().map_err(|_| invalid)?,
+                before: before.parse().map_err(|_| invalid)?,
+            }),
+            ["a", prompt, turn] => Ok(Self::Assistant {
+                prompt: ordinal(prompt)?,
+                turn: turn.parse().map_err(|_| invalid)?,
+            }),
+            _ => Err(invalid),
+        }
+    }
+}
+
+impl Default for HistoryCursor {
+    fn default() -> Self {
+        Self::Prompt {
+            before: i64::MAX as u64,
+        }
+    }
+}
+
+/// State transitions, including rows with no searchable text, per call.
+/// Together with the byte budget this bounds sparse and empty archives.
+pub(crate) const HISTORY_SCAN_STEPS: usize = 1_024;
 
 /// One bounded, cited hit in the session's durable transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,31 +113,36 @@ pub(crate) struct HistoryMatch {
 /// What one search found, and whether it read the whole transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HistorySearch {
-    /// In transcript order.
+    /// Newest prompts first; within each prompt, its text then newest turns.
     pub(crate) matches: Vec<HistoryMatch>,
-    /// The scan budget ended the walk before the oldest history; earlier
-    /// spans were not examined.
-    pub(crate) truncated: bool,
+    /// The next unvisited position, including when the match limit ended
+    /// the page. None means the archive was exhausted.
+    pub(crate) next_cursor: Option<HistoryCursor>,
 }
 
 pub(crate) type HistorySearchFuture =
     Pin<Box<dyn Future<Output = Result<HistorySearch, String>> + Send + 'static>>;
 
-/// Searches the session's complete persisted transcript — every user prompt,
-/// assistant turn, and tool result, including spans compaction has replaced
-/// in assembly. Installed by the session runtime; direct runs have none, so
+/// Searches persisted user inputs, assistant turns and tool results, including
+/// compacted spans. Retrieval calls/results are omitted to avoid query echoes. Installed by the session runtime; direct runs have none, so
 /// the tool is neither declared nor dispatchable there.
 pub(crate) trait HistorySearcher: Send + Sync {
-    fn search(&self, query: String, limit: usize) -> HistorySearchFuture;
+    fn search(
+        &self,
+        query: String,
+        limit: usize,
+        cursor: Option<HistoryCursor>,
+    ) -> HistorySearchFuture;
 }
 
 pub(crate) fn search_history_spec() -> ToolSpec {
     ToolSpec::new(
         SEARCH_HISTORY_TOOL,
-        "Search this session's full persisted history: every earlier user message, assistant \
-         reply, and tool result, including parts that compaction has since summarized away. \
-         Returns bounded excerpts with citations. Use it to recover an exact path, error \
-         string, decision, or instruction that the current context no longer shows verbatim.",
+        "Search this session's persisted user messages (including applied steering), assistant \
+         replies and tool results, including compacted spans and this run's earlier work. \
+         History-tool calls/results are excluded to avoid matching search echoes. Returns \
+         bounded excerpts, newest prompts first. Continue with next_cursor until exhausted \
+         before concluding an older fact is absent.",
         json!({
             "type": "object",
             "properties": {
@@ -72,6 +150,10 @@ pub(crate) fn search_history_spec() -> ToolSpec {
                     "type": "string",
                     "minLength": 1,
                     "description": "Case-insensitive literal text to find."
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Copy next_cursor from the previous result to continue the same search."
                 },
                 "limit": {
                     "type": "integer",
@@ -88,14 +170,18 @@ pub(crate) fn search_history_spec() -> ToolSpec {
 
 /// Renders a search as one tool result. Bounded by the caller's limit and the
 /// ordinary tool-result truncation. A truncated walk says so, so the model
-/// can narrow the query rather than conclude the fact was never recorded.
+/// can continue the search rather than conclude the fact was never recorded.
 pub(crate) fn render_history_matches(query: &str, search: &HistorySearch) -> String {
-    let truncation_note = "\n[search stopped at its scan budget before reaching the oldest \
-                           history; narrow the query to look further back]\n";
+    let continuation = search.next_cursor.as_ref().map(|cursor| {
+        format!(
+            "\n[older history remains unexamined; continue with next_cursor: {}]\n",
+            serde_json::to_string(cursor).expect("history cursor serializes")
+        )
+    });
     if search.matches.is_empty() {
         let mut output = format!("No history matches for {query:?}.");
-        if search.truncated {
-            output.push_str(truncation_note);
+        if let Some(note) = &continuation {
+            output.push_str(note);
         }
         return output;
     }
@@ -110,8 +196,8 @@ pub(crate) fn render_history_matches(query: &str, search: &HistorySearch) -> Str
         output.push_str(&hit.excerpt);
         output.push('\n');
     }
-    if search.truncated {
-        output.push_str(truncation_note);
+    if let Some(note) = &continuation {
+        output.push_str(note);
     }
     output
 }
@@ -132,35 +218,48 @@ pub(crate) fn find_case_insensitive(haystack: &str, needle: &str) -> Option<(usi
         let lowered = haystack.to_ascii_lowercase();
         return lowered.find(needle).map(|at| (at, at + needle.len()));
     }
-    let needle_chars: Vec<char> = needle.chars().collect();
-    let mut chars = haystack.char_indices().peekable();
-    while let Some(&(start, _)) = chars.peek() {
-        // Lowercased chars of the haystack from `start`, each tagged with the
-        // end offset of the original char it came from.
-        let mut matched = 0;
-        let mut end = None;
-        let mut probe = chars.clone();
-        'attempt: while matched < needle_chars.len() {
-            let Some((index, ch)) = probe.next() else {
-                break;
-            };
-            for lowered in ch.to_lowercase() {
-                if matched == needle_chars.len() || lowered != needle_chars[matched] {
-                    // Either a mismatch, or a multi-char lowering ran past the
-                    // needle so the match would split an original char.
-                    // Neither counts.
-                    break 'attempt;
-                }
+    // KMP consumes the lowercased stream once. Re-probing from every original
+    // char makes a long repeated Unicode prefix quadratic on the store lane.
+    let pattern: Vec<char> = needle.chars().collect();
+    let mut fallback = vec![0usize; pattern.len()];
+    for index in 1..pattern.len() {
+        let mut matched = fallback[index - 1];
+        while matched > 0 && pattern[index] != pattern[matched] {
+            matched = fallback[matched - 1];
+        }
+        if pattern[index] == pattern[matched] {
+            matched += 1;
+        }
+        fallback[index] = matched;
+    }
+    // Only the last needle-length window needs original byte coordinates.
+    // The flag says its first lowered char starts an original character;
+    // neither end of a match may split a multi-char lowercase expansion.
+    let mut recent = VecDeque::with_capacity(pattern.len());
+    let mut matched = 0;
+    for (index, ch) in haystack.char_indices() {
+        let mut lowered = ch.to_lowercase().peekable();
+        let mut first = true;
+        while let Some(value) = lowered.next() {
+            if recent.len() == pattern.len() {
+                let _ = recent.pop_front();
+            }
+            recent.push_back((index, first));
+            while matched > 0 && value != pattern[matched] {
+                matched = fallback[matched - 1];
+            }
+            if value == pattern[matched] {
                 matched += 1;
             }
-            end = Some(index + ch.len_utf8());
+            if matched == pattern.len() {
+                let &(start, aligned) = recent.front().expect("a complete match fills the window");
+                if aligned && lowered.peek().is_none() {
+                    return Some((start, index + ch.len_utf8()));
+                }
+                matched = fallback[matched - 1];
+            }
+            first = false;
         }
-        if matched == needle_chars.len()
-            && let Some(end) = end
-        {
-            return Some((start, end));
-        }
-        chars.next();
     }
     None
 }
@@ -206,10 +305,10 @@ mod tests {
     }
 
     #[test]
-    fn rendering_cites_every_match_and_reports_truncation() {
+    fn rendering_cites_every_match_and_supplies_a_resumable_cursor() {
         let empty = HistorySearch {
             matches: Vec::new(),
-            truncated: false,
+            next_cursor: None,
         };
         assert_eq!(
             render_history_matches("x", &empty),
@@ -220,7 +319,7 @@ mod tests {
                 citation: "user message #3".to_owned(),
                 excerpt: "an x".to_owned(),
             }],
-            truncated: false,
+            next_cursor: None,
         };
         let rendered = render_history_matches("x", &one);
         assert!(rendered.starts_with("1 history match(es) for \"x\":"));
@@ -228,11 +327,37 @@ mod tests {
         assert!(!rendered.contains("scan budget"));
         let truncated = HistorySearch {
             matches: Vec::new(),
-            truncated: true,
+            next_cursor: Some(HistoryCursor::Prompt { before: 3 }),
         };
         let rendered = render_history_matches("x", &truncated);
         assert!(rendered.starts_with("No history matches for \"x\"."));
-        assert!(rendered.contains("scan budget"), "{rendered}");
+        assert!(rendered.contains("next_cursor: \"u:3\""), "{rendered}");
+    }
+
+    #[test]
+    fn cursors_round_trip_and_reject_invalid_coordinates() {
+        for value in ["u:0", "r:3:12", "t:3:12:4", "a:3:12"] {
+            let args: SearchHistoryArgs =
+                serde_json::from_value(json!({"query": "needle", "cursor": value})).unwrap();
+            assert_eq!(serde_json::to_value(args.cursor.unwrap()).unwrap(), value);
+        }
+        for value in [
+            "",
+            "u:-1",
+            "u:9223372036854775808",
+            "u:3:extra",
+            "t:3:4294967296:1",
+            "t:3:1:65536",
+            "a:3:1:extra",
+        ] {
+            assert!(
+                serde_json::from_value::<SearchHistoryArgs>(
+                    json!({"query": "needle", "cursor": value})
+                )
+                .is_err(),
+                "{value}"
+            );
+        }
     }
 
     /// F24: offsets found in a lowercased copy do not index the original when
@@ -252,6 +377,68 @@ mod tests {
         let text = format!("{}{}needle", "İ".repeat(600), "y".repeat(200));
         let excerpt = excerpt_around(&text, "needle").unwrap();
         assert!(excerpt.ends_with("needle"), "{excerpt}");
+    }
+
+    #[test]
+    fn unicode_matching_agrees_with_literal_original_character_spans() {
+        fn reference(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+            if needle.is_empty() {
+                return Some((0, 0));
+            }
+            for (start, _) in haystack.char_indices() {
+                for end in haystack
+                    .char_indices()
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(haystack.len()))
+                    .filter(|end| *end > start)
+                {
+                    let lowered: String = haystack[start..end]
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .collect();
+                    if lowered == needle {
+                        return Some((start, end));
+                    }
+                }
+            }
+            None
+        }
+        let alphabet = ['a', 'A', 'İ', 'i', '̇', 'ẞ', 'ß'];
+        let needles = [
+            "", "a", "aa", "i", "i̇", "̇", "i̇i", "̇i̇", "ß", "ßß", "ai̇", "i̇a", "ßa", "aß", "i̇i̇",
+        ];
+        let mut level = vec![String::new()];
+        for depth in 0..=4 {
+            for haystack in &level {
+                for needle in needles {
+                    assert_eq!(
+                        find_case_insensitive(haystack, needle),
+                        reference(haystack, needle),
+                        "{haystack:?}, {needle:?}"
+                    );
+                }
+            }
+            if depth < 4 {
+                level = level
+                    .iter()
+                    .flat_map(|prefix| alphabet.iter().map(move |ch| format!("{prefix}{ch}")))
+                    .collect();
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_unicode_prefixes_and_overlapping_expansions_keep_exact_offsets() {
+        let haystack = format!("{}x", "İ".repeat(4096));
+        let needle = format!("{}x", "i̇".repeat(256));
+        assert_eq!(
+            find_case_insensitive(&haystack, &needle),
+            Some((3840 * 2, 4096 * 2 + 1))
+        );
+        assert_eq!(find_case_insensitive("İİi", "i̇i"), Some((2, 5)));
+        assert_eq!(find_case_insensitive("İİ", "i̇i"), None);
+        assert_eq!(find_case_insensitive("İi", "i"), Some((2, 3)));
+        assert_eq!(find_case_insensitive("İİ", "̇i̇"), None);
     }
 
     #[test]

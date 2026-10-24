@@ -1405,6 +1405,7 @@ async fn terminal_runs_replay_committed_turns_and_status_in_follow_up_context() 
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();

@@ -7,7 +7,22 @@ use std::sync::Arc;
 
 /// Variables every child starts with regardless of the allowlist: enough
 /// for a program to find its tools, home, locale, terminal, and scratch.
+#[cfg(not(windows))]
 pub const BASE_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
+/// Windows loaders require SYSTEMROOT and AppContainer startup requires
+/// LOCALAPPDATA in the child environment.
+/// Capture it with the other base values rather than adding worker ambient
+/// environment after the invocation has been frozen.
+#[cfg(windows)]
+pub const BASE_ENV: [&str; 7] = [
+    "PATH",
+    "HOME",
+    "LANG",
+    "TERM",
+    "TMPDIR",
+    "SYSTEMROOT",
+    "LOCALAPPDATA",
+];
 /// Names a call may request per invocation.
 pub const MAX_SHELL_ENV_NAMES: usize = 16;
 /// Names the allowlist may hold.
@@ -15,7 +30,7 @@ pub const MAX_SHELL_ENV_ALLOWLIST: usize = 64;
 
 /// How the runtime treats a shell command whose first program has a bounded
 /// built-in equivalent (`grep` → `search`, `cat` → `read_file`, …).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BuiltinPreference {
     /// Say nothing.
     Off,
@@ -27,7 +42,8 @@ pub enum BuiltinPreference {
     Strict,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShellPolicy {
     /// Environment variable names a call may pass through from the server's
     /// environment, beyond [`BASE_ENV`]. Sorted, deduplicated, validated.

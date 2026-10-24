@@ -29,6 +29,8 @@ use directories::ProjectDirs;
 use futures_util::StreamExt;
 use qq_core::PublishedEventStream;
 
+#[doc(hidden)]
+pub mod command_owner;
 mod cors;
 
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
@@ -74,6 +76,13 @@ const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 
 pub type CommandFuture =
     Pin<Box<dyn Future<Output = Result<CommandReceipt, ServerHandlerError>> + Send + 'static>>;
+pub type WorkspaceCatalogFuture = Pin<
+    Box<
+        dyn Future<Output = Result<qq_protocol::WorkspaceCatalog, ServerHandlerError>>
+            + Send
+            + 'static,
+    >,
+>;
 pub type SnapshotFuture =
     Pin<Box<dyn Future<Output = Result<WorkspaceSnapshot, ServerHandlerError>> + Send + 'static>>;
 pub type ModelsFuture = Pin<
@@ -93,6 +102,13 @@ pub type DelegationFuture =
 /// Root-supplied application seam for durable session requests.
 pub trait ServerHandler: Send + Sync + 'static {
     fn command(&self, _request: CommandRequest) -> CommandFuture {
+        Box::pin(async { Err(ServerHandlerError::Unavailable) })
+    }
+
+    fn workspace_catalog(
+        &self,
+        _request: qq_protocol::WorkspaceCatalogRequest,
+    ) -> WorkspaceCatalogFuture {
         Box::pin(async { Err(ServerHandlerError::Unavailable) })
     }
 
@@ -199,12 +215,12 @@ pub struct ServerOptions {
     bind_address: SocketAddr,
     version: String,
     allowed_origins: AllowedOrigins,
+    health_path: &'static str,
 }
 
 impl ServerOptions {
-    /// Creates options using the default ephemeral IPv4 loopback address,
-    /// this crate's version as the reported server version, and no
-    /// cross-origin access.
+    /// Creates session-server options using the default ephemeral IPv4
+    /// loopback address, this crate's version, and no cross-origin access.
     #[must_use]
     pub fn new(paths: ServerPaths) -> Self {
         Self {
@@ -212,11 +228,12 @@ impl ServerOptions {
             bind_address: DEFAULT_BIND_ADDRESS,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             allowed_origins: AllowedOrigins::default(),
+            health_path: "/v1/health",
         }
     }
 
-    /// Overrides the version reported by `/v1/health`, the discovery file, and
-    /// capabilities. The binary passes its build string (version plus source
+    /// Overrides the version reported by health probes and discovery, and by
+    /// session-server capabilities. The binary passes its build string (version plus source
     /// revision) so a client can tell two servers of the same version apart.
     /// Must be non-empty, at most 256 bytes, and printable ASCII without
     /// spaces; anything else is rejected at start as `InvalidVersion`.
@@ -486,6 +503,16 @@ impl ServerReservation {
         handler: Arc<dyn ServerHandler>,
         identity: ServerIdentity,
     ) -> Result<ServerHandle, ServerError> {
+        self.start_with(identity, |connection, allowed_origins| {
+            router(handler, connection, allowed_origins)
+        })
+    }
+
+    fn start_with(
+        self,
+        identity: ServerIdentity,
+        build: impl FnOnce(ServerConnection, AllowedOrigins) -> Router,
+    ) -> Result<ServerHandle, ServerError> {
         let Self {
             listener,
             address,
@@ -508,7 +535,7 @@ impl ServerReservation {
         .map_err(map_connection_error)?;
         write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
         guard.connection = Some(connection.clone());
-        let app = router(handler, connection.clone(), allowed_origins);
+        let app = build(connection.clone(), allowed_origins);
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, app)
@@ -546,6 +573,18 @@ impl ServerHandle {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
+    }
+
+    /// Waits for the listener to stop. Cancelling this wait retains the task
+    /// handle, so the caller can still request and await graceful shutdown.
+    pub async fn finished(&mut self) -> Result<(), ServerError> {
+        let result = self
+            .task
+            .as_mut()
+            .ok_or(ServerError::ServerTaskStopped)?
+            .await;
+        self.task.take();
+        result.map_err(|_| ServerError::ServerTaskStopped)?
     }
 
     /// Requests graceful shutdown and waits for bounded metadata and lock cleanup.
@@ -637,7 +676,7 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => {
             drop(lock);
-            return find_existing_server(&options.paths)
+            return find_existing_server(&options.paths, options.health_path)
                 .await
                 .map(ReserveOutcome::Existing);
         }
@@ -711,6 +750,7 @@ fn router(
     router
         .route("/v1/health", get(health))
         .route("/v1/capabilities", post(capabilities))
+        .route("/v1/workspaces/list", post(workspace_catalog))
         .route("/v1/workspaces/snapshot", post(workspace_snapshot))
         .route("/v1/models", post(models))
         .route(
@@ -954,6 +994,30 @@ fn server_capabilities(
     }
 }
 
+async fn workspace_catalog(
+    State(state): State<AppState>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let (_permit, request) =
+        match decode_bounded::<qq_protocol::WorkspaceCatalogRequest>(&state, body) {
+            Ok(decoded) => decoded,
+            Err((status, message)) => return api_error(status, message),
+        };
+    if request.limit == 0 || request.limit > qq_protocol::MAX_WORKSPACE_PAGE {
+        return api_error(StatusCode::BAD_REQUEST, "invalid page limit");
+    }
+    match state.handler.workspace_catalog(request).await {
+        Ok(catalog)
+            if serde_json::to_vec(&catalog)
+                .is_ok_and(|json| json.len() <= qq_protocol::MAX_SNAPSHOT_BYTES) =>
+        {
+            Json(catalog).into_response()
+        }
+        Ok(_) => handler_error_response(ServerHandlerError::Internal),
+        Err(error) => handler_error_response(error),
+    }
+}
+
 async fn workspace_snapshot(
     State(state): State<AppState>,
     body: Result<Bytes, BytesRejection>,
@@ -1165,13 +1229,20 @@ pub async fn discover() -> Result<Option<ServerConnection>, ServerError> {
 /// This is intended for isolated embeddings and test fixtures. Ordinary
 /// callers should use [`discover`], which retains the user-scoped default.
 pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>, ServerError> {
+    discover_at_endpoint(paths, "/v1/health").await
+}
+
+async fn discover_at_endpoint(
+    paths: &ServerPaths,
+    health_path: &str,
+) -> Result<Option<ServerConnection>, ServerError> {
     let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
 
     for attempt in 0..DISCOVERY_RETRIES {
         let Some(connection) = connection_for_discovery(read_connection(paths))? else {
             return Ok(None);
         };
-        match probe_health(&client, &connection).await {
+        match probe_health(&client, &connection, health_path).await {
             Ok(info) if info == *connection.server_info() => return Ok(Some(connection)),
             Ok(_) | Err(HealthProbeError::Unavailable) => {}
             Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1269,13 +1340,16 @@ fn write_metadata_atomically(
     result
 }
 
-async fn find_existing_server(paths: &ServerPaths) -> Result<ServerConnection, ServerError> {
+async fn find_existing_server(
+    paths: &ServerPaths,
+    health_path: &str,
+) -> Result<ServerConnection, ServerError> {
     let client = probe_client().map_err(|_| ServerError::ExistingServerUnavailable)?;
     let mut meaningful_error = None;
 
     for attempt in 0..STARTUP_RETRIES {
         match read_connection(paths) {
-            Ok(Some(connection)) => match probe_health(&client, &connection).await {
+            Ok(Some(connection)) => match probe_health(&client, &connection, health_path).await {
                 Ok(info) if info == *connection.server_info() => return Ok(connection),
                 Ok(_) | Err(HealthProbeError::Unavailable) => {}
                 Err(HealthProbeError::ProtocolMismatch { found }) => {
@@ -1317,9 +1391,10 @@ enum HealthProbeError {
 async fn probe_health(
     client: &reqwest::Client,
     connection: &ServerConnection,
+    path: &str,
 ) -> Result<ServerInfo, HealthProbeError> {
     let response = client
-        .get(connection.endpoint("/v1/health"))
+        .get(connection.endpoint(path))
         .bearer_auth(connection.expose_bearer_token())
         .timeout(PROBE_TIMEOUT)
         .send()
@@ -2719,7 +2794,7 @@ mod tests {
         write_metadata_atomically(&paths, &MetadataFile::new(&stale)).unwrap();
         let probe = probe_client().unwrap();
         assert!(matches!(
-            probe_health(&probe, &stale).await,
+            probe_health(&probe, &stale, "/v1/health").await,
             Err(HealthProbeError::Unavailable)
         ));
         let handler = unavailable_handler();
@@ -3181,5 +3256,36 @@ mod tests {
             read_connection(&permission_paths).unwrap_err(),
             ServerError::InsecurePermissions { .. }
         ));
+    }
+    #[tokio::test]
+    async fn workspace_catalog_requires_authentication_and_a_registered_handler() {
+        let directory = TestDirectory::new();
+        let StartOutcome::Started(server) = start(
+            unavailable_handler(),
+            test_identity(),
+            ServerOptions::new(directory.paths()),
+        )
+        .await
+        .unwrap() else {
+            panic!("expected a new server")
+        };
+        let http = reqwest::Client::new();
+        let url = server.connection().endpoint("/v1/workspaces/list");
+        let response = http
+            .post(url.clone())
+            .json(&serde_json::json!({"after": null, "limit": 2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = http
+            .post(url)
+            .bearer_auth(server.connection().expose_bearer_token())
+            .json(&serde_json::json!({"after": null, "limit": 2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        server.shutdown().await.unwrap();
     }
 }

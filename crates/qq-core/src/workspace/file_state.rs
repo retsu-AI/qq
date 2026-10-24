@@ -39,7 +39,7 @@ impl FileState {
 
 /// A file-state map entry produced by a successful tool execution, carried on
 /// the tool result so session persistence can record it durably.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct FileStateUpdate {
     pub(crate) path: String,
     pub(crate) hash: String,

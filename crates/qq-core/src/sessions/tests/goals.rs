@@ -3786,6 +3786,7 @@ async fn goal_parent51_upgrade_retains_notices_and_process_receipts() {
             None,
             None,
             Some(Box::new(receipt.clone())),
+            None,
         )
         .await
         .unwrap();
@@ -4376,6 +4377,7 @@ async fn real_in_run_compactor_preserves_rejected_prefix_and_uncertain_dispatch(
                 crate::runtime::InRunCompactionRequest {
                     transcript: vec![Message::user("summarize")],
                     turn_cutoff: 0,
+                    inherited_prefix: false,
                     system: Arc::from("system"),
                     tools: Arc::from([qq_provider::ToolSpec::new(
                         "read_file",

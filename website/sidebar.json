@@ -14,6 +14,7 @@
       { "page": "providers", "label": "Providers and credentials", "description": "Connect OpenAI, Anthropic, Google, xAI, Codex, Bedrock, or a gateway, and where credentials are kept." },
       { "page": "permissions", "label": "Permissions and trust", "description": "What the agent may do without asking, approval modes, and trusting project configuration." },
       { "page": "tui", "label": "The TUI", "description": "The interactive terminal: layout, sessions, approvals, commands, and keys." },
+      { "page": "desktop", "label": "Desktop app (Windows)", "description": "The Windows desktop app: projects, sessions, approvals, Git, worktree sessions, and keys." },
       { "page": "headless", "label": "Headless: ask, run, serve", "description": "Run agents from scripts and CI with qq ask, qq run, and qq serve; exit codes and JSONL output." },
       { "page": "mcp", "label": "MCP servers", "description": "Give the agent more tools with Model Context Protocol servers over stdio or HTTP." }
     ]

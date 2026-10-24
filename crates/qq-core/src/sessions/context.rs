@@ -374,11 +374,11 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
             let (constraint, detail) = match reason {
                 ContextRejectReason::Irreducible(constraint) => (
                     constraint,
-                    "the system prompt, tool schemas, and this run's own messages alone exceed the limit, so compaction cannot help; shorten the prompt or instructions, or start a new session".to_owned(),
+                    "the system prompt, tool schemas, and this run's own messages alone exceed the limit; use a larger context window or shorten the task input; all session history is preserved".to_owned(),
                 ),
                 ContextRejectReason::NoReducibleHistory(constraint) => (
                     constraint,
-                    "no earlier history remains to compact; start a new session".to_owned(),
+                    "no earlier history remains to compact; use a larger context window or shorten the task input; all session history is preserved".to_owned(),
                 ),
                 ContextRejectReason::Exhausted(
                     constraint,
@@ -386,7 +386,7 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                 ) => (
                     constraint,
                     format!(
-                        "automatic compaction ran {steps} summarizer step{} for this prompt and the context is still too large; run /compact again or start a new session",
+                        "automatic compaction ran {steps} summarizer step{} for this prompt and reached its recovery limit while the request is still too large; all session history is preserved",
                         if steps == 1 { "" } else { "s" },
                     ),
                 ),
@@ -396,16 +396,16 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                 ) => (
                     constraint,
                     format!(
-                        "one earlier prompt and its run measure {bytes} bytes, more than the summarizer can read within the selected model's window, so compaction cannot reduce it; start a new session, or continue this one with a model that has a larger context window",
+                        "one earlier prompt and its run measure {bytes} bytes, which automatic recovery could not reduce within the selected model's window; use a larger context window; all session history is preserved",
                     ),
                 ),
                 ContextRejectReason::SummarizerOverflow(constraint) => (
                     constraint,
-                    "the summarizer's own request is over the limit; start a new session".to_owned(),
+                    "the summarizer's own request is over the limit; use a larger context window or reduce the configured instructions; all session history is preserved".to_owned(),
                 ),
                 ContextRejectReason::BetweenRunsOnly(constraint) => (
                     constraint,
-                    "the context grew past the limit during this run and neither stubbing stale results nor compacting the run's own turns brought it back under; run /compact or start a new session, then retry".to_owned(),
+                    "automatic recovery could not reduce this run's context below the selected limit; all session history is preserved".to_owned(),
                 ),
                 ContextRejectReason::Unsupported(constraint) => (
                     constraint,
@@ -418,11 +418,11 @@ pub(crate) fn rejection_message(plan: ContextPlan) -> Option<String> {
                             if steps == 1 { "" } else { "s" },
                         ),
                         CompactionExhaustion::OversizedUnit { bytes } => format!(
-                            "one earlier prompt and its run measure {bytes} bytes, more than the summarizer can read within the model's window, so compaction cannot reduce it",
+                            "one earlier prompt and its run measure {bytes} bytes, which automatic recovery could not reduce within the model's window",
                         ),
                     };
                     return Some(format!(
-                        "the provider previously rejected an equivalent request for exceeding its context window, and {why}; the current provider-neutral estimate is {} input tokens with a {}-token output reserve; run /compact or start a new session",
+                        "the provider previously rejected an equivalent request for exceeding its context window, and {why}; the current provider-neutral estimate is {} input tokens with a {}-token output reserve; all session history is preserved",
                         estimate.estimated_input_tokens, estimate.output_reserve_tokens,
                     ));
                 }
@@ -830,12 +830,16 @@ mod tests {
     }
 
     #[test]
-    fn rejection_messages_name_a_recovery_step() {
+    fn rejection_messages_preserve_history_without_prescribing_manual_compaction() {
         let mut request = input(Some(99));
         request.compaction =
             CompactionDisposition::Exhausted(CompactionExhaustion::Attempted { steps: 1 });
         let message = rejection_message(plan(request)).unwrap();
-        assert!(message.contains("/compact"), "{message}");
+        assert!(!message.contains("/compact"), "{message}");
+        assert!(
+            message.contains("all session history is preserved"),
+            "{message}"
+        );
         assert!(
             message.contains("estimated at 60 input tokens"),
             "{message}"
@@ -844,7 +848,7 @@ mod tests {
         assert!(
             rejection_message(plan(request))
                 .unwrap()
-                .contains("/compact")
+                .contains("all session history is preserved")
         );
         request.compaction = CompactionDisposition::Unsupported;
         assert!(rejection_message(plan(request)).unwrap().contains("qq ask"));
@@ -854,7 +858,7 @@ mod tests {
         assert!(
             rejection_message(plan(request))
                 .unwrap()
-                .contains("new session")
+                .contains("larger context window")
         );
     }
 

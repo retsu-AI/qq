@@ -1,23 +1,41 @@
 pub(crate) mod ask;
-mod dispatch;
+pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
 pub(crate) mod fetch;
 pub(crate) mod goal;
 mod lang;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_owner;
+#[cfg(any(target_os = "macos", all(test, target_os = "linux")))]
+#[cfg_attr(
+    all(test, target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "compile shared Unix launch interfaces and validate grants without claiming macOS enforcement"
+    )
+)]
+pub(crate) mod macos_owner;
 mod matching;
+mod native_exit;
 pub(crate) mod network;
 pub mod output;
 pub(crate) mod process_context;
 mod read;
 mod search;
 mod shell;
+#[cfg(windows)]
+pub(crate) mod windows_owner;
+pub(crate) use shell::forward_shell_chunk;
 mod specs;
 mod tree;
 pub(crate) mod walk;
+#[cfg(windows)]
+pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
+pub(crate) use shell::MAX_SHELL_OUTPUT_BYTES;
 #[cfg(unix)]
 pub(crate) use shell::ProcessGroupGuard;
 
@@ -98,8 +116,8 @@ pub(crate) use output::{ResultRecall, TurnOutputBudget, finalize_spill_marker, h
 pub(crate) use read::hold_tool_read;
 pub(crate) use specs::{
     CancelAgentArgs, MAX_SPAWN_AGENT_SCHEMA_BYTES, MAX_WAIT_AGENTS_SECS, SPAWN_AGENT_TOOL,
-    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, static_tools,
-    wait_agents_spec,
+    SpawnAgentArgs, WaitAgentsArgs, cancel_agent_spec, spawn_agent_spec, spawn_model_routes,
+    static_tools, wait_agents_spec,
 };
 #[cfg(test)]
 pub(crate) use specs::{specs, test_tool_effect};
@@ -125,8 +143,33 @@ use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::mpsc;
 
+#[cfg(all(test, unix))]
+pub(crate) use shell::hold_shell_receipt;
 #[cfg(all(test, any(unix, windows)))]
-pub(crate) use shell::observe_shell_spawn;
+pub(crate) use shell::{limit_shell_read_chunks, observe_shell_spawn, observe_shell_termination};
+
+#[cfg(all(test, unix))]
+pub(crate) async fn create_test_fifo(path: &std::path::Path) {
+    let mut child = tokio::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("start the native FIFO fixture utility");
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status.expect("wait for the FIFO fixture utility"),
+        Err(_) => {
+            child
+                .kill()
+                .await
+                .expect("reap the timed-out FIFO fixture utility");
+            panic!("FIFO fixture creation timed out");
+        }
+    };
+    assert!(status.success(), "the native FIFO fixture utility failed");
+}
 
 #[cfg(all(test, unix))]
 pub(crate) const PANIC_SHELL_ARGUMENTS: &str = r#"{"command":"sleep 300"}"#;
@@ -161,30 +204,27 @@ pub(crate) async fn assert_panicked_process_exits(pid: u32) {
 
 #[cfg(all(test, windows))]
 pub(crate) async fn assert_panicked_process_exits(pid: u32) {
-    // This observes only the fixture's numeric PID. It cannot turn an
-    // unconfirmed production cleanup result into confirmed quiescence.
-    let script = format!(
-        "$ErrorActionPreference = 'Stop'; \
-         $observedProcess = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
-         if ($null -eq $observedProcess) {{ exit 0 }}; \
-         if ($observedProcess.WaitForExit(10000)) {{ exit 0 }}; \
-         [Console]::Error.WriteLine('the owned shell did not exit after panic'); exit 1"
-    );
-    let observed = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        tokio::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .kill_on_drop(true)
-            .output(),
-    )
+    // Observe the kernel process object directly. Launching PowerShell adds a
+    // second process startup to the timeout and cannot strengthen this proof.
+    // This fixture observation never confirms production tool quiescence.
+    tokio::task::spawn_blocking(move || {
+        let process = match win_custody::Process::open(pid, win_custody::ProcessAccess::Synchronize)
+        {
+            Ok(process) => process,
+            // ERROR_INVALID_PARAMETER means the process left the PID table.
+            Err(error) if error.raw_os_error() == Some(87) => return,
+            Err(error) => panic!("cannot observe the panicked fixture's process: {error}"),
+        };
+        assert_eq!(
+            process
+                .wait(Some(std::time::Duration::from_secs(10)))
+                .unwrap(),
+            win_custody::WaitOutcome::Signaled,
+            "the owned process must still exit after panic",
+        );
+    })
     .await
-    .expect("the Windows process-exit observer must finish")
-    .expect("PowerShell must observe the panicked fixture's process");
-    assert!(
-        observed.status.success(),
-        "the owned process must still exit after panic: {}",
-        String::from_utf8_lossy(&observed.stderr)
-    );
+    .unwrap();
 }
 
 #[cfg(test)]
@@ -3154,6 +3194,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn file_tools_preserve_human_changes_during_staging() {
+        for (name, existing) in [
+            ("write_file", false),
+            ("write_file", true),
+            ("edit_file", true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            if existing {
+                fs::write(directory.path().join("a"), "original").unwrap();
+            }
+            let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
+            let arguments = if name == "edit_file" {
+                json!({"edits":[{"path":"a","old":"original","new":"agent change"}]})
+            } else {
+                json!({"path":"a","content":"agent change", "if_hash":format!("h:{}", &content_hash(b"original")[..12])})
+            };
+            let (entered, release) = hold_tool_apply(workspace.path());
+            let operation = tokio::task::spawn_blocking(move || {
+                run_tool(
+                    &workspace,
+                    &FileState::default(),
+                    name,
+                    &arguments.to_string(),
+                )
+            });
+            entered.await.unwrap();
+            fs::write(directory.path().join("a"), "human change").unwrap();
+            release.send(()).unwrap();
+            let result = operation.await.unwrap();
+            assert!(result.is_error, "{name}: {}", result.model_text);
+            assert!(result.file_states.is_empty());
+            assert_eq!(
+                fs::read_to_string(directory.path().join("a")).unwrap(),
+                "human change"
+            );
+            assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".qq-apply-")
+            }));
+        }
+    }
+
     #[test]
     fn dispatch_protects_policy_and_git_trust_files_without_blocking_ordinary_writes() {
         let directory = tempfile::tempdir().unwrap();
@@ -3179,6 +3265,7 @@ mod tests {
         for path in [
             ".qq/config.ron",
             ".qq/config.d/policy.ron",
+            ".qq/task-publication.lock",
             ".qq/packs/untrusted/pack.ron",
             "qq.ron",
             ".git",
@@ -3374,7 +3461,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
+            "6f5ee886cbf2c09329fd373d88e1cb2091c8929a0fcb1f5de7e2ee2abfc7017f"
         );
     }
 
@@ -4452,6 +4539,135 @@ mod tests {
         assert!(!cancelled.is_cancelled());
     }
 
+    #[tokio::test]
+    async fn dropped_durable_output_recording_is_not_a_clean_drain() {
+        let tasks = ToolTasks::default();
+        tasks
+            .set_output_recorder(|_, _| std::future::pending())
+            .unwrap();
+        let lease = tasks.enter();
+        let write = lease
+            .output_record(qq_protocol::ToolCallId::generate().unwrap(), b"checkpoint")
+            .unwrap();
+        drop(write);
+        drop(lease);
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedOutput));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_process_receipt_write_reaps_child_and_blocks_settlement() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let tasks = ToolTasks::default();
+        let (sender, spawned) = tokio::sync::oneshot::channel();
+        let sender = std::sync::Mutex::new(Some(sender));
+        tasks
+            .set_process_recorder(move |_, receipt| {
+                sender
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(receipt.facts().pid)
+                    .unwrap();
+                async { Err(crate::sessions::SessionRuntimeError::Unavailable) }
+            })
+            .unwrap();
+        let result = dispatch::execute_with_images(
+            None,
+            workspace,
+            Arc::new(FileState::default()),
+            "shell".to_owned(),
+            PANIC_SHELL_ARGUMENTS.to_owned(),
+            RunCancellation::new(),
+            None,
+            tasks.clone(),
+            Arc::new(crate::runtime::ShellPolicy::default()),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Some(qq_protocol::ToolCallId::generate().unwrap()),
+        )
+        .await;
+        assert_eq!(result.disposition, ResultDisposition::Unobserved);
+        assert!(
+            result
+                .model_text
+                .contains("could not persist the command process")
+        );
+        assert_eq!(tasks.drain().await, Err(ToolDrainError::UnrecordedProcess));
+        let pid =
+            rustix::process::Pid::from_raw(i32::try_from(spawned.await.unwrap()).unwrap()).unwrap();
+        assert!(rustix::process::test_kill_process(pid).is_err());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn stalled_process_receipt_cannot_delay_cancellation_or_timeout() {
+        for expire in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace =
+                Workspace::open(&std::fs::canonicalize(directory.path()).unwrap()).unwrap();
+            let tasks = ToolTasks::default();
+            let cancelled = RunCancellation::new();
+            let (sender, spawned) = tokio::sync::oneshot::channel();
+            let (release, gate) = tokio::sync::oneshot::channel();
+            let hook = std::sync::Mutex::new(Some((sender, gate)));
+            tasks
+                .set_process_recorder(move |_, receipt| {
+                    let (sender, gate) = hook.lock().unwrap().take().unwrap();
+                    sender.send(receipt.facts().pid).unwrap();
+                    async move {
+                        gate.await.unwrap();
+                        Ok(())
+                    }
+                })
+                .unwrap();
+            let mut arguments: serde_json::Value =
+                serde_json::from_str(PANIC_SHELL_ARGUMENTS).unwrap();
+            if expire {
+                arguments["timeout_seconds"] = json!(120);
+            }
+            let execution = tokio::spawn(dispatch::execute_with_images(
+                None,
+                workspace,
+                Arc::default(),
+                "shell".to_owned(),
+                arguments.to_string(),
+                cancelled.clone(),
+                None,
+                tasks.clone(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Arc::default(),
+                Some(qq_protocol::ToolCallId::generate().unwrap()),
+            ));
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+                .await
+                .unwrap()
+                .unwrap();
+            let stopped = shell::observe_shell_termination(pid);
+            if expire {
+                tokio::time::pause();
+                tokio::time::advance(std::time::Duration::from_secs(121)).await;
+                tokio::time::resume();
+            } else {
+                cancelled.cancel();
+            }
+            let terminated = tokio::time::timeout(std::time::Duration::from_secs(5), stopped).await;
+            release.send(()).unwrap();
+            let result = execution.await.unwrap();
+            tasks.drain().await.unwrap();
+            assert!(
+                matches!(terminated, Ok(Ok(()))),
+                "receipt persistence must not extend execution (timeout={expire})"
+            );
+            assert!(result.is_error);
+        }
+    }
+
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn panicked_shell_task_never_reports_confirmed_quiescence() {
@@ -4597,6 +4813,10 @@ mod tests {
         )
         .await;
 
+        assert_eq!(
+            result.native_outcome,
+            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(0) })
+        );
         assert!(!result.is_error, "unexpected error: {}", result.model_text);
         assert!(result.model_text.contains("out\n"), "{}", result.model_text);
         assert!(result.model_text.contains("err\n"), "{}", result.model_text);
@@ -4625,6 +4845,10 @@ mod tests {
         )
         .await;
 
+        assert_eq!(
+            result.native_outcome,
+            Some(crate::command_owner::NativeCommandOutcome::Exited { code: Some(7) })
+        );
         assert!(result.is_error);
         assert!(
             result.model_text.contains("before failure"),
@@ -4674,6 +4898,185 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn shell_accepts_a_build_deadline_longer_than_ten_minutes() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let result = run_shell_tool(
+            workspace,
+            r#"{"command":"printf build-finished","timeout_seconds":1800}"#,
+            RunCancellation::new(),
+            None,
+        )
+        .await;
+
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("build-finished"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_build_survives_the_old_ten_minute_ceiling() {
+        running_build_survives_clock_advance(
+            r#"{"command":"printf ready; read token < release; printf build-finished","timeout_seconds":1800}"#,
+            601,
+        ).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_running_build_without_a_command_timeout_survives_two_minutes() {
+        running_build_survives_clock_advance(
+            r#"{"command":"printf ready; read token < release; printf build-finished"}"#,
+            121,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn native_admission_freezes_task_and_explicit_command_deadlines_without_a_default_cap() {
+        use crate::command_owner::{
+            CommandOwnerError, CommandSnapshot, NativeCommand, NativeCommandFuture,
+            NativeCommandService,
+        };
+        struct Capture(Arc<std::sync::Mutex<Vec<NativeCommand>>>);
+        impl NativeCommandService for Capture {
+            fn identity(&self) -> NativeCommandFuture<qq_protocol::StoreId> {
+                Box::pin(async { Ok(qq_protocol::StoreId::from_bytes([7; 16])) })
+            }
+            fn acknowledge(&self, _: Vec<qq_protocol::ToolCallId>) -> NativeCommandFuture<()> {
+                unreachable!()
+            }
+            fn cancel(&self, _: qq_protocol::ToolCallId) -> NativeCommandFuture<()> {
+                unreachable!()
+            }
+            fn wait(
+                &self,
+                _: qq_protocol::ToolCallId,
+                _: u64,
+            ) -> NativeCommandFuture<CommandSnapshot> {
+                unreachable!()
+            }
+            fn submit(&self, request: NativeCommand) -> NativeCommandFuture<()> {
+                self.0.lock().unwrap().push(request);
+                Box::pin(async { Err(CommandOwnerError::Full) })
+            }
+        }
+        let now = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let task_deadline = now + 600_000;
+        for name in ["shell", "exec"] {
+            for (timeout, task) in [
+                (None, Some(task_deadline)),
+                (None, None),
+                (Some(3600), Some(task_deadline)),
+                (Some(1), Some(task_deadline)),
+            ] {
+                let directory = tempfile::tempdir().unwrap();
+                let workspace = Workspace::open(directory.path()).unwrap();
+                let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let service = Arc::new(Capture(requests.clone()));
+                let tasks = ToolTasks::with_native_commands(Some(service));
+                tasks.set_native_recorder(|_, _| async { Ok(()) }).unwrap();
+                tasks.shorten_native_deadline(task);
+                let mut arguments = if name == "shell" {
+                    json!({"command":"unused"})
+                } else {
+                    json!({"program":"unused","args":[]})
+                };
+                if let Some(timeout) = timeout {
+                    arguments["timeout_seconds"] = json!(timeout);
+                }
+                let result = super::dispatch::execute_with_images(
+                    None,
+                    workspace,
+                    Arc::new(FileState::default()),
+                    name.to_owned(),
+                    arguments.to_string(),
+                    RunCancellation::new(),
+                    None,
+                    tasks.clone(),
+                    Arc::new(crate::ShellPolicy::default()),
+                    Arc::default(),
+                    Arc::default(),
+                    Arc::default(),
+                    Some(qq_protocol::ToolCallId::generate().unwrap()),
+                )
+                .await;
+                assert!(result.is_error);
+                tasks.drain().await.unwrap();
+                let requests = requests.lock().unwrap();
+                assert_eq!(requests.len(), 1);
+                let frozen = requests[0].not_after_ms;
+                if timeout == Some(1) {
+                    let frozen = frozen.expect("an explicit command timeout remains bounded");
+                    assert!(frozen >= now + 1_000 && frozen < task_deadline);
+                } else {
+                    assert_eq!(
+                        frozen, task,
+                        "{name} timeout={timeout:?} must not invent a two-minute cap"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn running_build_survives_clock_advance(arguments: &'static str, seconds: u64) {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let release = directory.path().join("release");
+        crate::tools::create_test_fifo(&release).await;
+        // Keep both ends open until completion so an input written just
+        // before the shell opens its reader cannot disappear with the writer.
+        let gate = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(release)
+            .unwrap();
+        let (output, mut chunks) = mpsc::channel(8);
+        let cancellation = RunCancellation::new();
+        let execution = tokio::spawn(run_shell_tool(
+            workspace,
+            arguments,
+            cancellation.clone(),
+            Some(output),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut observed = String::new();
+            while !observed.contains("ready") {
+                observed.push_str(&chunks.recv().await.expect("command reached its gate"));
+            }
+        })
+        .await
+        .expect("command started");
+
+        // Advance the deadline clock while the real native process waits on
+        // explicit input, rather than making a long build fixture sleep.
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(seconds)).await;
+        tokio::time::resume();
+        let mut writer = gate.try_clone().unwrap();
+        tokio::task::spawn_blocking(move || {
+            writer.write_all(b"continue\n").unwrap();
+        })
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), execution).await;
+        cancellation.cancel();
+        let result = result.expect("released command completed").unwrap();
+        assert!(!result.is_error, "{}", result.model_text);
+        assert!(result.model_text.contains("build-finished"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn shell_rejects_empty_commands_and_out_of_range_timeouts() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = Workspace::open(directory.path()).unwrap();
@@ -4681,7 +5084,7 @@ mod tests {
         for arguments in [
             r#"{"command":"   "}"#,
             r#"{"command":"true","timeout_seconds":0}"#,
-            r#"{"command":"true","timeout_seconds":601}"#,
+            r#"{"command":"true","timeout_seconds":18446744073709551615}"#,
         ] {
             let result =
                 run_shell_tool(workspace.clone(), arguments, RunCancellation::new(), None).await;
@@ -4993,7 +5396,18 @@ mod tests {
             .expect("cancellation must remain live with a full output queue")
             .unwrap();
         assert!(result.is_error);
-        assert_eq!(result.model_text, "tool execution was cancelled");
+        assert!(result.model_text.starts_with("shell exit=cancelled "));
+        assert!(
+            result
+                .model_text
+                .contains("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        );
+        assert!(
+            result
+                .model_text
+                .ends_with("tool execution was cancelled; its process group was killed")
+        );
+        assert!(result.model_text.len() <= shell::SHELL_BOUNDS.max_bytes);
         assert_eq!(result.disposition, ResultDisposition::Interrupted);
     }
 
@@ -5204,3 +5618,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, not(windows)))]
+#[path = "tools/windows_owner/arguments.rs"]
+mod windows_arguments;

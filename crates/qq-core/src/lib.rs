@@ -38,6 +38,8 @@ use thiserror::Error;
 mod approval;
 mod cancellation;
 pub mod catalog;
+#[doc(hidden)]
+pub mod command_owner;
 pub mod context_source;
 pub mod hosts;
 mod input;
@@ -46,6 +48,7 @@ pub mod output;
 pub mod plan;
 mod runtime;
 mod sessions;
+pub mod task_workspace;
 mod tools;
 
 #[doc(hidden)]
@@ -60,6 +63,7 @@ pub use tools::bench_support as tool_bench;
 pub use tools::network::{NetworkPolicy, host_grant_matches};
 #[doc(hidden)]
 pub use tools::output::bench_support as tool_output_bench;
+mod storage;
 mod workspace;
 
 use runtime::{
@@ -101,7 +105,7 @@ pub use sessions::{
     ReviewSpend, ReviewVerdict, RuntimeLoadError, RuntimeLoadFuture, RuntimeLoadProgress,
     RuntimeLoadRequest, RuntimeLoadStage, RuntimeLoader, STORE_SCHEMA_VERSION, SessionEventStream,
     SessionRuntime, SessionRuntimeError, SessionRuntimeOptions, SideAnswer, SideQueryLimits,
-    SlashCommandError, SpawnModelValidationFuture, WorkerRuntimeLoadFuture,
+    SlashCommandError, SpawnModelValidationFuture, TaskWorkspacePolicy, WorkerRuntimeLoadFuture,
     WorkspaceGrantAuthority, WorkspaceGrantSeed, run_cost,
 };
 /// Merkle index over the workspace tree the tools see.
@@ -1161,16 +1165,18 @@ impl Runtime {
         stream! {
         let mut messages = messages;
         let mut summary = String::new();
+        let mut emitted_text_bytes = 0_usize;
         let mut total_usage = Some(TokenUsage::default());
         let mut ordinal = 0_u32;
         let mut continuations: u16 = 0;
+        let mut fold = runtime::SummaryFold::new(messages.len().saturating_sub(1));
         // One turn of calls is answered with rejections so the model can
         // still write the summary; a second fails the step.
         let mut rejected_call_turn = false;
         let static_bytes = paid_output_cap.as_ref().map(|_| {
             (system.len() as u64).saturating_add(runtime::tool_schema_measurement(&tools).bytes)
         });
-        loop {
+        'requests: loop {
             let input_tokens = static_bytes.map(|static_bytes|
                 static_bytes.saturating_add(measure_messages(&messages)));
             yield Ok(runtime::SummarizeStep::RequestStarting { input_tokens });
@@ -1214,11 +1220,8 @@ impl Runtime {
                 match event {
                     Ok(ProviderEvent::Replay { data }) => replay = Some(data),
                     Ok(ProviderEvent::OutputTextDelta { text: delta }) => {
-                        if summary
-                            .len()
-                            .saturating_add(text.len())
-                            .saturating_add(delta.len())
-                            > MAX_RUN_MODEL_TEXT_BYTES
+                        emitted_text_bytes = emitted_text_bytes.saturating_add(delta.len());
+                        if emitted_text_bytes > MAX_RUN_MODEL_TEXT_BYTES
                         {
                             yield Err(runtime::SummarizeError::Rejected(
                                 "summarizer output exceeded the run text bound".to_owned(),
@@ -1288,12 +1291,28 @@ impl Runtime {
                     // summarizer like a model turn (ADR-0048 § 2).
                     Err(error) => {
                         let rejected_before_work = matches!(&error,
-                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::Configuration(_)
+                            qq_provider::ProviderError::Api { .. } | qq_provider::ProviderError::ResponseFailed { kind: qq_provider::ProviderErrorKind::ContextExceeded, .. } | qq_provider::ProviderError::Configuration(_)
                             | qq_provider::ProviderError::CredentialsUnavailable(_))
                             && text.is_empty() && calls.is_empty() && replay.is_none()
                             && !reasoning_seen;
                         let kind = run_failure_kind(error.kind());
                         let message = error.to_string();
+                        if rejected_before_work
+                            && kind == RunFailureKind::ProviderContextExceeded
+                            && fold.split(&mut messages)
+                        {
+                            ordinal += 1;
+                            yield Ok(runtime::SummarizeStep::TurnCompleted {
+                                model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                                ordinal,
+                                message: Message::assistant(String::new()),
+                                usage: Some(TokenUsage::default()),
+                                truncated: false,
+                            });
+                            summary.clear();
+                            continuations = 0;
+                            continue 'requests;
+                        }
                         if rejected_before_work {
                             yield Err(runtime::SummarizeError::RejectedBeforeWork { kind, message });
                             return;
@@ -1330,6 +1349,7 @@ impl Runtime {
                 None => completed,
             };
             yield Ok(runtime::SummarizeStep::TurnCompleted {
+                model_work: runtime::ModelWorkDisposition::Committed,
                 ordinal, message: completed, usage, truncated: truncated.is_some(),
             });
             // Overflowing the sum is a provider protocol fault; fail the
@@ -1401,6 +1421,15 @@ impl Runtime {
             }
             summary.push_str(&text);
             let Some(reason) = truncated else {
+                match fold.advance(&mut summary) {
+                    Ok(Some(next)) => {
+                        messages = next;
+                        continuations = 0;
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => { yield Err(error); return; }
+                }
                 yield Ok(runtime::SummarizeStep::Summary(summary)); return;
             };
             if text.trim().is_empty() && reason == qq_provider::IncompleteReason::OutputTokens {
@@ -2593,6 +2622,290 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn summary_fold_preserves_the_cumulative_run_text_bound() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let portion = "x".repeat(MAX_RUN_MODEL_TEXT_BYTES / 2 + 1);
+        let turn = || {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: portion.clone(),
+                }),
+                Ok(ProviderEvent::Completed { usage: None }),
+            ]
+        };
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(
+                    vec![
+                        vec![Err(ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "overflow".to_owned(),
+                        })],
+                        turn(),
+                        turn(),
+                    ]
+                    .into(),
+                ),
+                requests: requests.clone(),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let steps = runtime.summarize(
+            vec![
+                Message::user("evidence ".repeat(2000)),
+                Message::user(sessions::COMPACTION_INSTRUCTION),
+            ],
+            Arc::from("system"),
+            Arc::from([]),
+            256,
+            None,
+        );
+        tokio::pin!(steps);
+        let mut rejected = false;
+        let mut completed = false;
+        while let Some(step) = steps.next().await {
+            match step {
+                Err(runtime::SummarizeError::Rejected(message)) => {
+                    rejected = message.contains("run text bound")
+                }
+                Ok(runtime::SummarizeStep::Summary(_)) => completed = true,
+                _ => {}
+            }
+        }
+        assert!(rejected);
+        assert!(!completed);
+        assert_eq!(requests.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn summary_fold_rejects_empty_intermediate_portions_before_more_provider_work() {
+        for partial in ["", " \n\t"] {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let runtime = Runtime::new(
+                SummarizeScript {
+                    requests: requests.clone(),
+                    turns: Mutex::new(
+                        vec![
+                            vec![Err(ProviderError::ResponseFailed {
+                                kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                                message: "context length exceeded".to_owned(),
+                            })],
+                            vec![
+                                Ok(ProviderEvent::OutputTextDelta {
+                                    text: partial.to_owned(),
+                                }),
+                                Ok(ProviderEvent::Completed { usage: None }),
+                            ],
+                            vec![
+                                Ok(ProviderEvent::OutputTextDelta {
+                                    text: "final without earlier evidence".to_owned(),
+                                }),
+                                Ok(ProviderEvent::Completed { usage: None }),
+                            ],
+                        ]
+                        .into(),
+                    ),
+                },
+                "test-model",
+                256,
+            )
+            .unwrap();
+            let steps = runtime.summarize(
+                vec![
+                    Message::user("evidence ".repeat(2000)),
+                    Message::user(sessions::COMPACTION_INSTRUCTION),
+                ],
+                Arc::from("summarize"),
+                Arc::from([]),
+                256,
+                None,
+            );
+            tokio::pin!(steps);
+            let mut rejected = false;
+            while let Some(step) = steps.next().await {
+                match step {
+                    Err(runtime::SummarizeError::Rejected(message)) => {
+                        assert!(message.contains("empty summary"), "{message}");
+                        rejected = true;
+                    }
+                    Ok(runtime::SummarizeStep::Summary(text)) => {
+                        panic!("discarded earlier evidence: {text}")
+                    }
+                    other => {
+                        other.expect("summary work must persist before rejection");
+                    }
+                }
+            }
+            assert!(rejected);
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                2,
+                "never send the later portion after dropping its predecessor"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_fold_resets_continuations_and_reports_rejected_work() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let complete = |text: &str| {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: text.to_owned(),
+                }),
+                Ok(ProviderEvent::Completed {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                }),
+            ]
+        };
+        let truncated = || {
+            vec![
+                Ok(ProviderEvent::OutputTextDelta {
+                    text: "part ".to_owned(),
+                }),
+                Ok(ProviderEvent::Incomplete {
+                    usage: Some(qq_provider::ProviderUsage {
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_input_tokens: 0,
+                        cache_write_input_tokens: 0,
+                        reasoning_tokens: None,
+                    }),
+                    reason: qq_provider::IncompleteReason::OutputTokens,
+                }),
+            ]
+        };
+        let mut turns = vec![vec![Err(ProviderError::ResponseFailed {
+            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+            message: "context length exceeded".to_owned(),
+        })]];
+        for _ in 0..2 {
+            for _ in 0..MAX_OUTPUT_CONTINUATIONS {
+                turns.push(truncated());
+            }
+            turns.push(complete("finished"));
+        }
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(turns.into()),
+                requests: requests.clone(),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let steps = runtime.summarize(
+            vec![
+                Message::user("evidence ".repeat(2000)),
+                Message::user(sessions::COMPACTION_INSTRUCTION),
+            ],
+            Arc::from("system"),
+            Arc::from([]),
+            256,
+            None,
+        );
+        tokio::pin!(steps);
+        let mut rejected = 0;
+        let mut summary = None;
+        while let Some(step) = steps.next().await {
+            match step.unwrap() {
+                runtime::SummarizeStep::TurnCompleted {
+                    model_work: runtime::ModelWorkDisposition::RejectedBeforeWork,
+                    usage,
+                    ..
+                } => {
+                    rejected += 1;
+                    assert_eq!(usage, Some(TokenUsage::default()));
+                }
+                runtime::SummarizeStep::Summary(text) => summary = Some(text),
+                _ => {}
+            }
+        }
+        assert_eq!(rejected, 1);
+        assert!(summary.unwrap().ends_with("finished"));
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1 + 2 * (usize::from(MAX_OUTPUT_CONTINUATIONS) + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn summary_fold_can_split_after_many_completed_continuation_turns() {
+        struct SmallWindow {
+            requests: Arc<Mutex<Vec<ModelRequest>>>,
+        }
+        impl Provider for SmallWindow {
+            fn stream(&self, request: ModelRequest) -> ProviderStream {
+                let oversized = measure_messages(request.messages()) > 5_000;
+                let fragments = request
+                    .messages()
+                    .iter()
+                    .filter(|m| m.role() == Role::Assistant)
+                    .count();
+                self.requests.lock().unwrap().push(request);
+                if oversized {
+                    return Box::pin(stream::iter([Err(ProviderError::ResponseFailed {
+                        kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                        message: "context length exceeded".to_owned(),
+                    })]));
+                }
+                let terminal = if fragments < usize::from(MAX_OUTPUT_CONTINUATIONS) {
+                    ProviderEvent::Incomplete {
+                        usage: None,
+                        reason: qq_provider::IncompleteReason::OutputTokens,
+                    }
+                } else {
+                    ProviderEvent::Completed { usage: None }
+                };
+                Box::pin(stream::iter([
+                    Ok(ProviderEvent::OutputTextDelta {
+                        text: "fragment ".to_owned(),
+                    }),
+                    Ok(terminal),
+                ]))
+            }
+        }
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SmallWindow {
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let steps = runtime.summarize(
+            vec![
+                Message::user("evidence ".repeat(8_192)),
+                Message::user(sessions::COMPACTION_INSTRUCTION),
+            ],
+            Arc::from("system"),
+            Arc::from([]),
+            256,
+            None,
+        );
+        tokio::pin!(steps);
+        let mut summary = None;
+        while let Some(step) = steps.next().await {
+            if let runtime::SummarizeStep::Summary(text) =
+                step.expect("remaining split capacity must survive earlier continuations")
+            {
+                summary = Some(text);
+            }
+        }
+        assert!(summary.is_some());
+        assert!(requests.lock().unwrap().len() > 64);
+    }
+
+    #[tokio::test]
     async fn in_run_summarize_answers_one_call_turn_with_rejections_and_keeps_only_the_new_reply() {
         // Turn one is cut mid-reply; turn two continues it but calls a tool,
         // abandoning the reply; turn three writes the summary. Only turn
@@ -2800,6 +3113,120 @@ mod tests {
         assert!(prompt_system.starts_with(summarizer_system));
         assert_eq!(summarizer.tools(), prompt.tools());
         assert!(!summarizer.tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn summary_fold_request_weights_match_each_replaced_transcript() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runtime = Runtime::new(
+            SummarizeScript {
+                turns: Mutex::new(
+                    vec![
+                        vec![Err(ProviderError::ResponseFailed {
+                            kind: qq_provider::ProviderErrorKind::ContextExceeded,
+                            message: "overflow".to_owned(),
+                        })],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "PREFIX_FRAGMENT ".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Incomplete {
+                                reason: qq_provider::IncompleteReason::OutputTokens,
+                                usage: None,
+                            }),
+                        ],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "SUFFIX_FRAGMENT".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Completed { usage: None }),
+                        ],
+                        vec![
+                            Ok(ProviderEvent::OutputTextDelta {
+                                text: "final".to_owned(),
+                            }),
+                            Ok(ProviderEvent::Completed { usage: None }),
+                        ],
+                    ]
+                    .into(),
+                ),
+                requests: Arc::clone(&requests),
+            },
+            "test-model",
+            256,
+        )
+        .unwrap();
+        let workspace = std::fs::canonicalize(directory.path()).unwrap();
+        let plan = tokio::task::spawn_blocking(move || {
+            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
+                &runtime, workspace,
+            ))
+            .unwrap()
+        })
+        .await
+        .unwrap();
+        let events = plan
+            .execute(
+                vec![
+                    Message::user("evidence ".repeat(12_000)),
+                    Message::user(sessions::COMPACTION_INSTRUCTION),
+                ],
+                RunCancellation::new(),
+                Arc::new(StaticPolicyGate {
+                    mode: ApprovalMode::ReadOnly,
+                    grants: approval::SessionGrants::default(),
+                    network: Arc::default(),
+                }),
+                Arc::new(workspace::FileState::default()),
+                RunCapabilities::restricted().summarizer(plan::PromptPrefixKey {
+                    tools: None,
+                    guidance: false,
+                    subagent: None,
+                }),
+            )
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
+            "{events:?}"
+        );
+        let weights = events
+            .iter()
+            .filter_map(|event| match event {
+                RuntimeEvent::Prepared { weight, .. } => Some(weight),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(weights.len(), 4);
+        let final_input = requests[3]
+            .messages()
+            .iter()
+            .flat_map(|message| message.content())
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(final_input.contains("PREFIX_FRAGMENT SUFFIX_FRAGMENT"));
+        assert!(events.iter().any(|event| matches!(event, RuntimeEvent::AssistantTurnCompleted { model_work: runtime::ModelWorkDisposition::RejectedBeforeWork, usage: Some(usage), .. } if *usage == TokenUsage::default())));
+        for (index, (weight, request)) in weights.iter().zip(requests.iter()).enumerate() {
+            let boundary = if index == 2 {
+                requests[1].messages().len() - 1
+            } else {
+                request.messages().len() - 1
+            };
+            assert_eq!(
+                weight.reducible_message_bytes,
+                measure_messages(&request.messages()[..boundary])
+            );
+            assert_eq!(
+                weight.irreducible_message_bytes,
+                measure_messages(&request.messages()[boundary..])
+            );
+        }
     }
 
     #[tokio::test]
@@ -9366,12 +9793,13 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
+        // Task-owned command deadlines update the shell description as well.
         // Record the resulting schema identity including those descriptions.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "2424a90087e39ad4908ce6db040d26c08b78889deae337feed86c9fc2a137a27"
+            "6f5ee886cbf2c09329fd373d88e1cb2091c8929a0fcb1f5de7e2ee2abfc7017f"
         );
         let spawn = specs.last().unwrap();
         assert!(

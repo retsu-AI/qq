@@ -437,7 +437,7 @@ fn credential_check(
                 api_key,
                 profile,
             } => {
-                let audience = crate::runtime::builtin_audience(provider);
+                let audience = crate::builtin_auth::BuiltinAuth::of(provider).audience();
                 let stored_name = provider.stored_name(profile.as_deref());
                 match (api_key, provider.variables) {
                     (Some(secret), _) => reference(secret, Some(audience)),

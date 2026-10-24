@@ -10,6 +10,7 @@ pub(super) struct SessionToolGate {
     cancellation: watch::Receiver<bool>,
     network: Arc<crate::tools::network::NetworkPolicy>,
     delegate: approval::ApprovalDelegate,
+    task_scoped: bool,
 }
 
 impl SessionToolGate {
@@ -19,6 +20,7 @@ impl SessionToolGate {
         cancellation: watch::Receiver<bool>,
         network: Arc<crate::tools::network::NetworkPolicy>,
         delegate: approval::ApprovalDelegate,
+        task_scoped: bool,
     ) -> Self {
         Self {
             inner,
@@ -26,6 +28,7 @@ impl SessionToolGate {
             cancellation,
             network,
             delegate,
+            task_scoped,
         }
     }
 }
@@ -38,6 +41,7 @@ impl ToolGate for SessionToolGate {
         let mut cancellation = self.cancellation.clone();
         let network = Arc::clone(&self.network);
         let delegate = self.delegate;
+        let task_scoped = self.task_scoped;
         Box::pin(async move {
             let policy = match inner
                 .store
@@ -61,7 +65,7 @@ impl ToolGate for SessionToolGate {
             let class = approval::classify(call.effect, &call.name, &call.arguments, &network);
             let mut mode = mode;
             for (parent_mode, parent_grants) in ancestors {
-                let message = match approval::evaluate(parent_mode, &call.name, &class, &parent_grants) {
+                let message = match approval::evaluate_in_task(parent_mode, &call.name, &class, &parent_grants, task_scoped) {
                     approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
                     approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask => {
                         // Ask applies to each child action too: only the human
@@ -84,7 +88,8 @@ impl ToolGate for SessionToolGate {
                     Err(error) => approval_persistence_failure(error),
                 };
             }
-            let decision = approval::evaluate(mode, &call.name, &class, &grants);
+            let decision =
+                approval::evaluate_in_task(mode, &call.name, &class, &grants, task_scoped);
             // Write children retain mandatory supervision independently of the
             // user's approval mode. The parent's policy was checked above.
             let decision = if supervised
@@ -161,11 +166,8 @@ impl ToolGate for SessionToolGate {
                         biased;
                         changed = cancellation.changed() => {
                             let _ = changed;
-                            inner.remove_approval(call.id);
-                            return GateDecision::Deny {
-                                message: "The run stopped before this question was answered."
-                                    .to_owned(),
-                            };
+                            return cancelled_hold(&inner, &claimed, call.id,
+                                "The run stopped before this question was answered.").await;
                         }
                         result = &mut resolved => result.is_err(),
                         () = sleep_until_or_never(deadline) => true,
@@ -328,11 +330,8 @@ impl ToolGate for SessionToolGate {
                                 biased;
                                 changed = cancellation.changed() => {
                                     let _ = changed;
-                                    inner.remove_approval(call.id);
-                                    return GateDecision::Deny {
-                                        message: "The run stopped before this approval was resolved."
-                                            .to_owned(),
-                                    };
+                                    return cancelled_hold(&inner, &claimed, call.id,
+                                        "The run stopped before this approval was resolved.").await;
                                 }
                                 result = &mut resolved => break result.is_err(),
                                 () = sleep_until_or_never(goal_deadline) => break true,
@@ -444,14 +443,11 @@ impl ToolGate for SessionToolGate {
                             tokio::select! {
                                 biased;
                                 changed = cancellation.changed() => {
-                                    // Run cancellation or shutdown: leave the call
-                                    // awaiting so run completion interrupts it.
+                                    // The gate can observe cancellation before the
+                                    // session loop; retain an expired goal hold first.
                                     let _ = changed;
-                                    inner.remove_approval(call.id);
-                                    return GateDecision::Deny {
-                                        message: "The run stopped before this approval was resolved."
-                                            .to_owned(),
-                                    };
+                                    return cancelled_hold(&inner, &claimed, call.id,
+                                        "The run stopped before this approval was resolved.").await;
                                 }
                                 result = &mut resolved => break result.is_err(),
                                 () = sleep_until_or_never(deadline) => break true,
@@ -463,6 +459,25 @@ impl ToolGate for SessionToolGate {
                 }
             }
         })
+    }
+}
+
+// The gate and the session loop race on the same cancellation signal. Settle
+// an expired goal's unanswered hold before yielding a denied/interrupted call:
+// the outer loop can no longer find the awaiting row once it persists that call.
+async fn cancelled_hold(
+    inner: &SessionRuntimeInner,
+    claimed: &ClaimedRun,
+    call: ToolCallId,
+    message: &str,
+) -> GateDecision {
+    let settled = expire_goal_hold(inner, claimed, true).await;
+    inner.remove_approval(call);
+    match settled {
+        Ok(()) => GateDecision::Deny {
+            message: message.to_owned(),
+        },
+        Err(error) => approval_persistence_failure(error),
     }
 }
 

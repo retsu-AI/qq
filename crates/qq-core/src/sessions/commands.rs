@@ -1120,9 +1120,9 @@ pub(super) fn execute_command(
                 }
                 Err(error) => return Err(SessionRuntimeError::InvalidInput(error)),
             }
-            let (session_id, status, stored_outcome, kind) = transaction
+            let (session_id, status, stored_outcome, kind, observation_only) = transaction
                 .query_row(
-                    "SELECT session_id, status, outcome_json, kind FROM runs WHERE id = ?1",
+                    "SELECT session_id, status, outcome_json, kind, EXISTS(SELECT 1 FROM temp.native_observation_runs WHERE run_id=runs.id) FROM runs WHERE id = ?1",
                     [run_id.to_string()],
                     |row| {
                         Ok((
@@ -1130,6 +1130,7 @@ pub(super) fn execute_command(
                             row.get::<_, String>(1)?,
                             row.get::<_, Option<String>>(2)?,
                             row.get::<_, String>(3)?,
+                            row.get::<_, bool>(4)?,
                         ))
                     },
                 )
@@ -1156,7 +1157,10 @@ pub(super) fn execute_command(
                 // Only an executing prompt run has a boundary to steer at. A
                 // queued run has not started: the client submits a new prompt
                 // or cancels instead. Compaction runs take no user input.
-                if status != "running" || parse_run_kind(&kind)? != RunKind::Prompt {
+                if observation_only
+                    || status != "running"
+                    || parse_run_kind(&kind)? != RunKind::Prompt
+                {
                     return Err(SessionRuntimeError::RunNotSteerable);
                 }
                 let pending: u16 = transaction.query_row(
@@ -1495,8 +1499,9 @@ pub(super) fn execute_command(
                         run_id,
                         tool_call_id,
                     )?;
+                    let task_scoped = super::task_workspaces::is_bound(&transaction, run_id)?;
                     for (mode, grants) in &ancestors {
-                        refusal = match approval::evaluate(*mode, &name, &class, grants) {
+                        refusal = match approval::evaluate_in_task(*mode, &name, &class, grants, task_scoped) {
                             approval::PolicyDecision::Execute
                             | approval::PolicyDecision::AskUser { .. } => continue,
                             // The pending response supplies the fresh human
@@ -2332,6 +2337,11 @@ pub(super) fn delete_idle_session(
                     ) OR EXISTS(
                         SELECT 1 FROM side_questions
                         WHERE session_id = sessions.id AND state = 'running'
+                    ) OR EXISTS(
+                        SELECT 1 FROM native_command_owners native
+                        JOIN tool_calls call ON call.id=native.tool_call_id
+                        JOIN runs run ON run.id=call.run_id
+                        WHERE run.session_id=sessions.id AND native.result_saved=0
                     )
              FROM sessions WHERE id = ?1",
             [session_id.to_string()],
@@ -2373,6 +2383,9 @@ pub(super) fn delete_idle_session(
                  WHERE owner.id IS NULL OR ancestor.id IS NULL
                      OR owner.status NOT IN
                          ('completed', 'cancelled', 'failed', 'interrupted', 'budget_exhausted', 'paused')
+                     OR EXISTS(SELECT 1 FROM native_command_owners native
+                         JOIN tool_calls call ON call.id=native.tool_call_id
+                         WHERE call.run_id=owner.id AND native.result_saved=0)
                      OR (owners.depth = ?2 AND ancestor.owner_run_id IS NOT NULL)
              )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],
@@ -2390,9 +2403,16 @@ pub(super) fn delete_idle_session(
          ) SELECT EXISTS(
             SELECT 1 FROM paid JOIN runs r ON r.id=paid.run_id
             WHERE r.status IN ('queued','running') OR EXISTS(
+                SELECT 1 FROM native_command_owners native
+                JOIN tool_calls call ON call.id=native.tool_call_id
+                WHERE call.run_id=r.id AND native.result_saved=0
+            ) OR EXISTS(
                 SELECT 1 FROM runs helper WHERE helper.kind='compaction'
                   AND helper.auto_compaction=1 AND helper.auto_compaction_for_run_id=r.id
-                  AND helper.session_id=r.session_id AND helper.status IN ('queued','running')
+                  AND helper.session_id=r.session_id AND (helper.status IN ('queued','running')
+                    OR EXISTS(SELECT 1 FROM native_command_owners native
+                        JOIN tool_calls call ON call.id=native.tool_call_id
+                        WHERE call.run_id=helper.id AND native.result_saved=0))
             )
          )",
         params![session_id.to_string(), MAX_CHILD_DEPTH],

@@ -54,7 +54,7 @@ pub enum InitError {
     Invalid {
         path: PathBuf,
         #[source]
-        source: config::ConfigError,
+        source: Box<config::ConfigError>,
     },
 }
 
@@ -225,7 +225,12 @@ pub fn run<R: BufRead, W: Write>(
     // design; its document has already parsed by the time that is reported.
     match config::ConfigLoader::new(paths.clone()).check(&config::LoadRequest::new(cwd)) {
         Ok(_) | Err(config::ConfigError::TrustRequired { .. }) => {}
-        Err(source) => return Err(InitError::Invalid { path, source }),
+        Err(source) => {
+            return Err(InitError::Invalid {
+                path,
+                source: Box::new(source),
+            });
+        }
     }
 
     let next = match provider {
@@ -676,8 +681,9 @@ mod tests {
                 &error,
                 InitError::Invalid {
                     path,
-                    source: qq_config::ConfigError::UnknownProvider(_),
+                    source,
                 } if *path == fixture.global_file()
+                    && matches!(source.as_ref(), qq_config::ConfigError::UnknownProvider(_))
             ),
             "{error:?}"
         );

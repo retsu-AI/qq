@@ -28,3 +28,4 @@ time.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+qq-config.workspace = true

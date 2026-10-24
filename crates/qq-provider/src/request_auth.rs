@@ -53,7 +53,6 @@ const MAX_CREDENTIAL_HEADER_BYTES: usize = 64 * 1_024;
 const CHATGPT_ACCOUNT_ID: HeaderName = HeaderName::from_static("chatgpt-account-id");
 const ORIGINATOR: HeaderName = HeaderName::from_static("originator");
 const X_OPENAI_FEDRAMP: HeaderName = HeaderName::from_static("x-openai-fedramp");
-const X_GOOG_API_KEY: HeaderName = HeaderName::from_static("x-goog-api-key");
 
 /// The headers one request-time credential places on an attempt.
 ///
@@ -105,15 +104,6 @@ impl RequestCredential {
         if is_fedramp {
             credential.push_metadata(X_OPENAI_FEDRAMP, HeaderValue::from_static("true"));
         }
-        Ok(credential)
-    }
-
-    /// A Google API key, sent as `x-goog-api-key`.
-    pub fn google_api_key(api_key: impl Into<String>) -> Result<Self, RequestCredentialError> {
-        let api_key = api_key.into();
-        check_credential_size(api_key.len())?;
-        let mut credential = Self::empty();
-        credential.push_secret(X_GOOG_API_KEY, api_key)?;
         Ok(credential)
     }
 
@@ -246,7 +236,6 @@ impl RequestCredentialError {
 pub(crate) enum RequestCredentialKindExpected {
     Bearer,
     Codex,
-    GoogleApiKey,
 }
 
 impl RequestCredentialKindExpected {
@@ -258,22 +247,18 @@ impl RequestCredentialKindExpected {
             ORIGINATOR,
             X_OPENAI_FEDRAMP,
         ];
-        static GOOGLE_API_KEY: [HeaderName; 1] = [X_GOOG_API_KEY];
         match self {
             Self::Bearer => &BEARER,
             Self::Codex => &CODEX,
-            Self::GoogleApiKey => &GOOGLE_API_KEY,
         }
     }
 
     fn required(self) -> &'static [HeaderName] {
         static BEARER: [HeaderName; 1] = [AUTHORIZATION];
         static CODEX: [HeaderName; 3] = [AUTHORIZATION, CHATGPT_ACCOUNT_ID, ORIGINATOR];
-        static GOOGLE_API_KEY: [HeaderName; 1] = [X_GOOG_API_KEY];
         match self {
             Self::Bearer => &BEARER,
             Self::Codex => &CODEX,
-            Self::GoogleApiKey => &GOOGLE_API_KEY,
         }
     }
 }
@@ -305,14 +290,17 @@ impl RequestAuthorizer {
         Self::request_credentials(credentials, RequestCredentialKindExpected::Bearer)
     }
 
-    pub(crate) fn request_time_google_api_key(
-        credentials: SharedRequestCredentialProvider,
-    ) -> Self {
-        Self::request_credentials(credentials, RequestCredentialKindExpected::GoogleApiKey)
-    }
-
     pub(crate) fn request_time_codex(credentials: SharedRequestCredentialProvider) -> Self {
         Self::request_credentials(credentials, RequestCredentialKindExpected::Codex)
+    }
+
+    /// The headers this authorizer sets on each attempt, which static
+    /// configuration therefore may not set.
+    pub(crate) fn owned_headers(&self) -> &'static [HeaderName] {
+        match self {
+            Self::Credential(_, expected) => expected.allowed(),
+            _ => &[],
+        }
     }
 
     const fn request_credentials(

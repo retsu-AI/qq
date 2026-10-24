@@ -16,6 +16,7 @@ published at <https://retsu-ai.github.io/qq/>.
 | check my setup before the first run | [`qq doctor`](cli.md#qq-doctor---json) |
 | understand what the agent may do without asking | [Permissions and trust](permissions.md) |
 | learn the terminal UI | [The TUI](tui.md) |
+| use the Windows desktop app | [Desktop](desktop.md) |
 | run agents from scripts and CI | [Headless: `qq ask`, `qq run`, `qq serve`](headless.md) |
 | give the agent more tools | [MCP servers](mcp.md) |
 | look up every setting | [Configuration reference](configuration.md) |

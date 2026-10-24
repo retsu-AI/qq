@@ -79,9 +79,8 @@ Codex: `Authorization`, `chatgpt-account-id`, `originator`, optionally
 more than 64 KiB of values fails the attempt before a header is applied.
 Optional names are cleared first, so a credential that drops one does not
 inherit it. Google GenerateContent accepts request-time bearer credentials
-like the other adapters, and request-time API keys
-(`HttpAuth::RequestTimeGoogleApiKey`, `RequestCredential::google_api_key`)
-sent as `x-goog-api-key`; that intent is valid only for Google.
+like the other adapters; Google API keys are resolved once into a static
+`x-goog-api-key` header.
 
 ## Shared HTTP Execution And Adapter Kit
 

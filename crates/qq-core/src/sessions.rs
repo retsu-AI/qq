@@ -42,8 +42,9 @@ use crate::{
     SpawnRequest, SubagentSpawner, ToolGate, ToolGateFuture, approval,
     catalog::EffectClass,
     runtime::{
-        HISTORY_SCAN_BUDGET_BYTES, HistoryMatch, HistorySearch, HistorySearchFuture,
-        HistorySearcher, SpillHandle, SpillReadFuture, SpillReader, excerpt_around,
+        HISTORY_SCAN_BUDGET_BYTES, HISTORY_SCAN_STEPS, HistoryCursor, HistoryMatch, HistorySearch,
+        HistorySearchFuture, HistorySearcher, SpillHandle, SpillReadFuture, SpillReader,
+        excerpt_around,
     },
     workspace::{FileState, FileStateUpdate},
 };
@@ -63,10 +64,14 @@ mod goal_paid;
 mod goal_policy;
 pub use goal_policy::{GoalPolicy, GoalPolicyError, GoalPolicyFuture};
 mod goals;
+mod history;
 pub(crate) use goal_paid::{GoalPaidInput, PaidRequestAdmission};
 pub(crate) use goals::GoalRunInput;
 pub use goals::GoalValidationError;
 mod in_run_compaction;
+mod native_ack;
+mod native_recovery;
+pub(crate) mod native_scope;
 mod projection;
 mod runtime;
 mod scheduler;
@@ -77,8 +82,10 @@ mod snapshots;
 mod store;
 mod streaming;
 mod subagents;
+mod task_workspaces;
 #[cfg(test)]
 mod tests;
+pub use task_workspaces::TaskWorkspacePolicy;
 mod tool_calls;
 mod transcript;
 
@@ -297,12 +304,12 @@ pub mod bench_support {
         let search = search_session_history(
             connection,
             session_id,
-            RunId::from_bytes([9; 16]),
             query,
             crate::runtime::MAX_HISTORY_MATCHES,
+            None,
         )
         .expect("search");
-        (search.matches.len(), search.truncated)
+        (search.matches.len(), search.next_cursor.is_some())
     }
 }
 
@@ -326,6 +333,7 @@ use codec::*;
 use commands::*;
 use compaction::*;
 use events::*;
+use history::search_session_history;
 use settlement::*;
 use snapshots::*;
 use streaming::*;
@@ -344,8 +352,8 @@ const MAX_CONTEXT_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const CONTEXT_PRUNE_KEEP_TURNS: usize = 4;
 /// Longest argument excerpt embedded in a pruned-result stub.
 const CONTEXT_PRUNE_STUB_ARGUMENT_BYTES: usize = 256;
-/// Compaction summaries retained per session, newest first. History is kept
-/// (not deleted eagerly) so a bad compaction can be rolled back later.
+/// Recent rollback checkpoints, in addition to the session prefix and run
+/// markers required to replay their baseline.
 const COMPACTION_HISTORY_ROWS: u32 = 3;
 /// Assemblies at or below this size are compacted without a shrinkage check:
 /// the structured summary's fixed framing can legitimately exceed a tiny
@@ -447,10 +455,10 @@ const PRUNABLE_READ_ONLY_TOOLS: [&str; 6] = [
 ];
 /// Prefixes the latest compaction summary when assembly replays it as the
 /// conversation's opening message.
-const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
+pub(crate) const COMPACTION_SUMMARY_PREAMBLE: &str = "The earlier part of this conversation was compacted \
 into the summary below. Treat it as authoritative context; the verbatim conversation resumes \
-after it. A QQ compaction record at its end was copied exactly from the session store and wins \
-over the narrative above it; use search_history for anything else you need verbatim.";
+after it. QQ original inputs and the compaction record were copied from the session store and \
+win over the narrative; later input corrections take precedence. Use search_history for other detail.";
 /// Opens a run whose prompt could not be admitted even after the fold was
 /// exhausted: the retained transcript is dropped from this request and only
 /// the latest summary stands in for it. The session keeps every row.
@@ -464,14 +472,15 @@ from the session; use search_history for verbatim detail.";
 pub(crate) const IN_RUN_COMPACTION_PREAMBLE: &str = "Your earlier work on this task was compacted into \
 the summary below. Treat it as authoritative: the tool results it describes were real and \
 their effects stand. A QQ compaction record at its end was copied exactly from the session \
-store. The verbatim conversation resumes after it; continue the task.";
+store. QQ original inputs preserve applied instructions and later corrections take precedence. \
+The verbatim conversation resumes after it; continue the task.";
 /// The fixed instruction appended as the final user message of a compaction
 /// run. The model writes only the narrative; QQ renders the exact record
 /// from stored rows when the summary commits (ADR-0056).
-const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
+pub(crate) const COMPACTION_INSTRUCTION: &str = "Summarize this conversation so it can replace the \
 transcript as model context. Do not call any tools. After your summary QQ appends an exact \
-record copied from the session store: every user message verbatim, the last assistant reply, \
-the files read and modified, and the failed tool calls. Do not restate any of it. Write at most \
+input section copied from the session store, including applied user corrections and answers, \
+and a bounded record of the last assistant reply, files read and modified, and failed tool calls. Do not restate any of it. Write at most \
 about 1,200 words, in exactly these sections:\n\
 1. Intent: what the user is trying to accomplish and what done looks like, in their terms.\n\
 2. Decisions and constraints: each decision or constraint with its reason, using exact names, \

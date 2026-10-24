@@ -45,6 +45,7 @@ pub(super) enum MatchError {
     /// so the retry needs no read.
     NotFound { closest: Option<Closest> },
     /// A strategy found several candidates; the 1-based lines they start on.
+    /// Exact diagnostics stop at three candidates, so that count is a lower bound.
     Ambiguous {
         via: Strategy,
         count: usize,
@@ -76,19 +77,34 @@ const BLOCK_ANCHOR_MIN_LINES: usize = 3;
 const BLOCK_ANCHOR_MIN_SIMILARITY: f64 = 0.7;
 const BLOCK_ANCHOR_MAX_SIZE_DELTA: f64 = 0.25;
 
+/// Unlike `match_indices`, includes overlapping occurrences at UTF-8 boundaries.
+pub(super) fn exact_starts<'a>(text: &'a str, old: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        let start = offset + text.get(offset..)?.find(old)?;
+        offset = start + text[start..].chars().next().map_or(1, char::len_utf8);
+        Some(start)
+    })
+}
+
 /// Finds `old` in `text`. `fuzzy=false` stops after `exact`.
 pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
     let started = Instant::now();
     // exact
-    let mut exact = text.match_indices(old).map(|(start, _)| start);
+    let mut exact = exact_starts(text, old);
     if let Some(start) = exact.next() {
-        let rest: Vec<usize> = exact.collect();
-        if !rest.is_empty() {
-            let mut lines = vec![line_of(text, start)];
-            lines.extend(rest.iter().map(|&s| line_of(text, s)));
+        if let Some(second) = exact.next() {
+            // Ambiguity is already proven. Bound diagnostics rather than
+            // repeatedly scanning a large overlapping pattern for a count.
+            let lines: Vec<_> = [Some(start), Some(second), exact.next()]
+                .into_iter()
+                .flatten()
+                .map(|offset| line_of(text, offset))
+                .collect();
+            let count = lines.len();
             return Err(MatchError::Ambiguous {
                 via: Strategy::Exact,
-                count: lines.len(),
+                count,
                 lines,
             });
         }
@@ -145,8 +161,6 @@ pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Matc
             [only] => {
                 let (start, _) = lines.spans[*only];
                 let (_, end) = lines.spans[*only + old_line_count - 1];
-                // Without a trailing newline on `old`, the match ends where
-                // the last old line's content ends, not at the file's newline.
                 // Without a trailing newline on `old`, the match ends where
                 // the last line's content does, not at the file's newline.
                 let end = if old.ends_with('\n') {

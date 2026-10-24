@@ -1245,7 +1245,7 @@ mod tests {
             r#"{"command":"pwd","timeout_seconds":1,"timeout_seconds":2}"#,
             r#"{"cwd":"."}"#,
             r#"{"command":"pwd","timeout_seconds":0}"#,
-            r#"{"command":"pwd","timeout_seconds":601}"#,
+            r#"{"command":"pwd","timeout_seconds":18446744073709551615}"#,
             r#"{"command":"   "}"#,
             r#"{"command":"pwd\u0000"}"#,
             r#"{"command":"pwd","cwd":""}"#,

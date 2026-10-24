@@ -47,6 +47,7 @@ pub(crate) struct ExecutionContextFacts {
     pub(crate) locale: Locale,
     pub(crate) cwd: CwdIdentity,
     pub(crate) verdict: ExecutionVerdict,
+    /// Host process owning this invocation; native backends may run the payload in descendants.
     pub(crate) pid: u32,
 }
 
@@ -132,7 +133,7 @@ impl ExecutionContextReceipt {
     pub(crate) fn valid(&self) -> bool {
         let facts = self.facts();
         facts.pid != 0
-            && facts.base_env_present < 32
+            && usize::from(facts.base_env_present) < (1_usize << BASE_ENV.len())
             && (!matches!(facts.verdict, ExecutionVerdict::VerifiedRead { .. })
                 || (!facts.requested_env
                     && facts.locale != Locale::Other
@@ -204,24 +205,127 @@ pub(super) enum OwnedLaunch {
     Exec(ExecArgs),
 }
 
+pub(crate) struct NativeExecution {
+    pub environment: crate::command_owner::NativeEnvironment,
+    pub filesystem: crate::command_owner::NativeFilesystem,
+    pub network: crate::command_owner::NativeNetwork,
+    pub resources: crate::command_owner::NativeResources,
+}
+
 /// The command and its capabilities are prepared together. Keeping this value
 /// alive through reap prevents later path/env changes from replacing a verified
 /// image or working directory.
 pub(crate) struct PreparedLaunch {
-    command: tokio::process::Command,
+    command: Option<tokio::process::Command>,
     receipt: ExecutionContextReceipt,
-    _cwd: cap_std::fs::Dir,
+    _cwd: Option<cap_std::fs::Dir>,
     #[cfg(target_os = "linux")]
-    _image: Option<std::fs::File>,
+    _image: Option<(std::fs::File, String)>,
+    #[cfg(target_os = "linux")]
+    startup: Option<super::linux_owner::Startup>,
+    #[cfg(target_os = "macos")]
+    macos_startup: Option<super::macos_owner::Startup>,
+    #[cfg(windows)]
+    windows_startup: Option<super::windows_owner::Startup>,
 }
 
 impl PreparedLaunch {
+    #[cfg(target_os = "linux")]
+    pub(super) fn owned_linux(
+        mut self,
+        owner: &super::linux_owner::LinuxOwner,
+        native: Option<&NativeExecution>,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                self._image.as_ref(),
+                native,
+            )
+            .map_err(PreparationError::Custody)?;
+        self.command = Some(command);
+        self.startup = Some(startup);
+        Ok(self)
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn owned_macos(
+        mut self,
+        owner: &super::macos_owner::MacosOwner,
+        native: Option<&NativeExecution>,
+        deadline: Instant,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                native,
+                deadline,
+            )
+            .map_err(PreparationError::Macos)?;
+        self.command = Some(command);
+        self.macos_startup = Some(startup);
+        Ok(self)
+    }
+    #[cfg(windows)]
+    pub(super) fn owned_windows(
+        mut self,
+        owner: &super::windows_owner::WindowsOwner,
+        native: Option<&NativeExecution>,
+        deadline: Instant,
+    ) -> Result<Self, PreparationError> {
+        let command = self
+            .command
+            .take()
+            .expect("newly prepared launch has a command");
+        let (command, startup) = owner
+            .wrap(
+                command,
+                self._cwd.as_ref().expect("prepared cwd is held"),
+                native,
+                deadline,
+            )
+            .map_err(PreparationError::Windows)?;
+        self.command = Some(command);
+        self.windows_startup = startup;
+        Ok(self)
+    }
     /// Only stream/process supervision settings may change after verification.
-    pub(crate) fn spawn(
+    pub(crate) async fn spawn(
         &mut self,
         piped_stdin: bool,
-    ) -> std::io::Result<(tokio::process::Child, Option<Box<ExecutionContextReceipt>>)> {
-        self.command
+        process: &super::ToolTaskLease,
+        cancelled: &ToolCancellation,
+        deadline: Instant,
+    ) -> std::io::Result<(
+        super::shell::NativeChild,
+        Option<Box<ExecutionContextReceipt>>,
+    )> {
+        if cancelled.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "command startup was cancelled",
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command startup timed out",
+            ));
+        }
+        let mut command = self
+            .command
+            .take()
+            .ok_or_else(|| std::io::Error::other("launch was already consumed"))?;
+        command
             .stdin(if piped_stdin {
                 std::process::Stdio::piped()
             } else {
@@ -231,8 +335,37 @@ impl PreparedLaunch {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(unix)]
-        self.command.process_group(0);
-        let child = self.command.spawn()?;
+        command.process_group(0);
+        #[cfg(target_os = "macos")]
+        let child = if let Some(startup) = self.macos_startup.take() {
+            super::macos_owner::spawn(command, startup, process, cancelled, deadline).await?
+        } else {
+            command.spawn()?.into()
+        };
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+        let child = {
+            let _ = process;
+            command.spawn()?
+        };
+        #[cfg(target_os = "linux")]
+        let child = if let Some(startup) = self.startup.take() {
+            super::linux_owner::spawn(command, startup, process, cancelled, deadline).await?
+        } else {
+            command.spawn()?.into()
+        };
+        #[cfg(windows)]
+        let child = super::windows_owner::spawn(
+            command,
+            self.windows_startup.take(),
+            piped_stdin,
+            self._cwd
+                .take()
+                .ok_or_else(|| std::io::Error::other("launch directory was already consumed"))?,
+            process,
+            cancelled,
+            deadline,
+        )
+        .await?;
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.facts_mut().pid = pid;
@@ -244,6 +377,21 @@ impl PreparedLaunch {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PreparationError {
+    #[error("resource enforcement is unavailable for this command launcher")]
+    ResourcesUnavailable,
+    #[error("network enforcement is unavailable for this command launcher")]
+    NetworkUnavailable,
+    #[error("filesystem enforcement is unavailable for this command launcher")]
+    FilesystemUnavailable,
+    #[cfg(target_os = "linux")]
+    #[error("could not establish Linux command custody: {0}")]
+    Custody(#[source] std::io::Error),
+    #[cfg(target_os = "macos")]
+    #[error("could not establish macOS command isolation: {0}")]
+    Macos(#[source] std::io::Error),
+    #[cfg(windows)]
+    #[error("could not establish Windows command isolation: {0}")]
+    Windows(#[source] std::io::Error),
     #[error("captured child environment exceeds 256 KiB")]
     EnvironmentBound,
     #[error("could not capture cwd: {0}")]
@@ -258,7 +406,12 @@ pub(crate) enum PreparationError {
     Cancelled,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "captured invocation values, image approvals, identity and cancellation are distinct inputs"
+)]
 pub(super) fn prepare(
+    captured: Option<&crate::command_owner::NativeEnvironment>,
     workspace: Workspace,
     launch: OwnedLaunch,
     approvals: Arc<ApprovedReadImages>,
@@ -267,6 +420,8 @@ pub(super) fn prepare(
     cancelled: &ToolCancellation,
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
+    #[cfg(test)]
+    crate::workspace::pause_blocking_preparation(&workspace);
     if cancelled.is_cancelled() || Instant::now() >= deadline {
         return Err(PreparationError::Cancelled);
     }
@@ -296,7 +451,10 @@ pub(super) fn prepare(
         if environment.iter().any(|(saved, _)| saved == name) {
             continue;
         }
-        if let Some(value) = std::env::var_os(name) {
+        if let Some(value) = match captured {
+            Some(captured) => captured.get(name),
+            None => std::env::var_os(name),
+        } {
             bytes = bytes
                 .saturating_add(name.len())
                 .saturating_add(value.as_encoded_bytes().len());
@@ -378,7 +536,7 @@ pub(super) fn prepare(
                     ));
                     command.args(&args.args);
                     command.as_std_mut().arg0(&args.program);
-                    image = Some(bound);
+                    image = Some((bound, args.program.clone()));
                     ExecutionVerdict::VerifiedRead {
                         family,
                         sealed_image_sha256: hash,
@@ -414,16 +572,23 @@ pub(super) fn prepare(
             facts,
             manifest: approvals.shared_entries(),
             policy_sha256: policy_digest(),
-            producer: producer.capture(cancelled, deadline),
+            producer: tracing::info_span!(target: "qq::diagnostic", "native_producer_identity")
+                .in_scope(|| producer.capture(cancelled, deadline)),
         }),
         None => ExecutionContextReceipt::V1(facts),
     };
     Ok(PreparedLaunch {
-        command,
+        command: Some(command),
         receipt,
-        _cwd: directory,
+        _cwd: Some(directory),
         #[cfg(target_os = "linux")]
         _image: image,
+        #[cfg(target_os = "linux")]
+        startup: None,
+        #[cfg(target_os = "macos")]
+        macos_startup: None,
+        #[cfg(windows)]
+        windows_startup: None,
     })
 }
 
@@ -715,6 +880,7 @@ mod tests {
         let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
         requested.env.push("PATH".to_owned());
         let unsupported = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(requested),
             approved.clone(),
@@ -731,6 +897,7 @@ mod tests {
             }
         );
         let unapproved = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             Arc::default(),
@@ -747,6 +914,7 @@ mod tests {
             }
         );
         let mut prepared = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             approved.clone(),
@@ -762,6 +930,7 @@ mod tests {
         ));
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Shell(
                 serde_json::from_value(
@@ -785,7 +954,14 @@ mod tests {
         assert!(
             cwd_runtime
                 .block_on(async {
-                    let (mut child, _) = cwd_bound.spawn(false)?;
+                    let (mut child, _) = cwd_bound
+                        .spawn(
+                            false,
+                            &super::super::dispatch::ToolTasks::default().enter(),
+                            &cancelled,
+                            Instant::now() + std::time::Duration::from_secs(5),
+                        )
+                        .await?;
                     child.wait().await
                 })
                 .unwrap()
@@ -808,7 +984,14 @@ mod tests {
         assert!(
             runtime
                 .block_on(async {
-                    let (mut child, _) = prepared.spawn(false)?;
+                    let (mut child, _) = prepared
+                        .spawn(
+                            false,
+                            &super::super::dispatch::ToolTasks::default().enter(),
+                            &cancelled,
+                            Instant::now() + std::time::Duration::from_secs(5),
+                        )
+                        .await?;
                     child.wait().await
                 })
                 .unwrap()
@@ -816,6 +999,7 @@ mod tests {
         );
         assert!(!root.join("written.txt").exists());
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
+            None,
             workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -844,6 +1028,7 @@ mod tests {
             .unwrap(),
         );
         let script_bound = prepare(
+            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             script_approval,
@@ -862,6 +1047,7 @@ mod tests {
         );
         std::fs::write(&program, &image).unwrap();
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
+            None,
             workspace,
             Arc::default(),
             "exec".to_owned(),
@@ -905,6 +1091,7 @@ pub(crate) fn prepare_goal_check(
     deadline: Instant,
 ) -> Result<PreparedLaunch, PreparationError> {
     prepare(
+        None,
         workspace,
         OwnedLaunch::Shell(ShellArgs {
             command,
