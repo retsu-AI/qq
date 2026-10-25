@@ -391,7 +391,7 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
             json!({
                 "type": "string",
                 "enum": ["read", "write"],
-                "description": "read (default): read-only workspace access. write: edit files and run commands under supervised approval. Requires reviewer_model; only one write sub-agent runs at a time. Choose write only for implementation."
+                "description": "read (default): read-only workspace access. write: edit files and run commands using Auto within the parent's authority; only one write sub-agent runs at a time. Choose write only for implementation."
             }),
         );
     }
@@ -433,8 +433,8 @@ pub(crate) fn spawn_agent_spec(model_routes: &[String], delegation: &DelegationR
     };
     let description = if delegation.write_children {
         format!(
-            "{} Read by default; authority: write enables edits and commands with reviewer_model, \
-             supervised approval and one write sub-agent at a time.",
+            "{} Read by default; authority: write enables edits and commands using Auto within the parent's \
+             authority, with one write sub-agent at a time.",
             description.replacen("to a read-only sub-agent", "to a sub-agent", 1)
         )
     } else {

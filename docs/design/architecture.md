@@ -1474,7 +1474,7 @@ use the same child ownership and accounting boundary.
 
 Local tool ownership extends through blocking file work and shell termination
 and reap. A parent, or a replacement run in its session, cannot start another
-write while a supervised child is draining. Cancellation does not undo a native
+write while a write child is draining. Cancellation does not undo a native
 write already inside its atomic apply step. Unix shell process groups are killed
 before settling a command. Windows assigns each suspended command to a kernel
 job before resuming it, forbids breakaway, and confirms the job is empty after
@@ -2125,12 +2125,11 @@ work, context exchange, and conflicting changes.
 
 Concurrency is therefore bounded and session-aware. Multiple independent
 sessions run concurrently, but two writing agents never modify the same
-checkout concurrently. A single serialized `Supervised` write child shares its
-parent's checkout: the parent is blocked while it runs, sibling writers
-serialize on a per-run permit retained through local execution teardown, and
-every mutating call it makes is adjudicated before it executes. Read-only
-research agents run in parallel. QQ has no agent swarm, distributed scheduler,
-or worktree coordinator.
+checkout concurrently. A single serialized write child shares its parent's
+checkout: the parent is blocked while it runs, sibling writers serialize on a
+per-run permit retained through local execution teardown, and the child uses
+Auto within its parent's authority. Read-only research agents run in parallel.
+QQ has no agent swarm, distributed scheduler, or worktree coordinator.
 
 ## Local And Remote Networking
 
