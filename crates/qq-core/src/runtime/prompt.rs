@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(24) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(25) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 24. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 25. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -39,6 +39,8 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// 23 → 24 drops the absolute workspace root from the header: Auto runs
 /// execute in per-run task directories, and naming one made every run's
 /// prompt (the head of each provider's cached prefix) unique.
+/// 24 → 25 describes write children as Auto within parent authority, without
+/// requiring a reviewer for their authorized edits and commands.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -64,7 +66,7 @@ pub(crate) struct PromptSections<'a> {
 }
 
 /// What a sub-agent may do, as far as its prompt is concerned. A read child
-/// cannot implement anything; a write child (supervised) can.
+/// cannot implement anything; a write child can, within parent authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubagentAuthority {
     Read,
@@ -274,9 +276,9 @@ fn agent_prompt_prefix(
     };
     let authority_guidance = if write_children {
         "- Sub-agents read by default. Choose authority: write for an implementation task that \
-         requires editing files or running commands. Write sub-agents require a configured \
-         reviewer_model and run under supervised approval; only one write sub-agent runs at a \
-         time. Keep their work separate from your own edits.\n"
+         requires editing files or running commands. Write sub-agents use Auto within the parent's \
+         authority; only one write sub-agent runs at a time. Keep their work separate from your \
+         own edits.\n"
     } else {
         ""
     };
@@ -631,7 +633,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 24);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 25);
     }
 
     #[test]

@@ -9660,7 +9660,9 @@ mod tests {
             );
             if write_children {
                 assert!(prompt.contains("read by default"));
-                assert!(prompt.contains("reviewer_model"));
+                assert!(prompt.contains("Auto within the parent"));
+                assert!(!prompt.contains("reviewer_model"));
+                assert!(!prompt.contains("supervised approval"));
                 assert!(prompt.contains("one write sub-agent"));
                 assert!(prompt.contains("implementation task"));
             }
@@ -9753,10 +9755,11 @@ mod tests {
             None,
             None,
         );
-        // Prompt 24 drops the workspace root from the header; prompt 23
+        // Prompt 25 changes write-child guidance (absent here). Prompt 24
+        // drops the workspace root from the header; prompt 23
         // changes execution, questions and public-fetch guidance. Undo those
         // declared changes before checking the historical v14 bytes.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 24);
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 25);
         let prompt = prompt
             .replacen(
                 "operating in a workspace.\n",
