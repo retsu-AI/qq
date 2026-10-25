@@ -21,6 +21,7 @@ pub struct ModelRequest {
     max_output_tokens: u32,
     reasoning_effort: Option<ReasoningEffort>,
     tool_choice: ToolChoice,
+    cache_key: Option<Arc<str>>,
 }
 
 /// Whether the model may call the declared tools on this request.
@@ -56,7 +57,23 @@ impl ModelRequest {
             max_output_tokens,
             reasoning_effort: None,
             tool_choice: ToolChoice::Auto,
+            cache_key: None,
         }
+    }
+
+    /// Names the conversation this request continues, so a provider that
+    /// routes requests by key (OpenAI's `prompt_cache_key`) sends every turn
+    /// of it to the machine that holds its cached prefix. Adapters without
+    /// such routing ignore it. It is a stable identifier, never a secret.
+    #[must_use]
+    pub fn with_cache_key(mut self, key: impl Into<Arc<str>>) -> Self {
+        self.cache_key = Some(key.into());
+        self
+    }
+
+    #[must_use]
+    pub fn cache_key(&self) -> Option<&str> {
+        self.cache_key.as_deref()
     }
 
     /// Asks the model not to call the declared tools on this request; see

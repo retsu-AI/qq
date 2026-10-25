@@ -8,7 +8,7 @@ use std::borrow::Cow;
 
 use crate::{
     Provider, ProviderError, ProviderStream,
-    compiler::{EndpointKind, HttpAuth, HttpProtocol, ResponsesBodyShape},
+    compiler::{CacheRouting, EndpointKind, HttpAuth, HttpProtocol, ResponsesBodyShape},
     credentials::StaticAuth,
     http::AttemptPolicy,
     providers::{
@@ -24,6 +24,8 @@ const REQUEST_TIME_CODEX_REQUIRES_RESPONSES_MESSAGE: &str =
     "request-time Codex authentication requires the OpenAI Responses protocol";
 const CODEX_BODY_REQUIRES_RESPONSES_MESSAGE: &str =
     "the Codex request body shape requires the OpenAI Responses protocol";
+const CACHE_ROUTING_PROTOCOL_MESSAGE: &str =
+    "the selected cache routing is not supported by this protocol";
 const AUTHORIZER_WITH_AUTH_MESSAGE: &str =
     "internal request authorization cannot be combined with HTTP authentication";
 
@@ -36,6 +38,7 @@ pub(crate) struct HttpConstructionSpec {
     pub(crate) authorizer: Option<RequestAuthorizer>,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body_shape: ResponsesBodyShape,
+    pub(crate) cache_routing: CacheRouting,
 }
 
 /// The static headers and per-attempt authorizer one adapter sends.
@@ -119,6 +122,7 @@ pub(crate) fn construct_http_provider(
         authorizer,
         headers,
         body_shape,
+        cache_routing,
     } = spec;
 
     if body_shape == ResponsesBodyShape::Codex && protocol != HttpProtocol::OpenAiResponses {
@@ -126,13 +130,25 @@ pub(crate) fn construct_http_provider(
             CODEX_BODY_REQUIRES_RESPONSES_MESSAGE.to_owned(),
         ));
     }
+    match (cache_routing, protocol) {
+        (CacheRouting::None, _)
+        | (CacheRouting::PromptCacheKey, HttpProtocol::OpenAiResponses)
+        | (CacheRouting::GrokConversation, HttpProtocol::OpenAiChatCompletions) => {}
+        _ => {
+            return Err(ProviderError::Configuration(
+                CACHE_ROUTING_PROTOCOL_MESSAGE.to_owned(),
+            ));
+        }
+    }
     let ResolvedHttpAuth { auth, authorizer } = resolve_http_auth(protocol, auth, authorizer)?;
     Ok(match protocol {
         HttpProtocol::OpenAiResponses => CompiledHttpProvider::OpenAiResponses(
-            OpenAi::with_client(client, endpoint, auth, headers, authorizer, body_shape)?,
+            OpenAi::with_client(client, endpoint, auth, headers, authorizer, body_shape)?
+                .with_prompt_cache_key(cache_routing == CacheRouting::PromptCacheKey),
         ),
         HttpProtocol::OpenAiChatCompletions => CompiledHttpProvider::OpenAiChatCompletions(
-            OpenAiChatCompletions::with_client(client, endpoint, auth, headers, authorizer)?,
+            OpenAiChatCompletions::with_client(client, endpoint, auth, headers, authorizer)?
+                .with_grok_conversation(cache_routing == CacheRouting::GrokConversation),
         ),
         HttpProtocol::AnthropicMessages => CompiledHttpProvider::AnthropicMessages(
             AnthropicMessages::with_client(client, endpoint, auth, headers, authorizer)?,
@@ -232,6 +248,7 @@ mod tests {
             endpoint: reqwest::Url::parse("http://127.0.0.1:1/test").unwrap(),
             endpoint_kind: EndpointKind::Exact,
             body_shape: ResponsesBodyShape::Standard,
+            cache_routing: CacheRouting::None,
             auth,
             authorizer: None,
             headers: Vec::new(),
@@ -251,6 +268,37 @@ mod tests {
                 spec(protocol, HttpAuth::ApiKey("test-secret".into())),
             )
             .unwrap();
+        }
+    }
+
+    #[test]
+    fn cache_routing_is_accepted_only_on_its_own_protocol() {
+        let protocols = [
+            HttpProtocol::OpenAiResponses,
+            HttpProtocol::OpenAiChatCompletions,
+            HttpProtocol::AnthropicMessages,
+            HttpProtocol::GoogleGenerateContent,
+        ];
+        for (routing, accepted) in [
+            (CacheRouting::PromptCacheKey, HttpProtocol::OpenAiResponses),
+            (
+                CacheRouting::GrokConversation,
+                HttpProtocol::OpenAiChatCompletions,
+            ),
+        ] {
+            for protocol in protocols {
+                let mut spec = spec(protocol, HttpAuth::ApiKey("test-secret".into()));
+                spec.cache_routing = routing;
+                let result = construct_http_provider(reqwest::Client::new(), spec);
+                if protocol == accepted {
+                    assert!(result.is_ok(), "{routing:?} on {protocol:?}");
+                } else {
+                    assert!(
+                        matches!(result, Err(ProviderError::Configuration(_))),
+                        "{routing:?} on {protocol:?}"
+                    );
+                }
+            }
         }
     }
 
@@ -277,6 +325,7 @@ mod tests {
                     endpoint: reqwest::Url::parse("http://127.0.0.1:1/test").unwrap(),
                     endpoint_kind: EndpointKind::Base,
                     body_shape: ResponsesBodyShape::implied_by(&auth),
+                    cache_routing: CacheRouting::None,
                     auth,
                     authorizer: None,
                     headers: Vec::new(),
@@ -344,6 +393,7 @@ mod tests {
                 authorizer: Some(RequestAuthorizer::default()),
                 headers: Vec::new(),
                 body_shape: ResponsesBodyShape::Standard,
+                cache_routing: CacheRouting::None,
             },
         )
         .err()

@@ -148,6 +148,7 @@ impl ProviderCompiler {
             authorizer: None,
             headers: recipe.headers,
             body_shape: recipe.body_shape,
+            cache_routing: recipe.cache_routing,
         };
 
         construct_http_provider(client, spec)
@@ -200,6 +201,7 @@ pub struct HttpProviderRecipe {
     auth: HttpAuth,
     headers: Vec<(String, String)>,
     body_shape: ResponsesBodyShape,
+    cache_routing: CacheRouting,
 }
 
 impl HttpProviderRecipe {
@@ -215,6 +217,7 @@ impl HttpProviderRecipe {
             auth,
             headers: Vec::new(),
             body_shape,
+            cache_routing: CacheRouting::None,
         }
     }
 
@@ -232,6 +235,31 @@ impl HttpProviderRecipe {
         self.body_shape = body_shape;
         self
     }
+
+    /// Selects how a request's cache key reaches the endpoint. Each choice
+    /// belongs to one protocol; compiling it with another is a
+    /// configuration error.
+    #[must_use]
+    pub fn with_cache_routing(mut self, cache_routing: CacheRouting) -> Self {
+        self.cache_routing = cache_routing;
+        self
+    }
+}
+
+/// How a request's [`crate::ModelRequest::cache_key`] reaches a provider
+/// that routes requests to the machine holding their cached prefix. Only
+/// endpoints known to accept the signal get one: a strict OpenAI-compatible
+/// proxy may reject an unknown body field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheRouting {
+    /// The key is not sent.
+    #[default]
+    None,
+    /// OpenAI Responses `prompt_cache_key`; the Codex body also sends the
+    /// `session-id` header the ChatGPT backend routes by.
+    PromptCacheKey,
+    /// xAI Chat Completions `x-grok-conv-id` header.
+    GrokConversation,
 }
 
 /// The OpenAI Responses request body a compiled provider sends.

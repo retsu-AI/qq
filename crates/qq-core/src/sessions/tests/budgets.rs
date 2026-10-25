@@ -406,3 +406,35 @@ async fn run_limits_survive_restart_and_bound_the_recovered_run() {
     );
     runtime.close().await.unwrap();
 }
+
+/// Every request of a session names the session as its cache key, so a
+/// provider that routes by key sends each turn and each later run to the
+/// cache holding their prefix.
+#[tokio::test]
+async fn every_session_request_carries_the_session_as_its_cache_key() {
+    let mut harness = budget_harness(BudgetLoopLoader {
+        requests: Arc::new(StdMutex::new(Vec::new())),
+        entered: None,
+        usage: None,
+        pricing: None,
+        hang: false,
+    })
+    .await;
+    for _ in 0..2 {
+        let run_id = queue_limited_prompt(
+            &harness,
+            RunLimits {
+                max_model_turns: Some(2),
+                ..RunLimits::default()
+            },
+        )
+        .await;
+        collect_until(&mut harness.events, finished_for(run_id)).await;
+    }
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 4, "two turns in each of two runs");
+    let session = harness.session_id.to_string();
+    for request in requests.iter() {
+        assert_eq!(request.cache_key(), Some(session.as_str()));
+    }
+}

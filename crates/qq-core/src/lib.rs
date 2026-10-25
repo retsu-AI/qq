@@ -757,6 +757,9 @@ pub(crate) struct RunCapabilities {
     /// these, exactly as assembly does, so a prune seam replays byte for
     /// byte. Direct runs have none and fall back to the built-in names.
     inherited_effects: Vec<Option<catalog::EffectClass>>,
+    /// The session this run continues, sent to providers that route a
+    /// conversation's requests to one prompt cache. Direct runs have none.
+    cache_key: Option<Arc<str>>,
 }
 
 impl RunCapabilities {
@@ -787,6 +790,7 @@ impl RunCapabilities {
             stall_exempt: false,
             summarizer: None,
             inherited_effects: Vec::new(),
+            cache_key: None,
         }
     }
 
@@ -817,6 +821,11 @@ impl RunCapabilities {
     pub(crate) fn with_limits(mut self, limits: RunLimits, pricing: Option<ModelPricing>) -> Self {
         self.limits = limits;
         self.pricing = pricing;
+        self
+    }
+
+    pub(crate) fn with_cache_key(mut self, key: impl Into<Arc<str>>) -> Self {
+        self.cache_key = Some(key.into());
         self
     }
 
@@ -957,6 +966,7 @@ impl RunCapabilities {
             stall_exempt: false,
             summarizer: None,
             inherited_effects: Vec::new(),
+            cache_key: None,
         }
     }
 }
@@ -1134,6 +1144,7 @@ impl Runtime {
         messages: Vec<Message>,
         system: Arc<str>,
         tools: Arc<[ToolSpec]>,
+        cache_key: Option<Arc<str>>,
         max_output_tokens: u32,
         paid_output_cap: Option<Arc<std::sync::atomic::AtomicU32>>,
     ) -> impl Stream<Item = Result<runtime::SummarizeStep, runtime::SummarizeError>> + Send + '_
@@ -1163,6 +1174,10 @@ impl Runtime {
             let request =
                 ModelRequest::new(Arc::clone(&self.model), messages.clone(), request_cap)
                     .with_system(Arc::clone(&system));
+            let request = match &cache_key {
+                Some(key) => request.with_cache_key(Arc::clone(key)),
+                None => request,
+            };
             let request = if tools.is_empty() {
                 request
             } else {
@@ -2578,6 +2593,7 @@ mod tests {
             vec![Message::user("summarize")],
             Arc::from("system"),
             tools,
+            None,
             256,
             None,
         );
@@ -2638,6 +2654,7 @@ mod tests {
             ],
             Arc::from("system"),
             Arc::from([]),
+            None,
             256,
             None,
         );
@@ -2698,6 +2715,7 @@ mod tests {
                 ],
                 Arc::from("summarize"),
                 Arc::from([]),
+                None,
                 256,
                 None,
             );
@@ -2788,6 +2806,7 @@ mod tests {
             ],
             Arc::from("system"),
             Arc::from([]),
+            None,
             256,
             None,
         );
@@ -2868,6 +2887,7 @@ mod tests {
             ],
             Arc::from("system"),
             Arc::from([]),
+            None,
             256,
             None,
         );
@@ -11796,6 +11816,7 @@ mod tests {
                 vec![Message::user("summarize")],
                 Arc::from("system"),
                 Arc::from([]),
+                None,
                 256,
                 None,
             ));

@@ -569,6 +569,9 @@ async fn prepare_execution(
         }
     }
     .with_literal_slash(claimed.literal_slash)
+    // One key per session: every turn and run of the conversation, and its
+    // compactions, reach the provider cache that holds their prefix.
+    .with_cache_key(claimed.identity.session_id.to_string())
     .with_execution_started(execution_started)
     .with_tool_tasks(resources.tools.clone())
     .with_output(claimed.output.clone())
