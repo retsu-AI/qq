@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 #![cfg(any(target_os = "linux", target_os = "macos", windows))]
-#[path = "../src/command_owner/client.rs"]
+#[path = "../crates/qq-host/src/command_worker.rs"]
 mod client;
 #[cfg(target_os = "linux")]
 #[path = "../src/command_owner/delegation.rs"]

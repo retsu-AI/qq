@@ -27,6 +27,12 @@ pub const BUILD_VERSION: &str = concat!(
     env!("QQ_BUILD_DATE")
 );
 
+/// This executable's identity, handed to the runtime it hosts.
+pub const HOST_BUILD: qq_host::HostBuild = qq_host::HostBuild {
+    source_revision: env!("QQ_SOURCE_REVISION"),
+    version: BUILD_VERSION,
+};
+
 #[derive(Debug, Parser)]
 #[command(name = "qq", version = VERSION, about = "Build and run AI agents")]
 pub struct Cli {

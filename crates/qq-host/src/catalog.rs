@@ -77,7 +77,7 @@ enum DiscoveryAuth {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum ModelDiscoveryError {
+pub enum ModelDiscoveryError {
     #[error("model-discovery cache key generation failed")]
     Random,
 }

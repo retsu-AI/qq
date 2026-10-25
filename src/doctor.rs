@@ -437,7 +437,7 @@ fn credential_check(
                 api_key,
                 profile,
             } => {
-                let audience = crate::builtin_auth::BuiltinAuth::of(provider).audience();
+                let audience = qq_host::builtin_auth::BuiltinAuth::of(provider).audience();
                 let stored_name = provider.stored_name(profile.as_deref());
                 match (api_key, provider.variables) {
                     (Some(secret), _) => reference(secret, Some(audience)),
@@ -467,7 +467,7 @@ fn credential_check(
         ) => match auth {
             config::BedrockAuth::ApiKey(secret) => reference(secret, None),
             config::BedrockAuth::Aws(config::AwsAuth::Profile(profile)) => {
-                if crate::runtime::aws_profile_configured(profile) {
+                if qq_host::runtime::aws_profile_configured(profile) {
                     Check::ok(NAME, format!("{provider_id}: AWS profile {profile}"))
                 } else {
                     Check::fail(
@@ -478,7 +478,7 @@ fn credential_check(
                 }
             }
             config::BedrockAuth::Aws(config::AwsAuth::DefaultChain) => {
-                match crate::runtime::aws_default_chain_source() {
+                match qq_host::runtime::aws_default_chain_source() {
                     Some(source) => Check::ok(NAME, format!("{provider_id}: AWS {source}")),
                     None => Check::fail(
                         NAME,
@@ -521,7 +521,7 @@ fn mcp_check(store: &auth::CredentialStore, snapshot: &config::ConfigSnapshot) -
             Err(error) => {
                 failures.push((
                     server,
-                    crate::mcp::BearerFailure::new(&error, reference, url),
+                    qq_host::mcp::BearerFailure::new(&error, reference, url),
                 ));
             }
         }
