@@ -451,10 +451,10 @@ the new prompt is charged and shrinkage from assembly-time pruning is credited
 rather than discarding the measurement, and a code-heavy transcript that
 tokenizes near three bytes per token is no longer under-charged by a quarter
 on every turn. Within a run the same rule is applied per
-request component (system text, tool schemas, messages), so the budget-final
-turn, which changes only the system text, keeps a
-measurement-derived estimate; the slice checkpoint and continuation turns
-change only the messages. Pricing-only refreshes are
+request component (system text, tool schemas, messages), so the budget-final,
+slice checkpoint and continuation turns, which add only a framed notice
+message, keep a measurement-derived estimate and the run's cached system
+prefix. Pricing-only refreshes are
 compatible; missing usage, model changes, successful compaction, malformed or
 unsupported history, or any wire/prefix mismatch clear or disable reuse.
 Provider-overflow suppression is deliberately weaker than reuse: when the

@@ -35,11 +35,35 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
         assert_eq!(requests[0].tool_choice(), qq_provider::ToolChoice::Auto);
         assert_eq!(requests[1].tools(), requests[0].tools());
         assert_eq!(requests[1].tool_choice(), qq_provider::ToolChoice::None);
-        assert!(
-            requests[1]
-                .system()
-                .is_some_and(|system| system.contains(crate::BUDGET_FINAL_RESPONSE_NOTICE))
+        // The notice is a conversation message, so the system prompt (the
+        // head of every provider's cached prefix) is the run's own.
+        assert_eq!(requests[1].system(), requests[0].system());
+        assert_eq!(
+            requests[1].messages().last(),
+            Some(&Message::user(crate::BUDGET_FINAL_RESPONSE_NOTICE))
         );
+    }
+    // A later run in the session replays the notice where the model saw it.
+    let replayed = queue_limited_prompt(
+        &harness,
+        RunLimits {
+            max_model_turns: Some(1),
+            ..RunLimits::default()
+        },
+    )
+    .await;
+    collect_until(&mut harness.events, finished_for(replayed)).await;
+    {
+        let requests = harness.requests.lock().unwrap();
+        let history = requests.last().unwrap().messages();
+        let notice = history
+            .iter()
+            .position(|message| *message == Message::user(crate::BUDGET_FINAL_RESPONSE_NOTICE))
+            .expect("the first run's notice is replayed");
+        assert!(matches!(
+            history[notice + 1].content(),
+            [ContentBlock::Text { text }] if text == "final status"
+        ));
     }
     let snapshot = harness
         .runtime
