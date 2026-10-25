@@ -69,8 +69,12 @@ write one" in [`adr/README.md`](adr/README.md).
 
 ## Plans — `plans/`
 
-One [core stabilization plan](plans/README.md) defines the remaining work
-and its acceptance. Issues and PRs carry assignments and verification. Retired
+The [core stabilization plan](plans/README.md) defines the remaining core work
+and its acceptance. The proposed
+[desktop, mobile and fleet plan](plans/desktop-mobile-fleet.md) builds on it:
+one per-user daemon serving TUI, CLI, desktop and mobile as equal clients, and
+hub-based task orchestration across servers. Issues and PRs carry assignments
+and verification. Retired
 plans and evidence remain recoverable through Git history; no progress ledger
 or reservation document is required.
 
