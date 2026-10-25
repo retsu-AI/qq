@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 use qq_protocol::{ContentHash, DelegationRoster, PromptVersion};
 use qq_provider::ToolSpec;
@@ -12,12 +12,12 @@ use crate::{
     workspace::WorkspaceInstructions,
 };
 
-pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(23) {
+pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(24) {
     Some(version) => version,
     None => panic!("agent prompt version must be nonzero"),
 };
 
-/// The base agent prompt, now at version 23. History: 10 → 11 covers the tool-layer
+/// The base agent prompt, now at version 24. History: 10 → 11 covers the tool-layer
 /// series: read_file hashes and ranges, edit_file batches, search/tree
 /// guidance, spill handles, the shell environment and forbidden tiers;
 /// 11 → 12 adds ask_user; 12 → 13 adds fetch; 13 → 14 tells the model to
@@ -36,6 +36,9 @@ pub(crate) const AGENT_PROMPT_VERSION: PromptVersion = match PromptVersion::new(
 /// the restricted spawn declaration to its actual authority (AB4).
 /// 22 → 23 describes native Auto execution and normal tool environments without
 /// a command-name veto or human approval wait.
+/// 23 → 24 drops the absolute workspace root from the header: Auto runs
+/// execute in per-run task directories, and naming one made every run's
+/// prompt (the head of each provider's cached prefix) unique.
 /// The text is versioned in code, not configuration: bump this note and
 /// review the diff whenever it changes.
 ///
@@ -70,15 +73,13 @@ pub(crate) enum SubagentAuthority {
 
 #[cfg(test)]
 pub(crate) fn agent_system_prompt(
-    workspace: &Path,
     specs: &[ToolSpec],
     sections: PromptSections<'_>,
     workspace_instructions: &WorkspaceInstructions,
     persona: Option<&crate::plan::Persona>,
     selected_guidance: Option<&SelectedGuidance>,
 ) -> String {
-    let mut prompt =
-        agent_prompt_prefix(workspace, specs, sections, workspace_instructions, persona);
+    let mut prompt = agent_prompt_prefix(specs, sections, workspace_instructions, persona);
     if let Some(guidance) = selected_guidance {
         guidance.append_to_prompt(&mut prompt);
     }
@@ -100,13 +101,12 @@ pub(crate) struct PromptPrefix {
 
 impl PromptPrefix {
     pub(crate) fn new(
-        workspace: &Path,
         specs: &[ToolSpec],
         sections: PromptSections<'_>,
         workspace_instructions: &WorkspaceInstructions,
         persona: Option<&crate::plan::Persona>,
     ) -> Self {
-        let text = agent_prompt_prefix(workspace, specs, sections, workspace_instructions, persona);
+        let text = agent_prompt_prefix(specs, sections, workspace_instructions, persona);
         let mut hasher = Sha256::new();
         hasher.update(text.as_bytes());
         Self {
@@ -141,7 +141,6 @@ impl PromptPrefix {
 }
 
 fn agent_prompt_prefix(
-    workspace: &Path,
     specs: &[ToolSpec],
     sections: PromptSections<'_>,
     workspace_instructions: &WorkspaceInstructions,
@@ -413,7 +412,7 @@ fn agent_prompt_prefix(
         _ => "",
     };
     let mut prompt = format!(
-        "You are QQ, a coding agent operating in the workspace rooted at {root}.\n\
+        "You are QQ, a coding agent operating in a workspace.\n\
          \n\
          Available tools: {tool_names}. {read_description}\
          {edit_description}{command_description}{ask_description}\
@@ -440,7 +439,6 @@ fn agent_prompt_prefix(
          {command_preference}\
 {fetch_guidance}\
          {ask_guidance}{spawn_section}",
-        root = workspace.display(),
     );
     if let Some(authority) = subagent {
         prompt.push_str(SUBAGENT_SECTION);
@@ -603,7 +601,6 @@ mod ab2_contract {
 
     fn render(subagent: Option<SubagentAuthority>, specs: &[ToolSpec]) -> String {
         agent_system_prompt(
-            Path::new("/tmp/qq-prompt-test"),
             specs,
             PromptSections {
                 subagent,
@@ -634,7 +631,7 @@ mod ab2_contract {
         ] {
             assert!(prompt.contains(bullet), "missing contract: {bullet}");
         }
-        assert_eq!(AGENT_PROMPT_VERSION.get(), 23);
+        assert_eq!(AGENT_PROMPT_VERSION.get(), 24);
     }
 
     #[test]
@@ -674,7 +671,6 @@ mod ab2_header_authority {
         for spec in crate::tools::specs() {
             let name = spec.name().to_owned();
             let prompt = agent_system_prompt(
-                Path::new("/tmp/qq-prompt-test"),
                 &[spec],
                 PromptSections::default(),
                 &WorkspaceInstructions::empty(),
@@ -713,7 +709,6 @@ mod ab2_header_authority {
             .filter(|spec| matches!(spec.name(), "read_file" | "tree" | "search"))
             .collect::<Vec<_>>();
         let prompt = agent_system_prompt(
-            Path::new("/tmp/qq-prompt-test"),
             &specs,
             PromptSections::default(),
             &WorkspaceInstructions::empty(),

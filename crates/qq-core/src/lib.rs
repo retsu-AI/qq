@@ -2493,7 +2493,6 @@ mod tests {
         assert!(systems[3].contains("--- BEGIN WORKSPACE INSTRUCTIONS ---"));
         // Byte-for-byte parity with the single-pass builder for the plain case.
         let expected = runtime::agent_system_prompt(
-            plan.workspace.path(),
             &plan.catalog.base_specs(&catalog::StaticFilter {
                 spawn_agent: false,
                 search_history: false,
@@ -4265,7 +4264,9 @@ mod tests {
             .system()
             .expect("agent runs set a system prompt");
         assert!(!system.contains("edit_file"));
-        assert!(system.contains(directory.path().to_str().unwrap()));
+        // Tools take relative paths; naming the absolute root would make the
+        // cached prompt prefix differ per task directory.
+        assert!(!system.contains(directory.path().to_str().unwrap()));
         let result_message = &requests[1].messages()[2];
         assert!(matches!(
             result_message.content(),
@@ -9572,11 +9573,9 @@ mod tests {
     #[test]
     fn subagent_prompts_say_a_parent_is_waiting_and_read_children_drop_the_implement_line() {
         const IMPLEMENT: &str = "- Do the work. Decide what done looks like, read what the change needs, make it when a change is requested, verify it, and report. For an analysis-only or review request, deliver the findings without changing files. A plan, a proposal, or an offer to continue is not a result: end your turn when the task is done or a concrete blocker remains, and name the blocker.\n";
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let render = |subagent| {
             runtime::agent_system_prompt(
-                workspace,
                 &tools::specs(),
                 runtime::PromptSections {
                     subagent,
@@ -9627,7 +9626,6 @@ mod tests {
             };
             let specs = [tools::spawn_agent_spec(&[], &delegation)];
             let prompt = runtime::agent_system_prompt(
-                std::path::Path::new("/tmp/qq-prompt-test"),
                 &specs,
                 runtime::PromptSections::default(),
                 &instructions,
@@ -9650,12 +9648,10 @@ mod tests {
 
     #[test]
     fn delegation_guidance_asks_for_a_question_a_purpose_and_an_answer_shape() {
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &specs,
             runtime::PromptSections::default(),
             &instructions,
@@ -9726,22 +9722,26 @@ mod tests {
         const NEW_TASK: &str = "A complete, self-contained brief for the sub-agent: the question \
             to answer, what the answer is for, and the answer shape you want back. The sub-agent \
             starts with no other context and stops once it can answer.";
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &specs,
             runtime::PromptSections::default(),
             &instructions,
             None,
             None,
         );
-        // Prompt 23 changes execution, questions and public-fetch guidance.
-        // Undo those declared changes before checking the historical v14 bytes.
-        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 23);
+        // Prompt 24 drops the workspace root from the header; prompt 23
+        // changes execution, questions and public-fetch guidance. Undo those
+        // declared changes before checking the historical v14 bytes.
+        assert_eq!(runtime::AGENT_PROMPT_VERSION.get(), 24);
         let prompt = prompt
+            .replacen(
+                "operating in a workspace.\n",
+                "operating in the workspace rooted at /tmp/qq-prompt-test.\n",
+                1,
+            )
             .replacen("run commands under the host filesystem, network and environment policy, using the task deadline or an earlier explicit timeout. Native Auto preserves normal installed-tool configuration; explicit credential environment names require a policy grant. Auto never waits for human approval: a denied call is a tool error, so choose another permitted approach without bypassing the boundary. Ask may require human approval; ", "run one command in the workspace with a bounded timeout and may require user approval; the child starts from a cleared environment (PATH HOME LANG TERM TMPDIR) plus names you list in env that policy allows, and commands the policy classifies as forbidden (rm -rf on system paths, sudo, curl | sh, force-push, …) are refused under every approval mode; ", 1)
             .replacen("ask_user asks a bounded multiple-choice question when human input is enabled; in Auto it returns a result telling you to decide without human input; ", "ask_user puts a bounded multiple-choice question to the user and waits for the answer; ", 1)
             .replacen("fetch reads one public http(s) URL (HTML as markdown, JSON formatted). Auto needs no per-host approval; Ask requires human approval. Private, link-local and managed-denied hosts are refused.", "fetch reads one public http(s) URL (HTML as markdown, JSON formatted) and may require approval for the host; private and link-local hosts are refused.", 1);
@@ -9819,7 +9819,6 @@ mod tests {
 
     #[test]
     fn ab4_read_only_root_states_authority_and_has_no_action_obligation() {
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         // The schemas a ReadOnly root is offered: the mutating, shell and
         // network built-ins are withheld (`catalog.rs` read-only filter).
@@ -9829,7 +9828,6 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(read_only.len(), 4);
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &read_only,
             runtime::PromptSections {
                 read_only: true,
@@ -9847,11 +9845,9 @@ mod tests {
 
     #[test]
     fn agent_prompt_advertises_fetch_only_when_declared() {
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let specs = tools::specs();
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &specs,
             runtime::PromptSections::default(),
             &instructions,
@@ -9871,7 +9867,6 @@ mod tests {
             .filter(|spec| spec.name() != "fetch")
             .collect();
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &without,
             runtime::PromptSections::default(),
             &instructions,
@@ -9884,10 +9879,8 @@ mod tests {
 
     #[test]
     fn agent_prompt_teaches_delegation_only_when_spawn_agent_is_declared() {
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let without = runtime::agent_system_prompt(
-            workspace,
             &tools::specs(),
             runtime::PromptSections::default(),
             &instructions,
@@ -9900,7 +9893,6 @@ mod tests {
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &DelegationRoster::default()));
         let with = runtime::agent_system_prompt(
-            workspace,
             &specs,
             runtime::PromptSections::default(),
             &instructions,
@@ -10115,12 +10107,10 @@ mod tests {
 
         // The prompt embeds it and switches to role-based guidance; the
         // legacy worker-model sentence goes away.
-        let workspace = std::path::Path::new("/tmp/qq-prompt-test");
         let instructions = workspace::WorkspaceInstructions::empty();
         let mut specs = tools::specs();
         specs.push(tools::spawn_agent_spec(&[], &roster));
         let prompt = runtime::agent_system_prompt(
-            workspace,
             &specs,
             runtime::PromptSections {
                 roster: Some(&text),

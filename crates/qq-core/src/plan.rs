@@ -554,7 +554,6 @@ impl CompiledAgentPlan {
             return Arc::clone(prefix);
         }
         let prefix = Arc::new(crate::runtime::PromptPrefix::new(
-            self.workspace.path(),
             base_specs,
             crate::runtime::PromptSections {
                 tool_index: key
@@ -1101,7 +1100,6 @@ impl CompiledAgentPlan {
             subagent: None,
         };
         let full_prefix = Arc::new(crate::runtime::PromptPrefix::new(
-            opened.path(),
             &catalog.base_specs(&full_key.tools.expect("full key has a filter")),
             crate::runtime::PromptSections {
                 tool_index: catalog.index_text().map(Arc::as_ref),
@@ -1562,6 +1560,38 @@ mod tests {
         assert_eq!(narrow.digest(), same.digest());
     }
 
+    /// Auto runs each execute in a fresh per-run task workspace directory.
+    /// The system prompt is the head of every provider's cached prefix, so
+    /// it must not name that directory: identical workspaces at different
+    /// paths render byte-identical prompts (tools take relative paths).
+    #[test]
+    fn the_system_prompt_is_identical_across_workspace_locations() {
+        let first = canonical_temp();
+        let second = canonical_temp();
+        let prompt = |workspace: &Path| {
+            let plan = CompiledAgentPlan::compile_blocking(profile(workspace)).unwrap();
+            let key = PromptPrefixKey {
+                tools: Some(crate::catalog::StaticFilter {
+                    spawn_agent: true,
+                    search_history: true,
+                    update_goal: false,
+                    task_git: false,
+                    read_tool_result: true,
+                    load_skill: true,
+                    read_only: false,
+                    unattended: false,
+                }),
+                guidance: true,
+                subagent: None,
+            };
+            let specs = plan.catalog().base_specs(&key.tools.unwrap());
+            plan.prompt_prefix(key, &specs).complete("").0
+        };
+        let (a, b) = (prompt(first.path()), prompt(second.path()));
+        assert!(!a.contains(&*first.path().to_string_lossy()), "{a}");
+        assert_eq!(a, b);
+    }
+
     /// `wait_agents` and `cancel_agent` are never named in policy: they
     /// follow `spawn_agent` through exposure and pack filtering, so the three
     /// delegation tools are always present together or absent together.
@@ -1764,7 +1794,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "949bcf5f6192b025e98521fb8045142d3a228ca5bbceea26c5198c4a9f59c392"
+            "641bc5d8202b5359bb5808a76d60a3a9123ada880bc6b0272b00aae2aa5bbc80"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
