@@ -1032,6 +1032,31 @@ pub(crate) fn evaluate(
                 rules: verdict.reasons,
             };
         }
+        if mode == ApprovalMode::Auto {
+            // Workspace-local mutations run without additional authority.
+            // Other commands need a grant; the session gate denies missing
+            // Auto authority without prompting.
+            let workspace_local = verdict.decision == Decision::Prompt
+                && verdict.reasons.iter().all(|rule| {
+                    matches!(
+                        rule,
+                        RuleId::GitMutation
+                            | RuleId::RedirectIntoWorkspace
+                            | RuleId::InPlaceEdit
+                            | RuleId::Tee
+                            | RuleId::Symlink
+                            | RuleId::ChangeMode
+                    )
+                });
+            return if grants.covers_shell(name, command)
+                || verdict.decision == Decision::Allow
+                || workspace_local
+            {
+                PolicyDecision::Execute
+            } else {
+                PolicyDecision::RequireApproval
+            };
+        }
     }
     // A blocked host is refused before the mode is consulted, like a
     // Forbidden command: `full` is authority over the workspace, not over
@@ -1068,41 +1093,10 @@ pub(crate) fn evaluate(
             },
             // Human approval is fresh for every non-read action.
             ApprovalMode::Ask => PolicyDecision::RequireApproval,
-            ApprovalMode::Auto => match class {
-                // Auto trusts workspace-bounded edits and external tools, and
-                // shell commands that are allowed or only change files inside
-                // the workspace (commits, redirects, in-place edits). Remote
-                // operations, downloads, deletions, installs, unlisted
-                // programs, and dynamic words need additional authority. The
-                // session gate denies missing Auto authority without prompting.
-                ToolClass::Shell { command, .. } => {
-                    let verdict = classify_command(command, None);
-                    let workspace_local = verdict.decision == Decision::Prompt
-                        && verdict.reasons.iter().all(|rule| {
-                            matches!(
-                                rule,
-                                RuleId::GitMutation
-                                    | RuleId::RedirectIntoWorkspace
-                                    | RuleId::InPlaceEdit
-                                    | RuleId::Tee
-                                    | RuleId::Symlink
-                                    | RuleId::ChangeMode
-                            )
-                        });
-                    if grants.covers_shell(name, command)
-                        || verdict.decision == Decision::Allow
-                        || workspace_local
-                    {
-                        PolicyDecision::Execute
-                    } else {
-                        PolicyDecision::RequireApproval
-                    }
-                }
-                // Public research is part of Auto. Managed host and address
-                // restrictions remain independent of approval authority.
-                ToolClass::Network { .. } => PolicyDecision::Execute,
-                _ => PolicyDecision::Execute,
-            },
+            // Auto trusts workspace edits, external tools, and public research.
+            // Shell authority was checked above; managed network restrictions
+            // remain independent of approval authority.
+            ApprovalMode::Auto => PolicyDecision::Execute,
             // Full is an explicit grant of unrestricted authority.
             ApprovalMode::Full => PolicyDecision::Execute,
         },
