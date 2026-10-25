@@ -314,9 +314,10 @@ The TUI lost its server and could not reconnect; the reason follows. If a
 ### `qq server already running at …`
 
 Only one user-scoped server runs per machine, and every `qq` TUI attaches
-to it — including a server another open `qq` started. Stop it (`Ctrl-C` in
-its terminal, or quit the `qq` that started it) to bind another address;
-that cancels its queued and running runs.
+to it — including a server another open `qq` started. Stop it (`qq daemon
+stop`, `Ctrl-C` in its terminal, or quit the `qq` that started it) to bind
+another address; that cancels its queued and running runs. `qq daemon run`
+reports the same case as `qq daemon already running at …`.
 
 ### `session store is owned by another running qq process`
 

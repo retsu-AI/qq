@@ -36,11 +36,11 @@ mod cors;
 pub use cors::{AllowedOriginError, AllowedOrigins, MAX_ALLOWED_ORIGINS, MAX_ORIGIN_BYTES};
 use qq_protocol::{
     AgentProfileSummary, ApprovalMode, BudgetLimitKind, CAPABILITIES_VERSION, COMMAND_ROUTES,
-    CapabilitiesRequest, CommandReceipt, CommandRequest, DelegationCapabilities, DelegationRoster,
-    EventCapabilities, InputPartKind, LimitCapabilities, LocalConnectionError,
-    LocalServerConnection, MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES, MAX_INPUT_FILE_BYTES,
-    MAX_INPUT_FILE_PARTS, MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES, MAX_MODEL_BYTES,
-    MAX_MODEL_CATALOG_BYTES, MAX_ORGANIZATION_BYTES, MAX_OUTPUT_REPAIR_TURNS,
+    CapabilitiesRequest, CommandReceipt, CommandRequest, DAEMON_SHUTDOWN_PATH,
+    DelegationCapabilities, DelegationRoster, EventCapabilities, InputPartKind, LimitCapabilities,
+    LocalConnectionError, LocalServerConnection, MAX_CORRELATION_ENTRIES, MAX_EVENT_BYTES,
+    MAX_INPUT_FILE_BYTES, MAX_INPUT_FILE_PARTS, MAX_INPUT_PARTS, MAX_INPUT_TEXT_BYTES,
+    MAX_MODEL_BYTES, MAX_MODEL_CATALOG_BYTES, MAX_ORGANIZATION_BYTES, MAX_OUTPUT_REPAIR_TURNS,
     MAX_OUTPUT_SCHEMA_BYTES, MAX_OUTPUT_SCHEMA_DEPTH, MAX_OUTPUT_SCHEMA_VALUES, MAX_REQUEST_BYTES,
     MAX_WORKSPACE_BYTES, ModelCatalogRequest, ModelDescriptor, PROTOCOL_VERSION,
     ServerCapabilities, ServerInfo, SessionCommand, SessionCommandKind, SnapshotRequest,
@@ -60,6 +60,7 @@ const METADATA_FORMAT_VERSION: u16 = 2;
 const DEFAULT_DISPLAY_NAME: &str = "qq";
 const METADATA_FILE_NAME: &str = "server.ron";
 const LOCK_FILE_NAME: &str = "server.lock";
+const HOST_LOCK_FILE_NAME: &str = "host.lock";
 const DEFAULT_BIND_ADDRESS: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
 const MAX_METADATA_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_HEALTH_BYTES: usize = 16 * 1024;
@@ -73,6 +74,7 @@ const TOKEN_HEX_BYTES: usize = TOKEN_BYTES * 2;
 const MAX_CONCURRENT_SESSION_REQUESTS: usize = 64;
 const MAX_CONCURRENT_SUBSCRIPTIONS: usize = 64;
 const DEFAULT_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+const RELEASE_POLL: Duration = Duration::from_millis(25);
 
 pub type CommandFuture =
     Pin<Box<dyn Future<Output = Result<CommandReceipt, ServerHandlerError>> + Send + 'static>>;
@@ -167,6 +169,7 @@ pub struct ServerPaths {
     directory: PathBuf,
     lock_file: PathBuf,
     metadata_file: PathBuf,
+    host_lock_file: PathBuf,
 }
 
 impl ServerPaths {
@@ -177,6 +180,7 @@ impl ServerPaths {
         Self {
             lock_file: directory.join(LOCK_FILE_NAME),
             metadata_file: directory.join(METADATA_FILE_NAME),
+            host_lock_file: directory.join(HOST_LOCK_FILE_NAME),
             directory,
         }
     }
@@ -208,6 +212,12 @@ impl ServerPaths {
         &self.directory
     }
 
+    /// Creates the state directory as private (`0700` on Unix) if it is
+    /// missing, and rejects one that is a symlink or readable by others.
+    pub fn create_directory(&self) -> Result<(), ServerError> {
+        ensure_private_directory(&self.directory)
+    }
+
     #[must_use]
     pub fn lock_file(&self) -> &Path {
         &self.lock_file
@@ -227,6 +237,7 @@ pub struct ServerOptions {
     version: String,
     allowed_origins: AllowedOrigins,
     health_path: &'static str,
+    stop_route: bool,
 }
 
 impl ServerOptions {
@@ -240,7 +251,18 @@ impl ServerOptions {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             allowed_origins: AllowedOrigins::default(),
             health_path: "/v1/health",
+            stop_route: false,
         }
+    }
+
+    /// Serves `POST /v1/daemon/shutdown`, which asks the host to stop
+    /// (observed through [`ServerHandle::stop_requested`]). Only a host that
+    /// waits on that signal enables it; without it the route answers `404`,
+    /// so a server embedded in a client cannot be stopped from outside.
+    #[must_use]
+    pub fn with_stop_route(mut self) -> Self {
+        self.stop_route = true;
+        self
     }
 
     /// Overrides the version reported by health probes and discovery, and by
@@ -484,6 +506,7 @@ pub struct ServerReservation {
     bearer_token: String,
     version: String,
     allowed_origins: AllowedOrigins,
+    stop_route: bool,
     guard: InstanceGuard,
 }
 
@@ -514,15 +537,27 @@ impl ServerReservation {
         handler: Arc<dyn ServerHandler>,
         identity: ServerIdentity,
     ) -> Result<ServerHandle, ServerError> {
-        self.start_with(identity, |connection, allowed_origins, shutdown| {
-            router(handler, connection, allowed_origins, shutdown)
+        let stop_route = self.stop_route;
+        self.start_with(identity, |connection, allowed_origins, shutdown, stop| {
+            router(
+                handler,
+                connection,
+                allowed_origins,
+                shutdown,
+                stop_route.then_some(stop),
+            )
         })
     }
 
     fn start_with(
         self,
         identity: ServerIdentity,
-        build: impl FnOnce(ServerConnection, AllowedOrigins, watch::Receiver<bool>) -> Router,
+        build: impl FnOnce(
+            ServerConnection,
+            AllowedOrigins,
+            watch::Receiver<bool>,
+            watch::Sender<bool>,
+        ) -> Router,
     ) -> Result<ServerHandle, ServerError> {
         let Self {
             listener,
@@ -530,6 +565,7 @@ impl ServerReservation {
             bearer_token,
             version,
             allowed_origins,
+            stop_route: _,
             mut guard,
         } = self;
         let connection = ServerConnection::new(
@@ -547,10 +583,12 @@ impl ServerReservation {
         write_metadata_atomically(&guard.paths, &MetadataFile::new(&connection))?;
         guard.connection = Some(connection.clone());
         let (shutdown_sender, mut shutdown_receiver) = watch::channel(false);
+        let (stop_sender, stop_requests) = watch::channel(false);
         let app = build(
             connection.clone(),
             allowed_origins,
             shutdown_receiver.clone(),
+            stop_sender.clone(),
         );
         let task = tokio::spawn(async move {
             let serve_result = axum::serve(listener, app)
@@ -566,7 +604,21 @@ impl ServerReservation {
             connection,
             shutdown: Some(shutdown_sender),
             task: Some(task),
+            _stop_sender: stop_sender,
+            stop_requests,
         })
+    }
+}
+
+/// Reports a stop request to the host; see [`ServerHandle::stop_requests`].
+#[derive(Debug, Clone)]
+pub struct StopRequests(watch::Receiver<bool>);
+
+impl StopRequests {
+    /// Resolves once a stop was requested. If the server is dropped first,
+    /// it resolves too: there is nothing left to stop.
+    pub async fn wait(mut self) {
+        let _ = self.0.wait_for(|requested| *requested).await;
     }
 }
 
@@ -575,12 +627,31 @@ pub struct ServerHandle {
     connection: ServerConnection,
     shutdown: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<Result<(), ServerError>>>,
+    /// Keeps the stop channel open for the handle's life, so a server without
+    /// the stop route waits forever instead of observing a closed channel.
+    _stop_sender: watch::Sender<bool>,
+    stop_requests: watch::Receiver<bool>,
 }
 
 impl ServerHandle {
     #[must_use]
     pub fn connection(&self) -> &ServerConnection {
         &self.connection
+    }
+
+    /// Resolves once an authenticated client asked this server to stop
+    /// through `POST /v1/daemon/shutdown`. Never resolves unless the server
+    /// was started with [`ServerOptions::with_stop_route`]. The host decides
+    /// what stopping means; this only reports the request.
+    pub async fn stop_requested(&self) {
+        self.stop_requests().wait().await;
+    }
+
+    /// A waiter for [`Self::stop_requested`] that does not borrow the
+    /// handle, so a host can wait for it alongside [`Self::finished`].
+    #[must_use]
+    pub fn stop_requests(&self) -> StopRequests {
+        StopRequests(self.stop_requests.clone())
     }
 
     /// Stops accepting connections and ends event streams without waiting for other responses.
@@ -731,8 +802,68 @@ pub async fn reserve(options: ServerOptions) -> Result<ReserveOutcome, ServerErr
         bearer_token,
         version: options.version,
         allowed_origins: options.allowed_origins,
+        stop_route: options.stop_route,
         guard,
     })))
+}
+
+/// Held by a serving process from before its runtime opens until after the
+/// runtime closes, so other processes can tell when it has fully stopped.
+/// The instance lock alone is released as soon as the listener stops, while
+/// the runtime may still be closing its store.
+pub struct HostLock {
+    _file: File,
+}
+
+impl fmt::Debug for HostLock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("HostLock")
+    }
+}
+
+/// Takes the host lock at `paths`, waiting up to `timeout` for a previous
+/// host that is still closing.
+pub async fn acquire_host_lock(
+    paths: &ServerPaths,
+    timeout: Duration,
+) -> Result<HostLock, ServerError> {
+    ensure_private_directory(&paths.directory)?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let file = open_private_lock_file(&paths.host_lock_file)?;
+        match file.try_lock() {
+            Ok(()) => return Ok(HostLock { _file: file }),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(source)) => {
+                return Err(ServerError::StateIo {
+                    action: "lock",
+                    source,
+                });
+            }
+        }
+        drop(file);
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ServerError::HostStillStopping);
+        }
+        tokio::time::sleep(RELEASE_POLL).await;
+    }
+}
+
+/// Waits until no process holds the host lock at `paths`, or until `timeout`
+/// passes, and returns whether it was released. The probe takes the lock and
+/// drops it at once, so it never holds up a host that starts next.
+pub async fn wait_until_released(
+    paths: &ServerPaths,
+    timeout: Duration,
+) -> Result<bool, ServerError> {
+    if !validate_existing_private_directory(&paths.directory)? {
+        return Ok(true);
+    }
+    match acquire_host_lock(paths, timeout).await {
+        Ok(_released) => Ok(true),
+        Err(ServerError::HostStillStopping) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 #[derive(Clone)]
@@ -742,6 +873,7 @@ struct AppState {
     session_requests: Arc<Semaphore>,
     subscriptions: Arc<Semaphore>,
     shutdown: watch::Receiver<bool>,
+    stop: Option<watch::Sender<bool>>,
 }
 
 fn router(
@@ -749,6 +881,7 @@ fn router(
     connection: ServerConnection,
     allowed_origins: AllowedOrigins,
     shutdown: watch::Receiver<bool>,
+    stop: Option<watch::Sender<bool>>,
 ) -> Router {
     let state = AppState {
         handler,
@@ -756,6 +889,7 @@ fn router(
         shutdown,
         session_requests: Arc::new(Semaphore::new(MAX_CONCURRENT_SESSION_REQUESTS)),
         subscriptions: Arc::new(Semaphore::new(MAX_CONCURRENT_SUBSCRIPTIONS)),
+        stop,
     };
     // Command routes come from the protocol table so the client and server
     // agree by construction; `command_routes_match_the_protocol_table` pins it.
@@ -772,6 +906,7 @@ fn router(
         .route("/v1/workspaces/list", post(workspace_catalog))
         .route("/v1/workspaces/snapshot", post(workspace_snapshot))
         .route("/v1/models", post(models))
+        .route(DAEMON_SHUTDOWN_PATH, post(daemon_shutdown))
         .route(
             "/v1/workspaces/{workspace_id}/events",
             get(workspace_events),
@@ -810,6 +945,24 @@ fn authorized(headers: &HeaderMap, connection: &ServerConnection) -> bool {
 
 async fn health(State(state): State<AppState>) -> Json<ServerInfo> {
     Json(state.connection.server_info().clone())
+}
+
+/// Asks the host to stop. The response names the server that will stop, so
+/// the caller can wait for that process; stopping itself happens after the
+/// response is sent.
+async fn daemon_shutdown(State(state): State<AppState>) -> Response {
+    let Some(stop) = state.stop else {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "this server cannot be stopped remotely; quit the qq that started it",
+        );
+    };
+    stop.send_replace(true);
+    (
+        StatusCode::ACCEPTED,
+        Json(state.connection.server_info().clone()),
+    )
+        .into_response()
 }
 
 /// The admission preamble shared by every bounded JSON route: one request
@@ -1728,6 +1881,8 @@ pub enum ServerError {
     ServerTaskStopped,
     #[error("local server did not drain active responses before the shutdown deadline")]
     ShutdownTimedOut,
+    #[error("the previous qq server process has not finished stopping")]
+    HostStillStopping,
 }
 
 #[cfg(test)]
@@ -3276,6 +3431,99 @@ mod tests {
         .await
         .unwrap();
         server.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_stop_route_signals_only_a_host_that_opted_in_and_requires_the_token() {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let directory = TestDirectory::new();
+        let ReserveOutcome::Reserved(reservation) =
+            reserve(ServerOptions::new(directory.paths()).with_stop_route())
+                .await
+                .unwrap()
+        else {
+            panic!("fixture must own its server");
+        };
+        let server = reservation
+            .start(unavailable_handler(), test_identity())
+            .unwrap();
+        let endpoint = server.connection().endpoint(DAEMON_SHUTDOWN_PATH);
+        let anonymous = http.post(&endpoint).send().await.unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), server.stop_requested())
+                .await
+                .is_err(),
+            "an unauthenticated request must not stop the server"
+        );
+        let accepted = http
+            .post(&endpoint)
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        let stopping: ServerInfo = accepted.json().await.unwrap();
+        assert_eq!(&stopping, server.connection().server_info());
+        server.stop_requested().await;
+        // Signalling is all the route does: the listener keeps serving until
+        // the host shuts it down.
+        let health = http
+            .get(server.connection().endpoint("/v1/health"))
+            .bearer_auth(server.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+        server.shutdown().await.unwrap();
+
+        let embedded_directory = TestDirectory::new();
+        let embedded = start_test_server(embedded_directory.paths(), unavailable_handler()).await;
+        let refused = http
+            .post(embedded.connection().endpoint(DAEMON_SHUTDOWN_PATH))
+            .bearer_auth(embedded.connection().expose_bearer_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::NOT_FOUND);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), embedded.stop_requested())
+                .await
+                .is_err(),
+            "a server without the stop route must never report a stop request"
+        );
+        embedded.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_host_lock_outlives_the_listener_and_a_waiter_sees_its_release() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        assert!(
+            wait_until_released(&paths, Duration::ZERO).await.unwrap(),
+            "no state directory means no host"
+        );
+        let host = acquire_host_lock(&paths, Duration::ZERO).await.unwrap();
+        let server = start_test_server(paths.clone(), unavailable_handler()).await;
+        server.shutdown().await.unwrap();
+        // The listener is gone, but the host is still closing its runtime.
+        assert!(
+            !wait_until_released(&paths, Duration::from_millis(50))
+                .await
+                .unwrap()
+        );
+        assert!(matches!(
+            acquire_host_lock(&paths, Duration::from_millis(50)).await,
+            Err(ServerError::HostStillStopping)
+        ));
+        let waiter = tokio::spawn({
+            let paths = paths.clone();
+            async move { wait_until_released(&paths, Duration::from_secs(10)).await }
+        });
+        drop(host);
+        assert!(waiter.await.unwrap().unwrap());
+        // The waiter dropped its probe, so the next host takes the lock.
+        drop(acquire_host_lock(&paths, Duration::ZERO).await.unwrap());
     }
 
     #[tokio::test]

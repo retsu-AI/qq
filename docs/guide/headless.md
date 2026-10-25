@@ -193,13 +193,35 @@ qq serve --bind 127.0.0.1:4711
 qq serve --allow-origin https://app.example.com
 ```
 
-Runs the user-scoped server in the foreground until `Ctrl-C`. Without it,
+Runs the user-scoped server in the foreground until `Ctrl-C`, SIGTERM or
+`qq daemon stop`. Without it,
 each `qq` starts a server inside itself when none is running, and quitting
 that `qq` cancels its runs ([Exiting](tui.md#exiting)). `qq serve` is for
 keeping runs going after the TUI quits, for several TUIs on one machine, and
 for remote clients over a private network. It prints `qq server listening
 at ADDR`; a second `qq serve` reports the existing one. Stopping it cancels
 every queued and running run, as quitting an owning TUI does.
+
+## `qq daemon` — a background server
+
+```sh
+qq daemon run --detach     # start in the background; returns once it serves
+qq daemon status           # address, pid, version, log path; exit 1 if none
+qq daemon stop             # stop and wait until the store is closed
+qq daemon restart          # stop, then start this binary in the background
+```
+
+`qq daemon run` is `qq serve` under the name the other daemon commands use;
+add `--detach` to start it as a background process. A detached daemon does
+not depend on the terminal or directory it was started from, and writes to
+`daemon.log` in the server state directory (`qq daemon status` prints the
+path). Starting a second daemon reports the running one. Stopping settles
+every queued and running run as cancelled, as `Ctrl-C` on `qq serve` does.
+`stop` does not stop the server inside an interactive `qq`; quit that `qq`.
+
+The daemon's approval wait (`approval_timeout_seconds`) comes from global and
+managed configuration only, never from the directory it was started in. The
+same holds for `qq serve`.
 
 `qq run` and `qq ask` never use a server. `qq run` opens the session store
 itself, so it cannot run while another process holds that store — a TUI,
