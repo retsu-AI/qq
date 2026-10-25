@@ -197,31 +197,13 @@ impl SessionGrants {
             .any(|prefix| prefix.trim() == command)
     }
 
-    fn covers(&self, name: &str, class: &ToolClass) -> bool {
-        if self.tools.contains(name) {
-            return true;
-        }
-        match class {
-            ToolClass::Shell { command, .. } => {
-                self.shell_prefixes
-                    .iter()
-                    .any(|prefix| shell_prefix_matches(prefix, command))
-                    || self.delegate.commands.contains(command.trim())
-            }
-            ToolClass::Network {
-                host: Some(host), ..
-            } => {
-                self.hosts
-                    .iter()
-                    .any(|grant| crate::tools::network::host_grant_matches(grant, host))
-                    || self.delegate.hosts.contains(host.as_str())
-            }
-            ToolClass::ReadOnly
-            | ToolClass::Mutating
-            | ToolClass::External
-            | ToolClass::Interactive { .. }
-            | ToolClass::Network { host: None, .. } => false,
-        }
+    fn covers_shell(&self, name: &str, command: &str) -> bool {
+        self.tools.contains(name)
+            || self
+                .shell_prefixes
+                .iter()
+                .any(|prefix| shell_prefix_matches(prefix, command))
+            || self.delegate.commands.contains(command.trim())
     }
 }
 
@@ -1107,7 +1089,7 @@ pub(crate) fn evaluate(
                                     | RuleId::ChangeMode
                             )
                         });
-                    if grants.covers(name, class)
+                    if grants.covers_shell(name, command)
                         || verdict.decision == Decision::Allow
                         || workspace_local
                     {
