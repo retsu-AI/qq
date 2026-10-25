@@ -243,7 +243,10 @@ async fn take_host_lock(paths: &server::ServerPaths) -> Result<HostLock, Box<dyn
 async fn approval_timeout(
     factory: &runtime::RuntimeFactory,
 ) -> Result<Option<Duration>, Box<dyn Error>> {
-    let request = config::LoadRequest::from_process_env(neutral_directory(), None)?;
+    let request = server_config_request(&config::LoadRequest::from_process_env(
+        neutral_directory(),
+        None,
+    )?);
     let factory = factory.clone();
     Ok(tokio::task::spawn_blocking(move || {
         factory
@@ -252,6 +255,14 @@ async fn approval_timeout(
             .and_then(|snapshot| snapshot.approval_timeout())
     })
     .await?)
+}
+
+/// The server-wide load: environment overrides apply, but `QQ_CONFIG` and
+/// `QQ_CONFIG_CONTENT` do not. They name a workspace's file, and a relative
+/// `QQ_CONFIG` would not resolve from the neutral directory; that failed load
+/// would also drop the global timeout.
+fn server_config_request(process: &config::LoadRequest) -> config::LoadRequest {
+    config::LoadRequest::new(neutral_directory()).with_overrides(process.overrides().clone())
 }
 
 /// A directory with no project configuration above it, so loading from it
@@ -507,5 +518,33 @@ mod tests {
         let neutral = neutral_directory();
         assert!(neutral.is_absolute());
         assert_eq!(neutral.parent(), None);
+    }
+
+    #[test]
+    fn a_relative_qq_config_keeps_the_global_approval_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("global");
+        std::fs::create_dir(&global).unwrap();
+        let file = global.join("config.ron");
+        std::fs::write(&file, "(version: 1, approval_timeout_seconds: 45)").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let loader = config::ConfigLoader::new(config::ConfigPaths::new(
+            &global,
+            root.path().join("data"),
+            root.path().join("managed"),
+        ));
+        // `qq serve` launched with `QQ_CONFIG=qq.ron` from a workspace: the
+        // file exists there, but not relative to the neutral directory.
+        let process = config::LoadRequest::new(neutral_directory())
+            .with_explicit_path("qq.ron")
+            .with_overrides(config::RuntimeOverrides::new().with_model("openai/test-model"));
+        let snapshot = loader
+            .load_for_client(&server_config_request(&process))
+            .unwrap();
+        assert_eq!(snapshot.approval_timeout(), Some(Duration::from_secs(45)));
     }
 }
