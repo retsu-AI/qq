@@ -75,12 +75,12 @@ repository should not commit; this repository's `.gitignore` excludes
 | --- | --- | --- | --- |
 | `version` | `1` | required | document schema |
 | `model` | `"PROVIDER/MODEL"` | none; required to run | the route sessions start with |
-| `reviewer_model` | `"PROVIDER/MODEL"` | none | model used for tool review and the final-answer audit |
+| `reviewer_model` | `"PROVIDER/MODEL"` | none | model for an explicitly supervised reviewer; Auto and Ask never consult it. The final-answer audit uses `audit.role` from the delegation roster |
 | `worker_model` | `"PROVIDER/MODEL"` | none | deprecated; use `delegation.roster` |
 | `organization` | string | none | which enrolled organization manifest applies (`qq org`) |
 | `max_output_tokens` | integer | `16384` | cap on generated tokens per model turn; a model's own limit applies if lower. One exception: when a turn is cut at this cap with nothing visible (all hidden reasoning) or right after a complete tool call, that one retry is sent with the cap doubled, up to the model's limit and never past a managed `policy.max_output_tokens`, at most once per run. Use `policy.max_output_tokens` for a hard ceiling; run budgets still bound spend |
 | `reasoning_effort` | `none` `minimal` `low` `medium` `high` `xhigh` `max` `default` | provider default | effort hint for reasoning models that accept one. `default` lets the provider choose. Any other value outside the model's known accepted set (catalog or discovery) fails at plan time naming the accepted ones; with no known set, a rejected value fails at the provider ([providers](providers.md)) |
-| `approval_delegate` | `on` `off` | absent | Controls explicit supervision outside Auto. Auto and its write children do not require a reviewer; Ask always requires the human. See [permissions](permissions.md#approval-modes) |
+| `approval_delegate` | `on` `off` | absent | Controls explicit supervision of a `full` session. It has no effect in Auto or Ask: Auto denies out-of-scope actions and Ask always asks you. See [permissions](permissions.md#approval-modes) |
 | `approval_timeout_seconds` | `1`–`86400` | absent | server-side bound on how long a held call waits for you before it is denied. Absent is **no deadline**: the prompt waits for you, the run's own deadline, or cancellation. Not trust-gated: it can only shorten a wait. `qq serve` and `qq daemon` read it from global and managed configuration only; `qq run` and the TUI also read the project's |
 | `providers` | map | built-ins | provider declarations; [below](#providers) |
 | `mcp` | map | empty | MCP servers; [MCP servers](mcp.md) |

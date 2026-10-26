@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol)
-**Implements:** [`autonomous-core.md` § AC2, AC3, AC5, AC6](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md); audit [`core-autonomy.md`](../research/core-autonomy.md) A1, A2. Extends ADR-0039 and ADR-0040; supersedes ADR-0040 § Alternatives' deferral of `resume_run`
+**Implements:** [`autonomous-core.md` § AC2, AC3, AC5, AC6](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md); audit [`core-autonomy.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/core-autonomy.md) A1, A2. Extends ADR-0039 and ADR-0040; supersedes ADR-0040 § Alternatives' deferral of `resume_run`
 
 ## Context
 

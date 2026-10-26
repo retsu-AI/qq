@@ -2196,9 +2196,8 @@ fields stay managed-only:
   continues without recording trust or opening a human prompt. Explicit
   configuration inspection retains `TrustRequired`; `qq trust` records the
   reviewed authority on the server host. Runtime and strict inspection use
-  separate plan-cache keys. Existing process-scoped trust grants also remain
-  part of that key, so a plan compiled without project authority cannot serve
-  a trusted request, or vice versa.
+  separate plan-cache keys, so a plan compiled without project authority
+  cannot serve a trusted request, or vice versa.
 - **Promotion.** The approval prompt's workspace-lifetime choice appends
   the grant to `.qq/config.ron` by targeted text insertion — comments
   and formatting survive — with an atomic temp-and-rename write that

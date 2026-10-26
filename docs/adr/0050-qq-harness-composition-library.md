@@ -3,7 +3,7 @@
 **Status:** Accepted, partly implemented (2026-10-26); see Implementation notes
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (crate boundaries, features)
-**Implements:** [`autonomous-core.md` § AC10–AC13](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md); audit [`core-autonomy.md`](../research/core-autonomy.md) B1–B4. Refines ADR-0027 (the public surface) and audit F19 (build profiles)
+**Implements:** [`autonomous-core.md` § AC10–AC13](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md); audit [`core-autonomy.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/core-autonomy.md) B1–B4. Refines ADR-0027 (the public surface) and audit F19 (build profiles)
 
 ## Context
 

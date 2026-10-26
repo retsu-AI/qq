@@ -230,7 +230,7 @@ to 2000). A ratio below 1.0 favors the candidate. The historical R7 proposal in 
 [terminal-bench plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/terminal-bench.md)
 used a ratio interval entirely below 0.80 with no meaningful pass-rate loss.
 That proposal is not a current delivery gate; current work follows the
-[core stabilization plan](../../docs/plans/README.md).
+[current plan](../../docs/plans/README.md).
 
 ## Compare Against Other Harnesses
 

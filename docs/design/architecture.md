@@ -1714,10 +1714,9 @@ publication before teardown does not compile (ADR-0012).
 A started run with a captured goal charges completed model work to that goal's
 stored row under the same outcome guard. Replacing or clearing the live goal
 does not transfer its spending to the replacement or reactivate the archived
-row. Goal-owned routing and reviewer admission is retained durably, including
-when no main model turn commits. Reserved and queued settlement charges that
-spending to the captured historical goal without consuming a main run. Routing
-fallbacks for empty or oversized inputs have no paid admission. A live goal
+row. Goal-owned audit admission is retained durably, including when no main model
+turn commits. Reserved and queued settlement charges that spending to the
+captured historical goal without consuming a main run. A live goal
 update precedes the terminal run event in the same transaction; replaced goals
 receive historical accounting without updating the replacement.
 Usage and cost retain uncertainty independently, and settlement releases
@@ -2198,7 +2197,7 @@ path and are never wrapped in RPC or a plugin abstraction; the hot path
 selects one precompiled tool entry and never runs before/after hook lists;
 product memory is not a synchronous observer of every token and ordinary
 retrieval fails open with a visible diagnostic; synchronous decisions remain
-limited to typed approval (including the `reviewer_model` delegate, ADR-0041),
+limited to typed approval,
 exact tool validation, and budget admission; provider
 adapter families are feature-gated inside `qq-provider` (`provider-bedrock`
 owns the AWS SDK closure) rather than split into crates.

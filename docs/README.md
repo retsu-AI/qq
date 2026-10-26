@@ -8,7 +8,7 @@ below is for people changing QQ.
 | --- | --- |
 | how the system works today | [`design/architecture.md`](design/architecture.md), then the topic docs below |
 | why something is the way it is | [`adr/README.md`](adr/README.md) |
-| what evidence motivated a plan | `research/` below |
+| what evidence motivated the current plan | its *Evidence* section; older research snapshots are in Git history at [`2cafa65`](https://github.com/retsu-AI/qq/tree/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research) |
 | what is being built next and how it is accepted | [`plans/README.md`](plans/README.md) |
 | how to do a unit of work or review one | [`AGENTS.md`](../AGENTS.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | how to run, measure, or qualify something | `runbooks/` below |
@@ -25,41 +25,13 @@ below is for people changing QQ.
 - [`providers.md`](design/providers.md) — provider validation standard.
 - [`tools.md`](design/tools.md) — tool loop, built-in tools and their
   bounding/spill boundary, containment, edit semantics, shell classification,
-  `@` mentions, approvals (including
-  [delegated approval](design/tools.md#approval-policy)), MCP and embedded
-  hosts.
+  `@` mentions, [approvals](design/tools.md#approval-policy), MCP and
+  embedded hosts.
 - [`side-questions.md`](design/side-questions.md) — `/btw` side questions:
   captured context, least-authority tools, bounds, durability.
 - [`layout.md`](design/layout.md), [`transcript.md`](design/transcript.md),
   [`theme.md`](design/theme.md) — TUI layout tiers and panes, transcript
   rendering, themes.
-
-## Research — `research/`, dated evidence behind plans
-
-Snapshots of QQ and reference harnesses (Codex, OpenCode, Pi, fx) at a
-recorded commit. They are not updated as work ships; each names its snapshot
-date and the plan that acts on it.
-
-- [`harness-comparison.md`](research/harness-comparison.md) (2026-09-16) —
-  reliability findings F01–F28, comparative capability matrix, core versus
-  adapter placement, acceptance criteria.
-- [`run-reliability.md`](research/run-reliability.md) (2026-09-21) — why
-  sessions do not finish: failure taxonomy from the live session store,
-  findings R01–R12. Current work: [core stabilization](plans/README.md).
-- [`onboarding.md`](research/onboarding.md) (2026-09-22) — first-run and
-  configuration UX, findings O01–O20. The onboarding plan that acted on it
-  has closed.
-- [`token-efficiency.md`](research/token-efficiency.md) (2026-09-23) —
-  baseline mechanisms and hypotheses. Current work: [core stabilization](plans/README.md).
-- [`core-autonomy.md`](research/core-autonomy.md) (2026-09-28) — what stops
-  `qq-core` from running one task unattended for hours and from being
-  embedded. Current work: [core stabilization](plans/README.md).
-- [`goal-pursuit.md`](research/goal-pursuit.md) (2026-09-28) — how the
-  reference harnesses pursue one objective over time, and the positions
-  QQ's `/goal` takes. Current work: [core stabilization](plans/README.md).
-- [`action-bias.md`](research/action-bias.md) (2026-10-13) — why runs read
-  instead of finishing: shell reads counted as work, re-reads, delegation
-  wall time, and what the reference harnesses do instead. Current work: [core stabilization](plans/README.md).
 
 ## Decisions — `adr/`
 
@@ -69,14 +41,12 @@ write one" in [`adr/README.md`](adr/README.md).
 
 ## Plans — `plans/`
 
-The [core stabilization plan](plans/README.md) defines the remaining core work
-and its acceptance. The proposed
-[desktop, mobile and fleet plan](plans/desktop-mobile-fleet.md) builds on it:
-one per-user daemon serving TUI, CLI, desktop and mobile as equal clients, and
-hub-based task orchestration across servers. Issues and PRs carry assignments
-and verification. Retired
-plans and evidence remain recoverable through Git history; no progress ledger
-or reservation document is required.
+The [v0.1.10 plan](plans/README.md) defines the current work, the evidence
+behind it, and how each change is accepted. The proposed
+[desktop, mobile and fleet plan](plans/desktop-mobile-fleet.md) is deferred
+until after v0.1.10. Issues and PRs carry assignments and verification.
+Retired plans and evidence remain recoverable through Git history; no
+progress ledger or reservation document is required.
 
 ## Runbooks — `runbooks/`
 
@@ -113,10 +83,11 @@ these files at build time ([`runbooks/website.md`](runbooks/website.md)).
 1. Design docs are stateless: no status lines, checklists, or pending markers.
    Amend them in the commit that changes behavior.
 2. ADRs are one decision, one page, immutable once accepted.
-3. Keep one current stabilization plan. Remove completed work; move a durable
+3. Keep one current plan. Remove completed work; move a durable
    contract to `design/` only when it describes shipped behavior. Historical
    links can point to the original commit instead of maintaining old ledgers.
 4. Keep raw measurements under `target/` and out of Git. Record relevant
    results with the issue or PR.
-5. Research is dated evidence, not a work queue or an implementation claim.
+5. Evidence in a plan is dated and names its source; it is not a work queue
+   or an implementation claim.
 6. File names describe their contents, without dates or slice IDs.
