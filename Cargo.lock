@@ -2965,7 +2965,7 @@ dependencies = [
 
 [[package]]
 name = "qq"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "clap",
  "directories",
@@ -3006,7 +3006,7 @@ dependencies = [
 
 [[package]]
 name = "qq-auth"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "atomic-write-file",
  "base64 0.22.1",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "qq-client"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-stream",
  "futures-core",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "qq-config"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "directories",
  "objc2-core-foundation",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "qq-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-stream",
  "axum",
@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "qq-host"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3145,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "qq-mcp"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "futures-util",
  "qq-provider",
@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "qq-protocol"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "getrandom 0.3.4",
  "qq-reasoning",
@@ -3170,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "qq-provider"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-stream",
  "aws-config",
@@ -3199,14 +3199,14 @@ dependencies = [
 
 [[package]]
 name = "qq-reasoning"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qq-server"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-stream",
  "axum",
@@ -3226,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "qq-tui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "crossterm",
  "futures-util",
@@ -5469,7 +5469,7 @@ checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "xtask"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "async-stream",
  "cap-std",
