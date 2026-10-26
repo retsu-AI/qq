@@ -238,6 +238,10 @@ jobs:
           bash .github/scripts/test-exact.sh tools::windows_owner::directory::tests::shell_directory_preserves_identity_or_refuses_extended_only_paths
           bash .github/scripts/test-exact.sh tools::windows_owner::resources::tests::sampled_safeguards_are_refused_before_creating_a_job
           cargo test --locked -p qq --no-default-features --test command_worker_client windows:: -- --test-threads=1 --nocapture
+      - name: Windows detached daemon leaves its starter's job
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        shell: bash
+        run: cargo test --locked -p qq --no-default-features --test daemon_windows -- --exact a_detached_daemon_leaves_a_job_that_permits_it_and_starts_in_one_that_does_not --nocapture
       - name: Windows command and fleet resource bounds
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         shell: bash

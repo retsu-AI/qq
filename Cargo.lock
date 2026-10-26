@@ -2999,6 +2999,7 @@ dependencies = [
  "tracing-core",
  "webbrowser",
  "win-custody",
+ "win32job",
  "windows-permissions",
  "winsafe",
 ]
