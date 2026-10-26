@@ -42,7 +42,7 @@ the session; do not ask again.
 | The user said | You may |
 | --- | --- |
 | Asked a question | read and run read-only commands |
-| Asked for a change | edit, test, and commit in your own worktree |
+| Asked for a change | edit, test, and commit on your own branch; create it first with `git worktree add .worktrees/<short> -b <type>/<short> origin/main` |
 | "open a PR", "push it" | also push the branch and open a ready PR |
 | "merge", "land", "ship", "take it all the way" | also merge once `land-pr` says ready |
 
