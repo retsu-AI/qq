@@ -27,7 +27,7 @@ status() {
     # Every later request targets the PR's own repository, not the checkout's.
     IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' <<<"$view") || return 2
     # --paginate prints one JSON document per page; slurp them into one.
-    threads=$(gh api graphql --paginate -F owner="$owner" -F name="$repo" -F n="$number" -f query='
+    threads=$(gh api graphql --paginate -f owner="$owner" -f name="$repo" -F n="$number" -f query='
         query($owner: String!, $name: String!, $n: Int!, $endCursor: String) {
           repository(owner: $owner, name: $name) { pullRequest(number: $n) {
             reviewThreads(first: 100, after: $endCursor) {
