@@ -49,10 +49,12 @@ with no unresolved findings and reacted 👍. A clean receipt without the
    - **Failing checks.** Read the log:
      `gh run view <run-id> --log-failed`, or the `qq-check-<run-id>`
      artifact with `target/qq-check/last.json`. A failure in code the PR
-     touches gets a fix. A failure elsewhere is likely a stale base or a
-     flake. Rebase first, then rerun once with `gh run rerun <run-id>
-     --failed`. If the same failure comes back, it is real: fix it or
-     report it.
+     touches gets a fix. A failure elsewhere is a stale base or a flake.
+     If `git merge-base --is-ancestor origin/main HEAD` fails, the base
+     is stale: merge `origin/main` and push as for conflicts, which runs
+     CI on the new head. Otherwise rerun once with
+     `gh run rerun <run-id> --failed`. If the same failure comes back, it
+     is real: fix it or report it.
    - **Codex.** New commits trigger a new review. If the status says
      failed or nothing happens after a push, comment `@codex review` once.
      Codex findings are review threads; handle them as above.
