@@ -322,3 +322,67 @@ async fn stop_waits_for_a_host_that_is_already_closing() {
         .unwrap();
     assert_eq!(stdout(&output), "qq daemon stopped\n");
 }
+
+/// Rewrites the running daemon's discovery file as if a qq build speaking
+/// `protocol` had written it, which is what an upgraded binary finds.
+fn advertise_protocol(home: &Home, protocol: u16) {
+    let path = home.server_paths().metadata_file().to_path_buf();
+    let current = std::fs::read_to_string(&path).unwrap();
+    let ours = format!("protocol_version:{}", qq_protocol::PROTOCOL_VERSION);
+    assert!(current.contains(&ours), "{current}");
+    std::fs::write(
+        &path,
+        current.replace(&ours, &format!("protocol_version:{protocol}")),
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn restart_replaces_a_daemon_from_another_protocol_version() {
+    // After an upgrade the running daemon speaks the previous protocol. The
+    // stop request is the one route every version shares, so `restart` must
+    // still stop it and start this build, not fail on the version check.
+    let home = Home::new();
+    let first = pid_in(stdout(&home.run(&["daemon", "run", "--detach"]).await).trim_end());
+    let before = qq_server::discover_at(&home.server_paths())
+        .await
+        .unwrap()
+        .unwrap();
+    advertise_protocol(&home, qq_protocol::PROTOCOL_VERSION - 1);
+
+    let restarted = stdout(&home.run(&["daemon", "restart"]).await);
+    let mut lines = restarted.lines();
+    assert_eq!(
+        lines.next(),
+        Some(format!("qq daemon stopped (pid {first})").as_str())
+    );
+    let second = pid_in(lines.next().unwrap());
+    assert_ne!(first, second);
+    assert!(!alive(first));
+    let after = qq_server::discover_at(&home.server_paths())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.server_info().pid, second);
+    assert_eq!(
+        after.server_info().server_id,
+        before.server_info().server_id
+    );
+
+    advertise_protocol(&home, qq_protocol::PROTOCOL_VERSION + 1);
+    assert_eq!(
+        stdout(&home.run(&["daemon", "stop"]).await),
+        format!("qq daemon stopped (pid {second})\n")
+    );
+    assert!(!store_held(&home.store_lock()));
+    // The stopped daemon left the file it did not write. It names a server
+    // that no longer answers, so it is stale, exactly like one of ours.
+    assert!(home.server_paths().metadata_file().exists());
+    assert_eq!(
+        stdout(&home.run(&["daemon", "stop"]).await),
+        "qq daemon is not running\n"
+    );
+    let started = stdout(&home.run(&["daemon", "run", "--detach"]).await);
+    assert!(started.starts_with("qq daemon started at "), "{started}");
+    stdout(&home.run(&["daemon", "stop"]).await);
+}
