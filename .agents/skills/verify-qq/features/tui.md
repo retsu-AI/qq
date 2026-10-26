@@ -22,7 +22,7 @@
   | `Alt-R` | reasoning |
   | `Alt-N` / `Alt-C` | new session / new child |
   | `Ctrl-G` | next session that needs you |
-  | `y` `a` `w` `n` | approvals |
+  | `y` `n` (Ask); `a` `w` also for supervised non-Ask holds | approvals |
 
 ## How to get to it (user POV)
 

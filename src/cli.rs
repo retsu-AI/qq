@@ -260,19 +260,22 @@ pub struct RunArgs {
     #[arg(long, value_name = "NAME")]
     pub profile: Option<String>,
 
-    /// Approve every held call to this tool for the session (repeatable).
-    /// Under `--approval auto` this answers escalations the policy would
-    /// otherwise deny, without opening the whole run up as `full` does.
+    /// Grant this tool for the session (repeatable). Under `auto` and `full`
+    /// the grant is stored before the prompt runs; it is useful for sessions
+    /// and children whose policy would otherwise deny the call. Ignored under
+    /// `ask` and `read-only`.
     #[arg(long = "allow-tool", value_name = "NAME")]
     pub allow_tools: Vec<String>,
 
-    /// Approve held shell commands starting with this word-boundary prefix
-    /// for the session (repeatable), e.g. `--allow-shell "cargo test"`.
+    /// Grant shell commands starting with this word-boundary prefix for the
+    /// session (repeatable), e.g. `--allow-shell "cargo test"`. Stored like
+    /// `--allow-tool`.
     #[arg(long = "allow-shell", value_name = "PREFIX")]
     pub allow_shell_prefixes: Vec<String>,
 
-    /// Approve held `fetch` calls to this host for the session (repeatable):
-    /// an exact name or `*.suffix`, e.g. `--allow-host docs.rs`.
+    /// Grant `fetch` to this host for the session (repeatable): an exact
+    /// name or `*.suffix`, e.g. `--allow-host docs.rs`. Stored like
+    /// `--allow-tool`.
     #[arg(long = "allow-host", value_name = "HOST")]
     pub allow_hosts: Vec<String>,
 
@@ -510,20 +513,20 @@ pub fn parse_goal_cost(value: &str) -> Result<u64, String> {
     }
 }
 
-/// Approval policies. Headless Ask denies held actions instead of waiting.
+/// Approval policies. No mode waits for a human in `qq run`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum RunApproval {
-    /// Require explicit approval for every non-read call; unattended calls
-    /// are denied even when an allowlist matches.
+    /// Require fresh human approval for every non-read call. With no human
+    /// present, those calls are denied, even when an allowlist matches.
     Ask,
-    /// Deny every mutating, shell, and MCP tool call without prompting.
+    /// Deny every edit, shell, MCP, and network call.
     ReadOnly,
-    /// Approve tool calls unattended except dangerous shell commands
-    /// (destructive deletions, privilege escalation, force-pushes, piping
-    /// downloads into an interpreter), which are denied without prompting.
+    /// Run edits, shell, MCP, and public fetches without asking, inside a
+    /// private task copy of the workspace and the native sandbox. Calls
+    /// outside that boundary are denied and reported to the model.
     Auto,
-    /// Run available tools without approval prompts, within the configured
-    /// execution boundaries.
+    /// Run every tool without asking and without the task sandbox. Shell
+    /// still runs through the command worker; managed policy still applies.
     Full,
 }
 

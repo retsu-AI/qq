@@ -13,8 +13,8 @@ use std::{
 use qq_auth::{AuthError, CredentialStore, Secret};
 use qq_config::{
     AwsAuth, BedrockAuth, ClientSnapshot, ConfigError, ConfigLoader, ConfigSnapshot, EndpointMode,
-    HttpAccess, HttpCredential, LoadRequest, ProcessTrust, PromotionOutcome, ProviderAccess,
-    ProviderApi, ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
+    HttpAccess, HttpCredential, LoadRequest, PromotionOutcome, ProviderAccess, ProviderApi,
+    ProviderAuth, ProviderConfig, RuntimeOverrides, WorkspaceGrant,
 };
 use qq_core::{
     ApprovalReviewer, GrantPromotionFuture, GrantSeedFuture, LoadedRuntime, PublishedEventStream,
@@ -130,7 +130,7 @@ pub struct ProviderRemedy {
 
 /// Everything the interactive client derives from one loaded configuration.
 /// See [`RuntimeFactory::tui_model_state`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct TuiModelState {
     pub goals: qq_config::GoalsConfig,
     /// The configured route as a selection, or the default when none.
@@ -145,23 +145,6 @@ pub struct TuiModelState {
     pub unauthenticated_providers: Vec<ProviderRemedy>,
     /// The server-side approval wait the configuration sets, if any.
     pub approval_timeout: Option<std::time::Duration>,
-}
-
-/// How the user answered the trust prompt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrustResolution {
-    /// Record the pending files durably, as `qq trust` does.
-    Persist,
-    /// Admit them for this process only.
-    Session,
-}
-
-/// A resolved trust prompt: which files were trusted and the client state
-/// the now-loadable configuration provides.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrustGranted {
-    pub trusted: Vec<String>,
-    pub state: TuiModelState,
 }
 
 #[derive(Clone)]
@@ -180,11 +163,6 @@ struct RuntimeFactoryInner {
     discovery: ModelDiscovery,
     mcp: crate::mcp::McpRegistryCache,
     plans: PlanCache,
-    /// Project files trusted for this process only (the TUI's "this
-    /// session"). Applied to every load request this factory builds and
-    /// folded into the plan key so a compile from before the grant is not
-    /// served after it. Never written to the trust state.
-    process_trust: std::sync::Mutex<Vec<ProcessTrust>>,
     check_policy_slots: std::sync::OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
@@ -341,43 +319,15 @@ impl RuntimeFactory {
                 discovery: ModelDiscovery::new()?,
                 mcp: crate::mcp::McpRegistryCache::new(),
                 plans: PlanCache::new(PlanCacheLimits::default()),
-                process_trust: std::sync::Mutex::new(Vec::new()),
                 check_policy_slots: std::sync::OnceLock::new(),
             }),
         })
     }
 
-    /// Trust these project files for the rest of this process: every load
-    /// request the factory builds for a workspace carries them, and the plan
-    /// key changes so cached compiles from before the grant are not served.
-    /// Nothing is written; the next `qq` asks again. A poisoned lock is
-    /// treated as "unavailable" and reported so the caller can say so.
-    pub fn trust_for_process(&self, grants: Vec<ProcessTrust>) -> Result<(), RuntimeBuildError> {
-        let mut process_trust = self
-            .inner
-            .process_trust
-            .lock()
-            .map_err(|_| RuntimeBuildError::CacheUnavailable)?;
-        process_trust.extend(grants);
-        process_trust.sort();
-        process_trust.dedup();
-        Ok(())
-    }
-
-    /// The process-scoped grants in effect, sorted. Empty when none.
-    pub fn process_trust(&self) -> Result<Vec<ProcessTrust>, RuntimeBuildError> {
-        self.inner
-            .process_trust
-            .lock()
-            .map(|grants| grants.clone())
-            .map_err(|_| RuntimeBuildError::CacheUnavailable)
-    }
-
     /// What the interactive client needs from a loaded configuration: the
     /// configured route (if any), whether it is usable as the client default,
     /// the catalog, the credential remedies, and the server's approval wait.
-    /// Blocking: probes credentials. Computed at startup and again after the
-    /// trust prompt is answered, so both paths agree.
+    /// Blocking: probes credentials. Computed once at startup.
     pub fn tui_model_state(
         &self,
         snapshot: &ClientSnapshot,
@@ -430,92 +380,6 @@ impl RuntimeFactory {
             unauthenticated_providers,
             approval_timeout: snapshot.approval_timeout(),
         }
-    }
-
-    /// Answer the TUI's trust prompt for exactly the files it showed.
-    /// `reviewed` is the `(path, digest)` of every file on the prompt;
-    /// when the pending set now holds a file at any other digest (it was
-    /// edited while the prompt was open) nothing is trusted and
-    /// `ConfigError::TrustChanged` carries the set to show again.
-    /// `Persist` records the files exactly as `qq trust` does; `Session`
-    /// admits them for this process only. Either way the configuration is
-    /// then loaded and the client's model state recomputed. Blocking:
-    /// trust-state I/O, the load, and credential probes. An empty pending
-    /// set is not an error: the files were trusted meanwhile (another `qq
-    /// trust`) and the load simply succeeds.
-    pub fn resolve_trust(
-        &self,
-        request: &LoadRequest,
-        choice: TrustResolution,
-        reviewed: &[ProcessTrust],
-    ) -> Result<TrustGranted, RuntimeBuildError> {
-        self.resolve_trust_with(request, choice, reviewed, || {})
-    }
-
-    /// [`Self::resolve_trust`] with a hook run between the grant and the
-    /// post-grant load, where a concurrent edit can land; tests use it to
-    /// place that edit deterministically.
-    fn resolve_trust_with(
-        &self,
-        request: &LoadRequest,
-        choice: TrustResolution,
-        reviewed: &[ProcessTrust],
-        after_grant: impl FnOnce(),
-    ) -> Result<TrustGranted, RuntimeBuildError> {
-        let trusted: Vec<String> = match choice {
-            TrustResolution::Persist => self
-                .inner
-                .config
-                .grant_reviewed_trust(request, reviewed)?
-                .iter()
-                .map(|item| item.source().label().to_owned())
-                .collect(),
-            TrustResolution::Session => {
-                let pending = self
-                    .inner
-                    .config
-                    .reviewed_pending_trust(request, reviewed)?;
-                let mut grants = Vec::with_capacity(pending.len());
-                let mut labels = Vec::with_capacity(pending.len());
-                for item in &pending {
-                    let Some(path) = item.source().path() else {
-                        // Pending trust is only ever a project file; a
-                        // virtual source here is a loader invariant break,
-                        // not something the user can act on.
-                        return Err(RuntimeBuildError::Config(ConfigError::TrustRequired {
-                            pending: pending.clone(),
-                            reports: Vec::new(),
-                        }));
-                    };
-                    grants.push(ProcessTrust {
-                        path: path.to_owned(),
-                        digest: item.digest().to_owned(),
-                    });
-                    labels.push(item.source().label().to_owned());
-                }
-                self.trust_for_process(grants)?;
-                labels
-            }
-        };
-        let request = request.clone().with_process_trust(self.process_trust()?);
-        after_grant();
-        // A file rewritten after the grant's scan but before this load is
-        // pending again at a digest nobody reviewed. That is the same event
-        // as an edit while the prompt was open, so report it the same way:
-        // the TUI redraws the prompt with the new content instead of showing
-        // a generic error over the old declarations.
-        let snapshot = match self.load_for_client(&request) {
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => {
-                return Err(RuntimeBuildError::Config(ConfigError::TrustChanged {
-                    pending,
-                }));
-            }
-            other => other?,
-        };
-        Ok(TrustGranted {
-            trusted,
-            state: self.tui_model_state(&snapshot, &request),
-        })
     }
 
     pub fn load(&self, request: &LoadRequest) -> Result<ConfigSnapshot, RuntimeBuildError> {
@@ -981,12 +845,7 @@ impl RuntimeFactory {
         } else {
             LoadRequest::from_process_env(workspace, max_output_tokens)?
         };
-        let request = request.with_untrusted_project_config_ignored();
-        let process_trust = self.process_trust()?;
-        if process_trust.is_empty() {
-            return Ok(request);
-        }
-        Ok(request.with_process_trust(process_trust))
+        Ok(request.with_untrusted_project_config_ignored())
     }
 
     fn validate_tui_qa_snapshot(&self, snapshot: &ConfigSnapshot) -> Result<(), RuntimeBuildError> {
@@ -1431,7 +1290,6 @@ impl RuntimeFactory {
             explicit_config_content: request.explicit_content().map(str::to_owned),
             approval_delegate: request.overrides().approval_delegate(),
             reasoning_effort: request.overrides().reasoning_effort(),
-            process_trust: crate::plan::ProcessTrustFingerprint::of(request.process_trust()),
             ignore_untrusted_project_config: request.ignores_untrusted_project_config(),
         };
         let lookup = self.inner.plans.load(&key, || {
@@ -4053,7 +3911,7 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use futures_util::stream;
     use qq_auth::{CredentialPaths, KeyringBackend, KeyringError};
-    use qq_config::{ConfigPaths, PendingTrust, ProviderKind, RuntimeOverrides, UsageType};
+    use qq_config::{ConfigPaths, ProviderKind, RuntimeOverrides, UsageType};
     use qq_core::Runtime;
     use qq_protocol::{
         CommandId, CommandOutcome, ModelSelection, RunId, RunPromptIdentity, RunStatus,
@@ -7396,260 +7254,58 @@ mod tests {
     }
 
     #[test]
-    fn trust_prompt_persist_records_like_qq_trust_and_session_grants_only_this_process() {
-        // OB7: both answers make the configuration load and yield the same
-        // client model state a trusted start would; only `Persist` writes.
-        let fixture = RuntimeFixture::new();
-        let credentials = CredentialStore::with_backend(
-            CredentialPaths::new(fixture.path("data")),
-            Arc::new(MemoryKeyring::default()),
-        );
-        credentials
-            .set("openai/default", "test-secret", false)
-            .unwrap();
-        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
-        fs::write(
-            fixture.path("work/.qq/config.ron"),
-            r#"(version: 1, model: "openai/gpt-5.6", mcp: {"tool": Stdio(command: "tool")})"#,
-        )
-        .unwrap();
-        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
-
-        // Session: the load succeeds through this factory only; the trust
-        // state file is never written and a fresh factory still asks.
-        let factory = fixture.factory_with_credentials(credentials.clone());
-        let pending = match factory.load_for_client(&request) {
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
-            other => panic!("expected TrustRequired, got {other:?}"),
-        };
-        assert_eq!(pending.len(), 1);
-        let reviewed: Vec<ProcessTrust> =
-            pending.iter().filter_map(PendingTrust::reviewed).collect();
-        assert_eq!(
-            pending[0]
-                .declarations()
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>(),
-            ["model openai/gpt-5.6", "MCP tool → tool"]
-        );
-        let granted = factory
-            .resolve_trust(&request, TrustResolution::Session, &reviewed)
-            .unwrap();
-        assert_eq!(granted.trusted, [pending[0].source().label().to_owned()]);
-        assert_eq!(
-            granted.state.tui_model.model.as_deref(),
-            Some("openai/gpt-5.6")
-        );
-        assert!(granted.state.model.is_some(), "credential present: usable");
-        assert!(!fixture.path("data/trust.ron").exists());
-        // The factory's own request path (what the embedded server uses for
-        // `models`, `capabilities`, and plans) carries the grant.
-        let workspace = request.cwd().to_owned();
-        let served = factory
-            .models_for(&ModelCatalogRequest {
-                workspace: workspace.display().to_string(),
-                selection: ModelSelection::default(),
-            })
-            .unwrap();
-        assert!(!served.is_empty());
-        assert_eq!(factory.process_trust().unwrap().len(), 1);
-        let fresh = fixture.factory_with_credentials(credentials.clone());
-        assert!(matches!(
-            fresh.load_for_client(&request),
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
-        ));
-
-        // Persist: recorded on disk, so a fresh factory loads too.
-        let granted = fresh
-            .resolve_trust(&request, TrustResolution::Persist, &reviewed)
-            .unwrap();
-        assert_eq!(granted.trusted.len(), 1);
-        assert!(fixture.path("data/trust.ron").exists());
-        assert!(
-            fixture
-                .factory_with_credentials(credentials)
-                .load_for_client(&request)
-                .is_ok()
-        );
-        // Persist with nothing pending is not an error: the load runs and
-        // the answer names no file.
-        let again = fresh
-            .resolve_trust(&request, TrustResolution::Persist, &[])
-            .unwrap();
-        assert!(again.trusted.is_empty());
-    }
-
-    #[test]
-    fn a_trust_answer_covers_only_the_content_the_prompt_showed() {
-        // A project file edited while the prompt is open (a `git pull`
-        // adds an MCP server) must not be trusted by the key pressed for
-        // the old content, under either answer. The error carries the new
-        // set, and answering for that set succeeds.
-        let fixture = RuntimeFixture::new();
-        let credentials = CredentialStore::with_backend(
-            CredentialPaths::new(fixture.path("data")),
-            Arc::new(MemoryKeyring::default()),
-        );
-        credentials
-            .set("openai/default", "test-secret", false)
-            .unwrap();
-        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
-        let config = fixture.path("work/.qq/config.ron");
-        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
-        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
-        let factory = fixture.factory_with_credentials(credentials);
-        let shown = match factory.load_for_client(&request) {
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
-            other => panic!("expected TrustRequired, got {other:?}"),
-        };
-        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
-
-        fs::write(
-            &config,
-            r#"(version: 1, model: "openai/gpt-5.6", mcp: {"evil": Stdio(command: "evil")})"#,
-        )
-        .unwrap();
-        for choice in [TrustResolution::Session, TrustResolution::Persist] {
-            let current = match factory.resolve_trust(&request, choice, &reviewed) {
-                Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
-                other => panic!("expected TrustChanged for {choice:?}, got {other:?}"),
-            };
-            assert_eq!(current.len(), 1);
-            assert_ne!(current[0].digest(), shown[0].digest());
-            assert!(
-                current[0]
-                    .declarations()
-                    .iter()
-                    .any(|declaration| declaration.to_string() == "MCP evil → evil")
-            );
-        }
-        assert!(!fixture.path("data/trust.ron").exists(), "nothing recorded");
-        assert!(
-            factory.process_trust().unwrap().is_empty(),
-            "nothing admitted"
-        );
-
-        let current = factory
-            .inner
-            .config
-            .pending_trust(&request)
-            .unwrap()
-            .iter()
-            .filter_map(PendingTrust::reviewed)
-            .collect::<Vec<_>>();
-        let granted = factory
-            .resolve_trust(&request, TrustResolution::Session, &current)
-            .unwrap();
-        assert_eq!(granted.trusted.len(), 1);
-    }
-
-    #[test]
-    fn an_edit_after_the_grant_scan_redraws_the_prompt_instead_of_failing() {
-        // Review (#213): a file rewritten after the grant's scan but before
-        // the post-grant load made that load fail `TrustRequired`, a generic
-        // error over the old declarations. It is the same event as an edit
-        // while the prompt was open and must come back as `TrustChanged`
-        // carrying the new content. The hook places the edit exactly there.
-        let fixture = RuntimeFixture::new();
-        let credentials = CredentialStore::with_backend(
-            CredentialPaths::new(fixture.path("data")),
-            Arc::new(MemoryKeyring::default()),
-        );
-        credentials
-            .set("openai/default", "test-secret", false)
-            .unwrap();
-        fs::create_dir_all(fixture.path("work/.qq")).unwrap();
-        let config = fixture.path("work/.qq/config.ron");
-        fs::write(&config, r#"(version: 1, model: "openai/gpt-5.6")"#).unwrap();
-        let request = LoadRequest::new(fs::canonicalize(fixture.path("work")).unwrap());
-        let factory = fixture.factory_with_credentials(credentials);
-        let shown = match factory.load_for_client(&request) {
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { pending, .. })) => pending,
-            other => panic!("expected TrustRequired, got {other:?}"),
-        };
-        let reviewed: Vec<ProcessTrust> = shown.iter().filter_map(PendingTrust::reviewed).collect();
-        let edit = || {
-            fs::write(
-                &config,
-                r#"(version: 1, model: "openai/gpt-5.6", mcp: {"late": Stdio(command: "late")})"#,
-            )
-            .unwrap();
-        };
-        let result =
-            factory.resolve_trust_with(&request, TrustResolution::Session, &reviewed, edit);
-        let current = match result {
-            Err(RuntimeBuildError::Config(ConfigError::TrustChanged { pending })) => pending,
-            other => panic!("expected TrustChanged, got {other:?}"),
-        };
-        assert_eq!(current.len(), 1);
-        assert!(
-            current[0]
-                .declarations()
-                .iter()
-                .any(|declaration| declaration.to_string() == "MCP late → late"),
-            "the redraw carries the content that was actually written"
-        );
-    }
-
-    #[test]
-    fn a_session_trust_grant_is_a_new_plan_cache_slot() {
-        // A plan compiled while the project file was withheld must not be
-        // served after `s`: the grant is in the key.
+    fn durable_trust_recompiles_a_plan_that_withheld_untrusted_authority() {
+        // Runtime loads withhold the untrusted route and grant; once `qq
+        // trust` records the file, the cached plan from before must not be
+        // served again.
         let fixture = RuntimeFixture::new();
         let factory = fixture.factory();
         fs::write(
             fixture.path("global/config.ron"),
             r#"(version: 1, model: "custom/test-model", providers: {
                 "custom": Custom(connection: (base_url: "http://localhost/v1", api: OpenAiChatCompletions, auth: NoAuth),
-                models: {"test-model": (name: "Test model")})
+                models: {"test-model": (name: "Test model"), "other-model": (name: "Other model")})
             })"#,
         )
         .unwrap();
         fs::create_dir_all(fixture.path("work/.qq")).unwrap();
         fs::write(
             fixture.path("work/.qq/config.ron"),
-            r#"(version: 1, max_output_tokens: 64, policy: (allow_tools: ["read_file"]))"#,
+            r#"(version: 1, model: "custom/other-model", max_output_tokens: 64, policy: (allow_tools: ["read_file"]))"#,
         )
         .unwrap();
         let workspace = fs::canonicalize(fixture.path("work")).unwrap();
-        // Runtime loads continue while withholding the untrusted grant.
         let before = factory.request_for_workspace(&workspace, None).unwrap();
         let (untrusted_plan, lookup) = factory
             .plan_with_lookup(&before, &AgentProfileId::default())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
+        // Non-sensitive settings apply even while authority is withheld.
         assert_eq!(untrusted_plan.resolved_model().max_output_tokens, 64);
+        assert_eq!(untrusted_plan.resolved_model().route, "custom/test-model");
         assert!(factory.load(&before).unwrap().grants().tools().is_empty());
         let request = LoadRequest::new(&workspace);
         assert!(matches!(
             factory.plan_for(&request),
             Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
         ));
-        let reviewed: Vec<ProcessTrust> = factory
-            .inner
-            .config
-            .pending_trust(&request)
-            .unwrap()
-            .iter()
-            .filter_map(PendingTrust::reviewed)
-            .collect();
-        factory
-            .resolve_trust(&request, TrustResolution::Session, &reviewed)
-            .unwrap();
+
+        // What `qq trust` does.
+        let granted = factory.inner.config.grant_pending_trust(&request).unwrap();
+        assert_eq!(granted.len(), 1);
+
         let after = factory.request_for_workspace(&workspace, None).unwrap();
-        assert_eq!(after.process_trust().len(), 1);
         let (plan, lookup) = factory
             .plan_with_lookup(&after, &AgentProfileId::default())
             .unwrap();
         assert_eq!(lookup, PlanLookup::Compiled);
         assert!(!Arc::ptr_eq(&untrusted_plan, &plan));
+        assert_eq!(plan.resolved_model().route, "custom/other-model");
+        assert_eq!(plan.resolved_model().max_output_tokens, 64);
         assert_eq!(
             factory.load(&after).unwrap().grants().tools(),
             ["read_file"]
         );
-        // Non-sensitive settings apply both before and after trust.
-        assert_eq!(plan.resolved_model().max_output_tokens, 64);
         assert_eq!(
             factory
                 .plan_with_lookup(&after, &AgentProfileId::default())
@@ -7657,19 +7313,8 @@ mod tests {
                 .1,
             PlanLookup::Hit
         );
-        // The pre-grant slot still withholds authority; it cannot return the
-        // trusted plan merely because another request gained session trust.
-        let (still_untrusted, lookup) = factory
-            .plan_with_lookup(&before, &AgentProfileId::default())
-            .unwrap();
-        assert_eq!(lookup, PlanLookup::Hit);
-        assert!(Arc::ptr_eq(&untrusted_plan, &still_untrusted));
-        assert!(factory.load(&before).unwrap().grants().tools().is_empty());
-        // Explicit inspection without a process grant remains strict.
-        assert!(matches!(
-            factory.plan_for(&request),
-            Err(RuntimeBuildError::Config(ConfigError::TrustRequired { .. }))
-        ));
+        // Strict inspection now loads too.
+        assert!(factory.plan_for(&request).is_ok());
     }
 
     #[test]
@@ -8599,7 +8244,6 @@ mod tests {
             explicit_config_content: None,
             approval_delegate: None,
             reasoning_effort: None,
-            process_trust: None,
             ignore_untrusted_project_config: false,
         };
         let (first, _) = factory

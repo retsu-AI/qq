@@ -67,14 +67,14 @@ TUI and asks with `/models` instead.
 ### `project configuration needs your trust before it is used: …`
 
 A file under this repository declares something sensitive (a model,
-providers, MCP servers, grants). Only `qq ask`, `qq run`, and `qq serve`
-print this and stop; bare `qq` opens the TUI on a prompt that lists each
-file and what it declares, with `t` (trust, as `qq trust` would), `s` (this
-session only), and `q`. For the headless commands, read the listed file(s),
-then run `qq trust` in that directory. You will see this again after any
-edit to a trusted file's sensitive sections, including one that arrived with
-`git pull`. A TUI attached to a server on another host also prints this;
-run `qq trust` on that host.
+providers, MCP servers, grants, packs). Strict inspection commands such as
+`qq config check` print this. `qq`, `qq ask`, `qq run`, and `qq serve` do
+not stop: they start with that file's sensitive settings switched off, and
+`qq config sources` and `qq doctor` list it as `pending trust`. Read the
+listed file(s), then run `qq trust` in that directory. Editing a trusted
+file's sensitive sections, including through `git pull`, switches them off
+again until you trust it again. Trust is a decision about files on the host
+that runs the server, so for a remote server run `qq trust` there.
 [Permissions › Project trust](permissions.md#project-trust).
 
 ### `model route must use provider/model syntax: "…"`
@@ -216,10 +216,10 @@ start it again after adding one.
 ### `qq run` denied everything
 
 `--approval read-only` denies every edit, shell, MCP, and network call.
-`--approval ask` denies calls needing explicit human approval, including
-allowlisted calls. The default `--approval auto` permits workspace edits and
-safe commands; grant specific extras with `--allow-shell` / `--allow-tool` /
-`--allow-host`.
+`--approval ask` denies every non-read call, including allowlisted ones,
+because no human is present to approve it. The default `--approval auto`
+runs edits and commands inside the task sandbox. Under Auto, a denial means
+the call left that boundary; the denial text says which rule applied.
 [Headless › Approval without a human](headless.md#approval-without-a-human).
 
 ### The agent says a command was `forbidden`
@@ -230,6 +230,75 @@ not have it. Explicit managed controls and native filesystem/network policy
 still apply. A denied Auto call returns a tool error so the agent can choose a
 permitted alternative. See
 [Command controls](permissions.md#command-controls).
+
+### The first shell command ends the run: `session runtime is unavailable`
+
+The host cannot create the shell sandbox's user namespace. This usually
+means Ubuntu 23.10 or later with AppArmor's restriction on, a container
+with default seccomp/AppArmor profiles, or a hardened kernel. QQ cannot
+prove that the failed launch left nothing behind, so it stops the runtime
+rather than reporting an ordinary tool error. `qq run` prints this message
+and exits with code 4; the TUI loses its connection. It happens in `ask`,
+`auto`, and `full`.
+
+Check as the user that runs QQ:
+
+```sh
+unshare --user --map-current-user --pid --fork --kill-child=KILL --mount-proc -- true
+```
+
+If that prints `unshare failed: Operation not permitted`, allow
+unprivileged user namespaces, then start QQ again. See
+[Install › What the shell sandbox needs](install.md#system-requirements).
+
+That workspace stays held after the failure, even once namespaces are
+allowed: a later `qq run` or prompt there waits instead of starting, because
+QQ keeps a hold on any command whose end it could not confirm (see
+[Workspace held after an interrupted completion check](#workspace-held-after-an-interrupted-completion-check)).
+Other workspaces are unaffected until their own first command. QQ has no
+command to release this hold yet, so check `unshare` before the first run on
+a new host.
+
+### `could not establish Linux command custody: …`
+
+The model receives this as a tool error when shell's sandbox cannot be set
+up for one command, and it continues with other tools. When the rest reads
+`required Linux network enforcement is unavailable` or `required Linux
+filesystem enforcement is unavailable`, the kernel lacks Landlock ABI 6
+(Linux 6.12), or `landlock` is not in `/sys/kernel/security/lsm`. This
+affects `auto` only; `ask` and `full` still run commands.
+
+### `could not start the command: …`
+
+The same kind of tool error, raised later in sandbox setup. `kernel
+isolation setup failed` means seccomp is unavailable or the CPU
+architecture is not x86_64 or aarch64 (Auto only).
+
+### `could not identify native command owner: command owner is stopping or has lost durable execution state`
+
+The command worker did not start. On Linux this usually means QQ runs as
+root, there is no root-owned util-linux `unshare` on `PATH`, `unshare` sits
+in a directory other users can write, the `qq` binary is group- or
+world-writable, or `unshare` is dynamically linked and `/etc/ld.so.preload`
+lists a module. On macOS, QQ is
+running as root or the binary is writable by others. See
+[Install › What the shell sandbox needs](install.md#system-requirements).
+
+### `task preparation failed: task workspace limit exceeded`
+
+An Auto run copies the project into a private task directory first. That
+copy holds at most 16,384 entries and 256 MiB. Add build output, vendored
+dependencies, and large data to `.gitignore`, `.ignore`, or `.qqignore`, or
+start QQ from a smaller subdirectory. `disk_space_low: …` in the same place
+means the data directory's disk has less than the copy plus a 512 MiB
+reserve. [Permissions › Task workspaces](permissions.md#task-workspaces).
+
+### `task edits could not be published; work is retained at …`
+
+The run finished but QQ could not copy its changes back. Usually a file in
+your checkout changed in a way that conflicts with the task's edit. Nothing
+was overwritten. The named directory holds the task's files; copy what you
+need from it.
 
 ### `unavailable MCP servers: …`
 

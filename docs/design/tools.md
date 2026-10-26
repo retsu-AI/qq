@@ -226,8 +226,10 @@ child session uses the same store-owned restrictions regardless of its model
 profile or approval grants. Corrupt or empty stored scope records refuse startup.
 The metadata has a byte bound and the registry has a capacity bound. Store
 schema 60 prevents older runtimes from ignoring these restrictions. Scope
-retirement/reconfiguration and automatic task-workspace preparation are not yet
-implemented; this remains an opt-in host API, not qualified default Auto.
+retirement and reconfiguration are not implemented. Static registration
+remains an opt-in host API; the binary's default Auto instead prepares a
+task workspace per run through `SessionRuntimeOptions.task_workspaces`
+(below).
 
 `NativeNetwork::Isolated` separately requests a Linux network namespace with
 no host interfaces, plus Landlock restrictions on pathname and abstract Unix
@@ -2256,10 +2258,10 @@ dispatch overhead has a benchmark.
 
 ## Intentionally Deferred
 
-- Git worktree or sandbox isolation for editing subagents.
+- Per-child isolation for editing subagents (Auto children share their
+  root's private task tree).
 - A harness-owned undo layer (run snapshots) independent of the user's VCS.
 - User-home, administrator-managed, and bundled skill roots.
-- OS-level shell sandboxing (Landlock/seccomp).
 - Approval pattern languages or per-path ACLs.
 - A plugin API beyond MCP.
 - Cross-workspace tool access as anything but an explicit grant.

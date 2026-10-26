@@ -773,7 +773,6 @@ async fn interactive(
     let approved_read_images = overrides.approved_read_images.clone();
     let factory = environment.factory;
     let request = environment.request;
-    let environment_request = request.clone();
     let loader = environment.config;
     let server_paths = environment.server_paths;
     let workspace = environment.workspace;
@@ -781,18 +780,12 @@ async fn interactive(
     // Read once, here: neither `qq-config` nor `qq-tui` consults the
     // environment, they take the answer as a value.
     let truecolor = truecolor_support(std::env::var_os("COLORTERM").as_deref());
-    let (loaded, tui, themes) = tokio::task::spawn_blocking(move || {
+    let (model_state, tui, themes) = tokio::task::spawn_blocking(move || {
         // The client load tolerates a missing model: the TUI opens and
         // routes to `/models`. Headless paths keep `load`. Untrusted project
         // authority stays disabled without stopping startup.
-        let loaded = match config_factory.load_for_client(&request) {
-            Ok(snapshot) => Ok(config_factory.tui_model_state(&snapshot, &request)),
-            Err(runtime::RuntimeBuildError::Config(config::ConfigError::TrustRequired {
-                pending,
-                ..
-            })) => Err(pending),
-            Err(error) => return Err(error),
-        };
+        let snapshot = config_factory.load_for_client(&request)?;
+        let model_state = config_factory.tui_model_state(&snapshot, &request);
         // TUI settings and themes are not trust-gated: `.qq/tui.ron` and
         // `.qq/themes/` declare nothing sensitive.
         let (tui_snapshot, tui) = load_tui_config(&loader, request.cwd())?;
@@ -802,20 +795,9 @@ async fn interactive(
             tui_snapshot.settings().theme(),
             truecolor,
         )?;
-        Ok::<_, runtime::RuntimeBuildError>((loaded, tui, themes))
+        Ok::<_, runtime::RuntimeBuildError>((model_state, tui, themes))
     })
     .await??;
-    let (model_state, pending_trust, reviewed_trust) = match loaded {
-        Ok(state) => (state, Vec::new(), Vec::new()),
-        Err(pending) => (
-            runtime::TuiModelState::default(),
-            trust_notices(&pending),
-            pending
-                .iter()
-                .filter_map(config::PendingTrust::reviewed)
-                .collect::<Vec<_>>(),
-        ),
-    };
     let runtime::TuiModelState {
         goals,
         configured_model,
@@ -838,16 +820,11 @@ async fn interactive(
     // The TUI paints its first frame before the server is reserved or the
     // embedded runtime opened; the port connects on the loop's first recv
     // and the embedded handle comes back through the channel for shutdown.
-    // Whether this process owns the server is known only then; the trust
-    // resolver reads it because trust is a decision about files on the host
-    // that runs the server.
-    let owns_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (embedded_tx, mut embedded_rx) = tokio::sync::oneshot::channel::<EmbeddedRuntime>();
     let connect = {
         let model = model.clone();
         let server_paths = server_paths.clone();
         let factory = factory.clone();
-        let owns_server = Arc::clone(&owns_server);
         async move {
             factory
                 .validate_isolated_tui_qa_state()
@@ -873,7 +850,6 @@ async fn interactive(
                     (connection, initial(false))
                 }
                 server::ReserveOutcome::Reserved(reservation) => {
-                    owns_server.store(true, std::sync::atomic::Ordering::Release);
                     let handler = Arc::new(
                         runtime::RuntimeHandler::open_owned(factory.clone(), approval_timeout)
                             .await
@@ -914,78 +890,6 @@ async fn interactive(
             .map_err(|error| qq_tui::ClientFailure::new(error.to_string()))
         }
     };
-    // `t` records the pending files exactly as `qq trust` does; `s` admits
-    // them for this process only. Both run on the blocking pool (trust state
-    // I/O, configuration load, credential probes) and hand back what the
-    // now-loadable configuration provides. The server the loop connected to
-    // must be ours: a remote server's files cannot be read or trusted here.
-    // Either answer covers only the `(path, digest)` pairs the prompt showed;
-    // a file edited while it was open re-prompts with the new content.
-    let trust: qq_tui::TrustResolver = {
-        let factory = factory.clone();
-        let request = environment_request.clone();
-        let reviewed = Arc::new(std::sync::Mutex::new(reviewed_trust));
-        Box::new(move |choice| {
-            let factory = factory.clone();
-            let request = request.clone();
-            let owns_server = Arc::clone(&owns_server);
-            let reviewed = Arc::clone(&reviewed);
-            Box::pin(async move {
-                if !owns_server.load(std::sync::atomic::Ordering::Acquire) {
-                    return Err(qq_tui::TrustFailure::from(
-                        "this client is attached to a server it does not own; run `qq trust` on the server host"
-                            .to_owned(),
-                    ));
-                }
-                tokio::task::spawn_blocking(move || {
-                    let choice = match choice {
-                        qq_tui::TrustChoice::Persist => runtime::TrustResolution::Persist,
-                        qq_tui::TrustChoice::Session => runtime::TrustResolution::Session,
-                    };
-                    // Only this resolver touches the list, and the loop
-                    // awaits one resolution at a time; a poisoned lock is
-                    // a failed answer, never an empty (trust-nothing) set.
-                    let Ok(mut reviewed) = reviewed.lock() else {
-                        return Err(qq_tui::TrustFailure::from(
-                            "trust review state is unavailable".to_owned(),
-                        ));
-                    };
-                    match factory.resolve_trust(&request, choice, &reviewed) {
-                        Ok(granted) => Ok(qq_tui::TrustResolved {
-                            goals: tui_goal_defaults(&granted.state.goals),
-                            trusted: granted.trusted,
-                            model: granted.state.tui_model,
-                            models: granted.state.models.into_iter().map(Into::into).collect(),
-                            unauthenticated_providers: granted
-                                .state
-                                .unauthenticated_providers
-                                .into_iter()
-                                .map(tui_provider_remedy)
-                                .collect(),
-                        }),
-                        Err(runtime::RuntimeBuildError::Config(
-                            config::ConfigError::TrustChanged { pending },
-                        )) => {
-                            *reviewed = pending
-                                .iter()
-                                .filter_map(config::PendingTrust::reviewed)
-                                .collect();
-                            Err(qq_tui::TrustFailure {
-                                reason: "project configuration changed while the prompt was open; review it again"
-                                    .to_owned(),
-                                changed: Some(trust_notices(&pending)),
-                            })
-                        }
-                        Err(error) => Err(qq_tui::TrustFailure::from(error.to_string())),
-                    }
-                })
-                .await
-                .map_err(|_| {
-                    qq_tui::TrustFailure::from("trust resolution stopped unexpectedly".to_owned())
-                })?
-            })
-        })
-    };
     let result = qq_tui::run(
         qq_tui::LazyPort::new(connect),
         qq_tui::TuiOptions {
@@ -996,9 +900,7 @@ async fn interactive(
             unauthenticated_providers,
             themes,
             workspace_root: Some(workspace_root),
-            pending_trust,
         },
-        Some(trust),
     )
     .await;
 
@@ -1714,22 +1616,6 @@ fn tui_action_name(action: qq_tui::Action) -> &'static str {
         qq_tui::Action::CancelRun => "cancel_run",
         qq_tui::Action::InterruptRun => "interrupt_run",
     }
-}
-
-/// The trust prompt's rendering of pending files: path plus one line per
-/// declaration, nothing secret.
-fn trust_notices(pending: &[config::PendingTrust]) -> Vec<qq_tui::PendingTrustNotice> {
-    pending
-        .iter()
-        .map(|item| qq_tui::PendingTrustNotice {
-            path: item.source().label().to_owned(),
-            declarations: item
-                .declarations()
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        })
-        .collect()
 }
 
 /// The headless run's delegate options, from the loaded configuration as

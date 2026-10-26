@@ -112,8 +112,8 @@ top-level configuration. Not to be confused with a
 
 A directory with a `pack.ron` that bundles profiles, a persona prompt,
 skills, commands, and MCP servers, so a setup can be shared. A project's
-packs load only once you [trust](#trust) each `pack.ron`; editing one asks
-again. See [`packs`](configuration.md#packs).
+packs load only once you [trust](#trust) each `pack.ron`; editing one
+disables it until you run `qq trust` again. See [`packs`](configuration.md#packs).
 
 ### Roster
 
@@ -131,9 +131,10 @@ model picks a sub-agent's model by role; the child keeps its parent's
 ### Grant
 
 A standing approval: a tool name, a shell command prefix (`cargo test`), or
-a host that may run without asking. `a` at an approval prompt grants for
-the session and `w` for the workspace; `policy.allow_*` in configuration
-grants for every new session. See
+a host. `policy.allow_*` in configuration and `qq run --allow-tool`,
+`--allow-shell`, and `--allow-host` grant them;
+`a` and `w` at a supervised (non-Ask) prompt grant for the session or the
+workspace. Native Auto does not need grants for ordinary work. See
 [Grants in configuration](permissions.md#grants-in-configuration).
 
 ### Approval mode

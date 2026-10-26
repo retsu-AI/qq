@@ -3,9 +3,9 @@
 AI coding agents in one binary: a terminal UI, a headless runner for scripts
 and CI, and a local server that several clients can share. Agents read,
 search, and edit your files, run commands, call MCP tools, and spawn
-sub-agents. Every mutating action passes an explicit approval policy — a
-real bash parser grades each command — and every event is stored in SQLite,
-so sessions survive restarts and many agents can run at once.
+sub-agents. Every action passes an explicit approval policy, shell commands
+run inside the operating system's sandbox, and every event is stored in
+SQLite, so sessions survive restarts and many agents can run at once.
 
 Documentation: <https://retsu-ai.github.io/qq/> (the same pages as
 [`docs/guide/`](docs/guide/README.md)).
@@ -29,7 +29,9 @@ release's `SHA256SUMS`, and installs to `~/.local/bin`. Other routes:
 | From source | `cargo install --git https://github.com/retsu-AI/qq --locked qq` |
 | Windows | the `x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/retsu-AI/qq/releases/latest) |
 
-Pinning, checksums, and upgrades: [Install](docs/guide/install.md).
+Pinning, checksums, upgrades, and what the shell sandbox needs from your
+system (Linux: a non-root user and kernel 6.12 or newer):
+[Install](docs/guide/install.md).
 
 ## First run
 
@@ -52,7 +54,7 @@ qq                                       # interactive
 qq run --approval auto "Add a --dry-run flag and a test for it"   # unattended
 ```
 
-The [Quickstart](docs/guide/quickstart.md) walks through approvals,
+The [Quickstart](docs/guide/quickstart.md) walks through approval modes,
 resuming sessions, and cloned projects that ship their own `.qq/config.ron`.
 
 ## Documentation
@@ -61,10 +63,10 @@ resuming sessions, and cloned projects that ship their own `.qq/config.ron`.
 
 | | |
 | --- | --- |
-| [Install](docs/guide/install.md) · [Quickstart](docs/guide/quickstart.md) | get running |
+| [Install](docs/guide/install.md) · [Quickstart](docs/guide/quickstart.md) | get running, and what the sandbox needs |
 | [Concepts and glossary](docs/guide/concepts.md) | sessions, runs, grants, approval modes |
 | [Providers and credentials](docs/guide/providers.md) | OpenAI, Anthropic, Google, xAI, Codex, Bedrock, gateways, local models |
-| [Permissions and trust](docs/guide/permissions.md) | approval modes, the shell classifier, grants, project trust |
+| [Permissions and trust](docs/guide/permissions.md) | approval modes, the shell sandbox, task workspaces, grants, project trust |
 | [The TUI](docs/guide/tui.md) · [Headless](docs/guide/headless.md) · [MCP servers](docs/guide/mcp.md) | the three surfaces and extra tools |
 | [Configuration reference](docs/guide/configuration.md) · [CLI reference](docs/guide/cli.md) | every key, flag, and environment variable |
 | [Troubleshooting](docs/guide/troubleshooting.md) · [FAQ](docs/guide/faq.md) | every message and its fix |
@@ -79,17 +81,18 @@ version.
 - **Three surfaces, one runtime.** `qq` (TUI), `qq run` (JSONL or text,
   exit codes for CI), `qq serve` (HTTP/SSE with resumable cursors). Same
   tools, policy, and store everywhere.
-- **Approval you can read.** `read_only`, `ask`, `auto`, `full`; a bash
-  parser grades every command `allow` / `prompt` / `forbidden`; `forbidden`
-  never runs, under any mode. Approve once, for the session, or write the
-  grant into `.qq/config.ron` from the prompt.
+- **Unattended by default.** `read_only`, `ask`, `auto`, `full`. The
+  default `auto` never stops to ask: it works in a private copy of the
+  workspace under the OS sandbox, publishes the checked edits when the run
+  completes, and reports anything outside that boundary to the model as a
+  denial. `ask` asks you before every non-read call.
 - **Durable sessions.** Everything is in SQLite before it is shown. Quit,
   reboot, `qq --session ID`. Long sessions compact themselves.
 - **Many agents.** Sub-agents with a delegation roster and depth bound; a
   sidebar grouped by what needs you; `Alt-A`/`Alt-D` to answer another
   session's approval without leaving yours.
-- **Layered configuration.** Global, per-project (trusted before it is
-  loaded), fragments, environment, managed and MDM layers; `qq config
+- **Layered configuration.** Global, per-project (sensitive settings stay
+  off until you run `qq trust`), fragments, environment, managed and MDM layers; `qq config
   explain FIELD` tells you which one won.
 - **Providers.** OpenAI, Anthropic, Google, xAI, ChatGPT Codex, Amazon
   Bedrock and Bedrock Mantle built in; any OpenAI-, Anthropic-, or

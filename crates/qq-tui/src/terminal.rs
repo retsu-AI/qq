@@ -24,7 +24,7 @@ use tokio::{
 
 use crate::{
     ClientPort, ClientRequest, ClientUpdate,
-    app::{App, TrustResolver, TuiError},
+    app::{App, TuiError},
     effect::{Effect, Effects, Redraw},
     view::FrameRenderer,
 };
@@ -37,11 +37,7 @@ const ANIMATION_INTERVAL: Duration = Duration::from_millis(crate::app::ANIMATION
 /// when it ended (`None` when the user never had one, or exited on a signal
 /// before the loop started). The terminal is restored before this returns,
 /// so the caller may print to the ordinary screen.
-pub async fn run<P>(
-    client: P,
-    app: App,
-    trust: Option<TrustResolver>,
-) -> Result<Option<SessionId>, TuiError>
+pub async fn run<P>(client: P, app: App) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {
@@ -67,7 +63,6 @@ where
         shutdown,
         Hooks {
             editor: external_editor,
-            trust,
             herdr: herdr.as_ref().map(crate::herdr::Reporter::sink),
         },
     )
@@ -147,12 +142,10 @@ pub(crate) type EditorFuture =
     std::pin::Pin<Box<dyn Future<Output = Result<Option<String>, EditorError>> + Send>>;
 
 /// The blocking work the loop delegates outside the app: an external editor
-/// for the draft and, when this client owns the server, the trust prompt's
-/// answer. Both suspend the loop while they run. `herdr` receives the
+/// for the draft, which suspends the loop while it runs. `herdr` receives the
 /// client's state after every update when running inside a herdr pane.
 pub(crate) struct Hooks<X> {
     pub(crate) editor: X,
-    pub(crate) trust: Option<TrustResolver>,
     pub(crate) herdr: Option<crate::herdr::ReportSink>,
 }
 
@@ -179,11 +172,7 @@ where
     F: Future<Output = io::Result<()>>,
     X: FnMut(String) -> EditorFuture,
 {
-    let Hooks {
-        mut editor,
-        mut trust,
-        herdr,
-    } = hooks;
+    let Hooks { mut editor, herdr } = hooks;
     tokio::pin!(shutdown);
     let mut renderer = FrameRenderer::default();
     let mut frame_tick = interval(FRAME_INTERVAL);
@@ -332,24 +321,6 @@ where
                     let bytes = mouse_capture_bytes(enabled)?;
                     output.write_all(&bytes).await?;
                     output.flush().await?;
-                }
-                Effect::ResolveTrust(choice) => {
-                    // The root writes the trust state (or admits the files
-                    // for this process) off the executor and computes what
-                    // now loads; nothing else is useful meanwhile, so the
-                    // loop waits like it does for the editor. Client updates
-                    // queue in the channel and drain afterwards.
-                    let outcome = match trust.as_mut() {
-                        Some(resolve) => resolve(choice).await,
-                        None => Err(crate::app::TrustFailure::from(
-                            "this client is attached to a server on another host; run `qq trust` there"
-                                .to_owned(),
-                        )),
-                    };
-                    match outcome {
-                        Ok(resolved) => queue.extend(app.apply_trust_resolved(choice, resolved)),
-                        Err(failure) => queue.extend(app.note_trust_failure(failure)),
-                    }
                 }
                 Effect::Quit => quit = true,
             }

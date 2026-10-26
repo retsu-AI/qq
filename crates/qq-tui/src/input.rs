@@ -287,9 +287,6 @@ pub(crate) enum Mode {
     Sessions,
     Commands,
     History,
-    /// The project's configuration awaits the user's trust; the prompt owns
-    /// input until `t`, `s`, or `q` answers it.
-    Trust,
     Approval,
     Compose,
 }
@@ -476,9 +473,9 @@ pub(crate) const fn approval_mode_row(mode: ApprovalMode) -> ApprovalModeRow {
         ),
         ApprovalMode::Auto => (
             "auto",
-            "edits and safe shell run; dangerous shell is held for approval",
+            "runs inside the task sandbox without asking; out-of-bounds calls are denied",
         ),
-        ApprovalMode::Full => ("full", "every tool call runs without asking"),
+        ApprovalMode::Full => ("full", "runs without asking or task sandbox containment"),
     };
     ApprovalModeRow {
         mode,

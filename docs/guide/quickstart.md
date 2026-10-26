@@ -72,20 +72,31 @@ qq
 ```
 
 The TUI opens on a new session in this directory. Type a request and press
-Enter. The agent can read and search files immediately. When it wants to
-edit a file, run a command, or reach the network, it asks:
+Enter. Under the default `auto` mode the agent reads, edits, and runs
+commands without stopping to ask. It works in a private copy of the project
+and runs commands inside the operating system's sandbox. When the run
+completes, QQ copies the changed files back into your checkout, keeping any
+edits you made meanwhile. A failed or cancelled run leaves your checkout
+untouched. Anything outside that boundary is refused and reported to the
+agent, which picks another way.
+
+To review each action yourself, switch the session to `ask` with
+`/approval`. The agent then stops before every non-read call:
 
 ```
 ◇ approval needed
 $ cargo test  (in ~/your-project)
-asks because: command is not on the allow list
-y once   a session   w workspace   n deny
+y once   n deny
 ```
 
-`y` runs it once, `a` allows that shape for the rest of the session, `w`
-writes the grant into the project's `.qq/config.ron` so it never asks
-again, `n` denies and tells the model why. See
+`y` runs it once, and `n` denies and tells the model why. `/approval
+read_only` lets it look but not touch. See
 [Permissions and trust](permissions.md) for the full model.
+
+On Linux, commands need a non-root user, unprivileged user namespaces, and
+kernel 6.12 or newer; Ubuntu 24.04 and most containers need a setting
+changed first. See
+[Install › What the shell sandbox needs](install.md#system-requirements).
 
 Skipped step 1 or 2? `qq` still opens. Without a model the top row reads
 `no model` and the composer rule says `choose a model with /models`; pick
@@ -111,19 +122,20 @@ them.
 
 ## 5. A project you cloned
 
-If a repository ships its own `.qq/config.ron` (like this one does), the first
-`qq` there stops with:
+A repository can ship its own `.qq/config.ron` (like this one does). QQ
+starts there without asking, but leaves the file's sensitive settings off:
+models, providers, MCP servers that run commands, grants, and packs. Its
+other settings apply. `qq config sources` and `qq doctor` list what is
+waiting:
 
 ```
-error: project configuration needs your trust before it is used:
-  /path/to/repo/.qq/config.ron
-Review the file, then run `qq trust` in this directory to accept it. Sensitive
-sections (providers, MCP servers, grants, model) load only after that.
+pending trust: /path/to/repo/.qq/config.ron
 ```
 
-That file may declare providers, MCP servers that run commands, and
-approval grants, so QQ never loads it silently. Read it, run `qq trust`, and
-QQ prints what it accepted. Edit the file later and QQ asks again.
+Read the file, then run `qq trust` in that directory. QQ prints what it
+accepted, and the next session uses it. If the file changes later, for
+example after a `git pull`, the changed settings switch off again until you
+rerun `qq trust`.
 
 ## 6. Automate it
 
@@ -132,9 +144,9 @@ qq run "Add a unit test for parse_duration and make it pass"
 ```
 
 `qq run` is the agent without a UI: readable progress on stderr, the final
-answer on stdout, exit code `0` on success. `auto` is the default and allows
-workspace edits and safe commands; `--approval read-only` lets it look but
-not touch; `--format jsonl` gives you every event as a JSON line. Details in
+answer on stdout, exit code `0` on success. `auto` is the default and works
+the same way as in the TUI; `--approval read-only` lets it look but not
+touch; `--format jsonl` gives you every event as a JSON line. Details in
 [Headless](headless.md).
 
 ## Where next
