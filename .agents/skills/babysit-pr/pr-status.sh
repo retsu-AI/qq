@@ -18,30 +18,34 @@ for arg in "$@"; do
     *) pr=$arg ;;
     esac
 done
-command -v gh >/dev/null || { echo "pr-status: gh is not on PATH (use the nix dev shell)" >&2; exit 2; }
+command -v gh >/dev/null || { echo "pr-status: gh is not on PATH; enter the dev shell (nix develop) or run inside nix shell nixpkgs#gh" >&2; exit 2; }
 command -v jq >/dev/null || { echo "pr-status: jq is not on PATH" >&2; exit 2; }
 
 status() {
-    local view threads comments reactions
+    local view threads comments reactions owner repo number
     view=$(gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup) || return 2
-    local number
-    number=$(jq -r .number <<<"$view")
-    threads=$(gh api graphql -F owner='{owner}' -F name='{repo}' -F n="$number" -f query='
-        query($owner: String!, $name: String!, $n: Int!) {
+    # Every later request targets the PR's own repository, not the checkout's.
+    IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' <<<"$view") || return 2
+    # --paginate prints one JSON document per page; slurp them into one.
+    threads=$(gh api graphql --paginate -F owner="$owner" -F name="$repo" -F n="$number" -f query='
+        query($owner: String!, $name: String!, $n: Int!, $endCursor: String) {
           repository(owner: $owner, name: $name) { pullRequest(number: $n) {
-            reviewThreads(first: 100) { nodes { id isResolved path line
-              comments(first: 1) { nodes { databaseId author { login } url body } } } } } } }') || return 2
-    comments=$(gh api "repos/{owner}/{repo}/issues/$number/comments" --paginate --jq \
-        '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]') || return 2
-    reactions=$(gh api "repos/{owner}/{repo}/issues/$number/reactions" --paginate --jq \
-        '[.[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]') || return 2
+            reviewThreads(first: 100, after: $endCursor) {
+              pageInfo { hasNextPage endCursor }
+              nodes { id isResolved path line
+                comments(first: 1) { nodes { databaseId author { login } url body } } } } } } }' |
+        jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]') || return 2
+    comments=$(gh api "repos/$owner/$repo/issues/$number/comments" --paginate |
+        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]') || return 2
+    reactions=$(gh api "repos/$owner/$repo/issues/$number/reactions" --paginate |
+        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]') || return 2
     jq -n --argjson view "$view" --argjson threads "$threads" --argjson comments "$comments" \
         --argjson reactions "$reactions" --argjson require_codex "$codex" '
         def failing: ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
         ($view.statusCheckRollup // []) as $checks
         | ($checks | map(select((.status // "COMPLETED") != "COMPLETED" or .state == "PENDING" or .state == "EXPECTED")) | map(.name // .context)) as $pending
         | ($checks | map(select((.conclusion // .state) as $c | failing | index($c))) | map(.name // .context)) as $failed
-        | ([$threads.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)
+        | ([$threads[] | select(.isResolved | not)
             | {id, path, line, comment_id: .comments.nodes[0].databaseId, author: .comments.nodes[0].author.login,
                url: .comments.nodes[0].url, body: (.comments.nodes[0].body | .[0:300])}]) as $open
         | ([$comments[] | capture("codex-review-state:v1 (?<s>\\{.*\\}) -->")? | .s | fromjson] | last) as $state
