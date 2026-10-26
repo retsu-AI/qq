@@ -21,28 +21,35 @@ done
 command -v gh >/dev/null || { echo "pr-status: gh is not on PATH; enter the dev shell (nix develop) or run inside nix shell nixpkgs#gh" >&2; exit 2; }
 command -v jq >/dev/null || { echo "pr-status: jq is not on PATH" >&2; exit 2; }
 
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Responses go through files: one PR's comment text can exceed the
+# per-argument limit if passed to jq on the command line.
 status() {
-    local view threads comments reactions owner repo number
-    view=$(gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup) || return 2
+    local owner repo number
+    gh pr view ${pr:+"$pr"} --json number,url,state,isDraft,headRefOid,baseRefName,mergeable,mergeStateStatus,statusCheckRollup \
+        >"$tmp/view.json" || return 2
     # Every later request targets the PR's own repository, not the checkout's.
-    IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' <<<"$view") || return 2
+    IFS=/ read -r owner repo number < <(jq -r '.url | capture("github\\.com/(?<o>[^/]+)/(?<r>[^/]+)/pull/(?<n>[0-9]+)") | "\(.o)/\(.r)/\(.n)"' "$tmp/view.json") || return 2
     # --paginate prints one JSON document per page; slurp them into one.
-    threads=$(gh api graphql --paginate -f owner="$owner" -f name="$repo" -F n="$number" -f query='
+    gh api graphql --paginate -f owner="$owner" -f name="$repo" -F n="$number" -f query='
         query($owner: String!, $name: String!, $n: Int!, $endCursor: String) {
           repository(owner: $owner, name: $name) { pullRequest(number: $n) {
             reviewThreads(first: 100, after: $endCursor) {
               pageInfo { hasNextPage endCursor }
               nodes { id isResolved path line
                 comments(first: 1) { nodes { databaseId author { login } url body } } } } } } }' |
-        jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]') || return 2
-    comments=$(gh api "repos/$owner/$repo/issues/$number/comments" --paginate |
-        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]') || return 2
-    reactions=$(gh api "repos/$owner/$repo/issues/$number/reactions" --paginate |
-        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]') || return 2
-    jq -n --argjson view "$view" --argjson threads "$threads" --argjson comments "$comments" \
-        --argjson reactions "$reactions" --argjson require_codex "$codex" '
+        jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]]' >"$tmp/threads.json" || return 2
+    gh api "repos/$owner/$repo/issues/$number/comments" --paginate |
+        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .body]' >"$tmp/comments.json" || return 2
+    gh api "repos/$owner/$repo/issues/$number/reactions" --paginate |
+        jq -s '[add[] | select(.user.login == "chatgpt-codex-connector[bot]") | .content]' >"$tmp/reactions.json" || return 2
+    jq -n --slurpfile v "$tmp/view.json" --slurpfile t "$tmp/threads.json" --slurpfile c "$tmp/comments.json" \
+        --slurpfile r "$tmp/reactions.json" --argjson require_codex "$codex" '
         def failing: ["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"];
-        ($view.statusCheckRollup // []) as $checks
+        $v[0] as $view | $t[0] as $threads | $c[0] as $comments | $r[0] as $reactions
+        | ($view.statusCheckRollup // []) as $checks
         | ($checks | map(select((.status // "COMPLETED") != "COMPLETED" or .state == "PENDING" or .state == "EXPECTED")) | map(.name // .context)) as $pending
         | ($checks | map(select((.conclusion // .state) as $c | failing | index($c))) | map(.name // .context)) as $failed
         | ([$threads[] | select(.isResolved | not)
