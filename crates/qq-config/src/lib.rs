@@ -93,17 +93,7 @@ pub struct LoadRequest {
     explicit_path: Option<PathBuf>,
     explicit_content: Option<String>,
     overrides: RuntimeOverrides,
-    process_trust: Vec<ProcessTrust>,
     ignore_untrusted_project_config: bool,
-}
-
-/// One project file trusted for this process only: the TUI's "this
-/// session" answer. Applied on top of the durable trust state at load time
-/// and never written to disk, so the next launch asks again.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ProcessTrust {
-    pub path: PathBuf,
-    pub digest: String,
 }
 
 impl LoadRequest {
@@ -185,24 +175,6 @@ impl LoadRequest {
         self.ignore_untrusted_project_config
     }
 
-    /// Trust these project files (by canonical path and sensitive digest)
-    /// for loads made with this request, without recording them. A file
-    /// whose sensitive content has since changed is pending again: the
-    /// digest no longer matches.
-    #[must_use]
-    pub fn with_process_trust(mut self, mut grants: Vec<ProcessTrust>) -> Self {
-        grants.sort();
-        grants.dedup();
-        self.process_trust = grants;
-        self
-    }
-
-    /// The process-scoped trust grants this request carries, sorted.
-    #[must_use]
-    pub fn process_trust(&self) -> &[ProcessTrust] {
-        &self.process_trust
-    }
-
     #[must_use]
     pub fn cwd(&self) -> &Path {
         &self.cwd
@@ -241,7 +213,6 @@ impl fmt::Debug for LoadRequest {
                 &self.explicit_content.as_ref().map(|_| "<redacted>"),
             )
             .field("overrides", &self.overrides)
-            .field("process_trust", &self.process_trust)
             .field(
                 "ignore_untrusted_project_config",
                 &self.ignore_untrusted_project_config,
@@ -517,36 +488,10 @@ impl ConfigLoader {
         loader::grant_pending_trust(self, request)
     }
 
-    /// Grants the pending set only when it is exactly what the user was
-    /// shown: every pending file must be pending at a `(path, digest)` in
-    /// `reviewed`. Otherwise nothing is written and
-    /// [`ConfigError::TrustChanged`] carries the current set to show again.
-    pub fn grant_reviewed_trust(
-        &self,
-        request: &LoadRequest,
-        reviewed: &[ProcessTrust],
-    ) -> Result<Vec<PendingTrust>, ConfigError> {
-        loader::grant_reviewed_trust(self, request, reviewed)
-    }
-
-    /// The current pending set, refused with [`ConfigError::TrustChanged`]
-    /// when it holds a file at a digest outside `reviewed`. Read-only: the
-    /// check a process-scoped grant makes before admitting what was shown.
-    pub fn reviewed_pending_trust(
-        &self,
-        request: &LoadRequest,
-        reviewed: &[ProcessTrust],
-    ) -> Result<Vec<PendingTrust>, ConfigError> {
-        let pending = loader::pending_trust(self, request)?;
-        loader::ensure_reviewed(&pending, reviewed)?;
-        Ok(pending)
-    }
-
     /// The project sources under the request's directory whose sensitive
     /// content no trust record covers, root first. Read-only: the same scan
-    /// [`Self::grant_pending_trust`] performs before it writes, so a prompt
-    /// can show exactly what a grant would accept. Process-scoped trust on
-    /// the request counts as a record.
+    /// [`Self::grant_pending_trust`] performs before it writes, so it lists
+    /// exactly what `qq trust` would record.
     pub fn pending_trust(&self, request: &LoadRequest) -> Result<Vec<PendingTrust>, ConfigError> {
         loader::pending_trust(self, request)
     }
@@ -1766,21 +1711,14 @@ pub struct PendingTrust {
     source: SourceIdentity,
     digest: String,
     sections: Vec<&'static str>,
-    declarations: Vec<TrustDeclaration>,
 }
 
 impl PendingTrust {
-    fn new(
-        source: SourceIdentity,
-        digest: String,
-        sections: Vec<&'static str>,
-        declarations: Vec<TrustDeclaration>,
-    ) -> Self {
+    fn new(source: SourceIdentity, digest: String, sections: Vec<&'static str>) -> Self {
         Self {
             source,
             digest,
             sections,
-            declarations,
         }
     }
 
@@ -1794,116 +1732,13 @@ impl PendingTrust {
         &self.digest
     }
 
-    /// The `(path, digest)` a prompt that showed this entry answers for.
-    /// `None` only for a virtual source, which is never pending.
-    #[must_use]
-    pub fn reviewed(&self) -> Option<ProcessTrust> {
-        self.source.path().map(|path| ProcessTrust {
-            path: path.to_owned(),
-            digest: self.digest.clone(),
-        })
-    }
-
     /// The sensitive configuration keys the file declares (`model`,
-    /// `providers`, `mcp`, `policy.allow_shell_prefixes`, …), so a user can
-    /// see what trusting it admits.
+    /// `providers`, `mcp`, `policy.allow_shell_prefixes`, …), which `qq
+    /// trust`, `qq config sources`, and `qq doctor` print so a user can see
+    /// what trusting it admits.
     #[must_use]
     pub fn sections(&self) -> &[&'static str] {
         &self.sections
-    }
-
-    /// What those sections declare, one entry per route, provider, MCP
-    /// server, grant group, or pack list, for a prompt that shows the user
-    /// what they are about to admit. Carries names, commands, URLs, and
-    /// counts only; never a secret.
-    #[must_use]
-    pub fn declarations(&self) -> &[TrustDeclaration] {
-        &self.declarations
-    }
-}
-
-/// One thing a pending project file declares, as the trust prompt lists it.
-/// Secrets, argument lists, and environment values never appear here.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TrustDeclaration {
-    /// `model`, `worker_model`, `reviewer_model`, or `organization` set to a
-    /// value.
-    Route { key: &'static str, route: String },
-    /// A provider entry. `kind` is the preset id (`openai`, `custom`, …) or
-    /// `removed` for a `Remove` patch.
-    Provider { name: String, kind: &'static str },
-    /// An MCP server that runs a command.
-    McpStdio { name: String, command: String },
-    /// An MCP server reached over HTTP.
-    McpHttp { name: String, url: String },
-    /// An MCP server an earlier layer declared that this file removes.
-    McpRemoved { name: String },
-    /// Approval grants, counted per list (`Remove(...)` entries are not
-    /// counted: they narrow authority).
-    Grants {
-        tools: usize,
-        shell_prefixes: usize,
-        hosts: usize,
-        env: usize,
-    },
-    /// Agent packs by id.
-    Packs(Vec<String>),
-    /// A sensitive key whose value has no short rendering (`profiles`,
-    /// `delegation`, `Clear` on a route, …).
-    Other(&'static str),
-}
-
-impl fmt::Display for TrustDeclaration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Route { key, route } => write!(formatter, "{key} {route}"),
-            Self::Provider { name, kind } => write!(formatter, "provider {name} ({kind})"),
-            Self::McpStdio { name, command } => write!(formatter, "MCP {name} → {command}"),
-            Self::McpHttp { name, url } => write!(formatter, "MCP {name} → {url}"),
-            Self::McpRemoved { name } => write!(formatter, "MCP {name} removed"),
-            Self::Grants {
-                tools,
-                shell_prefixes,
-                hosts,
-                env,
-            } => {
-                formatter.write_str("grants:")?;
-                let mut first = true;
-                for (count, noun) in [
-                    (*tools, "tool"),
-                    (*shell_prefixes, "shell prefix"),
-                    (*hosts, "host"),
-                    (*env, "env var"),
-                ] {
-                    if count == 0 {
-                        continue;
-                    }
-                    let plural = match (count, noun) {
-                        (1, _) => "",
-                        (_, "shell prefix") => "es",
-                        _ => "s",
-                    };
-                    write!(
-                        formatter,
-                        "{}{count} {noun}{plural}",
-                        if first { " " } else { ", " }
-                    )?;
-                    first = false;
-                }
-                if first {
-                    formatter.write_str(" none added")?;
-                }
-                Ok(())
-            }
-            Self::Packs(ids) => {
-                formatter.write_str("packs: ")?;
-                if ids.is_empty() {
-                    return formatter.write_str("none");
-                }
-                formatter.write_str(&ids.join(", "))
-            }
-            Self::Other(key) => formatter.write_str(key),
-        }
     }
 }
 
@@ -2650,11 +2485,6 @@ pub enum ConfigError {
         pending: Vec<PendingTrust>,
         reports: Vec<SourceReport>,
     },
-    /// A trust answer was given for content that has since changed: a file
-    /// is pending at a digest the prompt did not show. Nothing was trusted;
-    /// `pending` is the current set to review.
-    #[error("project configuration changed while it was being reviewed; review it again")]
-    TrustChanged { pending: Vec<PendingTrust> },
     #[error("failed to serialize configuration state: {message}")]
     StateSerialization { message: String },
     #[error("trust state has unsupported version {version}; expected 1")]

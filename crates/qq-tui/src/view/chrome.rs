@@ -403,7 +403,7 @@ fn hints_for(app: &App) -> Vec<(crate::commands::Command, &'static str)> {
                 hints.push((Command::OpenSessions, "sessions"));
             }
         }
-        Mode::Approval | Mode::Trust => {
+        Mode::Approval => {
             hints.push((Command::OpenHelp, "help"));
         }
         Mode::GoalForm
@@ -456,8 +456,6 @@ pub(crate) enum ComposerMode {
     Queue,
     /// An approval owns input; the composer is disabled.
     Approval,
-    /// The trust prompt owns input; the composer is disabled.
-    Trust,
 }
 
 impl ComposerMode {
@@ -466,7 +464,7 @@ impl ComposerMode {
             Self::Send => "›",
             Self::Steer => "↦",
             Self::Queue => "⇥",
-            Self::Approval | Self::Trust => "✎",
+            Self::Approval => "✎",
         }
     }
 
@@ -476,13 +474,12 @@ impl ComposerMode {
             Self::Steer => "Steer the run...",
             Self::Queue => "Queue for after this run...",
             Self::Approval => "Answer the approval above",
-            Self::Trust => "Answer the trust prompt above",
         }
     }
 
     /// Whether the composer accepts text at all.
     const fn disabled(self) -> bool {
-        matches!(self, Self::Approval | Self::Trust)
+        matches!(self, Self::Approval)
     }
 }
 
@@ -537,7 +534,7 @@ pub(super) fn composer(
     let glyph_style = match mode {
         ComposerMode::Send => accent().bold(),
         ComposerMode::Steer | ComposerMode::Queue => warning().bold(),
-        ComposerMode::Approval | ComposerMode::Trust => muted(),
+        ComposerMode::Approval => muted(),
     };
     let gutter = format!(" {} ", mode.glyph());
     // A free-text question uses the composer for the answer, so its caret

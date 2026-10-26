@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ClientSnapshot, ConfigError, ConfigLoader, ConfigPaths, ConfigSnapshot, ConfigSources,
-    LoadRequest, MAX_CONFIG_BYTES, PendingTrust, ProcessTrust, SourceIdentity, SourceKind,
-    SourceReport, SourceStatus,
+    LoadRequest, MAX_CONFIG_BYTES, PendingTrust, SourceIdentity, SourceKind, SourceReport,
+    SourceStatus,
     document::{Document, MergeState},
     managed::MdmConfiguration,
     remote,
@@ -97,11 +97,7 @@ pub(super) fn load_for_client(
     probes.record(&request.cwd);
     let cwd = canonical_working_directory(&request.cwd)?;
     probes.record(&cwd);
-    let mut trust = TrustState::load(&loader.paths, probes)?;
-    // "This session" grants live only in this request; the durable state on
-    // disk is untouched and the next process asks again.
-    trust.admit_process_trust(request.process_trust());
-    let trust = trust;
+    let trust = TrustState::load(&loader.paths, probes)?;
     let mdm = read_mdm_document(loader)?;
     let organization = selected_organization(loader, request, &cwd, &trust, mdm.as_ref(), probes)?;
     let (mut merged, compiled_report) = MergeState::compiled();
@@ -437,46 +433,21 @@ pub(super) fn pending_trust(
     let cwd = canonical_working_directory(&request.cwd)?;
     let mut probes = Probes::default();
     let probes = &mut probes;
-    let mut trust = TrustState::load(&loader.paths, probes)?;
-    trust.admit_process_trust(request.process_trust());
+    let trust = TrustState::load(&loader.paths, probes)?;
     scan_pending_trust(&cwd, &trust, probes)
 }
 
+/// Records every pending project source digest in one atomic state update.
 pub(super) fn grant_pending_trust(
     loader: &ConfigLoader,
     request: &LoadRequest,
-) -> Result<Vec<PendingTrust>, ConfigError> {
-    grant_trust(loader, request, None)
-}
-
-pub(super) fn grant_reviewed_trust(
-    loader: &ConfigLoader,
-    request: &LoadRequest,
-    reviewed: &[ProcessTrust],
-) -> Result<Vec<PendingTrust>, ConfigError> {
-    grant_trust(loader, request, Some(reviewed))
-}
-
-/// Records the pending set. With `reviewed`, the set is re-scanned under the
-/// state lock and refused when any file is pending at a digest the user was
-/// not shown: a prompt answers for the content it displayed, not for
-/// whatever the file holds when the key is pressed.
-fn grant_trust(
-    loader: &ConfigLoader,
-    request: &LoadRequest,
-    reviewed: Option<&[ProcessTrust]>,
 ) -> Result<Vec<PendingTrust>, ConfigError> {
     let cwd = canonical_working_directory(&request.cwd)?;
     let _state_lock = TrustStateLock::acquire(&loader.paths)?;
     let mut probes = Probes::default();
     let probes = &mut probes;
-    // The durable state alone: a process-scoped grant must not stop `qq
-    // trust` (or the TUI's persist choice) from recording the file.
     let mut trust = TrustState::load(&loader.paths, probes)?;
     let pending = scan_pending_trust(&cwd, &trust, probes)?;
-    if let Some(reviewed) = reviewed {
-        ensure_reviewed(&pending, reviewed)?;
-    }
 
     if !pending.is_empty() {
         for item in &pending {
@@ -491,31 +462,6 @@ fn grant_trust(
         trust.save(&loader.paths)?;
     }
     Ok(pending)
-}
-
-/// `Ok` when every pending file is pending at a digest in `reviewed`. A
-/// reviewed file that is no longer pending (trusted meanwhile) is fine.
-pub(super) fn ensure_reviewed(
-    pending: &[PendingTrust],
-    reviewed: &[ProcessTrust],
-) -> Result<(), ConfigError> {
-    // Indexed once: `config.d` fragments are unbounded in count, so a
-    // pairwise comparison would be quadratic per key press.
-    let reviewed: BTreeSet<(&Path, &str)> = reviewed
-        .iter()
-        .map(|grant| (grant.path.as_path(), grant.digest.as_str()))
-        .collect();
-    let unreviewed = pending.iter().any(|item| {
-        item.source()
-            .path()
-            .is_none_or(|path| !reviewed.contains(&(path, item.digest())))
-    });
-    if unreviewed {
-        return Err(ConfigError::TrustChanged {
-            pending: pending.to_vec(),
-        });
-    }
-    Ok(())
 }
 
 /// Every project configuration file and project pack manifest from the VCS
@@ -575,8 +521,7 @@ fn scan_pending_trust(
             }
             if let Some(digest) = pending_digest {
                 let sections = document.sensitive_sections();
-                let declarations = document.sensitive_declarations();
-                pending.push(PendingTrust::new(source, digest, sections, declarations));
+                pending.push(PendingTrust::new(source, digest, sections));
             }
         }
     }
@@ -842,7 +787,6 @@ fn apply_document(
             source.clone(),
             digest,
             document.sensitive_sections(),
-            document.sensitive_declarations(),
         ));
         SourceStatus::PartiallyAppliedPendingTrust
     } else {
@@ -1098,12 +1042,10 @@ fn withhold_untrusted_pack(
         .iter()
         .any(|item| item.source().path() == Some(path) && item.digest() == digest);
     if !listed {
-        let (sections, declarations) = pack.trust_summary();
         pending.push(PendingTrust::new(
             pack.source().clone(),
             digest.to_owned(),
-            sections,
-            declarations,
+            pack.sensitive_sections(),
         ));
     }
     None
@@ -1476,15 +1418,6 @@ impl TrustState {
     pub(super) fn insert(&mut self, path: PathBuf, digest: String) {
         if !self.contains(&path, &digest) {
             self.records.push(TrustRecord { path, digest });
-        }
-    }
-
-    /// Admit process-scoped grants as if recorded. Only meaningful on a
-    /// state that is never saved: callers that write (`grant_pending_trust`)
-    /// load without them.
-    pub(super) fn admit_process_trust(&mut self, grants: &[ProcessTrust]) {
-        for grant in grants {
-            self.insert(grant.path.clone(), grant.digest.clone());
         }
     }
 

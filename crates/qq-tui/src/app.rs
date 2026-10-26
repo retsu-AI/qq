@@ -94,73 +94,7 @@ pub struct TuiOptions {
     /// The canonical workspace root `@` mentions resolve against. `None`
     /// (a remote client without the tree) leaves `@` as literal text.
     pub workspace_root: Option<std::path::PathBuf>,
-    /// Project configuration files whose sensitive sections no trust record
-    /// covers. Non-empty opens the TUI on the trust prompt instead of a
-    /// session; `models` and `model` are then whatever loaded without them
-    /// (normally nothing) until the prompt is answered.
-    pub pending_trust: Vec<PendingTrustNotice>,
 }
-
-/// One project file awaiting the user's trust, already rendered for the
-/// prompt: the path and one human line per declaration (`model
-/// anthropic/claude-sonnet-5`, `MCP linear → https://…`, `grants: 2 tools`).
-/// Plain data so the TUI needs nothing from the configuration crate.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingTrustNotice {
-    pub path: String,
-    pub declarations: Vec<String>,
-}
-
-/// The user's answer to the trust prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustChoice {
-    /// Record the pending files durably, exactly as `qq trust` would.
-    Persist,
-    /// Load them for this process only; the next launch asks again.
-    Session,
-}
-
-/// What a resolved trust choice unlocked: the catalog and credential state
-/// the client skipped at startup because the configuration would not load.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrustResolved {
-    pub goals: GoalDefaults,
-    /// Paths now trusted, for the confirmation notice.
-    pub trusted: Vec<String>,
-    pub model: ModelSelection,
-    pub models: Vec<ModelOption>,
-    pub unauthenticated_providers: Vec<ProviderRemedy>,
-}
-
-/// The composition root's answer to a trust choice. Runs off the event loop;
-/// `Err` is shown as an error notice and the prompt stays.
-pub type TrustFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<TrustResolved, TrustFailure>> + Send>,
->;
-
-/// Why a trust choice was not applied. `changed` carries the current
-/// pending files when they differ from what the prompt showed (a file was
-/// edited while it was open): the prompt is redrawn with them and nothing
-/// was trusted, so the user answers again for what they now see.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustFailure {
-    pub reason: String,
-    pub changed: Option<Vec<PendingTrustNotice>>,
-}
-
-impl From<String> for TrustFailure {
-    fn from(reason: String) -> Self {
-        Self {
-            reason,
-            changed: None,
-        }
-    }
-}
-
-/// Resolves a [`TrustChoice`]. Only a client that owns the server (and so
-/// can read and record trust for the files on this host) has one; a client
-/// attached to a server elsewhere is told to run `qq trust` there.
-pub type TrustResolver = Box<dyn FnMut(TrustChoice) -> TrustFuture + Send>;
 
 /// A provider the configuration admits but that has no credential, and how
 /// to give it one. `remedy` is imperative and complete (`run qq auth login
@@ -184,18 +118,12 @@ pub(crate) const CHOOSE_MODEL_NOTICE: &str = "choose a model with /models";
 
 /// Runs the TUI to exit. Returns the session focused at exit, after the
 /// terminal has been restored, so the caller can tell the user how to
-/// continue it. `trust` answers the trust prompt when
-/// `options.pending_trust` is non-empty; `None` means this client cannot
-/// (the server, and the files, are on another host).
-pub async fn run<P>(
-    client: P,
-    options: TuiOptions,
-    trust: Option<TrustResolver>,
-) -> Result<Option<SessionId>, TuiError>
+/// continue it.
+pub async fn run<P>(client: P, options: TuiOptions) -> Result<Option<SessionId>, TuiError>
 where
     P: ClientPort,
 {
-    terminal::run(client, App::new(options), trust).await
+    terminal::run(client, App::new(options)).await
 }
 
 #[derive(Debug, Error)]
@@ -386,12 +314,6 @@ pub(crate) struct App {
     /// Read-only after startup: a credential added while the TUI runs takes
     /// effect at the next launch, like the catalog it gates.
     pub(crate) unauthenticated_providers: Vec<ProviderRemedy>,
-    /// Project files awaiting trust. While non-empty the trust prompt owns
-    /// input (`Mode::Trust`); a resolved choice clears it.
-    pub(crate) pending_trust: Vec<PendingTrustNotice>,
-    /// A trust choice is being resolved off the loop; further `t`/`s`
-    /// presses wait rather than starting a second write.
-    trust_resolving: bool,
     /// Profile new sessions are created with. `/profile` with nothing focused
     /// sets it; the server validates the name when the session is created.
     pub profile: AgentProfileId,
@@ -514,8 +436,6 @@ impl App {
             reasoning_effort: None,
             models: options.models,
             unauthenticated_providers: options.unauthenticated_providers,
-            pending_trust: options.pending_trust,
-            trust_resolving: false,
             workspace_id: None,
             workspace_path: String::new(),
             check_interruption: None,
@@ -571,81 +491,14 @@ impl App {
 
     /// Requests queued by [`Self::apply_client_update`]; the terminal loop
     /// drains and sends them after each update.
-    /// Who owns keyboard input right now. Overlays win over the trust
-    /// prompt, which wins over the approval prompt, which wins over the
-    /// composer.
+    /// Who owns keyboard input right now. Overlays win over the approval
+    /// prompt, which wins over the composer.
     pub(crate) fn mode(&self) -> Mode {
         match &self.overlay {
             Some(overlay) => overlay.mode(),
-            None if !self.pending_trust.is_empty() => Mode::Trust,
             None if self.pending_approval().is_some() => Mode::Approval,
             None => Mode::Compose,
         }
-    }
-
-    /// The trust prompt's answer, resolved by the composition root. Applies
-    /// what the now-loadable configuration provides (the client default
-    /// model, the catalog, the credential remedies) and drops the prompt, so
-    /// the OB1/OB2 guidance takes over exactly as if the TUI had started
-    /// with a trusted project.
-    pub fn apply_trust_resolved(
-        &mut self,
-        choice: TrustChoice,
-        resolved: TrustResolved,
-    ) -> Effects {
-        self.trust_resolving = false;
-        self.pending_trust.clear();
-        self.goal_defaults = resolved.goals;
-        self.unauthenticated_providers = resolved.unauthenticated_providers;
-        // Through the catalog path so the sort, per-session context windows,
-        // and an open picker are refreshed like a server catalog update.
-        self.apply_model_options(resolved.models, Some(resolved.model));
-        self.set_info(match choice {
-            TrustChoice::Persist => format!(
-                "trusted {} file{}",
-                resolved.trusted.len(),
-                if resolved.trusted.len() == 1 { "" } else { "s" }
-            ),
-            TrustChoice::Session => "trusted for this session".to_owned(),
-        });
-        // The server compiled its capabilities while the project was
-        // withheld; ask again now that profiles and skills can load, and
-        // refresh the catalog the same way bootstrap does so provider
-        // discovery replaces the root's static list.
-        let mut effects = Effects::send_now(ClientRequest::Capabilities);
-        effects.push(Effect::Send(ClientRequest::Models(self.model.clone())));
-        effects
-    }
-
-    /// The trust choice could not be resolved; the prompt stays and the
-    /// reason shows as an error. When the files changed under the prompt it
-    /// now lists the current set.
-    pub fn note_trust_failure(&mut self, failure: TrustFailure) -> Effects {
-        self.trust_resolving = false;
-        if let Some(changed) = failure.changed {
-            self.pending_trust = changed;
-        }
-        self.set_error_for(None, failure.reason);
-        Effects::redraw(Redraw::Immediate)
-    }
-
-    /// Keys while the trust prompt owns input. Everything but the three
-    /// answers (and Ctrl-C, handled before dispatch) is swallowed: nothing
-    /// else is meaningful before the configuration has loaded.
-    fn handle_trust_key(&mut self, key: KeyEvent) -> Effects {
-        let choice = match key.code {
-            KeyCode::Char('t' | 'T') => TrustChoice::Persist,
-            KeyCode::Char('s' | 'S') => TrustChoice::Session,
-            KeyCode::Char('q' | 'Q') | KeyCode::Esc => return self.execute(Command::Quit),
-            _ => return Effects::none(),
-        };
-        if self.trust_resolving {
-            return Effects::none();
-        }
-        self.trust_resolving = true;
-        let mut effects = Effects::redraw(Redraw::Immediate);
-        effects.push(Effect::ResolveTrust(choice));
-        effects
     }
 
     /// The external editor could not deliver text; the draft stays as it was.
@@ -1408,11 +1261,6 @@ impl App {
     /// when no model is configured at all. `None` once a model with an
     /// authenticated provider is in hand.
     pub(crate) fn startup_guidance(&self) -> Option<String> {
-        // Until the project is trusted the configuration has not loaded, so
-        // neither "no model" nor a credential remedy is known to be true.
-        if !self.pending_trust.is_empty() {
-            return None;
-        }
         if let Some(remedy) = self.configured_provider_remedy() {
             return Some(remedy.message());
         }
@@ -1533,7 +1381,6 @@ impl App {
             | Mode::Themes
             | Mode::Commands
             | Mode::History => self.handle_overlay_key(key),
-            Mode::Trust => self.handle_trust_key(key),
             Mode::Approval => self.handle_approval_key(key),
             Mode::Compose => self.handle_compose_key(key),
         }
@@ -3469,9 +3316,6 @@ impl App {
     /// What Enter does in the composer right now, for the prompt glyph.
     pub(crate) fn composer_mode(&self) -> crate::view::ComposerMode {
         use crate::view::ComposerMode;
-        if !self.pending_trust.is_empty() {
-            return ComposerMode::Trust;
-        }
         if self.pending_approval().is_some() {
             return ComposerMode::Approval;
         }

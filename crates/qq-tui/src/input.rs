@@ -287,9 +287,6 @@ pub(crate) enum Mode {
     Sessions,
     Commands,
     History,
-    /// The project's configuration awaits the user's trust; the prompt owns
-    /// input until `t`, `s`, or `q` answers it.
-    Trust,
     Approval,
     Compose,
 }
