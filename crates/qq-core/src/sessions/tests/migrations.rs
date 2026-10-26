@@ -3667,10 +3667,18 @@ fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
 async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
     // v0.1.3 through v0.1.8 stored `supervised` for write sub-agents: in the
     // session row and in every session summary journaled with an event,
-    // which migration 62 also copied into the run completion receipts. That
-    // mode no longer exists; children now run under `auto` with internal
+    // which runs also kept as their completion receipts from schema 62 on.
+    // That mode no longer exists; children now run under `auto` with internal
     // supervision. Upgraded stores must snapshot, replay and report
-    // completions instead of failing on the retired value.
+    // completions instead of failing on the retired value. A store from
+    // before 62 has no receipts yet: migration 62 decodes them from the
+    // journal, so it must find the summaries already rewritten.
+    for schema in [61, 63] {
+        retired_supervised_mode_upgrades_from(schema).await;
+    }
+}
+
+async fn retired_supervised_mode_upgrades_from(schema: u32) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sessions.sqlite3");
     let (workspace_id, session_id, store_id) = {
@@ -3718,8 +3726,22 @@ async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
                  UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_mode','supervised')
                   WHERE json_extract(envelope_json,'$.event.session.approval_mode') IS NOT NULL;
                  UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_mode','supervised')
-                  WHERE completion_json IS NOT NULL;
-                 UPDATE metadata SET value='63' WHERE key='schema_version';",
+                  WHERE completion_json IS NOT NULL;",
+            )
+            .unwrap();
+        if schema < 62 {
+            // Before 62, receipts lived only in the journal.
+            connection
+                .execute(
+                    "UPDATE runs SET completion_sequence=0,completion_json=NULL",
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                [schema.to_string()],
             )
             .unwrap();
         let journaled: u64 = connection
@@ -3729,7 +3751,10 @@ async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(journaled >= 2, "the fixture journals legacy summaries");
+        assert!(
+            journaled >= 2,
+            "from {schema}: the fixture journals legacy summaries"
+        );
     }
 
     let runtime = SessionRuntime::open(
@@ -3782,16 +3807,16 @@ async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(modes.len() >= 2, "{modes:?}");
+    assert!(modes.len() >= 2, "from {schema}: {modes:?}");
     assert!(
         modes.iter().all(|mode| *mode == ApprovalMode::Auto),
-        "{modes:?}"
+        "from {schema}: {modes:?}"
     );
     let completions = runtime
         .completed_runs(session_id, start, snapshot.cursor)
         .await
         .unwrap();
-    assert_eq!(completions.len(), 1);
+    assert_eq!(completions.len(), 1, "from {schema}: the receipt survives");
     let SessionEvent::RunFinished { session, .. } = &completions[0].receipt.event else {
         panic!("a completion is a run_finished receipt")
     };
@@ -3808,5 +3833,8 @@ async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(remaining, 0, "the retired mode is rewritten once, at open");
+    assert_eq!(
+        remaining, 0,
+        "from {schema}: the retired mode is rewritten once, at open"
+    );
 }

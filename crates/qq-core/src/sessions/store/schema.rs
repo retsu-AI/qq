@@ -2786,6 +2786,8 @@ pub(in crate::sessions) fn open_database(
                 ALTER TABLE runs ADD COLUMN completion_json TEXT CHECK((completion_json IS NULL AND completion_sequence=0) OR (completion_json IS NOT NULL AND completion_sequence>0 AND json_valid(completion_json) AND length(CAST(completion_json AS BLOB))<=1048576));
                 CREATE INDEX runs_completion ON runs(session_id,completion_sequence) WHERE completion_sequence>0;")?;
         }
+        // The backfill decodes journaled summaries; see migration 64.
+        retire_supervised_mode(&transaction)?;
         crate::sessions::completions::migrate(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value='62' WHERE key='schema_version'",
@@ -2841,21 +2843,14 @@ pub(in crate::sessions) fn open_database(
         return Err(SessionRuntimeError::CONSTRAINT);
     }
 
-    // 64: v0.1.3 through v0.1.8 recorded write sub-agents as `supervised`, a
-    // mode protocol 37 retired. Those children now run as `auto` with
-    // internal supervision, so the row and every journaled summary of it say
-    // `auto`; nothing else in the store ever held the value.
+    // 64: retire the `supervised` approval mode (see `retire_supervised_mode`).
+    // Stores from before 62 already did so ahead of the receipt backfill.
     if schema_version.as_deref() != Some("64") {
         let transaction = connection.transaction()?;
-        transaction.execute_batch(
-            "UPDATE sessions SET approval_mode='auto' WHERE approval_mode='supervised';
-             UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_mode','auto')
-              WHERE instr(envelope_json,'\"supervised\"')>0 AND json_valid(envelope_json)
-                AND json_extract(envelope_json,'$.event.session.approval_mode')='supervised';
-             UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_mode','auto')
-              WHERE instr(completion_json,'\"supervised\"')>0
-                AND json_extract(completion_json,'$.event.session.approval_mode')='supervised';
-             UPDATE metadata SET value='64' WHERE key='schema_version';",
+        retire_supervised_mode(&transaction)?;
+        transaction.execute(
+            "UPDATE metadata SET value='64' WHERE key='schema_version'",
+            [],
         )?;
         transaction.commit()?;
     }
@@ -2891,6 +2886,25 @@ pub(in crate::sessions) fn open_database(
         }
     };
     Ok((connection, store_id))
+}
+
+/// v0.1.3 through v0.1.8 recorded write sub-agents as `supervised`, a mode
+/// protocol 37 retired. Those children now run as `auto` with internal
+/// supervision, so the row and every journaled summary of it say `auto`;
+/// nothing else in the store ever held the value. Runs once `runs` has
+/// completion receipts, and before anything decodes journaled summaries:
+/// such readers skip what they cannot decode.
+fn retire_supervised_mode(connection: &Connection) -> Result<(), SessionRuntimeError> {
+    connection.execute_batch(
+        "UPDATE sessions SET approval_mode='auto' WHERE approval_mode='supervised';
+         UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_mode','auto')
+          WHERE instr(envelope_json,'\"supervised\"')>0 AND json_valid(envelope_json)
+            AND json_extract(envelope_json,'$.event.session.approval_mode')='supervised';
+         UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_mode','auto')
+          WHERE instr(completion_json,'\"supervised\"')>0
+            AND json_extract(completion_json,'$.event.session.approval_mode')='supervised';",
+    )?;
+    Ok(())
 }
 
 fn validate_owned_compaction_index(connection: &Connection) -> Result<(), SessionRuntimeError> {
