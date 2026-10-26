@@ -27,6 +27,6 @@ Declare a server in the global config, or in `.qq/config.ron`, which needs
 
 ## Gotchas
 
-- MCP calls are denied under `read-only` and allowed under `auto`.
+- MCP calls are denied under `read-only`, held under `ask`, and run under `auto` and `full`.
 - MCP is not available under `--tui-qa-root`.
 - `inspect` gives up after 45 s.

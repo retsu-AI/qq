@@ -6,8 +6,7 @@ QQ separates two questions:
   Enabled explicitly for reviewed content with `qq trust`; task startup
   ignores sensitive project settings until then.
 - **Approval** — may the agent take this action right now? Answered by the
-  session's approval mode, the grants in effect, and, when neither decides,
-  you.
+  session's approval mode and the grants in effect. Only Ask asks you.
 
 ## Project trust
 
@@ -73,7 +72,7 @@ Every session runs under one mode. Set the default in a profile
 | --- | --- | --- | --- | --- | --- |
 | `read_only` | run | denied | denied | denied | denied |
 | `ask` | run | human approval each call | human approval each call | human approval each call | human approval each call |
-| `auto` **(default)** | run | run within the workspace | run within the native task boundary | run | public hosts run |
+| `auto` **(default)** | run | run in the private [task copy](#task-workspaces), published when the run completes | run within the native task boundary | run | public hosts run |
 | `full` | run | run | run without Auto containment | run | public hosts run |
 
 Auto does not ask a human or consult a reviewer model for ordinary actions,
@@ -113,6 +112,50 @@ An embedding that does not supply a native task scope retains conservative
 shell admission through read/build classification or explicit grants. This is
 not equivalent to the binary's native Auto path.
 
+Shell needs operating-system support on the host, in every mode that runs
+commands, and QQ has no unsandboxed fallback. On Linux that means a
+non-root user, unprivileged user namespaces, and a root-owned `unshare`;
+Auto also needs Landlock ABI 6 (Linux 6.12+). The full list is in
+[Install › What the shell sandbox needs](install.md#system-requirements).
+
+### Task workspaces
+
+An Auto root run works in a private copy of the project, not the checkout
+itself. When the run starts, QQ copies the project's regular files into a
+task directory under its data directory, skipping files matched by
+`.gitignore`, `.ignore`, or `.qqignore`, the `.git` directory, symbolic
+links, special files, and project trust configuration. Built-in edits and
+shell commands, including those of child sessions, all see that copy.
+
+When the run completes, QQ publishes the changed files back to the
+checkout. Before installing each one it checks that the checkout's version
+is still the one the task started from, so edits you made meanwhile are kept
+rather than overwritten. A failed, cancelled, or interrupted run publishes
+nothing; its work stays in the task directory, and the error names the path.
+
+A task copy holds at most 16,384 entries (files plus the directories created
+for them) and 256 MiB in total; the limits are not configurable. Larger
+projects fail before the run starts with `task preparation failed: task
+workspace limit exceeded`. Build output such as `target/` or `node_modules/`
+counts unless an ignore file excludes it. Ask and Full runs use the checkout
+directly and have no task copy.
+
+### Task commits, pushes, and pull requests
+
+In an Auto root run inside a Git checkout, the agent also has three tools:
+
+| Tool | Effect |
+| --- | --- |
+| `task_commit` | commits the task's changed files to a private branch, `qq/task/<task>`, in QQ's own task repository. It never touches your refs, index, or Git config and runs no hooks, filters, or signing. Children must finish first |
+| `task_push` | pushes that branch to the GitHub repository a host `policy.task_hosting` grant names for this workspace |
+| `task_pr` | opens or updates the pull request for the pushed branch against the grant's base branch |
+
+`task_push` and `task_pr` refuse without a matching grant; nothing prompts
+for one. Grants, and the stored GitHub token they name, live only in host
+configuration; see [`policy.task_hosting`](configuration.md#policy). The
+tools need an absolute `git` on `PATH` and a checkout whose `HEAD` is a
+commit.
+
 ### Command controls
 
 The shell classifier is not a security boundary. It can describe an Ask
@@ -128,26 +171,26 @@ explicit managed policy and built-in protected-file checks.
 
 ## The approval prompt
 
+Only Ask, and explicitly supervised delegation outside Auto, put a call on
+hold for a human. Auto never does. An Ask prompt looks like this:
+
 ```
 ◇ approval needed
 $ npm install left-pad  (in ~/repo)
 asks because: package_install
-y once   a session   w workspace   n deny
+y once   n deny   ask: approval applies once
 ```
 
-| Key | Effect | Lifetime |
-| --- | --- | --- |
-| `y` | run this call | once |
-| `a` | run this and every later call of the same shape in this session, when the grant fits | until the session ends |
-| `w` | write the grant into `.qq/config.ron` and run, when the grant fits | every session in this workspace |
-| `n` | deny; the model receives the denial as a tool error and continues | — |
-| `Shift-Y` / `Shift-N` | decide and then steer the run with a note | — |
-| `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open | — |
+| Key | Effect |
+| --- | --- |
+| `y` | run this call once |
+| `n` | deny; the model receives the denial as a tool error and continues |
+| `Shift-Y` / `Shift-N` | decide and then steer the run with a note |
+| `Esc` | deny, like `n`; after `Shift-Y` / `Shift-N` it first cancels the note and leaves the prompt open |
 
-Ask approvals apply once. Session/workspace grant choices from older clients
-are reduced to once under Ask. Stored grants remain useful for explicit
-unscoped embeddings and retained policy configuration; native Auto does not
-need a grant for every command.
+Ask approvals apply once and never create a reusable grant. A held call
+outside Ask also offers `a` (allow this shape for the rest of the session)
+and `w` (also write the grant into `.qq/config.ron`), when the grant fits.
 
 Edits show a diff; `fetch` shows the URL and whether a grant covers the
 host; MCP calls show the server, tool, and arguments.
@@ -167,8 +210,10 @@ because no human is available.
 
 ## Grants in configuration
 
-The `w` key appends to the `policy` section of the project's
-`.qq/config.ron`:
+Grants are standing authority in the `policy` section of any configuration
+layer (the `w` key at a supervised prompt appends to the project's
+`.qq/config.ron`). Native Auto does not need them for ordinary work; they
+matter for explicit embeddings, delegated children, and hosts:
 
 ```ron
 policy: (

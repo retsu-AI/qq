@@ -5,16 +5,18 @@
 A single Rust binary that runs AI coding agents: interactively in a terminal
 UI, unattended from scripts (`qq run`), and as a local HTTP/SSE server that
 several clients can share. Agents read, search, and edit your files, run
-commands, call MCP tools, and spawn sub-agents, with every mutating action
-gated by an approval policy you control and every event stored in SQLite so
-sessions survive restarts.
+commands, call MCP tools, and spawn sub-agents, with every action gated by
+an approval policy you control, shell commands confined by the operating
+system's sandbox, and every event stored in SQLite so sessions survive
+restarts.
 
 ### How is it different from Codex, OpenCode, Pi, or Claude Code?
 
 Mostly in emphasis. QQ is built for running *many* agents at once with
 bounded resources and a durable record — sessions are first-class, the
-approval model is stricter and more explicit (a real bash parser grades every
-command), the server is part of the design rather than an add-on, and it is
+default mode works unattended in a sandboxed private copy of the workspace
+and publishes checked edits, the server is part of the design rather than an
+add-on, and it is
 one static binary with no runtime. It is younger and has fewer integrations.
 A detailed comparison lives in
 [`../research/harness-comparison.md`](../research/harness-comparison.md).
@@ -60,17 +62,19 @@ scope instructions to a subtree.
 
 ### Why does it ask me before running `cargo test`?
 
-Under the default `auto` mode a command runs unprompted only if the
-classifier grades it `allow` (a literal, listed read/build command with
-in-workspace operands) or a grant covers it. `cargo test` *is* on that list;
-`cargo test $PKG` or `cargo test | tee log` is not, because variables and
-pipes change what runs. Press `w` once to grant the prefix for the workspace.
+Under the default `auto` mode it should not: Auto runs commands inside its
+task sandbox without asking. A prompt means the session is in `ask` mode,
+which asks before every non-read call. The top row shows the mode; switch
+with `/approval`. If commands fail instead, check the
+[sandbox requirements](install.md#system-requirements).
 [Permissions](permissions.md).
 
 ### Can it run unattended in CI?
 
 Yes: `qq run --approval auto --format jsonl …` with credentials from the
-environment. [Headless › In CI](headless.md#in-ci).
+environment, on a runner that meets the
+[sandbox requirements](install.md#system-requirements).
+[Headless › In CI](headless.md#in-ci).
 
 ### Can I use it on a remote machine?
 

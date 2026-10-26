@@ -2190,7 +2190,7 @@ Application configuration types must not leak into `qq-core`.
 | General tools | MCP and the embedded `ExternalToolHost` | Startup catalog; call on demand | One selected adapter call | MCP process/HTTP boundary or trusted embedder |
 | Context/memory | Typed bounded `ContextSource` | Plan compile plus pre-turn fetch | No per-delta hook | Time/byte/token budgets; explicit fail policy |
 | Observers | Durable SSE/outbox | Subscription | Post-commit only | Cannot affect authoritative execution |
-| Process execution | Local implementation; cross-platform sandbox design under review in [PR #375](https://github.com/retsu-AI/qq/pull/375) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities |
+| Process execution | Durable command worker with native Linux, macOS and Windows backends ([tools § Native filesystem restriction primitive](tools.md#native-filesystem-restriction-primitive)) | Startup | Direct selected backend | Explicit filesystem/network/process capabilities; unavailable enforcement refuses execution |
 | Surface adapters | Versioned `qq-client` contract | Client startup | Outside agent loop | Product owns remote auth and UX |
 
 Rules that remain in force: the built-in Rust tools stay the zero-overhead

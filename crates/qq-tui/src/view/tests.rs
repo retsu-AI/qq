@@ -5092,11 +5092,17 @@ fn approval_mode_picker_and_badge_name_the_mode_in_effect() {
         .find(|row| row.contains("read_only") && row.contains("deny"))
         .unwrap();
     assert!(read_only.contains("active"), "{read_only}");
+    let auto = rows
+        .iter()
+        .find(|row| row.contains("auto") && row.contains("task sandbox"))
+        .unwrap();
+    assert!(auto.contains("without asking"), "{auto}");
+    assert!(!text.contains("held for approval"), "{text}");
     let full = rows
         .iter()
-        .find(|row| row.contains("full") && row.contains("every tool"))
+        .find(|row| row.contains("full") && row.contains("without asking"))
         .unwrap();
-    assert!(full.contains("without asking"), "{full}");
+    assert!(full.contains("containment"), "{full}");
 }
 
 #[test]

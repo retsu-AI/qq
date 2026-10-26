@@ -69,9 +69,11 @@ answer schema; those flags apply to ordinary prompt runs.
 | `--approval` | Meaning |
 | --- | --- |
 | `read-only` | reads only; every edit, shell, MCP, and network call is denied and reported to the model |
-| `ask` | reads run; calls requiring human approval are denied immediately, even with matching allowlists |
-| `auto` (default) | edits inside the workspace, safe shell (`allow` verdict or a grant), MCP and granted hosts run; `prompt`-verdict shell is denied; `forbidden` refused |
-| `full` | everything except `forbidden` shell shapes |
+| `ask` | reads run; every other call needs fresh human approval, so with no human present it is denied immediately, even with matching allowlists |
+| `auto` (default) | edits, shell, MCP, and public `fetch` run without asking, in a private [task copy](permissions.md#task-workspaces) of the workspace under the [shell sandbox](install.md#system-requirements); the checked edits are published when the run completes; anything outside that boundary is denied and reported to the model |
+| `full` | everything runs without asking, in the checkout itself and without the task sandbox; managed policy and protected files still apply |
+
+No mode waits for a human: `qq run` never stops on an approval prompt.
 
 Under `read-only`, when at least one held call was denied, a text-mode run
 ends with `held calls were denied under --approval read-only; rerun with
@@ -79,7 +81,10 @@ ends with `held calls were denied under --approval read-only; rerun with
 the resume hint). The exit status is unchanged; JSONL output carries no hint
 because each denied call is already in its `tool_call_finished` record.
 
-Between `auto` and `full`, grant exactly what the task needs:
+Auto already runs any command inside its task sandbox, so most runs need no
+grants. They matter where the policy would otherwise deny a call: a child
+session whose parent lacks that authority, an embedding without a task
+scope, or a host outside the public network policy:
 
 ```sh
 qq run --approval auto \
@@ -89,12 +94,12 @@ qq run --approval auto \
   "…"
 ```
 
-Grants use the same shapes as the TUI's approve-for-session
+Grants use the same shapes as configuration grants
 ([Permissions](permissions.md#grants-in-configuration)); `--allow-shell
 "cargo test"` covers `cargo test -p x` and never `cargo test | sh`.
-Under Auto, these grants are stored before the prompt is submitted, including
-when resuming a session. They do not open an approval hold. Read-only, Ask,
-parent authority, forbidden commands, and managed denies still apply.
+Under Auto and Full, these grants are stored before the prompt is submitted,
+including when resuming a session. They do not open an approval hold.
+Read-only, Ask, parent authority, and managed denies still apply.
 
 ### Limits
 
@@ -260,8 +265,16 @@ without waiting for the goal to finish. See [CLI flags](cli.md#qq-goal).
   env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
 - run: >
     qq run --model anthropic/claude-sonnet-5 --approval auto
-           --allow-shell "cargo test" --timeout-seconds 900 --max-cost-usd 2
+           --timeout-seconds 900 --max-cost-usd 2
            --format jsonl "Fix the failing tests" > run.jsonl
+```
+
+The runner must meet the [shell sandbox requirements](install.md#system-requirements).
+GitHub-hosted Ubuntu runners (24.04 and later) restrict unprivileged user
+namespaces; allow them in an earlier step:
+
+```yaml
+- run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
 Or skip the store entirely: QQ reads `ANTHROPIC_API_KEY` from the

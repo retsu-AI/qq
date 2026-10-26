@@ -17,7 +17,7 @@ approval policy as built-ins.
             args: ["mcp"],
             env: ["EXECUTOR_API_KEY"],      // variables passed through from your shell
             eager: true,                    // connect at startup instead of on first use
-            allow: ["execute", "skills"],   // tools that run without asking under `auto`
+            allow: ["execute", "skills"],   // tools granted for the workspace
         ),
 
         // A remote endpoint.
@@ -125,9 +125,9 @@ host. In CI prefer `bearer: Env("LINEAR_TOKEN")`.
 
 MCP calls are `External` effect class: under `read_only` they are denied
 unless the server marks the tool read-only and it is allowlisted; under
-`ask` each call asks; under `auto` and `full` they run. `allow: [...]` on the
-server is the workspace grant; `--allow-tool mcp__linear__create_issue`
-grants one for a headless run; `a` in the TUI grants one for the session.
+`ask` each call asks; under `auto` and `full` they run without asking.
+`allow: [...]` on the server is the workspace grant, and
+`--allow-tool mcp__linear__create_issue` grants one for a headless run.
 
 ## When a server is unavailable
 

@@ -1,6 +1,6 @@
 # ADR-0050 — Composition moves from the binary into a `qq-harness` library; `qq-core` gets tool features and a tested embedding example
 
-**Status:** Proposed
+**Status:** Accepted, partly implemented (2026-10-26); see Implementation notes
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (crate boundaries, features)
 **Implements:** [`autonomous-core.md` § AC10–AC13](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md); audit [`core-autonomy.md`](../research/core-autonomy.md) B1–B4. Refines ADR-0027 (the public surface) and audit F19 (build profiles)
@@ -137,3 +137,12 @@ Codex solved the same problem with a facade crate (`codex-core-api`) and a
   change). The binary hands in its build identity as `qq_host::HostBuild`, and
   `RuntimeBuildError` moved with the rest. Still in the binary: the headless
   driver (`src/headless.rs`, AC12.3) and the decision 1, 3 and 4 items.
+- 2026-10-26: accepted as the direction; the second review is the merge of
+  the PR that records this. Shipped: decision 2 as `qq-host` (#431), the
+  `tool-fetch` feature (#256), `crates/qq-core/examples/embed.rs`, and the
+  minimal `--no-default-features` profile in CI. Not shipped:
+  `drive_to_outcome` and the headless driver move (AC12.3),
+  `tests/embed-smoke/`, `LoadedRuntime::from_runtime`, and decision 4
+  (`SqliteCode`, typed `RuntimeLoadError`, `qq_core::limits`, a core
+  `bench-support` feature). Those remain open work, not commitments with
+  dates.

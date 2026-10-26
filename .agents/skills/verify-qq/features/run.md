@@ -4,7 +4,7 @@
 
 - **Flags** (`src/cli.rs`):
   - Input and workspace: `--workspace`, `--session`, `--steer-stdin`, `--correlation K=V` (at most 8).
-  - Approval: `--approval read-only|auto|full` (default `read-only`), `--allow-tool`, `--allow-shell`, `--allow-host`.
+  - Approval: `--approval read-only|ask|auto|full` (default `auto` for new sessions; resume keeps the stored mode), `--allow-tool`, `--allow-shell`, `--allow-host`.
   - Limits: `--timeout-seconds`, `--max-turns`, `--max-cost-usd`.
   - Output: `--output-schema`, `--output-repair-turns` (0–8), `--format text|jsonl`, `--trace PATH`.
 - **Exit codes** (`crates/qq-protocol/src/headless.rs`):

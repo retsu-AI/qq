@@ -2243,14 +2243,15 @@ async fn unattended_call(
     stderr: &mut impl Write,
 ) {
     let text = options.format == HeadlessFormat::Text;
-    // The headless invocation is the approval client.
-    // An explicit allowlist answers first, as a session
-    // grant so the same tool or prefix is not held again.
-    // Otherwise full approves everything unattended; auto
-    // denies whatever the policy escalated (dangerous
-    // shell) so the run never stalls waiting for a human —
-    // but when a reviewer model is configured the deny is
-    // deferred briefly, giving the reviewer its window.
+    // The headless invocation is the approval client for
+    // the holds that remain: Ask, and supervised calls
+    // outside Auto. An explicit allowlist answers first, as
+    // a session grant so the same tool or prefix is not held
+    // again. Otherwise full approves unattended and anything
+    // else is denied so the run never stalls waiting for a
+    // human, but when a reviewer model is configured the
+    // deny is deferred briefly, giving the reviewer its
+    // window.
     // The reviewer settles the call itself on approve or
     // deny; the deferred deny is the unattended answer to
     // an escalation. A late deny is harmless: resolution is
@@ -2707,9 +2708,9 @@ mod tests {
         }
     }
 
-    /// Issues a dangerous shell command (held under `auto`) on each of two
-    /// turns, then answers. Distinct call ids so the second is a fresh
-    /// approval decision, not a replay.
+    /// Issues a shell command the conservative classifier would hold
+    /// (`rm`) on each of two turns, then answers. Distinct call ids so the
+    /// second is a fresh approval decision, not a replay.
     struct DangerousShellProvider {
         turn: Mutex<usize>,
     }
