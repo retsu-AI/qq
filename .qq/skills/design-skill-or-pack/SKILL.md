@@ -20,37 +20,60 @@ skill; put the skill in `.qq/skills/` where every profile sees it.
 
 ```text
 .qq/skills/<name>/SKILL.md          workspace skills: disclosed to every profile
-.qq/commands/<name>.md              workspace commands: /name only, never disclosed
+.qq/commands/<name>.md              workspace commands: disclosed, and /name leaves room for arguments
 .qq/packs/<id>/pack.ron             project pack (needs `qq trust`)
 ~/.config/qq/packs/<id>/pack.ron    user pack, every project
 ```
 
 Skills under `.agents/` and `.claude/` are read for `/name` invocation only
 and are never disclosed to the model. Put anything you want the model to find
-on its own under `.qq/` or a pack.
+on its own under `.qq/` or a pack. In this repository every file under
+`.qq/skills/` has a byte-identical copy under `.agents/skills/` for other
+harnesses; `cargo xtask lint` enforces it.
+
+What QQ does not do, so write around it:
+
+- `load_skill` returns only `SKILL.md`. Point at bundled files (playbooks,
+  scripts) by their workspace path, such as
+  `.qq/skills/<name>/playbooks/x.md`, and have the model `read_file` them.
+- Model-spawned sub-agents get no skills catalog and no `load_skill`. A
+  skill that delegates must put the rules in the brief or tell the child
+  to `read_file` the skill.
+- A `/name` skill applies to one run. The next prompt does not see it
+  unless the model loads it again.
+- No front-matter flag hides a skill from the model; only its directory
+  does.
 
 ## Writing a skill
 
-The file is `<name>/SKILL.md`. The name is 1–64 bytes, starts with a
-lowercase letter, then lowercase letters, digits, `-`, `_`. Reserved names are
-every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`help`, `commands`,
-`models`, `profile`, `approval`, `skills`, `sessions`, `resume`, `agents`,
-`theme`, `editor`, `new`, `compact`, `rollback`, `prune`, `mouse`, `attention`, `changes`,
-`quit`, `exit`).
+The file is `<name>/SKILL.md`. The directory name is the skill name: 1–64
+bytes, a lowercase letter, then lowercase letters, digits, `-`, `_`. A
+directory with any other name is skipped without a warning. Reserved names are
+every entry of `qq_protocol::RESERVED_CLIENT_SLASH_COMMANDS` (`goal`, `btw`,
+`ask`, `help`, `commands`, `models`, `profile`, `approval`, `delegate`,
+`effort`, `skills`, `sessions`, `resume`, `agents`, `theme`, `editor`, `new`,
+`clear`, `compact`, `rollback`, `prune`, `mouse`, `attention`, `changes`,
+`quit`, `exit`, and the `btw-` variants).
 
-Start with YAML front matter carrying exactly one interpreted key:
+Start with YAML front matter carrying one interpreted key:
 
 ```markdown
 ---
+name: <name>
 description: One sentence, under 200 characters, that tells the model WHEN to load this.
 ---
 ```
+
+QQ reads only `description:`, as a single line capped at 512 bytes; a
+folded `>` value reads as the literal `>`. `name:` is ignored by QQ but
+other harnesses need it, so keep it equal to the directory name. The
+catalog holds at most 64 skills and commands in total.
 
 The description is the only part the model sees before it decides to call
 `load_skill`. Write it as a trigger, not a title: "Run the verification
 gates after a Rust change" beats "Verification". If the description does
 not say when, the skill is never loaded. Nothing else in the front matter is
-interpreted; keep it to `description:`.
+interpreted.
 
 The body is plain Markdown, at most 64 KiB. Structure that works:
 

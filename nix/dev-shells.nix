@@ -9,6 +9,7 @@
     let
       commonTools = with pkgs; [
         fd
+        gh
         git
         hyperfine
         jq

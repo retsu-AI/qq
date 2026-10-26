@@ -9,6 +9,8 @@ automation, and an HTTP/SSE server, all on one core runtime.
   a status table. If something blocks you, name the blocker in one sentence
   and what you need from the user. Do not invent extra gates, experiments,
   or follow-up work.
+- For a non-trivial task, load the `qq-mode` skill; it routes to the
+  playbook and the PR skills (`open-pr`, `babysit-pr`, `land-pr`).
 - `git status` first. Use your own worktree when another agent may be active:
   `git worktree add .worktrees/<name> -b <type>/<short> origin/main`. Never
   touch another agent's uncommitted changes.

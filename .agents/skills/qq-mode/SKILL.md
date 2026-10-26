@@ -1,63 +1,78 @@
 ---
 name: qq-mode
-description: Complete a QQ task with a narrow reproduction, the smallest fix, relevant verification, and the review the user requested.
+description: Start here for any non-trivial QQ task (bug, feature, refactor, investigation, PR follow-up). Routes to a playbook and the skills its steps need.
 ---
 
-# QQ work
+# QQ mode
 
-The user's request sets the scope and stopping point. `AGENTS.md` governs
-repository work; this skill adds no approval gates, ledgers, or mandatory
-documents. Planned work starts at `docs/plans/README.md`.
+The user's request sets the scope and the stopping point. `AGENTS.md`
+governs repository work. This skill picks the procedure; it adds no
+approval gates, ledgers, or mandatory documents. Planned work starts at
+`docs/plans/README.md`.
 
-Work within the authorized task, workspace, and tool permissions. Ask only
-when the next action crosses that boundary; do not request approval for each
-shell command or repeat permission already granted. Enforce the boundary
-through the available tools and policy, without bypassing a denial.
+## 1. Pick one route
 
-## Do the work
+| The request is... | Route |
+| --- | --- |
+| A question: how does X work, why is Y, should we do A or B | playbook `investigate` |
+| A defect: wrong output, crash, hang, flaky test | playbook `bug-fix` |
+| New or changed behavior, or a docs change | playbook `feature` |
+| Same behavior, different structure (rename, move, collapse) | playbook `refactor` |
+| Continue work another agent or session started | playbook `resume` |
+| Open a PR for finished work | skill `open-pr` |
+| Get a PR green: CI, review threads, Codex findings | skill `babysit-pr` |
+| Merge a PR | skill `land-pr` |
+| Check a diff before it ships | skill `review-diff` |
 
-1. Read `git status` and the relevant code. Use your own worktree when other
-   agents are active; give delegated work explicit owned paths. Preserve
-   other people's changes.
-2. Identify the requested observable result. For a runtime defect, reproduce
-   it with the narrowest behavioral test and show that test failing before
-   fixing the cause. For a refactor, preserve the observable contract.
-   Read-only and documentation tasks do not need invented runtime tests.
-3. Make the smallest justified change. Delete obsolete code and conflicting
-   instructions instead of adding layers. Update guide or design docs only
-   when the change makes them wrong.
-4. Iterate with the relevant narrow test:
-   `cargo nextest run -p <crate> -E 'test(/<pattern>/)'`.
-   Exercise the changed CLI, TUI, or server behavior directly or through an
-   existing smoke scenario or `verify-qq` drive. A simulated provider
-   proves the exercised runtime behavior, not the model's ability to work.
-5. Review the final diff against the branch base, including delegated edits.
-   Check for unrelated reversions, missing requested behavior, and weakened
-   assertions. For a PR, commit before the final gate so its evidence
-   identifies the commit. If the pre-push hook is enabled, let it run that
-   gate during push; otherwise run `cargo xtask check` once before pushing.
-   On failure, read `target/qq-check/last.json` and use the named rerun
-   command while fixing the cause. Do not loop the full gate.
+Read a playbook with `read_file .qq/skills/qq-mode/playbooks/<name>.md`.
+Load a skill with `load_skill <name>`. If two routes fit, take the one
+whose deliverable the user asked for. Bug-fix beats feature when the user
+calls existing behavior wrong.
 
-Do not run perf, release builds, mutation testing, or soak tests unless the
-task calls for them. Report observed limitations and budget overruns; do not
-invent new blockers. Encode a recurring defect in a focused behavioral test,
-type, or lint when it prevents the actual mistake.
+Follow the playbook's steps in order. A step you skip gets a one-line
+reason in the final reply. When a step names a skill, load it then, not
+up front. If a skill or playbook is wrong for the task, finish the task
+and tell the user what to fix in the skill.
 
-## Deliver the requested result
+## 2. Authority
 
-Push, open a PR, or merge only when the user has authorized it. Existing
-authorization persists; do not ask again. A requested final PR is non-draft
-unless the user says otherwise. Keep its description to the user-visible
-change, relevant verification, and known impact; link an existing issue.
+What the user said decides how far you go. Authority given once lasts for
+the session; do not ask again.
 
-When review is requested, check findings against the code and fix valid ones
-in new commits. Explain incorrect findings with evidence. Do not game the
-reviewer, dismiss findings to obtain approval, or substitute a clean receipt
-for a required Codex 👍. When the user requires that reaction, obtain it for
-the final non-draft PR head after the last change.
+| The user said | You may |
+| --- | --- |
+| Asked a question | read and run read-only commands |
+| Asked for a change | edit, test, and commit in your own worktree |
+| "open a PR", "push it" | also push the branch and open a ready PR |
+| "merge", "land", "ship", "take it all the way" | also merge once `land-pr` says ready |
 
-Keep working while an actionable step remains. When review is requested, wait
-only after the concrete changes are pushed and actionable work is complete.
-Stop at the user's requested boundary. Finish with the result, what was
-verified, and any remaining blocker.
+Keep working while an actionable step remains, then stop at the
+boundary the user set. Always stop and ask before you force-push, rewrite a pushed branch,
+delete a branch you did not create, change branch protection or CI
+settings, or publish a release. Never bypass a tool denial or an approval
+prompt; report it as the blocker.
+
+## 3. Delegate with a full brief
+
+A spawned sub-agent sees no skills catalog and cannot call `load_skill`.
+It has only your brief. Every brief says:
+
+1. Read `AGENTS.md`, `.qq/skills/qq-mode/SKILL.md`, and
+   `.qq/skills/principles/SKILL.md` with `read_file` before any work.
+2. The question or change, the files it owns, and the files it must not
+   touch.
+3. What done looks like: the test or command that must pass.
+4. The answer shape: findings with `file:line`, or the diff and the
+   command output that proves it.
+
+Use `authority: read` unless the child must edit. Only one write child
+runs at a time, so give write children disjoint paths and run them in
+sequence. You own the result: read the child's diff yourself before you
+build on it or report it.
+
+## 4. Reply
+
+Lead with the result for the person who asked: what changed for users,
+or the answer. Then how you verified it, quoting the command and the
+observed result. Label anything you did not observe as inferred. Then any
+blocker in one sentence with what you need. Give a PR as its full URL.
