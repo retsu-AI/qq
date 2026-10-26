@@ -12,7 +12,7 @@ Accepted by every command:
 | `--max-output-tokens N` | override the generation cap |
 | `--organization NAME` | select an enrolled organization manifest |
 | `--approve-self-contained-read-image FAMILY:SHA256` | attest exact self-contained native read behavior for progress/audit accounting; repeat for up to ten families |
-| `-V`, `--version` | `qq 0.1.8 (90d0fb8 2026-10-19)` |
+| `-V`, `--version` | `qq 0.1.9 (6809a21 2026-10-26)` |
 
 Read-image approvals are process-start host decisions for `ask`, `run`, `serve`
 and interactive execution. The flag attests read behavior for admitted
