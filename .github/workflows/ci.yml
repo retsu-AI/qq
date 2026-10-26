@@ -190,10 +190,10 @@ jobs:
       - name: Task files retain source configuration and directory identity
         shell: bash
         run: |
-          cargo test --locked -p qq --no-default-features --bin qq -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
-          cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
+          cargo test --locked -p qq-host --no-default-features --lib -- --list | tr -d '\r' | grep -Fx 'runtime::tests::task_runtime_uses_detached_files_and_source_configuration: test'
+          cargo test --locked -p qq-host --no-default-features --lib runtime::tests::task_runtime_uses_detached_files_and_source_configuration -- --exact
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            cargo test --locked -p qq --no-default-features --bin qq runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
+            cargo test --locked -p qq-host --no-default-features --lib runtime::tests::task_plan_cache_admits_a_fresh_grant_for_a_recreated_directory -- --exact
           fi
       - name: Isolated application paths
         if: ${{ !cancelled() }}
@@ -459,9 +459,9 @@ jobs:
         if: ${{ !cancelled() }}
         shell: bash
         run: |
-          cargo test --locked -p qq --no-default-features --bin qq -- --list |
+          cargo test --locked -p qq-host --no-default-features --lib -- --list |
             tr -d '\r' | grep -Fx 'runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work: test'
-          cargo test --locked -p qq --no-default-features --bin qq runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work -- --exact --nocapture
+          cargo test --locked -p qq-host --no-default-features --lib runtime::tests::continuation::live_goal_reconnect_applies_steering_without_restarting_work -- --exact --nocapture
       - name: Private command transport and worker process
         if: ${{ !cancelled() }}
         shell: bash
