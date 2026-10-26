@@ -304,7 +304,25 @@ async fn start_detached(
     #[cfg(unix)]
     command.process_group(0);
     #[cfg(windows)]
-    command.creation_flags(0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | NEW_PROCESS_GROUP.
+    {
+        // A terminal, SSH session or CI step may hold its processes in a job
+        // that kills them when it closes. Leave it as the command worker
+        // does: from inside QQ's own job, which permits breakaway, the
+        // daemon leaves every enclosing job that permits it too. One that
+        // forbids breakaway keeps the daemon; it still starts.
+        let breakaway =
+            match tokio::task::spawn_blocking(qq_core::command_owner::prepare_independent_worker)
+                .await
+            {
+                Ok(Ok(())) => 0x0100_0000, // CREATE_BREAKAWAY_FROM_JOB.
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "the daemon stays in the job that started it");
+                    0
+                }
+                Err(error) => return Err(error.into()),
+            };
+        command.creation_flags(breakaway | 0x0000_0008 | 0x0000_0200); // DETACHED_PROCESS | NEW_PROCESS_GROUP.
+    }
     let mut child = command.spawn()?;
     let deadline = tokio::time::Instant::now() + START_TIMEOUT;
     loop {
@@ -379,8 +397,15 @@ async fn stop(paths: &server::ServerPaths) -> Result<Stopped, Box<dyn Error>> {
     let deadline = tokio::time::Instant::now() + STOP_TIMEOUT;
     let mut closing = false;
     loop {
-        if let Some(connection) = server::discover_at(paths).await? {
-            return stop_serving(paths, connection).await;
+        match server::discover_at(paths).await {
+            Ok(Some(connection)) => return stop_serving(paths, connection).await,
+            Ok(None) => {}
+            // A daemon an older or newer qq started; only the stop request
+            // is shared across protocols.
+            Err(server::ServerError::ProtocolMismatch { .. }) => {
+                return stop_other_protocol(paths).await;
+            }
+            Err(error) => return Err(error.into()),
         }
         match server::acquire_host_lock(paths, Duration::ZERO).await {
             // Dropped at once: holding it would block the next host.
@@ -413,15 +438,37 @@ async fn stop_serving(
             ),
             error => io::Error::other(format!("could not ask the daemon to stop: {error}")),
         })?;
+    wait_for_release(paths, stopping.pid).await
+}
+
+async fn stop_other_protocol(paths: &server::ServerPaths) -> Result<Stopped, Box<dyn Error>> {
+    match server::request_stop_at(paths).await? {
+        server::StopRequest::Stopping(stopping) => wait_for_release(paths, stopping.pid).await,
+        server::StopRequest::Refused => Err(io::Error::other(
+            "the running server belongs to an interactive qq; quit that qq to stop it",
+        )
+        .into()),
+        server::StopRequest::NotRunning => Err(io::Error::other(format!(
+            "a qq server of another version is running but did not accept a stop request; \
+             stop it from the qq that started it, or end the process named in {}",
+            paths.metadata_file().display()
+        ))
+        .into()),
+    }
+}
+
+async fn wait_for_release(
+    paths: &server::ServerPaths,
+    pid: u32,
+) -> Result<Stopped, Box<dyn Error>> {
     if !server::wait_until_released(paths, STOP_TIMEOUT).await? {
         return Err(io::Error::other(format!(
-            "qq daemon (pid {}) did not stop within {}s",
-            stopping.pid,
+            "qq daemon (pid {pid}) did not stop within {}s",
             STOP_TIMEOUT.as_secs()
         ))
         .into());
     }
-    Ok(Stopped::Host(Some(stopping.pid)))
+    Ok(Stopped::Host(Some(pid)))
 }
 
 fn log_path(paths: &server::ServerPaths) -> PathBuf {

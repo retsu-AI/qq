@@ -3662,3 +3662,179 @@ fn ab5_schema_fifty_cannot_hide_a_missing_execution_receipt_column() {
         assert_eq!(version, previous.to_string());
     }
 }
+
+#[tokio::test]
+async fn a_store_with_retired_supervised_mode_opens_and_replays_as_auto() {
+    // v0.1.3 through v0.1.8 stored `supervised` for write sub-agents: in the
+    // session row and in every session summary journaled with an event,
+    // which runs also kept as their completion receipts from schema 62 on.
+    // That mode no longer exists; children now run under `auto` with internal
+    // supervision. Upgraded stores must snapshot, replay and report
+    // completions instead of failing on the retired value. A store from
+    // before 62 has no receipts yet: migration 62 decodes them from the
+    // journal, so it must find the summaries already rewritten.
+    for schema in [61, 63] {
+        retired_supervised_mode_upgrades_from(schema).await;
+    }
+}
+
+async fn retired_supervised_mode_upgrades_from(schema: u32) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("sessions.sqlite3");
+    let (workspace_id, session_id, store_id) = {
+        let runtime = SessionRuntime::open(
+            SessionRuntimeOptions::new(path.clone()),
+            Arc::new(ScriptedLoader),
+        )
+        .await
+        .unwrap();
+        let (workspace_id, _) = resolve_workspace(&runtime, directory.path()).await;
+        let CommandOutcome::SessionCreated { session_id } =
+            create_session(&runtime, workspace_id, None).await.outcome
+        else {
+            panic!("unexpected receipt")
+        };
+        let queued = runtime
+            .command(
+                CommandId::generate().unwrap(),
+                SessionCommand::SubmitPrompt {
+                    session_id,
+                    input: vec![InputPart::text("written by v0.1.8".to_owned())],
+                    limits: qq_protocol::RunLimits::default(),
+                    correlation: Correlation::default(),
+                    output: None,
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = runtime
+            .subscribe(SubscribeRequest {
+                workspace_id,
+                after: queued.committed_through,
+            })
+            .unwrap();
+        collect_through_finished(&mut events).await;
+        let store_id = runtime.store_id();
+        runtime.close().await.unwrap();
+        (workspace_id, session_id, store_id)
+    };
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE sessions SET approval_mode='supervised';
+                 UPDATE events SET envelope_json=json_set(envelope_json,'$.event.session.approval_mode','supervised')
+                  WHERE json_extract(envelope_json,'$.event.session.approval_mode') IS NOT NULL;
+                 UPDATE runs SET completion_json=json_set(completion_json,'$.event.session.approval_mode','supervised')
+                  WHERE completion_json IS NOT NULL;",
+            )
+            .unwrap();
+        if schema < 62 {
+            // Before 62, receipts lived only in the journal.
+            connection
+                .execute(
+                    "UPDATE runs SET completion_sequence=0,completion_json=NULL",
+                    [],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "UPDATE metadata SET value=?1 WHERE key='schema_version'",
+                [schema.to_string()],
+            )
+            .unwrap();
+        let journaled: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE json_extract(envelope_json,'$.event.session.approval_mode')='supervised'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            journaled >= 2,
+            "from {schema}: the fixture journals legacy summaries"
+        );
+    }
+
+    let runtime = SessionRuntime::open(
+        SessionRuntimeOptions::new(path.clone()),
+        Arc::new(ScriptedLoader),
+    )
+    .await
+    .unwrap();
+    let snapshot = runtime
+        .snapshot(SnapshotRequest {
+            workspace_id,
+            focused_session_id: Some(session_id),
+            include_sessions: Vec::new(),
+            session_limit: 8,
+            message_limit: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.sessions[0].approval_mode, ApprovalMode::Auto);
+    let start = EventCursor {
+        store_id,
+        workspace_id,
+        sequence: 0,
+    };
+    let mut events = runtime
+        .subscribe(SubscribeRequest {
+            workspace_id,
+            after: start,
+        })
+        .unwrap();
+    let replayed = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut replayed = Vec::new();
+        while let Some(event) = events.next().await {
+            let event = event.unwrap();
+            let last = event.cursor.sequence == snapshot.cursor.sequence;
+            replayed.push(event);
+            if last {
+                break;
+            }
+        }
+        replayed
+    })
+    .await
+    .unwrap();
+    let modes = replayed
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::SessionCreated { session }
+            | SessionEvent::RunFinished { session, .. } => Some(session.approval_mode),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(modes.len() >= 2, "from {schema}: {modes:?}");
+    assert!(
+        modes.iter().all(|mode| *mode == ApprovalMode::Auto),
+        "from {schema}: {modes:?}"
+    );
+    let completions = runtime
+        .completed_runs(session_id, start, snapshot.cursor)
+        .await
+        .unwrap();
+    assert_eq!(completions.len(), 1, "from {schema}: the receipt survives");
+    let SessionEvent::RunFinished { session, .. } = &completions[0].receipt.event else {
+        panic!("a completion is a run_finished receipt")
+    };
+    assert_eq!(session.approval_mode, ApprovalMode::Auto);
+    runtime.close().await.unwrap();
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let remaining: u64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM sessions WHERE approval_mode='supervised')
+                  + (SELECT COUNT(*) FROM events WHERE instr(envelope_json,'\"approval_mode\":\"supervised\"')>0)
+                  + (SELECT COUNT(*) FROM runs WHERE instr(completion_json,'\"approval_mode\":\"supervised\"')>0)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        remaining, 0,
+        "from {schema}: the retired mode is rewritten once, at open"
+    );
+}

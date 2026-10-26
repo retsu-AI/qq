@@ -1415,6 +1415,52 @@ pub async fn discover_at(paths: &ServerPaths) -> Result<Option<ServerConnection>
     discover_at_endpoint(paths, "/v1/health").await
 }
 
+/// What [`request_stop_at`] found at the discovery path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopRequest {
+    /// No server advertised itself, or the one advertised did not answer.
+    NotRunning,
+    /// The advertised server accepted the request and will stop.
+    Stopping(ServerInfo),
+    /// The advertised server answered but cannot be stopped remotely: it is
+    /// embedded in an interactive client.
+    Refused,
+}
+
+/// Asks the advertised server to stop, whatever protocol it speaks.
+///
+/// Discovery refuses a server of another protocol, since no other request
+/// would be understood. Stopping is the exception: every daemon serves
+/// [`DAEMON_SHUTDOWN_PATH`] with the same token and answer, so a newer binary
+/// can still replace the daemon an older one started.
+pub async fn request_stop_at(paths: &ServerPaths) -> Result<StopRequest, ServerError> {
+    let Some((address, token)) = advertised_endpoint(paths)? else {
+        return Ok(StopRequest::NotRunning);
+    };
+    let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
+    let Ok(response) = client
+        .post(format!("http://{address}{DAEMON_SHUTDOWN_PATH}"))
+        .bearer_auth(token)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await
+    else {
+        return Ok(StopRequest::NotRunning);
+    };
+    match response.status() {
+        StatusCode::ACCEPTED => {}
+        StatusCode::NOT_FOUND => return Ok(StopRequest::Refused),
+        _ => return Ok(StopRequest::NotRunning),
+    }
+    let Ok(bytes) = read_response_bounded(response, MAX_HEALTH_BYTES).await else {
+        return Ok(StopRequest::NotRunning);
+    };
+    match serde_json::from_slice::<ServerInfo>(&bytes) {
+        Ok(info) if info.is_well_formed() => Ok(StopRequest::Stopping(info)),
+        _ => Ok(StopRequest::NotRunning),
+    }
+}
+
 async fn discover_at_endpoint(
     paths: &ServerPaths,
     health_path: &str,
@@ -1422,8 +1468,21 @@ async fn discover_at_endpoint(
     let client = probe_client().map_err(|()| ServerError::ExistingServerUnavailable)?;
 
     for attempt in 0..DISCOVERY_RETRIES {
-        let Some(connection) = connection_for_discovery(read_connection(paths))? else {
-            return Ok(None);
+        let connection = match connection_for_discovery(read_connection(paths)) {
+            Ok(Some(connection)) => connection,
+            Ok(None) => return Ok(None),
+            // Metadata of another protocol is only an error while its server
+            // answers; one it left behind is stale, like one of ours.
+            Err(ServerError::ProtocolMismatch { expected, found }) => {
+                if other_protocol_answers(&client, paths, health_path).await? {
+                    return Err(ServerError::ProtocolMismatch { expected, found });
+                }
+                if attempt + 1 < DISCOVERY_RETRIES {
+                    tokio::time::sleep(DISCOVERY_RETRY_DELAY).await;
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
         };
         match probe_health(&client, &connection, health_path).await {
             Ok(info) if info == *connection.server_info() => return Ok(Some(connection)),
@@ -1441,6 +1500,52 @@ async fn discover_at_endpoint(
     }
 
     Ok(None)
+}
+
+/// Whether the server named by metadata of another protocol still answers
+/// its health route. Its body is not decoded: that shape is versioned too.
+async fn other_protocol_answers(
+    client: &reqwest::Client,
+    paths: &ServerPaths,
+    health_path: &str,
+) -> Result<bool, ServerError> {
+    let Some((address, token)) = advertised_endpoint(paths)? else {
+        return Ok(false);
+    };
+    Ok(client
+        .get(format!("http://{address}{health_path}"))
+        .bearer_auth(token)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await
+        .is_ok_and(|response| response.status() == StatusCode::OK))
+}
+
+/// The address and token of whatever server the metadata names, without
+/// checking its protocol. `None` when no metadata exists.
+fn advertised_endpoint(paths: &ServerPaths) -> Result<Option<(SocketAddr, String)>, ServerError> {
+    let metadata = match read_metadata_file(paths) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => return Ok(None),
+        Err(ServerError::StateIo { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    if metadata.format_version != METADATA_FORMAT_VERSION {
+        return Err(ServerError::MetadataVersionMismatch {
+            expected: METADATA_FORMAT_VERSION,
+            found: metadata.format_version,
+        });
+    }
+    let address = metadata
+        .address
+        .parse::<SocketAddr>()
+        .map_err(|_| ServerError::MetadataCorrupt)?;
+    if !address.ip().is_loopback() || address.port() == 0 {
+        return Err(ServerError::MetadataCorrupt);
+    }
+    Ok(Some((address, metadata.token)))
 }
 
 fn connection_for_discovery(
@@ -3066,6 +3171,68 @@ mod tests {
         assert_eq!(current, *server.connection());
         assert_ne!(current, stale);
         server.shutdown().await.unwrap();
+    }
+
+    /// Republishes a live server's metadata as if a build of `protocol` had
+    /// written it.
+    fn advertise_protocol(paths: &ServerPaths, connection: &ServerConnection, protocol: u16) {
+        let mut metadata = MetadataFile::new(connection);
+        metadata.protocol_version = protocol;
+        write_metadata_atomically(paths, &metadata).unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_protocols_daemon_can_be_stopped_but_not_an_embedded_server() {
+        let directory = TestDirectory::new();
+        let paths = directory.paths();
+        let ReserveOutcome::Reserved(reservation) =
+            reserve(ServerOptions::new(paths.clone()).with_stop_route())
+                .await
+                .unwrap()
+        else {
+            panic!("fixture must own its server");
+        };
+        let daemon = reservation
+            .start(unavailable_handler(), test_identity())
+            .unwrap();
+        advertise_protocol(&paths, daemon.connection(), PROTOCOL_VERSION - 1);
+        assert!(matches!(
+            discover_at(&paths).await,
+            Err(ServerError::ProtocolMismatch { found, .. }) if found == PROTOCOL_VERSION - 1
+        ));
+        assert_eq!(
+            request_stop_at(&paths).await.unwrap(),
+            StopRequest::Stopping(daemon.connection().server_info().clone())
+        );
+        daemon.stop_requested().await;
+        daemon.shutdown().await.unwrap();
+
+        let embedded_directory = TestDirectory::new();
+        let embedded_paths = embedded_directory.paths();
+        let embedded = start_test_server(embedded_paths.clone(), unavailable_handler()).await;
+        advertise_protocol(&embedded_paths, embedded.connection(), PROTOCOL_VERSION + 1);
+        assert_eq!(
+            request_stop_at(&embedded_paths).await.unwrap(),
+            StopRequest::Refused
+        );
+        let connection = embedded.connection().clone();
+        embedded.shutdown().await.unwrap();
+
+        // What a stopped server of another version leaves behind: its
+        // metadata, naming a listener that is gone. That is stale, not a
+        // mismatch, so the next start replaces it.
+        advertise_protocol(&embedded_paths, &connection, PROTOCOL_VERSION + 1);
+        assert_eq!(
+            request_stop_at(&embedded_paths).await.unwrap(),
+            StopRequest::NotRunning
+        );
+        assert!(discover_at(&embedded_paths).await.unwrap().is_none());
+        let replacement = start_test_server(embedded_paths.clone(), unavailable_handler()).await;
+        assert_eq!(
+            discover_at(&embedded_paths).await.unwrap().as_ref(),
+            Some(replacement.connection())
+        );
+        replacement.shutdown().await.unwrap();
     }
 
     #[tokio::test]

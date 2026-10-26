@@ -225,5 +225,7 @@ nix = { workspace = true, features = ["event", "process", "signal"] }
 [target.'cfg(windows)'.dev-dependencies]
 rappct.workspace = true
 win-custody.workspace = true
+# Shell-like jobs that permit breakaway, for the detached daemon test.
+win32job.workspace = true
 windows-permissions.workspace = true
 winsafe = { workspace = true, features = ["advapi"] }

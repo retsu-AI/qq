@@ -223,6 +223,8 @@ not depend on the terminal or directory it was started from, and writes to
 path). Starting a second daemon reports the running one. Stopping settles
 every queued and running run as cancelled, as `Ctrl-C` on `qq serve` does.
 `stop` does not stop the server inside an interactive `qq`; quit that `qq`.
+After an upgrade, `qq daemon restart` stops the daemon the previous version
+started and starts the new binary, even across a protocol change.
 
 The daemon's approval wait (`approval_timeout_seconds`) comes from global and
 managed configuration only, never from the directory it was started in. The
