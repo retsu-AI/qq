@@ -86,3 +86,80 @@ async fn a_read_only_run_takes_no_snapshot() {
             .is_empty()
     );
 }
+
+/// A slow snapshot (here, a Git clean filter that waits) must not delay a
+/// cancel: the run stops without waiting for the snapshot to finish.
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelling_a_run_does_not_wait_for_its_snapshot() {
+    let mut harness = scripted_runs_harness(
+        ApprovalMode::Full,
+        vec![vec![(
+            "write_file",
+            r#"{"path":"created.txt","content":"new\n"}"#.to_owned(),
+        )]],
+    )
+    .await;
+    workspace_repository(&harness);
+    let root = harness.workspace_path.clone();
+    let fifos = tempfile::tempdir().unwrap();
+    let entered = fifos.path().join("entered");
+    let release = fifos.path().join("release");
+    for fifo in [&entered, &release] {
+        let status = std::process::Command::new("mkfifo")
+            .arg(fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    // Staging `held.dat` blocks in its clean filter until released.
+    std::fs::write(root.join(".gitattributes"), "held.dat filter=hold\n").unwrap();
+    std::fs::write(root.join("held.dat"), "held\n").unwrap();
+    test_support::git(
+        &root,
+        &[
+            "config",
+            "filter.hold.clean",
+            &format!(
+                "sh -c 'echo > \"{}\"; cat \"{}\" > /dev/null; cat'",
+                entered.display(),
+                release.display()
+            ),
+        ],
+    );
+
+    let run_id = submit_prompt(&harness, "change things").await;
+    let reader = tokio::task::spawn_blocking(move || std::fs::read(entered));
+    tokio::time::timeout(Duration::from_secs(30), reader)
+        .await
+        .expect("the snapshot reaches the clean filter")
+        .unwrap()
+        .unwrap();
+    harness
+        .runtime
+        .command(
+            CommandId::generate().unwrap(),
+            SessionCommand::CancelRun { run_id },
+        )
+        .await
+        .unwrap();
+    // Far below the 30 s Git step timeout the snapshot would otherwise wait.
+    let finished = tokio::time::timeout(Duration::from_secs(10), async {
+        collect_until(&mut harness.events, finished_for(run_id)).await
+    })
+    .await;
+    // Unblock the orphaned filter, if it is still waiting, before asserting.
+    if let Ok(writer) = rustix::fs::open(
+        &release,
+        rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    ) {
+        drop(writer);
+    }
+    let observed = finished.expect("the cancel settles while the snapshot is still blocked");
+    assert!(matches!(
+        finished_outcome(&observed, run_id),
+        Some(RunOutcome::Cancelled)
+    ));
+    assert!(!root.join("created.txt").exists());
+}
