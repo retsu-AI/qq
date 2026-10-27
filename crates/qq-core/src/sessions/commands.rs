@@ -1583,9 +1583,17 @@ pub(super) fn execute_command(
                             | approval::PolicyDecision::AskUser { .. } => continue,
                             // The pending response supplies the fresh human
                             // approval required by an Ask ancestor.
-                            approval::PolicyDecision::RequireApproval if *mode == ApprovalMode::Ask => continue,
-                            approval::PolicyDecision::RequireApproval => Some(approval::PARENT_DENIED_RESULT.to_owned()),
-                            approval::PolicyDecision::Deny { reason } => Some(approval::deny_result(&reason)),
+                            approval::PolicyDecision::RequireApproval
+                                if *mode == ApprovalMode::Ask =>
+                            {
+                                continue;
+                            }
+                            approval::PolicyDecision::RequireApproval => {
+                                Some(approval::PARENT_DENIED_RESULT.to_owned())
+                            }
+                            approval::PolicyDecision::Deny { reason } => {
+                                Some(approval::deny_result(&reason))
+                            }
                         };
                         break;
                     }

@@ -859,7 +859,18 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
         })
         .collect();
     assert_eq!(undo, vec![root]);
-    assert!(!effects.requests_anything(), "undo is local, not a server command");
+    assert!(
+        !effects.requests_anything(),
+        "undo is local, not a server command"
+    );
+    // One restore at a time.
+    let again = app.execute(Command::UndoRun);
+    assert!(
+        !again
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    );
+    assert!(app.status.as_deref().unwrap().contains("already restoring"));
 
     app.apply_undo_result(Ok("restored snapshot r1: 2 paths restored".to_owned()));
     assert_eq!(
@@ -871,15 +882,29 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
     let mut remote = App::new(TuiOptions::default());
     remote.apply_snapshot(snapshot());
     let effects = remote.execute(Command::UndoRun);
-    assert!(!effects.iter().any(|effect| matches!(effect, Effect::UndoRun(_))));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    );
     assert!(remote.status.as_deref().unwrap().contains("qq undo"));
 
     // A running session is refused: the restore would race its edits.
     let (mut running, _, _, _) = running_app();
     running.workspace_root = Some(std::path::PathBuf::from("/work/tree"));
     let effects = running.execute(Command::UndoRun);
-    assert!(!effects.iter().any(|effect| matches!(effect, Effect::UndoRun(_))));
-    assert!(running.status.as_deref().unwrap().contains("every run to finish"));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    );
+    assert!(
+        running
+            .status
+            .as_deref()
+            .unwrap()
+            .contains("every run to finish")
+    );
 }
 
 #[test]

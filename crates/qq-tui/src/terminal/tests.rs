@@ -701,7 +701,9 @@ async fn undo_restores_the_newest_run_snapshot_and_names_the_reversal() {
 
     let text = undo_newest_run(root).await.unwrap();
     assert!(
-        text.starts_with(&format!("restored snapshot {run}: 2 paths restored; reverse with qq undo undo-")),
+        text.starts_with(&format!(
+            "restored snapshot {run}: 2 paths restored; reverse with qq undo undo-"
+        )),
         "{text}"
     );
     assert_eq!(

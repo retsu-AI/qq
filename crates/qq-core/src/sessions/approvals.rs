@@ -106,8 +106,11 @@ impl ToolGate for SessionToolGate {
             let mut mode = mode;
             for (parent_mode, _) in ancestors {
                 let message = match approval::evaluate(parent_mode, &class) {
-                    approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
-                    approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask && !no_human_approval => {
+                    approval::PolicyDecision::Execute
+                    | approval::PolicyDecision::AskUser { .. } => continue,
+                    approval::PolicyDecision::RequireApproval
+                        if parent_mode == ApprovalMode::Ask && !no_human_approval =>
+                    {
                         // Ask applies to each child action too. Auto children
                         // deny instead of inheriting a human approval wait.
                         if mode != ApprovalMode::ReadOnly {
@@ -115,7 +118,9 @@ impl ToolGate for SessionToolGate {
                         }
                         continue;
                     }
-                    approval::PolicyDecision::RequireApproval => approval::PARENT_DENIED_RESULT.to_owned(),
+                    approval::PolicyDecision::RequireApproval => {
+                        approval::PARENT_DENIED_RESULT.to_owned()
+                    }
                     approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
                 };
                 return match inner
@@ -394,10 +399,8 @@ impl ToolGate for SessionToolGate {
                                         // reaches the reviewer.
                                         ReviewDecision::Deny { reason } =>
                                         {
-                                            let message = format!(
-                                                "{} {}",
-                                                approval::reviewer_denied_result(),
-                                                truncate_utf8(reason, MAX_REVIEW_REASON_BYTES)
+                                            let message = approval::reviewer_denied_result(
+                                                &truncate_utf8(reason, MAX_REVIEW_REASON_BYTES),
                                             );
                                             match inner
                                                 .store
@@ -452,7 +455,7 @@ impl ToolGate for SessionToolGate {
                                 () = tokio::time::sleep_until(delegate_deadline) => {
                                     review = None;
                                     if no_human_approval {
-                                        let message = format!("{} {}", approval::reviewer_denied_result(), approval::DELEGATE_TIMED_OUT_REASON);
+                                        let message = approval::reviewer_denied_result(approval::DELEGATE_TIMED_OUT_REASON);
                                         match inner.store.deny_approval_by_reviewer(
                                             &claimed, call.id, message.clone(), DelegateIdentity::Reviewer,
                                         ).await {

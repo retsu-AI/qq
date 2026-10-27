@@ -672,7 +672,10 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
             .await
             .map_err(|error| error.to_string())?;
         let output = home
-            .run(&provider.base_url, &["run", "--format", "jsonl", "change things"])
+            .run(
+                &provider.base_url,
+                &["run", "--format", "jsonl", "change things"],
+            )
             .await?;
         ensure!(output.status == Some(0), "run: {}", output.stderr);
         let errors: Vec<_> = jsonl(&output.stdout)?
@@ -691,7 +694,9 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     ensure!(
         !home.workspace.join("notes.txt").exists()
             && home.workspace.join("created.txt").exists()
-            && fs::read_to_string(home.workspace.join("inventory.rs")).ok().as_deref()
+            && fs::read_to_string(home.workspace.join("inventory.rs"))
+                .ok()
+                .as_deref()
                 == Some("pub struct Changed;\n"),
         "the run's edits did not land: {:?}",
         home.files()?.keys().collect::<Vec<_>>()
@@ -699,8 +704,16 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     let after_run = home.files()?;
 
     let undo = home.run("http://127.0.0.1:1/v1", &["undo"]).await?;
-    ensure!(undo.status == Some(0), "qq undo: {}{}", undo.stdout, undo.stderr);
-    ensure!(home.files()? == files, "files differ from the snapshot after qq undo");
+    ensure!(
+        undo.status == Some(0),
+        "qq undo: {}{}",
+        undo.stdout,
+        undo.stderr
+    );
+    ensure!(
+        home.files()? == files,
+        "files differ from the snapshot after qq undo"
+    );
     ensure!(
         home.git(&["ls-files", "--stage"])? == index,
         "qq undo changed the index"

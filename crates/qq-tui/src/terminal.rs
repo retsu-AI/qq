@@ -187,6 +187,9 @@ where
     let mut last_client_failure: Option<String> = None;
     // Set when input or a client update arrived since the last herdr report.
     let mut state_may_change = false;
+    // At most one `/undo` restore runs at a time, off the loop so input and
+    // frames keep flowing while Git works.
+    let mut undo: Option<tokio::task::JoinHandle<Result<String, String>>> = None;
 
     loop {
         if redraw == Some(Redraw::Immediate) {
@@ -241,6 +244,17 @@ where
             }
             highlighted = renderer.highlighter.next() => {
                 Effects::changed(renderer.apply_highlight(highlighted))
+            }
+            Some(joined) = async {
+                match undo.as_mut() {
+                    Some(task) => Some(task.await),
+                    None => None,
+                }
+            }, if undo.is_some() => {
+                undo = None;
+                app.apply_undo_result(
+                    joined.unwrap_or_else(|_| Err("/undo stopped unexpectedly".to_owned())),
+                )
             }
             _ = animation_tick.tick(), if app.has_activity() => {
                 Effects::changed(app.advance_animation())
@@ -314,8 +328,9 @@ where
                     }
                 }
                 Effect::UndoRun(root) => {
-                    let result = undo_newest_run(&root).await;
-                    queue.extend(app.apply_undo_result(result));
+                    if undo.is_none() {
+                        undo = Some(tokio::spawn(async move { undo_newest_run(&root).await }));
+                    }
                 }
                 Effect::Attention(attention) => {
                     output.write_all(&attention_bytes(&attention)).await?;

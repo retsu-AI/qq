@@ -428,7 +428,7 @@ pub(crate) fn blocking_permits() -> Arc<Semaphore> {
 #[derive(Debug, Error)]
 pub enum WorkspacePathError {
     #[error(
-        "permission_denied: protected_path: task writes cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, the task publication lock, or .git trust files; use an explicit configuration or Git operation outside the agent file tools"
+        "permission_denied: config: protected_path: agent file tools cannot change project configuration (.qq/config.ron, .qq/config.d, .qq/packs, qq.ron), configured pack resources, the task publication lock, or .git trust files; ask the user to change them. Do not retry it in another form."
     )]
     ProtectedMutation,
     #[error("path must not be empty")]

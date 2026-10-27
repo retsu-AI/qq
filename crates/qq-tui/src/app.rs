@@ -329,6 +329,8 @@ pub(crate) struct App {
     /// Local root for `@` mention resolution and completion, when this
     /// client has the tree.
     pub(crate) workspace_root: Option<std::path::PathBuf>,
+    /// A `/undo` restore is running; a second one waits for it.
+    undoing: bool,
     pub sessions: SessionStore,
     /// Transcript panes left to right, each following its own view with its
     /// own scroll state; the renderer reconciles them every frame. One pane
@@ -440,6 +442,7 @@ impl App {
             workspace_path: String::new(),
             check_interruption: None,
             workspace_root: options.workspace_root,
+            undoing: false,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             panes: vec![TranscriptPane::default()],
             focused_pane: 0,
@@ -2432,9 +2435,15 @@ impl App {
     /// races an agent's edits.
     fn undo_run(&mut self) -> Effects {
         let Some(root) = self.workspace_root.clone() else {
-            self.set_warning("/undo needs the workspace tree; run qq undo on that machine".to_owned());
+            self.set_warning(
+                "/undo needs the workspace tree; run qq undo on that machine".to_owned(),
+            );
             return Effects::redraw(Redraw::Immediate);
         };
+        if self.undoing {
+            self.set_warning("/undo is already restoring the workspace".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
         if self
             .sessions
             .values()
@@ -2443,6 +2452,7 @@ impl App {
             self.set_warning("/undo needs every run to finish; wait or cancel first".to_owned());
             return Effects::redraw(Redraw::Immediate);
         }
+        self.undoing = true;
         self.set_info("restoring the snapshot before the newest run…".to_owned());
         let mut effects = Effects::redraw(Redraw::Immediate);
         effects.push(Effect::UndoRun(root));
@@ -2451,6 +2461,7 @@ impl App {
 
     /// The outcome of `/undo`, already phrased for the status line.
     pub(crate) fn apply_undo_result(&mut self, result: Result<String, String>) -> Effects {
+        self.undoing = false;
         match result {
             Ok(text) => self.set_info(text),
             Err(text) => self.set_warning(text),

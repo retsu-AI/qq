@@ -127,9 +127,11 @@ pub(crate) const DELEGATE_TIMED_OUT_REASON: &str = "the delegate did not answer 
 /// the ceiling and this only chooses who decides inside it.
 pub use qq_protocol::ApprovalDelegate;
 
-/// The model-facing prefix of a reviewer denial in Auto mode.
-pub(crate) fn reviewer_denied_result() -> &'static str {
-    "The approval reviewer denied this tool call:"
+/// The model-facing text of a reviewer denial in Auto mode.
+pub(crate) fn reviewer_denied_result(reason: &str) -> String {
+    format!(
+        "permission_denied: mode: the approval reviewer denied this call ({reason}); find another way, or tell the user what you need. Do not retry it in another form."
+    )
 }
 
 /// How one requested tool call relates to the workspace and the outside world.
@@ -1674,7 +1676,10 @@ mod tests {
             },
         });
         for (who, text) in [
-            ("fixed_stop", deny_result(&DenyReason::Stop(Stop::ForcePush))),
+            (
+                "fixed_stop",
+                deny_result(&DenyReason::Stop(Stop::ForcePush)),
+            ),
             ("user", USER_DENIED_RESULT.to_owned()),
             ("user", TIMEOUT_DENIED_RESULT.to_owned()),
             ("mode", deny_result(&DenyReason::Mode)),
@@ -1684,16 +1689,18 @@ mod tests {
             ("mode", PARENT_DENIED_RESULT.to_owned()),
             ("config", MANAGED_SHELL_DENIED_RESULT.to_owned()),
             ("config", host),
+            ("mode", reviewer_denied_result(DELEGATE_TIMED_OUT_REASON)),
+            (
+                "config",
+                crate::workspace::WorkspacePathError::ProtectedMutation.to_string(),
+            ),
         ] {
             let rest = text
                 .strip_prefix(&format!("permission_denied: {who}: "))
                 .unwrap_or_else(|| panic!("{who}: {text}"));
             let (reason, instead) = rest.split_once("; ").expect(&text);
             assert!(!reason.is_empty() && !instead.is_empty(), "{text}");
-            assert!(
-                text.ends_with("Do not retry it in another form."),
-                "{text}"
-            );
+            assert!(text.ends_with("Do not retry it in another form."), "{text}");
         }
         assert_eq!(
             USER_DENIED_RESULT,
