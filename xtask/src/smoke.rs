@@ -321,8 +321,9 @@ impl Home {
     }
 
     /// Runs git in the workspace with a fixture identity and no user config.
-    fn git(&self, args: &[&str]) -> Result<String, String> {
-        let output = std::process::Command::new("git")
+    async fn git(&self, args: &[&str]) -> Result<String, String> {
+        let mut command = Command::new("git");
+        command
             .current_dir(&self.workspace)
             .env("HOME", &self.root)
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -335,7 +336,11 @@ impl Home {
             .env("GIT_COMMITTER_NAME", "Smoke")
             .env("GIT_COMMITTER_EMAIL", "smoke@localhost")
             .args(args)
-            .output()
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(COMMAND_TIMEOUT, command.output())
+            .await
+            .map_err(|_| format!("git {args:?} did not exit within {COMMAND_TIMEOUT:?}"))?
             .map_err(|error| format!("git {args:?}: {error}"))?;
         if !output.status.success() {
             return Err(format!(
@@ -346,8 +351,9 @@ impl Home {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Every file under the workspace except `.git`, with its bytes.
-    fn files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
+    /// Every file under the workspace except `.git`, with its bytes. The walk
+    /// is synchronous, so it runs off the Tokio workers.
+    async fn files(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>, String> {
         fn walk(
             root: &Path,
             directory: &Path,
@@ -367,10 +373,14 @@ impl Home {
             }
             Ok(())
         }
-        let mut files = BTreeMap::new();
-        walk(&self.workspace, &self.workspace, &mut files)
-            .map_err(|error| format!("read the workspace: {error}"))?;
-        Ok(files)
+        let root = self.workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut files = BTreeMap::new();
+            walk(&root, &root, &mut files).map(|()| files)
+        })
+        .await
+        .map_err(|error| format!("read the workspace: {error}"))?
+        .map_err(|error| format!("read the workspace: {error}"))
     }
 
     fn command(&self, base_url: &str) -> Command {
@@ -646,18 +656,25 @@ async fn permission_dispatch(home: &Home) -> Result<(), String> {
 async fn run_then_undo(home: &Home) -> Result<(), String> {
     // The user's state: a commit, a stash entry, a staged change, and an
     // untracked draft. Undo must bring the files back and leave the rest.
-    fs::write(home.workspace.join("notes.txt"), "base notes\n").map_err(|e| e.to_string())?;
-    home.git(&["add", "inventory.rs", "notes.txt"])?;
-    home.git(&["commit", "-q", "-m", "base"])?;
-    fs::write(home.workspace.join("notes.txt"), "stashed notes\n").map_err(|e| e.to_string())?;
-    home.git(&["stash", "-q"])?;
-    fs::write(home.workspace.join("notes.txt"), "staged notes\n").map_err(|e| e.to_string())?;
-    home.git(&["add", "notes.txt"])?;
-    fs::write(home.workspace.join("draft.txt"), "user draft\r\nkeep\n")
+    tokio::fs::write(home.workspace.join("notes.txt"), "base notes\n")
+        .await
         .map_err(|e| e.to_string())?;
-    let files = home.files()?;
-    let index = home.git(&["ls-files", "--stage"])?;
-    let stash = home.git(&["stash", "list", "--format=%H"])?;
+    home.git(&["add", "inventory.rs", "notes.txt"]).await?;
+    home.git(&["commit", "-q", "-m", "base"]).await?;
+    tokio::fs::write(home.workspace.join("notes.txt"), "stashed notes\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    home.git(&["stash", "-q"]).await?;
+    tokio::fs::write(home.workspace.join("notes.txt"), "staged notes\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    home.git(&["add", "notes.txt"]).await?;
+    tokio::fs::write(home.workspace.join("draft.txt"), "user draft\r\nkeep\n")
+        .await
+        .map_err(|e| e.to_string())?;
+    let files = home.files().await?;
+    let index = home.git(&["ls-files", "--stage"]).await?;
+    let stash = home.git(&["stash", "list", "--format=%H"]).await?;
 
     let mut worker = Worker::start(home).await?;
     let result = async {
@@ -691,17 +708,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
     .await;
     worker.stop().await?;
     result?;
+    let after_run = home.files().await?;
     ensure!(
-        !home.workspace.join("notes.txt").exists()
-            && home.workspace.join("created.txt").exists()
-            && fs::read_to_string(home.workspace.join("inventory.rs"))
-                .ok()
-                .as_deref()
-                == Some("pub struct Changed;\n"),
+        !after_run.contains_key(Path::new("notes.txt"))
+            && after_run.contains_key(Path::new("created.txt"))
+            && after_run.get(Path::new("inventory.rs")).map(Vec::as_slice)
+                == Some(b"pub struct Changed;\n".as_slice()),
         "the run's edits did not land: {:?}",
-        home.files()?.keys().collect::<Vec<_>>()
+        after_run.keys().collect::<Vec<_>>()
     );
-    let after_run = home.files()?;
 
     let undo = home.run("http://127.0.0.1:1/v1", &["undo"]).await?;
     ensure!(
@@ -711,15 +726,15 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         undo.stderr
     );
     ensure!(
-        home.files()? == files,
+        home.files().await? == files,
         "files differ from the snapshot after qq undo"
     );
     ensure!(
-        home.git(&["ls-files", "--stage"])? == index,
+        home.git(&["ls-files", "--stage"]).await? == index,
         "qq undo changed the index"
     );
     ensure!(
-        home.git(&["stash", "list", "--format=%H"])? == stash,
+        home.git(&["stash", "list", "--format=%H"]).await? == stash,
         "qq undo changed the stash"
     );
 
@@ -736,7 +751,7 @@ async fn run_then_undo(home: &Home) -> Result<(), String> {
         .await?;
     ensure!(redo.status == Some(0), "qq undo {reverse}: {}", redo.stderr);
     ensure!(
-        home.files()? == after_run,
+        home.files().await? == after_run,
         "reversing the undo did not bring the run's edits back"
     );
     Ok(())

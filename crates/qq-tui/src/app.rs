@@ -1904,20 +1904,21 @@ impl App {
     /// failure is attributed to the right session and can undo optimistic
     /// state. Every request that carries a `CommandId` goes through here.
     fn send(&mut self, intent: PendingIntent, command: SessionCommand) -> Effects {
-        // A restore rewrites the workspace; this client starts no run that
-        // could edit it meanwhile. The text goes back to the composer.
-        if self.undoing
-            && matches!(
-                command,
-                SessionCommand::SubmitPrompt { .. }
-                    | SessionCommand::SetGoal { .. }
-                    | SessionCommand::SteerRun { .. }
-            )
-        {
-            if let PendingIntent::Prompt { text, .. } | PendingIntent::Steer { text, .. } = &intent
-                && self.composer.text.is_empty()
-            {
-                self.composer.replace(text.clone());
+        // A restore rewrites the workspace; this client starts, resumes or
+        // releases no work that could edit it meanwhile. Text goes back to
+        // the composer.
+        if self.undoing && intent.may_start_run() {
+            match &intent {
+                PendingIntent::Prompt { text, .. } | PendingIntent::Steer { text, .. }
+                    if self.composer.text.is_empty() =>
+                {
+                    self.composer.replace(text.clone());
+                }
+                // Re-open the prompt so the user can answer after the restore.
+                PendingIntent::Approval { tool_call_id } => {
+                    self.answered_approvals.remove(tool_call_id);
+                }
+                _ => {}
             }
             self.set_warning(
                 "/undo is restoring the workspace; send again when it finishes".to_owned(),
@@ -2504,6 +2505,12 @@ impl App {
         // A run this client just started may not show in the summaries yet:
         // its command is in flight, its mentions are resolving, or its
         // receipt arrived before the events it committed.
+        // Summaries prove nothing until the workspace snapshot has loaded and
+        // the event stream is live; an attach may still be discovering runs.
+        if self.workspace_id.is_none() || self.connection != ConnectionState::Live {
+            self.set_warning("/undo waits until the workspace has loaded".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
         let starting = self.resolving > 0
             || self.pending.values().any(PendingIntent::may_start_run)
             || self.last_sequence < self.run_start_through;

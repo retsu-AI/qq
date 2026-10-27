@@ -848,7 +848,28 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
         workspace_root: Some(root.clone()),
         ..TuiOptions::default()
     });
+    // Before the workspace loads, empty summaries prove nothing.
+    let effects = app.execute(Command::UndoRun);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    );
+    assert!(
+        app.status
+            .as_deref()
+            .unwrap()
+            .contains("workspace has loaded")
+    );
     app.apply_snapshot(snapshot());
+    let effects = app.execute(Command::UndoRun);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_))),
+        "a loaded snapshot is not current until the stream is live"
+    );
+    app.apply_client_update(ClientUpdate::Connection(ConnectionState::Live));
     app.composer.text = "/undo".to_owned();
     let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let undo: Vec<_> = effects
@@ -921,6 +942,7 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
     // A running session is refused: the restore would race its edits.
     let (mut running, _, _, _) = running_app();
     running.workspace_root = Some(std::path::PathBuf::from("/work/tree"));
+    running.apply_client_update(ClientUpdate::Connection(ConnectionState::Live));
     let effects = running.execute(Command::UndoRun);
     assert!(
         !effects
@@ -943,6 +965,7 @@ fn undo_waits_for_a_run_this_client_just_started() {
         ..TuiOptions::default()
     });
     app.apply_snapshot(snapshot());
+    app.apply_client_update(ClientUpdate::Connection(ConnectionState::Live));
     let session_id = app.focused().unwrap();
     let undo_requested = |app: &mut App| {
         app.execute(Command::UndoRun)
@@ -994,6 +1017,62 @@ fn undo_waits_for_a_run_this_client_just_started() {
         },
     )));
     assert!(undo_requested(&mut app));
+}
+
+#[test]
+fn undo_holds_goal_resumes_and_approval_answers_until_the_restore_finishes() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work/tree")),
+        ..TuiOptions::default()
+    });
+    let mut initial = snapshot();
+    let session_id = initial.focused.as_ref().unwrap().summary.id;
+    initial.focused.as_mut().unwrap().goal = Some(fixtures::goal_snapshot(session_id));
+    app.apply_snapshot(initial);
+    app.apply_client_update(ClientUpdate::Connection(ConnectionState::Live));
+    assert!(
+        app.execute(Command::UndoRun)
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    );
+
+    app.composer.replace("/goal resume".to_owned());
+    let requests = app.submit_prompt().split().1;
+    assert!(
+        requests.is_empty(),
+        "a goal resumed mid-restore: {requests:?}"
+    );
+
+    let tool_call = ToolCallSnapshot {
+        run_id: id(4, RunId::from_bytes),
+        state: ToolCallState::AwaitingApproval,
+        ..fixtures::tool_call(id(7, ToolCallId::from_bytes), session_id, "write_file")
+    };
+    app.sessions.upsert_tool_call(tool_call.clone());
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .split();
+    assert!(
+        requests.is_empty(),
+        "an approval was released mid-restore: {requests:?}"
+    );
+    assert_eq!(
+        app.pending_approval().map(|call| call.id),
+        Some(tool_call.id),
+        "the approval stays open to answer after the restore"
+    );
+
+    app.apply_undo_result(Ok("restored".to_owned()));
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+        .split();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::RespondToolApproval { .. },
+            ..
+        })]
+    ));
 }
 
 #[test]
