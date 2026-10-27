@@ -2092,6 +2092,7 @@ async fn execute_started_run(
     // flushed when the turn completes, before any of its calls execute.
     let mut pending_tool_call: Option<ToolCallId> = None;
     let mut pending_tool_output = String::new();
+    let mut snapshot_taken = false;
     // An internal run's streamed output never joins the transcript; the
     // summary accumulates here and persists as a compaction row instead. A
     // turn cut at the output limit is continued mid-token, so its successor
@@ -3010,9 +3011,33 @@ async fn execute_started_run(
             })) => {
                 accounting.record_review(usage, cost_usd_nanos);
             }
-            RunInput::Event(Some(RuntimeEvent::ToolCallStarted { id })) => {
+            RunInput::Event(Some(RuntimeEvent::ToolCallStarted {
+                id,
+                may_change_files,
+            })) => {
                 if internal {
                     continue;
+                }
+                // The run loop polls this stream before the call executes,
+                // so the snapshot sees the workspace as the run found it.
+                // Children change the root's workspace; the root's snapshot,
+                // taken before its write spawn, covers them.
+                if may_change_files && !snapshot_taken && !claimed.identity.child {
+                    snapshot_taken = true;
+                    // A cancel, or the run's duration budget running out,
+                    // drops the snapshot's Git steps and returns to the loop,
+                    // which then sees the cancel or the budget exhaustion. The
+                    // call does not start: the stream waits on this handler.
+                    let mut stop = cancellation.clone();
+                    let cancelled = tokio::select! {
+                        biased;
+                        _ = stop.wait_for(|cancelled| *cancelled) => true,
+                        () = tool_cancellation.cancelled() => true,
+                        () = snapshot_workspace(&claimed) => false,
+                    };
+                    if cancelled {
+                        continue;
+                    }
                 }
                 match inner.store.start_tool_call(&claimed, id).await {
                     Ok(_) => {}
@@ -3751,6 +3776,23 @@ async fn execute_started_run(
                 .await;
                 return;
             }
+        }
+    }
+}
+
+/// Records the run's workspace for `qq undo`. Best effort: a workspace
+/// outside Git has nothing to record, and a failed snapshot must not stop
+/// the run, so failures are logged.
+async fn snapshot_workspace(claimed: &ClaimedRun) {
+    let workspace = Path::new(&claimed.workspace);
+    let run = claimed.identity.run_id;
+    match crate::undo::snapshot(workspace, crate::undo::SnapshotKind::Run(run)).await {
+        Ok(Some(snapshot)) => {
+            tracing::debug!(%run, commit = %snapshot.commit, "workspace snapshot recorded");
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%run, %error, "could not snapshot the workspace; qq undo cannot restore this run");
         }
     }
 }

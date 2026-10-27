@@ -53,6 +53,7 @@ mod task_git_helper_image;
 pub mod task_git_job;
 pub mod task_workspace;
 mod tools;
+pub mod undo;
 
 #[doc(hidden)]
 pub use tools::process_context::ProcessProducer;

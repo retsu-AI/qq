@@ -27,6 +27,7 @@ mod init;
 
 mod logging;
 mod output;
+mod undo;
 
 fn main() -> ExitCode {
     if let Some(request) = cli::task_git_request() {
@@ -218,6 +219,7 @@ async fn run(cli: cli::Cli) -> Result<ExitCode, Box<dyn Error>> {
             return doctor_command(args, &overrides).await;
         }
         Some(cli::Command::Init(args)) => run_blocking_command(move || init_command(args)).await?,
+        Some(cli::Command::Undo(args)) => return Ok(undo::run(args).await),
         Some(cli::Command::Version) => print!("{}", version_report()),
         None => interactive(&overrides, cli.session, cli.tui_qa_root).await?,
     }

@@ -39,6 +39,7 @@ mod runs;
 mod settlement;
 mod streaming;
 mod task_git;
+mod undo;
 
 use std::sync::Mutex as StdMutex;
 
