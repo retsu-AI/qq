@@ -712,19 +712,19 @@ pub(super) async fn run_shell(
                         "could not read command {stream}: {source}; {message}"
                     ));
                 }
-                let mut content = Header::new(launch.header_tool(), None)
-                    .field("exit", "unobserved")
-                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
-                    .field("bytes", capture.total())
-                    .into_line();
-                content.push_str(&capture.into_output());
-                if !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                content.push_str(&format!(
-                    "could not read command {stream}: {source}; its process group was killed"
-                ));
-                let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
+                let mut result = ToolOutput::bounded(
+                    stopped_result(
+                        launch.header_tool(),
+                        "unobserved",
+                        elapsed,
+                        capture,
+                        &format!(
+                            "could not read command {stream}: {source}; its process group was killed"
+                        ),
+                    ),
+                    &SHELL_BOUNDS,
+                    true,
+                );
                 result.disposition = ResultDisposition::Unobserved;
                 result
             }
@@ -732,23 +732,17 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let mut content = Header::new(launch.header_tool(), None)
-                    .field("exit", "timeout")
-                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
-                    .field("bytes", capture.total())
-                    .into_line();
-                content.push_str(&capture.into_output());
-                if !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                if let Some(seconds) = timeout_seconds.filter(|_| !cancellation.timed_out()) {
-                    content.push_str(&format!(
+                let reason = match timeout_seconds.filter(|_| !cancellation.timed_out()) {
+                    Some(seconds) => format!(
                         "command timed out after {seconds} s; its process group was killed"
-                    ));
-                } else {
-                    content.push_str("command deadline expired; its process group was killed");
-                }
-                let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
+                    ),
+                    None => "command deadline expired; its process group was killed".to_owned(),
+                };
+                let mut result = ToolOutput::bounded(
+                    stopped_result(launch.header_tool(), "timeout", elapsed, capture, &reason),
+                    &SHELL_BOUNDS,
+                    true,
+                );
                 result.result_digest = identity.finish(None, None, true);
                 result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::TimedOut);
                 result
@@ -765,17 +759,17 @@ pub(super) async fn run_shell(
                 if let Err(message) = stop_shell(&mut child, &mut guard, process).await {
                     return ToolOutput::unobserved(message);
                 }
-                let mut content = Header::new(launch.header_tool(), None)
-                    .field("exit", "cancelled")
-                    .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
-                    .field("bytes", capture.total())
-                    .into_line();
-                content.push_str(&capture.into_output());
-                if !content.ends_with('\n') {
-                    content.push('\n');
-                }
-                content.push_str("tool execution was cancelled; its process group was killed");
-                let mut result = ToolOutput::bounded(content, &SHELL_BOUNDS, true);
+                let mut result = ToolOutput::bounded(
+                    stopped_result(
+                        launch.header_tool(),
+                        "cancelled",
+                        elapsed,
+                        capture,
+                        "tool execution was cancelled; its process group was killed",
+                    ),
+                    &SHELL_BOUNDS,
+                    true,
+                );
                 result.disposition = ResultDisposition::Interrupted;
                 result.result_digest = identity.finish(None, None, false);
                 result.native_outcome = Some(crate::command_owner::NativeCommandOutcome::Cancelled);
@@ -958,6 +952,28 @@ pub(crate) fn forward_shell_chunk(
         Err(mpsc::error::TrySendError::Full(_)) => *streamed += bytes.len(),
         Err(mpsc::error::TrySendError::Closed(_)) => *streamed = MAX_SHELL_OUTPUT_BYTES,
     }
+}
+
+/// `<tool> exit=<why> elapsed=<s> bytes=<n>`, the captured output, then the
+/// reason the process group was stopped.
+fn stopped_result(
+    tool: &str,
+    exit: &str,
+    elapsed: std::time::Duration,
+    capture: BoundedCapture,
+    reason: &str,
+) -> String {
+    let mut content = Header::new(tool, None)
+        .field("exit", exit)
+        .field("elapsed", format_args!("{:.1}", elapsed.as_secs_f64()))
+        .field("bytes", capture.total())
+        .into_line();
+    content.push_str(&capture.into_output());
+    if !content.ends_with('\n') {
+        content.push('\n');
+    }
+    content.push_str(reason);
+    content
 }
 
 /// `shell exit=<code> elapsed=<s> bytes=<n>` then the captured output. The

@@ -105,11 +105,26 @@ fn render_with_tail(goal: &qq_protocol::GoalSnapshot, now_ms: u64, tail: Option<
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct UpdateGoalArgs {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "checklist_edits")]
     pub checklist: Vec<ChecklistEdit>,
     pub notes: Option<String>,
     pub status: Option<ModelStatus>,
     pub wait: Option<ModelWait>,
+}
+
+/// Models sometimes send the checklist array JSON-encoded as a string; the
+/// decoded array is what they meant.
+fn checklist_edits<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ChecklistEdit>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let value = match value {
+        serde_json::Value::String(encoded) => {
+            serde_json::from_str(&encoded).map_err(serde::de::Error::custom)?
+        }
+        value => value,
+    };
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -188,5 +203,30 @@ impl UpdateGoalResult {
             reason,
             index,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChecklistEdit, UpdateGoalArgs};
+
+    /// v0.1.8 refused 5 update_goal calls in 4 runs that sent the checklist
+    /// as a JSON-encoded string.
+    #[test]
+    fn a_checklist_sent_as_a_json_string_decodes() {
+        let arguments: UpdateGoalArgs = serde_json::from_str(
+            r#"{"checklist":"[{\"id\": 4, \"state\": \"done\", \"type\": \"set_state\"}]"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            arguments.checklist.as_slice(),
+            [ChecklistEdit::SetState { id: 4, .. }]
+        ));
+
+        let error = serde_json::from_str::<UpdateGoalArgs>(r#"{"checklist":"not json"}"#)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.starts_with("expected ident"), "{error}");
     }
 }

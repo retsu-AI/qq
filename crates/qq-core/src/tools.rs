@@ -4175,7 +4175,7 @@ mod tests {
             ),
             (
                 r#"{"edits":[{"path":"a.txt","old":"alpha","new":"alpha"}]}"#,
-                "edit 0: invalid_edit",
+                "invalid_edit: old and new are identical in every edit",
             ),
             (
                 r#"{"edits":[{"path":"a.txt","insert_after":"alpha","new":"z","replace_all":true}]}"#,

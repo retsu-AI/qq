@@ -23,7 +23,11 @@ pub(super) enum Strategy {
     LineTrimmed,
     WhitespaceNormalized,
     IndentFlexible,
+    /// Curly quotes, en/em dashes and `…` read as their ASCII forms.
+    Punctuation,
     BlockAnchor,
+    /// `old` carried the `read_file` line-number gutter; matched without it.
+    LineNumbers,
 }
 
 impl Strategy {
@@ -33,7 +37,9 @@ impl Strategy {
             Self::LineTrimmed => "line_trimmed",
             Self::WhitespaceNormalized => "whitespace_normalized",
             Self::IndentFlexible => "indent_flexible",
+            Self::Punctuation => "punctuation",
             Self::BlockAnchor => "block_anchor",
+            Self::LineNumbers => "line_numbers_stripped",
         }
     }
 }
@@ -88,7 +94,67 @@ pub(super) fn exact_starts<'a>(text: &'a str, old: &'a str) -> impl Iterator<Ite
 }
 
 /// Finds `old` in `text`. `fuzzy=false` stops after `exact`.
+///
+/// A fuzzy match against CRLF text writes `new` with CRLF line endings, and
+/// an `old` copied with `read_file`'s line-number gutter is retried without
+/// it, as the last strategy.
 pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
+    let found = match find_in(text, old, new, fuzzy) {
+        Err(MatchError::NotFound { closest }) if fuzzy => {
+            let Some(stripped) = strip_gutter(old) else {
+                return Err(MatchError::NotFound { closest });
+            };
+            let new = strip_gutter(new).unwrap_or_else(|| new.to_owned());
+            match find_in(text, &stripped, &new, fuzzy) {
+                Ok(found) => Match {
+                    via: Strategy::LineNumbers,
+                    ..found
+                },
+                Err(MatchError::NotFound { .. }) => return Err(MatchError::NotFound { closest }),
+                Err(error) => return Err(error),
+            }
+        }
+        result => result?,
+    };
+    Ok(crlf_replacement(text, found))
+}
+
+/// `old` with the `read_file` gutter (`<right-aligned number>\t`) removed
+/// from every line, when every non-blank line carries one.
+fn strip_gutter(old: &str) -> Option<String> {
+    let mut out = String::with_capacity(old.len());
+    let mut any = false;
+    for line in old.split_inclusive('\n') {
+        let body = line.trim_end_matches(['\n', '\r']);
+        if body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let digits = body.trim_start_matches(' ');
+        let rest = digits.trim_start_matches(|ch: char| ch.is_ascii_digit());
+        if rest.len() == digits.len() {
+            return None;
+        }
+        out.push_str(rest.strip_prefix('\t')?);
+        out.push_str(&line[body.len()..]);
+        any = true;
+    }
+    any.then_some(out)
+}
+
+/// A fuzzy match forgave line endings, so the replacement takes the
+/// matched line's: an LF `new` spliced into CRLF text would mix them.
+fn crlf_replacement(text: &str, mut found: Match) -> Match {
+    let crlf = text[found.start..]
+        .find('\n')
+        .is_some_and(|at| text[..found.start + at].ends_with('\r'));
+    if found.via != Strategy::Exact && crlf && !found.replacement.contains('\r') {
+        found.replacement = found.replacement.replace('\n', "\r\n");
+    }
+    found
+}
+
+fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, MatchError> {
     let started = Instant::now();
     // exact
     let mut exact = exact_starts(text, old);
@@ -135,10 +201,13 @@ pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Matc
     // `line_trimmed` forgives line endings and trailing blanks; it keeps
     // indentation so that `indent_flexible` is the one strategy that moves
     // text between depths and re-indents the replacement to match.
-    let strategies: [(Strategy, LineKey); 3] = [
+    let strategies: [(Strategy, LineKey); 4] = [
         (Strategy::LineTrimmed, |line| line.trim_end().to_owned()),
         (Strategy::WhitespaceNormalized, normalize_inner_whitespace),
         (Strategy::IndentFlexible, |line| normalize_whitespace(line)),
+        (Strategy::Punctuation, |line| {
+            fold_punctuation(&normalize_whitespace(line))
+        }),
     ];
     for (strategy, key) in strategies {
         if started.elapsed() > CASCADE_DEADLINE {
@@ -168,7 +237,10 @@ pub(super) fn find(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Matc
                 } else {
                     trim_line_end(text, start, end)
                 };
-                let replacement = if strategy == Strategy::IndentFlexible {
+                let replacement = if matches!(
+                    strategy,
+                    Strategy::IndentFlexible | Strategy::Punctuation
+                ) {
                     reindent(new, &old_lines, &text[start..end])
                 } else {
                     new.to_owned()
@@ -386,6 +458,22 @@ fn leading_whitespace(line: &str) -> &str {
     &line[..line.len() - content.len()]
 }
 
+/// Typographic quotes, dashes and ellipses folded to ASCII, so an `old`
+/// typed with straight quotes finds text written with curly ones and back.
+fn fold_punctuation(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for ch in line.chars() {
+        match ch {
+            '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{2032}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{2033}' => out.push('"'),
+            '\u{2010}'..='\u{2015}' | '\u{2212}' => out.push('-'),
+            '\u{2026}' => out.push_str("..."),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Fraction of `expected` lines that appear in `actual` in order (an LCS
 /// over normalized lines), 1.0 when both are empty.
 fn line_similarity(expected: &[String], actual: &[String]) -> f64 {
@@ -598,5 +686,47 @@ mod tests {
         assert_eq!(found.via, Strategy::Exact);
         assert_eq!(&text[found.start..found.end], "foo();");
         assert_eq!(found.replacement, "baz();\nqux();");
+    }
+
+    #[test]
+    fn a_fuzzy_match_in_crlf_text_writes_crlf() {
+        let text = "fn a() {   \r\n    body();\r\n}\r\n";
+        let found = find(text, "fn a() {\n    body();\n}\n", "fn a() {\n    more();\n}\n", true)
+            .unwrap();
+        assert_eq!(found.via, Strategy::LineTrimmed);
+        assert_eq!(found.replacement, "fn a() {\r\n    more();\r\n}\r\n");
+        // An exact match, or a new that already carries CR, is left alone.
+        let found = find(text, "body();", "x();\ny();", true).unwrap();
+        assert_eq!(found.replacement, "x();\ny();");
+    }
+
+    #[test]
+    fn typographic_punctuation_matches_its_ascii_form() {
+        let text = "say \u{201C}hi\u{201D} \u{2014} it\u{2019}s fine\u{2026}\nnext\n";
+        let found = find(text, "say \"hi\" - it's fine...\n", "NEW\n", true).unwrap();
+        assert_eq!(found.via, Strategy::Punctuation);
+        assert_eq!(&text[found.start..found.end], text.lines().next().unwrap().to_owned() + "\n");
+        let text = "let s = \"plain\";\n";
+        let found = find(text, "let s = \u{201C}plain\u{201D};\n", "NEW\n", true).unwrap();
+        assert_eq!(found.via, Strategy::Punctuation);
+        assert_eq!(found.start..found.end, 0..text.len());
+    }
+
+    #[test]
+    fn a_copied_read_file_gutter_is_stripped_from_old_and_new() {
+        let text = "alpha\nbeta\ngamma\n";
+        let found = find(text, "  2\tbeta\n  3\tgamma\n", "  2\tBETA\n  3\tgamma\n", true).unwrap();
+        assert_eq!(found.via, Strategy::LineNumbers);
+        assert_eq!(&text[found.start..found.end], "beta\ngamma\n");
+        assert_eq!(found.replacement, "BETA\ngamma\n");
+        // Text that really starts with digits and a tab is matched as is.
+        let text = "1\tone\n2\ttwo\n";
+        let found = find(text, "2\ttwo\n", "NEW\n", true).unwrap();
+        assert_eq!(found.via, Strategy::Exact);
+        // Not every line numbered: no stripping.
+        assert!(matches!(
+            find("beta\ngamma\n", "2\tbeta\ngamma\n", "x", true),
+            Err(MatchError::NotFound { .. })
+        ));
     }
 }

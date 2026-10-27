@@ -80,7 +80,9 @@ enum Form<'a> {
 }
 
 impl Edit {
-    fn form(&self) -> Result<Form<'_>, String> {
+    /// `None` is a replace whose `old` equals `new`: there is nothing to
+    /// write, so the edit is skipped rather than failing its batch.
+    fn form(&self) -> Result<Option<Form<'_>>, String> {
         let new = self.new.as_deref();
         // An empty string in an unused form is a filled-in default, not a
         // second form: models that send every optional field send `""`.
@@ -95,27 +97,21 @@ impl Edit {
         ) {
             (Some(old), None, None) => {
                 let new = new.ok_or("invalid_edit: old requires new")?;
-                if old == new {
-                    return Err(
-                        "invalid_edit: old and new are identical; there is nothing to change"
-                            .to_owned(),
-                    );
-                }
-                Ok(Form::Replace { old, new })
+                Ok((old != new).then_some(Form::Replace { old, new }))
             }
             (None, Some(anchor), None) => {
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
                 let new = new.ok_or("invalid_edit: insert_before requires new")?;
-                Ok(Form::InsertBefore { anchor, new })
+                Ok(Some(Form::InsertBefore { anchor, new }))
             }
             (None, None, Some(anchor)) => {
                 if self.replace_all {
                     return Err("invalid_edit: replace_all applies to old/new only".to_owned());
                 }
                 let new = new.ok_or("invalid_edit: insert_after requires new")?;
-                Ok(Form::InsertAfter { anchor, new })
+                Ok(Some(Form::InsertAfter { anchor, new }))
             }
             // Every form empty: the only one given has no reading.
             (None, None, None) if self.old.is_some() => {
@@ -193,12 +189,17 @@ pub(super) fn edit_file(
     // Phase 1, no lock: resolve, verify currency, and apply every edit in
     // memory in order, so later edits see earlier results.
     let mut planned: BTreeMap<String, Planned> = BTreeMap::new();
+    let mut identical_skipped = false;
     for (index, edit) in arguments.edits.iter().enumerate() {
         if cancelled.is_cancelled() {
             return ToolOutput::interrupted("tool execution was cancelled");
         }
         let form = match edit.form() {
-            Ok(form) => form,
+            Ok(Some(form)) => form,
+            Ok(None) => {
+                identical_skipped = true;
+                continue;
+            }
             Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
         };
         let Ok(if_hash) = short_hash(edit.if_hash.as_deref()) else {
@@ -354,6 +355,11 @@ pub(super) fn edit_file(
     }
 
     let edits_total: usize = planned.values().map(|file| file.changes.len()).sum();
+    if edits_total == 0 {
+        return ToolOutput::refused(
+            "invalid_edit: old and new are identical in every edit; there is nothing to change",
+        );
+    }
     // `form()` succeeded for every edit, so an empty string left in any form
     // field was an unused filled-in default. Notes are header fields, built
     // before the result is bounded so a spilled copy carries them too.
@@ -364,6 +370,9 @@ pub(super) fn edit_file(
             .any(|form| form.as_deref() == Some(""))
     }) {
         notes.push("empty_form_ignored");
+    }
+    if identical_skipped {
+        notes.push("identical_edit_skipped");
     }
     for (freshness, name) in [
         (Freshness::Unread, "unread"),
@@ -1665,10 +1674,10 @@ mod tests {
 
         assert!(matches!(
             edit.form(),
-            Ok(Form::Replace {
+            Ok(Some(Form::Replace {
                 old: "before",
                 new: "after"
-            })
+            }))
         ));
     }
 
@@ -1685,10 +1694,10 @@ mod tests {
 
         assert!(matches!(
             edit.form(),
-            Ok(Form::InsertAfter {
+            Ok(Some(Form::InsertAfter {
                 anchor: "anchor\n",
                 new: "line\n"
-            })
+            }))
         ));
     }
 
@@ -1713,6 +1722,36 @@ mod tests {
             .expect("valid edit arguments");
             assert_eq!(edit.form().err().as_deref(), Some(message), "{field}");
         }
+    }
+
+    /// v0.1.8 failed 17 batches in 11 runs over one edit whose old equalled
+    /// its new, usually beside four to six real edits.
+    #[test]
+    fn an_identical_edit_is_skipped_and_the_rest_of_the_batch_applies() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        run(&workspace, &state, "read_file", r#"{"path":"a.txt"}"#);
+
+        let applied = run(
+            &workspace,
+            &state,
+            "edit_file",
+            r#"{"edits":[{"path":"a.txt","old":"alpha","new":"alpha"},{"path":"a.txt","old":"beta","new":"gamma"}]}"#,
+        );
+        assert!(!applied.is_error, "{}", applied.model_text);
+        assert!(
+            applied
+                .model_text
+                .starts_with("edit ok files=1 edits=1 note=identical_edit_skipped\n"),
+            "{}",
+            applied.model_text
+        );
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "alpha\ngamma\n"
+        );
     }
 }
 
