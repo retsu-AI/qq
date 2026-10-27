@@ -25,6 +25,23 @@ const MAX_RANGES: usize = 8;
 const MAX_OUTLINE_ITEMS: usize = 400;
 /// The short content hash carried by the header: `h:` + 12 hex digits.
 pub(super) const SHORT_HASH_LEN: usize = 12;
+
+/// The hex digits of an `h:<12 hex digits>` argument (`if_hash`,
+/// `if_changed_since`). `h:000000000000` is the placeholder models send when
+/// they have no hash, so it reads as absent rather than as a stale claim.
+pub(super) fn short_hash(value: Option<&str>) -> Result<Option<&str>, ()> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    match value.strip_prefix("h:") {
+        Some(hex)
+            if hex.len() == SHORT_HASH_LEN && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) =>
+        {
+            Ok((hex.bytes().any(|byte| byte != b'0')).then_some(hex))
+        }
+        _ => Err(()),
+    }
+}
 /// Escaped bytes reserved for the header line ahead of the body.
 const IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
 const IMAGE_EXTENSIONS_EXTRA: [&str; 1] = ["webp"];
@@ -127,13 +144,9 @@ pub(super) fn read_file(
         Ok(ranges) => ranges,
         Err(error) => return ReadSideOutput::refused(error),
     };
-    if let Some(since) = &arguments.if_changed_since
-        && !(since.len() == SHORT_HASH_LEN + 2
-            && since.starts_with("h:")
-            && since[2..].bytes().all(|byte| byte.is_ascii_hexdigit()))
-    {
+    let Ok(since) = short_hash(arguments.if_changed_since.as_deref()) else {
         return ReadSideOutput::refused("invalid_if_changed_since: expected h:<12 hex digits>");
-    }
+    };
     let loaded = match load(workspace, &arguments.path) {
         Ok(loaded) => loaded,
         Err(error) => return ReadSideOutput::error(error),
@@ -200,8 +213,8 @@ pub(super) fn read_file(
         )),
         ReadMode::Outline => outline(&loaded, short, total_lines, offset_ignored),
         ReadMode::Lines => {
-            if let (Some(since), Some(hash)) = (&arguments.if_changed_since, &loaded.hash)
-                && since[2..] == hash[..SHORT_HASH_LEN]
+            if let (Some(since), Some(hash)) = (since, &loaded.hash)
+                && since == &hash[..SHORT_HASH_LEN]
             {
                 let mut header = Header::new("read", Some(&loaded.path))
                     .token("unchanged")

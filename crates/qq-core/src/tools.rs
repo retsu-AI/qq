@@ -3967,6 +3967,63 @@ mod tests {
         );
     }
 
+    /// Models with no hash fill `if_hash`/`if_changed_since` with zeros
+    /// (21 stale_file errors in 15 v0.1.8 runs). The placeholder is no
+    /// claim at all: a read file edits as if it were absent, and an unread
+    /// one still needs a read.
+    #[test]
+    fn zero_hash_placeholder_reads_as_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("a.txt"), "alpha\nbeta\n").unwrap();
+        let workspace = Workspace::open(directory.path()).unwrap();
+        let state = FileState::default();
+        let zero = "h:000000000000";
+
+        let read = run_tool(
+            &workspace,
+            &state,
+            "read_file",
+            &format!(r#"{{"path":"a.txt","if_changed_since":"{zero}"}}"#),
+        );
+        assert!(!read.is_error, "{}", read.model_text);
+        assert!(read.model_text.contains("alpha"), "{}", read.model_text);
+
+        let edited = run_tool(
+            &workspace,
+            &state,
+            "edit_file",
+            &format!(
+                r#"{{"edits":[{{"path":"a.txt","old":"a","new":"A","replace_all":true,"if_hash":"{zero}"}}]}}"#
+            ),
+        );
+        assert!(!edited.is_error, "{}", edited.model_text);
+        assert_eq!(
+            fs::read_to_string(directory.path().join("a.txt")).unwrap(),
+            "AlphA\nbetA\n"
+        );
+
+        let written = run_tool(
+            &workspace,
+            &state,
+            "write_file",
+            &format!(r#"{{"path":"a.txt","content":"gamma\n","if_hash":"{zero}"}}"#),
+        );
+        assert!(!written.is_error, "{}", written.model_text);
+
+        fs::write(directory.path().join("b.txt"), "one\n").unwrap();
+        let unread = run_tool(
+            &workspace,
+            &FileState::default(),
+            "write_file",
+            &format!(r#"{{"path":"b.txt","content":"two\n","if_hash":"{zero}"}}"#),
+        );
+        assert!(
+            unread.model_text.starts_with("not_read"),
+            "{}",
+            unread.model_text
+        );
+    }
+
     #[test]
     fn write_file_hints_at_edit_file_when_most_lines_are_kept() {
         let directory = tempfile::tempdir().unwrap();
@@ -4118,7 +4175,7 @@ mod tests {
             ),
             (
                 r#"{"edits":[{"path":"a.txt","old":"alpha","new":"alpha"}]}"#,
-                "edit 0: invalid_edit",
+                "invalid_edit: old and new are identical in every edit",
             ),
             (
                 r#"{"edits":[{"path":"a.txt","insert_after":"alpha","new":"z","replace_all":true}]}"#,
@@ -4137,7 +4194,7 @@ mod tests {
                 "edit 0: invalid_if_hash",
             ),
             (
-                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"b","if_hash":"h:000000000000"}]}"#,
+                r#"{"edits":[{"path":"a.txt","old":"alpha","new":"b","if_hash":"h:0123456789ab"}]}"#,
                 "edit 0: stale_file",
             ),
             (r#"{"edits":[]}"#, "invalid_edit"),
