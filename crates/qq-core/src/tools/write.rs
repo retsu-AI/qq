@@ -15,6 +15,7 @@ use super::{
     edit::{MAX_DIFF_BYTES, MAX_EDIT_FILE_BYTES, read_editable, unified_diff},
     matching::lcs_len,
     output::Header,
+    read::short_hash,
 };
 
 /// Deepest chain of missing parent directories a write may create.
@@ -47,13 +48,9 @@ pub(super) fn write_file(
             MAX_EDIT_FILE_BYTES / (1024 * 1024)
         ));
     }
-    if let Some(if_hash) = &arguments.if_hash
-        && !(if_hash.len() == 14
-            && if_hash.starts_with("h:")
-            && if_hash[2..].bytes().all(|b| b.is_ascii_hexdigit()))
-    {
+    let Ok(if_hash) = short_hash(arguments.if_hash.as_deref()) else {
         return ToolOutput::refused("invalid_if_hash: expected h:<12 hex digits>");
-    }
+    };
     let path = match resolve_write_path(workspace, &arguments.path) {
         Ok(resolved) => resolved,
         Err(error) => return ToolOutput::error(error),
@@ -89,14 +86,14 @@ pub(super) fn write_file(
             // Overwrites follow the same read-before-write and staleness
             // rules as edits: a recorded read of this content, or an if_hash
             // that proves currency another way. Only new files are exempt.
-            match (&arguments.if_hash, file_state.recorded(&key)) {
+            match (if_hash, file_state.recorded(&key)) {
                 (Some(if_hash), _) => {
-                    if if_hash[2..] != current_hash[..12] {
+                    if if_hash != &current_hash[..12] {
                         // The current hash is not named (ADR-0058): passed
                         // back as if_hash it would authorize an overwrite of
                         // content the model never saw.
                         return ToolOutput::error(format!(
-                            "stale_file: {} is not {if_hash} now; read_file it again",
+                            "stale_file: {} is not h:{if_hash} now; read_file it again",
                             arguments.path
                         ));
                     }

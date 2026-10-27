@@ -1297,7 +1297,12 @@ between candidates a stricter one could not separate:
 | `line_trimmed` | trailing blanks, CRLF |
 | `whitespace_normalized` | runs of inner whitespace (indent kept) |
 | `indent_flexible` | indentation; `new` is re-indented by the delta |
+| `punctuation` | as `indent_flexible`, plus curly quotes, en/em dashes and `…` read as ASCII |
 | `block_anchor` | a drifted middle: ≥ 3 lines, first/last trimmed lines anchor, middle ≥ 0.7 LCS similarity, size delta ≤ 25 % |
+| `line_numbers_stripped` | a `read_file` gutter (`  12⇥`) on every non-blank line of `old`; the cascade reruns without it, and the gutter is stripped from `new` too |
+
+A fuzzy match in a CRLF file writes `new` with CRLF line endings unless
+`new` already carries a CR.
 
 A disproportionate guard refuses a `block_anchor` candidate spanning more
 than `max(old_lines + 3, 2·old_lines)` lines or `max(old_bytes + 500,
@@ -1312,7 +1317,11 @@ the retry needs no read.
 **Result.** `edit ok files=2 edits=3` then one line per file in path order:
 `<path> h:<new12> L96 -1+1 | L140 -0+6 via=indent_flexible` (`x3` marks a
 `replace_all` count). Notes join with a comma in the header
-(`note=empty_form_ignored,unread`). The unified diff of what changed on disk — not of
+(`note=empty_form_ignored,unread`). An edit whose `old` equals its `new` is
+skipped with `note=identical_edit_skipped`; a batch of only such edits is
+`invalid_edit`. `if_hash` (and `read_file`'s `if_changed_since`) of
+`h:000000000000` is the placeholder models send without a hash and reads
+as absent. The unified diff of what changed on disk — not of
 what the model asked — rides in `ui_payload` for every file; the approval
 preview renders the request grouped by path with anchors as context.
 Failures abort the whole batch and name the edit index: `not_read`,
