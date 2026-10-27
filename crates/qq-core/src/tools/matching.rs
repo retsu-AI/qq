@@ -237,14 +237,12 @@ fn find_in(text: &str, old: &str, new: &str, fuzzy: bool) -> Result<Match, Match
                 } else {
                     trim_line_end(text, start, end)
                 };
-                let replacement = if matches!(
-                    strategy,
-                    Strategy::IndentFlexible | Strategy::Punctuation
-                ) {
-                    reindent(new, &old_lines, &text[start..end])
-                } else {
-                    new.to_owned()
-                };
+                let replacement =
+                    if matches!(strategy, Strategy::IndentFlexible | Strategy::Punctuation) {
+                        reindent(new, &old_lines, &text[start..end])
+                    } else {
+                        new.to_owned()
+                    };
                 return Ok(Match {
                     start,
                     end,
@@ -691,8 +689,13 @@ mod tests {
     #[test]
     fn a_fuzzy_match_in_crlf_text_writes_crlf() {
         let text = "fn a() {   \r\n    body();\r\n}\r\n";
-        let found = find(text, "fn a() {\n    body();\n}\n", "fn a() {\n    more();\n}\n", true)
-            .unwrap();
+        let found = find(
+            text,
+            "fn a() {\n    body();\n}\n",
+            "fn a() {\n    more();\n}\n",
+            true,
+        )
+        .unwrap();
         assert_eq!(found.via, Strategy::LineTrimmed);
         assert_eq!(found.replacement, "fn a() {\r\n    more();\r\n}\r\n");
         // An exact match, or a new that already carries CR, is left alone.
@@ -705,7 +708,10 @@ mod tests {
         let text = "say \u{201C}hi\u{201D} \u{2014} it\u{2019}s fine\u{2026}\nnext\n";
         let found = find(text, "say \"hi\" - it's fine...\n", "NEW\n", true).unwrap();
         assert_eq!(found.via, Strategy::Punctuation);
-        assert_eq!(&text[found.start..found.end], text.lines().next().unwrap().to_owned() + "\n");
+        assert_eq!(
+            &text[found.start..found.end],
+            text.lines().next().unwrap().to_owned() + "\n"
+        );
         let text = "let s = \"plain\";\n";
         let found = find(text, "let s = \u{201C}plain\u{201D};\n", "NEW\n", true).unwrap();
         assert_eq!(found.via, Strategy::Punctuation);
@@ -715,7 +721,13 @@ mod tests {
     #[test]
     fn a_copied_read_file_gutter_is_stripped_from_old_and_new() {
         let text = "alpha\nbeta\ngamma\n";
-        let found = find(text, "  2\tbeta\n  3\tgamma\n", "  2\tBETA\n  3\tgamma\n", true).unwrap();
+        let found = find(
+            text,
+            "  2\tbeta\n  3\tgamma\n",
+            "  2\tBETA\n  3\tgamma\n",
+            true,
+        )
+        .unwrap();
         assert_eq!(found.via, Strategy::LineNumbers);
         assert_eq!(&text[found.start..found.end], "beta\ngamma\n");
         assert_eq!(found.replacement, "BETA\ngamma\n");
