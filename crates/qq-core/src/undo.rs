@@ -155,6 +155,9 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     // Nor did the snapshot hold what it left out, even if those paths are no
     // longer ignored: restoring must not delete them for being absent.
     excluded.extend(protected(&repository, &target.commit).await?);
+    // Nested repositories are recorded as gitlinks only; replacing or
+    // deleting one would lose its files and history.
+    excluded.extend(gitlinks(&repository, &index).await?);
     // Excluding a path does not keep the restore from replacing its parent
     // directory with a file the snapshot has there, which would delete it.
     let replaced = replaced_ancestors(&repository, &target.commit, &excluded).await?;
@@ -514,6 +517,29 @@ async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<Pa
     .await?;
     Ok(nul_separated(&listing)
         .map(|path| path_from_bytes(path.strip_suffix(b"/").unwrap_or(path)))
+        .collect())
+}
+
+/// Gitlinks (submodules and embedded repositories) in the scratch index.
+async fn gitlinks(
+    repository: &Repository,
+    index: &ScratchIndex,
+) -> Result<Vec<PathBuf>, UndoError> {
+    let listing = git_bytes(
+        &repository.workspace,
+        Some(&index.path),
+        "ls-files",
+        &["ls-files", "-z", "--stage", "--", "."],
+        Vec::new(),
+    )
+    .await?;
+    // `<mode> <object> <stage>\t<path>`
+    Ok(nul_separated(&listing)
+        .filter(|entry| entry.starts_with(b"160000 "))
+        .filter_map(|entry| {
+            let tab = entry.iter().position(|byte| *byte == b'\t')?;
+            Some(path_from_bytes(&entry[tab + 1..]))
+        })
         .collect())
 }
 
@@ -1388,6 +1414,33 @@ mod tests {
         // Not in the snapshot, so not reset to the submodule's commit.
         assert_eq!(
             read(&root.join("sub/tracked.txt")).as_deref(),
+            Some("dirty\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_nested_repository_is_not_replaced_by_a_snapshotted_file() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join("foo"), "file\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(root.join("foo")).unwrap();
+        let nested = root.join("foo");
+        std::fs::create_dir(&nested).unwrap();
+        repository(&nested);
+        std::fs::write(nested.join("tracked.txt"), "dirty\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert!(nested.join(".git").is_dir());
+        assert_eq!(
+            read(&nested.join("tracked.txt")).as_deref(),
             Some("dirty\n")
         );
     }

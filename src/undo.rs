@@ -34,8 +34,9 @@ enum CommandError {
 }
 
 async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, CommandError> {
-    let directory = std::env::current_dir()
-        .and_then(std::fs::canonicalize)
+    let directory = std::env::current_dir().map_err(CommandError::Directory)?;
+    let directory = tokio::fs::canonicalize(directory)
+        .await
         .map_err(CommandError::Directory)?;
     let snapshots = undo::list(&directory).await?;
     let now_ms = SystemTime::now()

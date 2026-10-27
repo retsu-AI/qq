@@ -87,53 +87,88 @@ async fn a_read_only_run_takes_no_snapshot() {
     );
 }
 
-/// Holds the next snapshot in a Git clean filter. The returned `entered`
-/// FIFO opens once the snapshot is blocked; [`release_snapshot`] lets it go.
+/// The next snapshot, held in a Git clean filter until this is dropped.
 #[cfg(unix)]
-fn hold_snapshots(root: &Path) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let fifos = tempfile::tempdir().unwrap();
-    let entered = fifos.path().join("entered");
-    let release = fifos.path().join("release");
-    for fifo in [&entered, &release] {
-        let status = std::process::Command::new("mkfifo")
-            .arg(fifo)
-            .status()
-            .unwrap();
-        assert!(status.success());
+struct HeldSnapshot {
+    _fifos: tempfile::TempDir,
+    entered: PathBuf,
+    release: PathBuf,
+}
+
+#[cfg(unix)]
+impl HeldSnapshot {
+    fn new(root: &Path) -> Self {
+        let fifos = tempfile::tempdir().unwrap();
+        let entered = fifos.path().join("entered");
+        let release = fifos.path().join("release");
+        for fifo in [&entered, &release] {
+            let status = std::process::Command::new("mkfifo")
+                .arg(fifo)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        // Staging `held.dat` blocks in its clean filter until released.
+        std::fs::write(root.join(".gitattributes"), "held.dat filter=hold\n").unwrap();
+        std::fs::write(root.join("held.dat"), "held\n").unwrap();
+        test_support::git(
+            root,
+            &[
+                "config",
+                "filter.hold.clean",
+                &format!(
+                    "sh -c 'echo > \"{}\"; cat \"{}\" > /dev/null; cat'",
+                    entered.display(),
+                    release.display()
+                ),
+            ],
+        );
+        Self {
+            _fifos: fifos,
+            entered,
+            release,
+        }
     }
-    // Staging `held.dat` blocks in its clean filter until released.
-    std::fs::write(root.join(".gitattributes"), "held.dat filter=hold\n").unwrap();
-    std::fs::write(root.join("held.dat"), "held\n").unwrap();
-    test_support::git(
-        root,
-        &[
-            "config",
-            "filter.hold.clean",
-            &format!(
-                "sh -c 'echo > \"{}\"; cat \"{}\" > /dev/null; cat'",
-                entered.display(),
-                release.display()
-            ),
-        ],
-    );
-    (fifos, entered, release)
-}
 
-#[cfg(unix)]
-async fn wait_for_held_snapshot(entered: PathBuf) {
-    let reader = tokio::task::spawn_blocking(move || std::fs::read(entered));
-    tokio::time::timeout(Duration::from_secs(30), reader)
+    /// Waits until the snapshot is blocked in the filter. Bounded in real
+    /// time on its own thread, so it works with Tokio's clock paused.
+    async fn entered(&self) {
+        let entered = self.entered.clone();
+        let waited = tokio::task::spawn_blocking(move || {
+            let (sent, received) = std::sync::mpsc::sync_channel(1);
+            let path = entered.clone();
+            // Detached: a reader that never sees a writer must not hold up
+            // runtime shutdown.
+            std::thread::spawn(move || {
+                let _ = sent.send(std::fs::read(path));
+            });
+            let waited = received.recv_timeout(Duration::from_secs(30));
+            if waited.is_err() {
+                open_for_writing(&entered);
+            }
+            waited
+        })
         .await
-        .expect("the snapshot reaches the clean filter")
-        .unwrap()
         .unwrap();
+        waited
+            .expect("the snapshot reaches the clean filter")
+            .unwrap();
+    }
 }
 
-/// Unblocks the orphaned filter, if it is still waiting.
 #[cfg(unix)]
-fn release_snapshot(release: &Path) {
+impl Drop for HeldSnapshot {
+    /// Lets an orphaned filter, if any is still waiting, finish.
+    fn drop(&mut self) {
+        open_for_writing(&self.release);
+    }
+}
+
+/// Opening a FIFO for writing and closing it gives its reader EOF.
+#[cfg(unix)]
+fn open_for_writing(fifo: &Path) {
     if let Ok(writer) = rustix::fs::open(
-        release,
+        fifo,
         rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     ) {
@@ -156,10 +191,10 @@ async fn cancelling_a_run_does_not_wait_for_its_snapshot() {
     let mut harness = scripted_runs_harness(ApprovalMode::Full, one_write()).await;
     workspace_repository(&harness);
     let root = harness.workspace_path.clone();
-    let (_fifos, entered, release) = hold_snapshots(&root);
+    let held = HeldSnapshot::new(&root);
 
     let run_id = submit_prompt(&harness, "change things").await;
-    wait_for_held_snapshot(entered).await;
+    held.entered().await;
     harness
         .runtime
         .command(
@@ -169,12 +204,11 @@ async fn cancelling_a_run_does_not_wait_for_its_snapshot() {
         .await
         .unwrap();
     // Far below the 30 s Git step timeout the snapshot would otherwise wait.
-    let finished = tokio::time::timeout(Duration::from_secs(10), async {
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
         collect_until(&mut harness.events, finished_for(run_id)).await
     })
-    .await;
-    release_snapshot(&release);
-    let observed = finished.expect("the cancel settles while the snapshot is still blocked");
+    .await
+    .expect("the cancel settles while the snapshot is still blocked");
     assert!(matches!(
         finished_outcome(&observed, run_id),
         Some(RunOutcome::Cancelled)
@@ -189,8 +223,17 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
     let mut harness = scripted_runs_harness(ApprovalMode::Full, one_write()).await;
     workspace_repository(&harness);
     let root = harness.workspace_path.clone();
-    let (_fifos, entered, release) = hold_snapshots(&root);
+    let held = HeldSnapshot::new(&root);
 
+    // The budget may expire only once the snapshot is blocked: hold the
+    // clock until then. Spinning keeps Tokio from auto-advancing it while
+    // the run waits on Git.
+    tokio::time::pause();
+    let keep_clock = tokio::spawn(async {
+        loop {
+            tokio::task::yield_now().await;
+        }
+    });
     let queued = harness
         .runtime
         .command(
@@ -199,7 +242,7 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
                 session_id: harness.session_id,
                 input: vec![InputPart::text("change things".to_owned())],
                 limits: qq_protocol::RunLimits {
-                    max_duration_ms: Some(3_000),
+                    max_duration_ms: Some(1_000),
                     ..qq_protocol::RunLimits::default()
                 },
                 correlation: Correlation::default(),
@@ -211,14 +254,16 @@ async fn a_duration_budget_does_not_wait_for_the_snapshot() {
     let CommandOutcome::PromptQueued { run_id, .. } = queued.outcome else {
         panic!("prompt queued: {:?}", queued.outcome);
     };
-    wait_for_held_snapshot(entered).await;
-    // The budget expires a few seconds in; the Git step timeout is 30 s.
-    let finished = tokio::time::timeout(Duration::from_secs(15), async {
+    held.entered().await;
+    // Past the budget, well short of the 30 s Git step timeout.
+    tokio::time::advance(Duration::from_millis(1_000)).await;
+    tokio::time::resume();
+    keep_clock.abort();
+    let observed = tokio::time::timeout(Duration::from_secs(15), async {
         collect_until(&mut harness.events, finished_for(run_id)).await
     })
-    .await;
-    release_snapshot(&release);
-    let observed = finished.expect("the budget settles the run while the snapshot is blocked");
+    .await
+    .expect("the budget settles the run while the snapshot is blocked");
     let Some(RunOutcome::BudgetExhausted { exhaustion }) = finished_outcome(&observed, run_id)
     else {
         panic!("budget exhaustion: {observed:?}");
