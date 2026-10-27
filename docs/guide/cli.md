@@ -224,6 +224,27 @@ between global packs and your global config.
 | `refresh NAME` | refetch, keeping the last good copy on failure |
 | `remove NAME` | forget it |
 
+## `qq undo [--list] [SNAPSHOT]`
+
+Restore the workspace to how it was before a run changed it. Before a run
+first edits a file or runs a command that may write, QQ records the working
+tree, untracked files included, as a hidden Git commit under
+`refs/qq/snapshots/`. The last 50 per repository are kept.
+
+```sh
+qq undo          # restore the newest run's snapshot for this directory
+qq undo --list   # list snapshots, newest first
+qq undo 3f9a     # restore one by name or unique prefix
+```
+
+Before restoring, `qq undo` records the current state and prints the
+`qq undo NAME` that brings it back. Only files under the workspace are
+restored; the index, stash, commits and branches are left alone, and
+`qq undo` says so when HEAD has moved since the snapshot. Not covered:
+ignored files, untracked files over 16 MiB, anything outside the workspace,
+and anything outside a Git work tree, which gets no snapshot. Exit 0 on
+success, 2 when there is no matching snapshot, 1 on a Git failure.
+
 ## `qq version`
 
 Version plus the compatibility contracts this build speaks: protocol,

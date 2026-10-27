@@ -153,6 +153,23 @@ struct RunState {
     slice: SliceScope,
     recovery: TurnScope,
 }
+/// Whether a call about to execute may change files, judged before it runs.
+/// Read-only shell is the one shell class known not to.
+fn may_change_files(
+    call: &RuntimeToolCall,
+    network: &NetworkPolicy,
+    entry: Option<&catalog::ToolEntry>,
+) -> bool {
+    match approval::classify(call.effect, &call.name, &call.arguments, network) {
+        approval::ToolClass::Mutating => true,
+        approval::ToolClass::External => !entry.is_some_and(|entry| entry.hints.read_only),
+        approval::ToolClass::Shell { read_only, .. } => !read_only,
+        approval::ToolClass::ReadOnly
+        | approval::ToolClass::Interactive { .. }
+        | approval::ToolClass::Network { .. } => false,
+    }
+}
+
 struct RunEnvironment {
     plan: Arc<plan::CompiledAgentPlan>,
     cancelled: RunCancellation,
@@ -3519,7 +3536,7 @@ impl RunState {
                                 }).collect::<Vec<_>>();
                                 for (admitted, _) in &overlapped {
                                     started_calls[usize::from(admitted.call_ordinal - 1)] = true;
-                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id });
+                                    yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: admitted.id, may_change_files: false });
                                 }
                             let mut executions = futures_stream::iter(
                                 overlapped.into_iter().map(|(call, offered)| execute_one(call, None, child_limits, offered)),
@@ -3587,7 +3604,7 @@ impl RunState {
                             }
                             let call = calls[batch_start].clone();
                             started_calls[usize::from(call.call_ordinal - 1)] = true;
-                            yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: call.id });
+                            yield TurnStep::Emit(RuntimeEvent::ToolCallStarted { id: call.id, may_change_files: may_change_files(&call, network_policy, catalog.lookup(&call.name)) });
                             if catalog.lookup(&call.name).map(|entry| entry.host) == Some(catalog::ToolHost::SelectTools) {
                                 let tool_span = tracing::info_span!(target: "qq::diagnostic", "tool", call_ordinal = call.call_ordinal);
                                 let (result, changed) = tool_span.in_scope(|| select_tools(catalog, &mut run.pins, &call.arguments, static_filter.as_ref().expect("selector requires tools")));

@@ -166,8 +166,27 @@ pub enum Command {
     /// chooser; without it and without a terminal on stdin the command fails.
     Init(InitArgs),
 
+    /// Restore the workspace to the snapshot taken before a run.
+    ///
+    /// Before a run first changes files in a Git work tree, QQ records the
+    /// working tree, untracked files included. Without arguments this
+    /// restores the newest run's snapshot for the current directory. The
+    /// state it replaces is recorded first, so the printed `qq undo NAME`
+    /// reverses it. Only files are restored: the index, stash, commits and
+    /// branches are unchanged, and ignored files are not covered.
+    Undo(UndoArgs),
+
     /// Print the version with the compatibility contracts this build speaks.
     Version,
+}
+
+#[derive(Debug, Args)]
+pub struct UndoArgs {
+    /// The snapshot to restore: a name from `--list`, or its unique prefix.
+    pub snapshot: Option<String>,
+    /// List this directory's snapshots, newest first, instead of restoring.
+    #[arg(long, conflicts_with = "snapshot")]
+    pub list: bool,
 }
 
 #[derive(Debug, Subcommand)]

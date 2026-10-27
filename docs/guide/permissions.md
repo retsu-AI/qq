@@ -169,6 +169,12 @@ Python, a library, or a dynamically constructed command from performing the
 same operation. Use native containment for those limits. Full still obeys
 explicit managed policy and built-in protected-file checks.
 
+## Undoing a run
+
+Before a run first changes files in a Git work tree, QQ snapshots the
+workspace. `qq undo` restores the newest run's snapshot, and the undo can
+itself be undone. See [`qq undo`](cli.md#qq-undo---list-snapshot).
+
 ## The approval prompt
 
 Only Ask, and explicitly supervised delegation outside Auto, put a call on

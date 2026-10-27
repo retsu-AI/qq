@@ -191,6 +191,10 @@ pub(crate) enum RuntimeEvent {
     },
     ToolCallStarted {
         id: ToolCallId,
+        /// The call may change files: an edit, a write, a shell command that
+        /// is not provably read-only, an external tool, or a write child.
+        /// The session layer snapshots the workspace before the first one.
+        may_change_files: bool,
     },
     ToolCallDenied {
         id: ToolCallId,
