@@ -17,7 +17,7 @@ pub(crate) use crate::workspace::hold_tool_apply;
 use super::{
     dispatch::{ToolCancellation, ToolOutput},
     matching::{self, MatchError, Strategy},
-    read::MAX_READ_SCAN_BYTES,
+    read::{MAX_READ_SCAN_BYTES, short_hash},
 };
 
 pub(super) const MAX_EDIT_FILE_BYTES: u64 = MAX_READ_SCAN_BYTES;
@@ -201,15 +201,11 @@ pub(super) fn edit_file(
             Ok(form) => form,
             Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
         };
-        if let Some(if_hash) = &edit.if_hash
-            && !(if_hash.len() == 14
-                && if_hash.starts_with("h:")
-                && if_hash[2..].bytes().all(|b| b.is_ascii_hexdigit()))
-        {
+        let Ok(if_hash) = short_hash(edit.if_hash.as_deref()) else {
             return ToolOutput::refused(format!(
                 "edit {index}: invalid_if_hash: expected h:<12 hex digits>"
             ));
-        }
+        };
         let path = match workspace.contained_path(&edit.path) {
             Ok(path) => path,
             Err(error) => {
@@ -272,12 +268,12 @@ pub(super) fn edit_file(
         // Every edit's if_hash is an assertion about the plan-time bytes, not
         // only the first one for its file: a later mismatch is still stale,
         // and a later match proves the file for the edits that follow.
-        if let Some(if_hash) = &edit.if_hash {
-            if if_hash[2..] != file.before_hash[..12] {
+        if let Some(if_hash) = if_hash {
+            if if_hash != &file.before_hash[..12] {
                 // The current hash is not named: passed back as if_hash it
                 // would prove a version the model never saw.
                 return ToolOutput::error(format!(
-                    "edit {index}: stale_file: {} is not {if_hash} now; read_file it again (or use an old that matches exactly once)",
+                    "edit {index}: stale_file: {} is not h:{if_hash} now; read_file it again (or use an old that matches exactly once)",
                     edit.path
                 ));
             }
@@ -1293,11 +1289,11 @@ mod tests {
             &workspace,
             &state,
             "edit_file",
-            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma","if_hash":"h:000000000000"}]}"#,
+            r#"{"edits":[{"path":"a.txt","old":"beta","new":"gamma","if_hash":"h:0123456789ab"}]}"#,
         );
         assert_eq!(
             refused.model_text,
-            "edit 0: stale_file: a.txt is not h:000000000000 now; read_file it again (or use an old that matches exactly once)"
+            "edit 0: stale_file: a.txt is not h:0123456789ab now; read_file it again (or use an old that matches exactly once)"
         );
         // Review (#281): the mismatch must not name the current hash either,
         // or the next call passes it and proves a version it never saw.
@@ -1312,11 +1308,11 @@ mod tests {
             &workspace,
             &state,
             "write_file",
-            r#"{"path":"a.txt","content":"x\n","if_hash":"h:000000000000"}"#,
+            r#"{"path":"a.txt","content":"x\n","if_hash":"h:0123456789ab"}"#,
         );
         assert_eq!(
             refused.model_text,
-            "stale_file: a.txt is not h:000000000000 now; read_file it again"
+            "stale_file: a.txt is not h:0123456789ab now; read_file it again"
         );
         assert_no_current_hash(&refused, b"alpha\nbeta\n");
     }
@@ -1337,14 +1333,14 @@ mod tests {
             &state,
             "edit_file",
             &format!(
-                r#"{{"edits":[{{"path":"a.txt","old":"alpha","new":"one","if_hash":"{}"}},{{"path":"a.txt","old":"beta","new":"two","if_hash":"h:000000000000"}}]}}"#,
+                r#"{{"edits":[{{"path":"a.txt","old":"alpha","new":"one","if_hash":"{}"}},{{"path":"a.txt","old":"beta","new":"two","if_hash":"h:0123456789ab"}}]}}"#,
                 short(before)
             ),
         );
         assert!(
             refused
                 .model_text
-                .starts_with("edit 1: stale_file: a.txt is not h:000000000000 now"),
+                .starts_with("edit 1: stale_file: a.txt is not h:0123456789ab now"),
             "{}",
             refused.model_text
         );
