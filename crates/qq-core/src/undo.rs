@@ -149,6 +149,10 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     // ignored, so the restore leaves them alone even where the snapshot has
     // an older version (a file ignored since the snapshot was taken).
     excluded.extend(ignored(&repository, &index).await?);
+    // Excluding a path does not keep the restore from replacing its parent
+    // directory with a file the snapshot has there, which would delete it.
+    let replaced = replaced_ancestors(&repository, &target.commit, &excluded).await?;
+    excluded.extend(replaced);
     git_with_input(
         &repository.workspace,
         Some(&index.path),
@@ -484,6 +488,47 @@ async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<Pa
     .await?;
     Ok(nul_separated(&listing)
         .map(|path| path_from_bytes(path.strip_suffix(b"/").unwrap_or(path)))
+        .collect())
+}
+
+/// Ancestors of `paths`, relative to the workspace, that `commit` holds as
+/// something other than a directory: a file, symlink or submodule.
+async fn replaced_ancestors(
+    repository: &Repository,
+    commit: &str,
+    paths: &[PathBuf],
+) -> Result<Vec<PathBuf>, UndoError> {
+    let mut ancestors: Vec<&Path> = paths
+        .iter()
+        .flat_map(|path| path.ancestors().skip(1))
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .collect();
+    ancestors.sort();
+    ancestors.dedup();
+    if ancestors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut objects = Vec::new();
+    for ancestor in &ancestors {
+        objects.extend_from_slice(commit.as_bytes());
+        objects.extend_from_slice(b":./");
+        objects.extend_from_slice(&path_bytes(ancestor));
+        objects.push(0);
+    }
+    let types = git_bytes(
+        &repository.workspace,
+        None,
+        "cat-file",
+        &["cat-file", "--batch-check=%(objecttype)", "-Z"],
+        objects,
+    )
+    .await?;
+    // One answer per object, in order: a type, or `<object> missing`.
+    Ok(ancestors
+        .into_iter()
+        .zip(types.split(|byte| *byte == 0))
+        .filter(|(_, kind)| matches!(*kind, b"blob" | b"commit"))
+        .map(|(ancestor, _)| ancestor.to_owned())
         .collect())
 }
 
@@ -1007,6 +1052,46 @@ mod tests {
 
         restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("foo/secret")).as_deref(), Some("secret\n"));
+    }
+
+    #[tokio::test]
+    async fn a_directory_holding_excluded_files_is_not_replaced_by_a_snapshotted_file() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::create_dir(root.join("nested")).unwrap();
+        std::fs::write(root.join("foo"), "file\n").unwrap();
+        std::fs::write(root.join("nested/bar"), "file\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // `foo` becomes a directory with an ignored and a tracked-able file;
+        // `nested/bar` a directory holding a file too large to snapshot.
+        std::fs::remove_file(root.join("foo")).unwrap();
+        std::fs::create_dir(root.join("foo")).unwrap();
+        std::fs::write(root.join("foo/secret"), "secret\n").unwrap();
+        std::fs::write(root.join("foo/plain"), "plain\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "secret\n").unwrap();
+        std::fs::remove_file(root.join("nested/bar")).unwrap();
+        std::fs::create_dir(root.join("nested/bar")).unwrap();
+        let large = root.join("nested/bar/large.bin");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(MAX_UNTRACKED_FILE_BYTES + 1)
+            .unwrap();
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
+        assert_eq!(read(&root.join("foo/secret")).as_deref(), Some("secret\n"));
+        assert_eq!(
+            std::fs::metadata(&large).unwrap().len(),
+            MAX_UNTRACKED_FILE_BYTES + 1
+        );
     }
 
     #[cfg(unix)]
