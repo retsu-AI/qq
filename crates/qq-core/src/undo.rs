@@ -165,6 +165,9 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
         "restore",
         &[
             "restore",
+            // Submodule working trees are not in the snapshot (only their
+            // gitlinks are), so the restore must not reset them.
+            "--no-recurse-submodules",
             "--no-overlay",
             "--source",
             &target.commit,
@@ -175,7 +178,7 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
         pathspecs(&excluded),
     )
     .await?;
-    drop(index);
+    index.remove().await;
     let diff = git(
         &repository.workspace,
         None,
@@ -253,7 +256,7 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
         &["write-tree"],
     )
     .await?;
-    drop(index);
+    index.remove().await;
     let head = git(
         &repository.workspace,
         None,
@@ -626,6 +629,7 @@ fn pathspecs(excluded: &[PathBuf]) -> Vec<u8> {
 /// about as much as `git status`.
 struct ScratchIndex {
     path: PathBuf,
+    removed: bool,
 }
 
 impl ScratchIndex {
@@ -641,13 +645,35 @@ impl ScratchIndex {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(UndoError::Index(error)),
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            removed: false,
+        })
+    }
+
+    /// Removes the file off the Tokio workers.
+    async fn remove(mut self) {
+        self.removed = true;
+        let _ = tokio::fs::remove_file(&self.path).await;
     }
 }
 
 impl Drop for ScratchIndex {
+    /// A cancelled snapshot drops the index without [`ScratchIndex::remove`];
+    /// the file is removed on the blocking pool.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if self.removed {
+            return;
+        }
+        let path = std::mem::take(&mut self.path);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(move || std::fs::remove_file(path));
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
     }
 }
 
@@ -678,6 +704,18 @@ fn command(directory: &Path, index: Option<&Path>) -> tokio::process::Command {
     if let Some(index) = index {
         command.env("GIT_INDEX_FILE", index);
     }
+    // Snapshots run on the host before the agent's call, whatever sandbox
+    // that call gets: no repository hooks or fsmonitor helper may run.
+    command.args([
+        "-c",
+        if cfg!(windows) {
+            "core.hooksPath=NUL"
+        } else {
+            "core.hooksPath=/dev/null"
+        },
+        "-c",
+        "core.fsmonitor=false",
+    ]);
     command
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_AUTHOR_NAME", "QQ")
@@ -1282,6 +1320,76 @@ mod tests {
         let listing = git(root, &["ls-files", "-v"]);
         assert!(listing.contains("S tracked.txt"), "{listing}");
         assert!(listing.contains("S sparse/absent.txt"), "{listing}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repository_hooks_do_not_run() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = directory();
+        let root = &fixture.path().join("root");
+        std::fs::create_dir(root).unwrap();
+        repository(root);
+        let hooks = root.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        // Outside the workspace, where a restore cannot remove it.
+        let marker = fixture.path().join("hook-ran");
+        let hook = hooks.join("reference-transaction");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The hook is live for ordinary Git.
+        git(root, &["update-ref", "refs/fixture/probe", "HEAD"]);
+        assert!(marker.exists());
+        std::fs::remove_file(&marker).unwrap();
+
+        let taken = snapshot(root, SnapshotKind::BeforeUndo)
+            .await
+            .unwrap()
+            .unwrap();
+        restore(&taken).await.unwrap();
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn a_restore_leaves_submodule_working_trees_alone() {
+        let fixture = directory();
+        let upstream = fixture.path().join("upstream");
+        let root = fixture.path().join("root");
+        for directory in [&upstream, &root] {
+            std::fs::create_dir(directory).unwrap();
+            repository(directory);
+        }
+        git(
+            &root,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                "../upstream",
+                "sub",
+            ],
+        );
+        git(&root, &["commit", "-q", "-m", "submodule"]);
+        git(&root, &["config", "submodule.recurse", "true"]);
+        std::fs::write(root.join("sub/tracked.txt"), "dirty\n").unwrap();
+
+        let taken = snapshot(
+            &root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
+        // Not in the snapshot, so not reset to the submodule's commit.
+        assert_eq!(
+            read(&root.join("sub/tracked.txt")).as_deref(),
+            Some("dirty\n")
+        );
     }
 
     #[tokio::test]
