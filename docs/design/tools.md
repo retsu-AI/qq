@@ -815,7 +815,7 @@ and keeps the schema for each tool in one place:
   environment (§ Shell Execution).
 - `exec` — one program with an argument list and no shell between the model
   and the process; same environment, timeout, output, and approval path as
-  `shell`, but the classifier sees exact argv.
+  `shell`, but the stop check sees exact argv.
 - `ask_user` — one to four structured questions for the human, each with two
   to six options or free text; the run waits for the answers (§ Asking The
   User).
@@ -1555,7 +1555,7 @@ Native containment does not itself grant credential access.
 4 KiB, optional `stdin` ≤ 64 KiB, `cwd`, `timeout_seconds`, `env`) with no
 shell in between: no quoting, globbing, `$`, or pipes. For policy it is
 rendered as the equivalent command line — each argument single-quoted when
-it holds metacharacters — so the classifier, prefix grants (`cargo test`
+it holds metacharacters — so the fixed stops, prefix grants (`cargo test`
 covers `exec cargo [test, -p, x]`), and the approval preview see one shape
 for both tools, and an argument like `rm -rf /` is a literal word, never a
 command. The system prompt steers the model to `exec` for single programs
@@ -1622,143 +1622,43 @@ is allowed. Process preparation also resolves and holds a contained directory,
 including checking symlink resolution.
 
 Shell path checks alone do not contain arbitrary programs. Native Auto enforces
-its filesystem and network policy at the OS boundary. Command classification is
-admission assistance for unscoped embeddings and Ask previews, not containment.
+its filesystem and network policy at the OS boundary. The fixed stops below are
+an accident net over literal commands, not containment.
 
-### Shell Classification
+### Fixed Stops
 
-Before policy sees a shell command, the classifier parses it with
-`tree-sitter-bash` and judges it on a three-tier lattice, strictest verdict
-over every simple command anywhere in the tree (ADR-0020):
+A few shell actions can't be undone and are almost never intended. They are
+denied in every approval mode except `full`, before any hold, as a tool error
+(`permission_denied: fixed_stop: <reason>; <what to do instead>`). No grant
+lifts one. Everything else follows the mode: `auto` runs it, `ask` holds it,
+`read_only` denies it.
 
-| tier | reached by | unscoped `auto` | native Auto / Full |
-| --- | --- | --- | --- |
-| `Allow` | a word-only sequence (`cmd (&& \|\| ; \|) cmd…` of literal words, stream-only redirects) whose every command, once launchers are peeled, is a listed read/build shape with workspace-relative operands | executes | executes |
-| `Prompt` | everything else: parse errors, `$VAR`/globs/`$(…)`, constructs, unlisted programs, and the explicit list (deletions, git mutations and remotes, mode changes, `sed -i`, installs, containers, downloads, signals, `xargs`/`tee`, writing redirects, inline interpreters, operands outside the workspace) | denied without a grant | executes |
-| `Forbidden` | `rm -rf` on root, home, or outside the workspace; `sudo|doas|su|pkexec`; raw device writes; `mkfs|fdisk|parted|wipefs`; power state; `git push --force|+ref|--delete|--mirror`; `chmod|chown -R … /`; download piped to an interpreter; dynamic `eval`; fork bomb; `history -c|shred|crontab -r`; writes to shell profiles, `~/.ssh`, `/etc`; reverse shells; `LD_PRELOAD|PATH|GIT_SSH_COMMAND|BASH_ENV`-class env prefixes | denied without an exact grant | executes within applicable host policy |
+| Stop | Matches |
+| --- | --- |
+| `force_push` | `git push` with `--force`, `-f`, `--force-with-lease`, `--mirror`, `--delete`/`-d`, `--prune`, or a `+ref`/`:ref` refspec after the remote; git's global options (`-C`, `-c`, …) are skipped first |
+| `remove_root` | `rm -r`, `chmod`/`chown`/`chgrp -R`, or `mv` of a source (honoring `-t`/`--target-directory`) that is `/`, the home directory, or a path directly under either |
+| `privilege_escalation` | `sudo`, `doas`, `su`, `pkexec` |
+| `disk_write` | `mkfs*`, `fdisk`, `sfdisk`, `gdisk`, `parted`, `wipefs`; `dd of=`, a `cp`/`install` destination, a `tee` file, or a redirect that is a disk device |
+| `power_state` | `shutdown`, `reboot`, `halt`, `poweroff`, `systemctl reboot\|poweroff\|halt\|kexec` |
+| `credential_read` | any word or redirect naming `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`, or QQ's credential files |
 
-`Forbidden` is refused under every mode as a tool error naming the rule and
-an alternative; only a grant that quotes the exact command string lifts it
-(prefix grants lift `Prompt` alone). Wrappers are peeled ≤ 8 deep so the
-inner command is judged too. Past that depth, what is left counts as nested
-and is never allowed. Commands over 16 KiB skip parsing and prompt. Literal assignment substitution
-inside `env -S` reads the original string once, with the last assignment winning;
-inserted values are never recursively expanded. Expanded text is capped at
-16 KiB. Expansion overflow is Forbidden (`command_too_long`) even under `full`,
-because the unexamined tail can contain a forbidden program or flag. The bounded
-prefix is still classified for specific refusal reasons.
+The check parses the command with `tree-sitter-bash` and judges every simple
+command in it: in lists, pipelines, subshells, control flow and `$(…)`. The
+launchers `timeout`, `time`, `nice`, `nohup` and `stdbuf` are peeled, and
+`env`, `xargs`, `sudo`, `chrt`, `taskset` and `env -S` reach the command they
+run. `sh -c STRING` is reparsed, at most 4 deep. `$HOME` and `${HOME}` read as
+`~`, in arguments and redirect targets; any other expansion is unknown and
+never matches. A command over 16 KiB,
+or one the parser can't read, is not a stop.
 
-**Launchers** are a closed set: `timeout`, `time`, `nice`, `nohup`, and
-`stdbuf`. They are judged by the command they launch. A launcher qualifies
-when it has only its own options and an inner command follows:
+Paths are normalized lexically (`~/x/..` is `~`) and never resolved, so a
+symlink or a relative path that climbs to home is not caught. A script, an
+interpreter or a dynamically built command can do any of these things
+without matching. Managed `deny_shell_prefixes` add literal prefixes that are
+denied the same way, in every mode including `full`.
 
-- `timeout`: `-s/--signal SIG`, `-k/--kill-after D`, and
-  `--preserve-status`, then a duration. `--foreground` is excluded because
-  it leaves the command's children untimed (a float such as `30`, `1e3`, or
-  `inf`, with an optional `s`/`m`/`h`/`d` suffix).
-- `nice`: `-n N` or `--adjustment=N`.
-- `stdbuf`: `-i/-o/-e MODE`.
-- `time`: `-p`.
-- `nohup`: no options.
-
-A qualifying launcher is replaced by its inner command at the same level,
-so it adds no tier. `timeout 300 cargo test` is `Allow`, `nice rm -rf
-target` is `Prompt`, and `timeout 5 sudo ls` is `Forbidden`. A launcher
-with any other option, or with nothing to launch, is `unlisted`. A
-path-qualified launcher (`/usr/bin/timeout`, `./nice`) is not treated as
-the launcher, because it may be any file. It stays `unlisted`, but its
-apparent inner command is still judged, as nested, so `/usr/bin/timeout 5
-sudo ls` is `Forbidden`.
-
-The other wrappers are recorded as commands of their own, and the command
-they wrap is recorded as nested. It is judged, so a `Forbidden` inner
-command is found, but it is never allowed. These are `env`, `xargs`,
-`sudo`, `doas`, `su`, `ionice`, `chrt`, and `taskset`. For `chrt` and
-`taskset`, every suffix of the arguments is judged as the command,
-because options and the positional may be dynamic. This over-reports
-(`taskset 0x1 echo sudo` is `Forbidden`) rather than miss a buried
-command. `env -S STRING` (`--split-string`) builds its command by `env`'s
-own splitting rules, so it is an unknown program, and every suffix of its
-unquoted, `\_`-split words is judged too. Past 8 wrappers, any further
-launchers are skipped to the program they launch, which is judged nested
-(`Prompt`), so `nice` ×9 `sudo ls` is `Forbidden` while `nice` ×9 `echo
-sudo` is not. A tail that is not a clean launcher chain is judged at every
-suffix, including the command at the boundary itself. Every suffix enumeration judges at most 16 starts, each whole (so a
-`--force` deep in the argv is seen), and classification stays linear in
-the command. `env NAME=VALUE cmd` carries its
-assignments to `cmd`. Because
-GNU `timeout` creates its own process group, shell cancellation can leave
-it running. That predates T18 and is ENG-1032.
-
-Any assignment before a command keeps it from `Allow` unless it is in a
-short set of output and test knobs: `RUST_BACKTRACE`, `RUST_LOG`,
-`RUST_TEST_THREADS`, `RUST_MIN_STACK`, `NO_COLOR`, `CLICOLOR*`, `TERM`,
-`COLUMNS`, `LINES`, `LANG`, `LC_ALL`, `TZ`, `CI`, `NEXTEST_PROFILE`,
-`QQ_BENCH_ITERATIONS`, `QQ_SOAK_TURNS`, and
-`QQ_SOAK_EXPECT_COMPLETED`. `QQ_*` as a whole is not inert:
-`QQ_UPDATE_FIXTURES` rewrites checked-in fixtures, as `INSTA_UPDATE` does
-snapshots. Many variables name a program the tool will
-run (`RUSTDOC`, `CC`, `GIT_EXTERNAL_DIFF`), so this is an allowlist. An
-`export` or `declare -x` is a construct and was never `Allow`. `ionice`, `chrt`, and `taskset` are not launchers
-because they can retarget a running process; with `-p` they launch
-nothing. `renice` only retargets and is `unlisted`. `sh -c STRING` is
-reparsed. 
-
-A redirect writes nothing when its target is exactly `/dev/null`,
-`/dev/stdin`, `/dev/stdout`, `/dev/stderr`, or `/dev/fd/0`–`2`, or when it
-duplicates a standard descriptor (`2>&1`, `>&2`). A prefix such as
-`/dev/stdout-copy` is a file. `>&3` copies an inherited descriptor, which
-may be a file or a socket, so it is a write. `> 1` writes a file named `1`. A
-list or pipeline whose redirects all write nothing (`cd src && cargo test
-2>&1 | grep FAILED`) is judged like the same list without them. Any other
-redirected construct counts as nested.
-
-Globs stay dynamic (`dynamic_word`), including workspace-relative ones. A
-glob expands to filenames the workspace controls, and a filename can be
-program syntax: a file named `e touch PWN` turns `sed -n *` into a script
-that runs a command.
-
-`git -C <dir>` is skipped before the subcommand is read, so `git -C sub
-push --force` is still `Forbidden`. A `-C` command is never `Allow`. A hop
-that escapes lexically is `Prompt` with `path_outside_workspace`. One that
-looks contained is `Prompt` too, because a workspace symlink can point
-anywhere and the gates have no root to resolve it against. `git worktree
-list` and `git branch --list [pattern]` are reads.
-
-Containment of ordinary operands (`cat link/x`, `cd link`) is still
-lexical and does not resolve symlinks. That predates T18 and is tracked
-separately. `-C` is closed here because it changes which repository git
-acts on.
-
-`git fetch` keeps `git_remote` in every form. With no refspec on the
-command line git applies `remote.<name>.fetch` from its configuration,
-which the classifier cannot read and which may update local branches.
-
-A path-qualified program (`./ls`, `bin/cargo`, `/tmp/timeout`) is never
-`Allow`, because the allow tables name programs reached through `PATH`
-and a path names whatever file sits there.
-
-Git's global options before the subcommand (`-C`, `-c`, `--git-dir`,
-`--work-tree`, `--exec-path`, `--config-env`, `--attr-source`, `--bare`,
-and any other dash word, known or not) are all skipped, so the subcommand
-rules apply: `git -C sub -c k=v push --force`
-is `Forbidden`. Any of them except `--no-pager`, `-P`, and
-`--no-optional-locks` makes the command `Prompt`. `git -C` into `/tmp` is an escape:
-the writable-temporary exception covers scratch files, not other
-repositories. `git branch` is a read only when every option is a listing
-option. Git's last option wins (`--list --no-list name` creates `name`),
-so the check is an allowlist.
-
-The approval gates and the approval preview classify without the
-workspace root, so every absolute operand counts as an escape, including
-one inside the workspace. This fails closed. Only the bench and the rule
-tests pass a root.
-
-The rules are a static table in `approval/rules.rs` whose
-`match`/`not_match` examples run as one unit test. `ShellCommandPreview`
-carries `verdict` and `reasons` (rule ids) so a client can show why it is
-asking. Cost: 3–10 µs on ordinary commands, ~165 µs on a 1 KiB one-liner
-(`classify_command` bench; gate 200 µs).
+The stops live in `approval/stops.rs`; the parse is in `approval/classify.rs`.
+`ShellCommandPreview` no longer carries a `verdict` or `reasons`.
 
 ## Version Control
 
@@ -2097,9 +1997,8 @@ carry three lifetimes:
   reviewer model; a historical `jev` still decodes) and, for a delegate, the `run_id` that
   recorded it. A delegate grant is deliberately narrower
   than a human one. It matches only the byte-exact command or host,
-  never a prefix and never a `*.suffix`; it does not lift a `Forbidden`
-  verdict, which only a human's exact string may do (ADR-0020); it is
-  never promoted to workspace configuration; and one run may record at
+  never a prefix and never a `*.suffix`; no grant lifts a fixed stop; it
+  is never promoted to workspace configuration; and one run may record at
   most 64 of them. The storage rule above applies unchanged: a value
   that does not fit approves the call once and records nothing. If a
   human grant already covers the same string, the human row is kept and

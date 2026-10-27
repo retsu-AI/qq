@@ -1127,10 +1127,7 @@ pub(super) async fn execute(
                 tail: String::new(),
             });
         }
-        if crate::approval::classify_command(&check.command, Some(Path::new(&claimed.workspace)))
-            .decision
-            == crate::approval::Decision::Forbidden
-        {
+        if crate::approval::fixed_stop(&check.command).is_some() {
             break Completion::Forbidden;
         }
         let policy = match inner.grant_authority.as_ref() {

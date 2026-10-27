@@ -983,13 +983,10 @@ struct StaticPolicyGate {
 impl ToolGate for StaticPolicyGate {
     fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
         let class = approval::classify(call.effect, &call.name, &call.arguments, &self.network);
-        let decision = match approval::evaluate(self.mode, &call.name, &class, &self.grants) {
+        let decision = match approval::evaluate(self.mode, &class) {
             approval::PolicyDecision::Execute => GateDecision::Execute,
             approval::PolicyDecision::Deny { reason } => GateDecision::Deny {
                 message: approval::deny_result(&reason),
-            },
-            approval::PolicyDecision::Forbidden { rules } => GateDecision::Deny {
-                message: approval::forbidden_result(&rules),
             },
             approval::PolicyDecision::RequireApproval => GateDecision::Deny {
                 message: approval::UNATTENDED_DENIED_RESULT.to_owned(),

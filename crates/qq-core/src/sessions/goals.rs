@@ -338,15 +338,8 @@ pub(super) fn validate_check_authority(
     command: &str,
     policy: Option<&Result<(), GoalCheckPolicyError>>,
 ) -> Result<(), SessionRuntimeError> {
-    let workspace_id = session_workspace(connection, session)?;
-    let workspace: String = connection.query_row(
-        "SELECT path FROM workspaces WHERE id = ?1",
-        [workspace_id.to_string()],
-        |row| row.get(0),
-    )?;
-    if crate::approval::classify_command(command, Some(Path::new(&workspace))).decision
-        == crate::approval::Decision::Forbidden
-    {
+    session_workspace(connection, session)?;
+    if crate::approval::fixed_stop(command).is_some() {
         return Err(SessionRuntimeError::GoalCheckForbidden);
     }
     if let Some(Err(error)) = policy {

@@ -251,8 +251,8 @@ byte-identical apart from the version; the version moves because event and
 snapshot decoders are strict. Version 20 added `verdict` and `reasons` to
 `ShellCommandPreview` on `tool_approval_requested` (ADR-0020): the shell
 classifier's tier (`allow | prompt | forbidden`) and the rule ids that
-produced it, so a client can show why the gate is asking. Both are optional
-and omitted when absent; the struct is `deny_unknown_fields`, so a
+produced it. Both are optional and omitted when absent, and the runtime no
+longer sets them; the struct is `deny_unknown_fields`, so a
 version-19 client would reject a preview that carries them. Version 21 added
 `range` to `InputPart::WorkspaceFile` (client-side `@path:a-b` mentions) and
 the `ask_user` question round trip (ADR-0021): optional `question` on
@@ -1213,9 +1213,9 @@ Modes:
 | Mode | Behavior |
 | --- | --- |
 | `read_only` | Deny mutating, shell, and MCP tools without prompting |
-| `ask` | Fresh human approval for every non-read action, ignoring grants and reviewers |
-| `auto` | Default. Allowed actions run without prompting; an action outside current authority or matching a forbidden rule is denied as a tool error, never held |
-| `full` | Every tool call executes without prompting |
+| `ask` | Fresh human approval for every non-read action, ignoring grants and reviewers; fixed stops are denied without asking |
+| `auto` | Default. Every call runs without prompting except a fixed stop (force-push, `sudo`, `rm -r` of home, credential files, …), which is denied as a tool error, never held |
+| `full` | Every tool call executes without prompting; fixed stops do not apply |
 
 The mode is read when each approval is evaluated, so it applies to the next
 held call even during an active run. The command commits and publishes a

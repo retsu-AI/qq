@@ -1,32 +1,12 @@
-//! Shell command classification over a real parse. `tree-sitter-bash` turns
-//! the command into a CST; two walks read it. `word_only_sequence` accepts
-//! only `cmd (&& || ; |) cmd…` made of literal words and is the sole path to
-//! `Allow`. `literal_commands` collects every simple command anywhere — in
-//! subshells, `if`, `$(…)`, function bodies — so a `Prompt` or `Forbidden`
-//! shape cannot hide. Parse errors classify `Prompt`. The decision lattice is
-//! `Forbidden > Prompt > Allow`: the strictest verdict over every simple
-//! command wins.
+//! The shell parse behind the fixed stops and the explicit command controls.
+//! `tree-sitter-bash` turns the command into a CST and the collector records
+//! every simple command anywhere in it: in lists, pipelines, subshells, `if`,
+//! `$(…)` and function bodies, with launchers and wrappers peeled and
+//! `sh -c STRING` reparsed. A dynamic word is `None`.
 
 use std::sync::OnceLock;
 
 use tree_sitter::{Node, Parser};
-
-use super::rules::{self, RuleId};
-
-/// Where a command sits on the policy lattice, with the rules that put it
-/// there. `Allow` carries no reasons: nothing matched a stricter tier.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Verdict {
-    pub(crate) decision: Decision,
-    pub(crate) reasons: Vec<RuleId>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum Decision {
-    Allow,
-    Prompt,
-    Forbidden,
-}
 
 /// Commands longer than this skip parsing: nothing that long is a command a
 /// human would approve from a preview, and the parser's worst case is theirs.
@@ -87,10 +67,6 @@ impl SimpleCommand {
     pub(crate) fn args(&self) -> &[Option<String>] {
         self.argv.get(1..).unwrap_or(&[])
     }
-
-    pub(crate) fn has_dynamic_word(&self) -> bool {
-        self.argv.iter().any(Option::is_none)
-    }
 }
 
 /// A redirect target that writes nothing: the null device, a standard
@@ -116,119 +92,27 @@ pub(crate) fn basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
 
-/// Classifies a shell command string. `workspace` is the absolute root used
-/// to judge redirect and path operands; `cwd` the command's directory
-/// relative to it.
-pub(crate) fn classify_command(command: &str, workspace: Option<&std::path::Path>) -> Verdict {
-    if command.len() > MAX_CLASSIFIED_BYTES {
-        return Verdict {
-            decision: Decision::Prompt,
-            reasons: vec![RuleId::CommandTooLong],
-        };
-    }
-    if command.trim().is_empty() {
-        return Verdict {
-            decision: Decision::Prompt,
-            reasons: vec![RuleId::EmptyCommand],
-        };
-    }
-    let mut parser = parser();
-    let Some(tree) = parser.parse(command, None) else {
-        return Verdict {
-            decision: Decision::Prompt,
-            reasons: vec![RuleId::ParseError],
-        };
-    };
-    let root = tree.root_node();
-    let mut reasons: Vec<RuleId> = Vec::new();
-    let mut decision = Decision::Allow;
-    if root.has_error() {
-        decision = Decision::Prompt;
-        reasons.push(RuleId::ParseError);
-    }
-    // Every simple command anywhere in the tree, wrappers peeled.
+/// Every simple command in `command`, wrappers peeled. `$HOME` and
+/// `${HOME}` read as `~`, so a home operand is visible; any other expansion
+/// is `None`. A parse error still yields the commands the parser recovered.
+pub(super) fn shell_commands(command: &str) -> Vec<SimpleCommand> {
     let mut commands = Vec::new();
+    if command.len() > MAX_CLASSIFIED_BYTES {
+        return commands;
+    }
+    let Some(tree) = parser().parse(command, None) else {
+        return commands;
+    };
     let mut expansion_overflow = false;
-    let mut collector = Collector::<false> {
+    Collector::<false> {
         source: command.as_bytes(),
         commands: &mut commands,
         expansion_overflow: &mut expansion_overflow,
         nested_shells: 0,
-    };
-    collector.collect(root, false);
-    if expansion_overflow {
-        // Truncated expansion can hide a forbidden program or flag. Full
-        // approval must not execute a command we stopped examining.
-        decision = Decision::Forbidden;
-        reasons.push(RuleId::CommandTooLong);
+        home: true,
     }
-    if commands.is_empty() && !root.has_error() {
-        // A bare assignment, a comment, or a construct with no command.
-        decision = decision.max(Decision::Prompt);
-        reasons.push(RuleId::NoCommand);
-    }
-    // Pipeline rule: a downloader anywhere before an interpreter anywhere.
-    // The danger is the combination, so neither command alone carries it.
-    let mut saw_downloader = false;
-    for simple in &commands {
-        match simple.program() {
-            Some("curl" | "wget" | "aria2c" | "fetch") => saw_downloader = true,
-            Some(
-                "sh" | "bash" | "zsh" | "dash" | "ksh" | "python" | "python3" | "node" | "perl"
-                | "ruby" | "php",
-            ) if saw_downloader
-                && !simple
-                    .args()
-                    .iter()
-                    .any(|a| a.as_deref() == Some("-c") || a.as_deref() == Some("-e")) =>
-            {
-                decision = Decision::Forbidden;
-                reasons.push(RuleId::DownloadPipedToInterpreter);
-            }
-            _ => {}
-        }
-    }
-    // A `/dev/tcp/` redirect is a socket.
-    if commands
-        .iter()
-        .flat_map(|c| c.redirects.iter())
-        .any(|target| {
-            target
-                .as_deref()
-                .is_some_and(|t| t.starts_with("/dev/tcp/") || t.starts_with("/dev/udp/"))
-        })
-    {
-        decision = Decision::Forbidden;
-        reasons.push(RuleId::NetworkShell);
-    }
-    for simple in &commands {
-        let (tier, rule) = rules::judge(simple, workspace);
-        if tier > decision || (tier == decision && tier != Decision::Allow) {
-            decision = decision.max(tier);
-        }
-        if tier != Decision::Allow
-            && let Some(rule) = rule
-            && !reasons.contains(&rule)
-        {
-            reasons.push(rule);
-        }
-    }
-    // Allow requires the whole program be a word-only sequence: anything the
-    // structural walk did not see as `cmd (&& || ; |) cmd` — subshells,
-    // control flow, substitutions, heredocs — asks.
-    if decision == Decision::Allow && !word_only_sequence(root, command.as_bytes()) {
-        decision = Decision::Prompt;
-        reasons.push(RuleId::NotWordOnly);
-    }
-    // Reasons carry only what set the decision: a Forbidden verdict does not
-    // list the Prompt rules beneath it.
-    if decision == Decision::Forbidden {
-        reasons.retain(|rule| {
-            rule.tier() == Decision::Forbidden
-                || (expansion_overflow && *rule == RuleId::CommandTooLong)
-        });
-    }
-    Verdict { decision, reasons }
+    .collect(tree.root_node(), false);
+    commands
 }
 
 /// For a transparent launcher, the number of words after the program that
@@ -594,6 +478,7 @@ fn goal_policy_commands(source: &str) -> Option<Vec<SimpleCommand>> {
         commands: &mut commands,
         expansion_overflow: &mut unresolved,
         nested_shells: 0,
+        home: false,
     }
     .collect(root, false);
     if unresolved { None } else { Some(commands) }
@@ -616,56 +501,25 @@ fn goal_policy_syntax_resolved(root: Node<'_>, source: &[u8]) -> bool {
     true
 }
 
-/// `program` → `list`/`pipeline`/`command` chains of literal words only.
-fn word_only_sequence(root: Node<'_>, source: &[u8]) -> bool {
-    fn sequence(node: Node<'_>, source: &[u8]) -> bool {
-        match node.kind() {
-            "program" | "list" | "pipeline" => {
-                let mut cursor = node.walk();
-                node.named_children(&mut cursor)
-                    .filter(|child| child.kind() != "comment")
-                    .all(|child| sequence(child, source))
-            }
-            // `cmd > /dev/null`, `cmd 2>&1`: harmless redirects keep the
-            // sequence word-only; anything that writes a file does not.
-            "redirected_statement" => {
-                let mut cursor = node.walk();
-                node.named_children(&mut cursor)
-                    .all(|child| match child.kind() {
-                        "file_redirect" => {
-                            let (target, _) = redirect_target(child, source);
-                            target.is_some_and(|t| stream_target(&t))
-                        }
-                        _ => sequence(child, source),
-                    })
-            }
-            "command" => {
-                let mut cursor = node.walk();
-                node.children(&mut cursor).all(|child| match child.kind() {
-                    "command_name" => child
-                        .named_child(0)
-                        .is_some_and(|name| literal_word(name, source).is_some()),
-                    "word" | "number" | "raw_string" | "string" | "concatenation" => {
-                        literal_word(child, source).is_some()
-                    }
-                    "variable_assignment" => true,
-                    _ => false,
-                })
-            }
-            _ => false,
-        }
-    }
-    sequence(root, source)
-}
-
 /// The literal text of a word node, or `None` when it (or any part of a
 /// concatenation/string) expands at runtime.
 fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
+    word(node, source, false)
+}
+
+/// [`literal_word`], reading `$HOME` and `${HOME}` as `~` when `home` is set.
+fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
     match node.kind() {
+        "simple_expansion" | "expansion"
+            if home && matches!(&source[node.byte_range()], b"$HOME" | b"${HOME}") =>
+        {
+            Some("~".to_owned())
+        }
         "word" | "number" | "test_operator" => {
             let text = std::str::from_utf8(&source[node.byte_range()]).ok()?;
             // A bare word with a glob character expands to unknown paths.
-            if text.contains(['*', '?', '[']) {
+            // The stop check reads it as text: `rm -rf ~/*` names home.
+            if !home && text.contains(['*', '?', '[']) {
                 return None;
             }
             Some(text.to_owned())
@@ -682,6 +536,9 @@ fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
                     "string_content" => {
                         out.push_str(std::str::from_utf8(&source[child.byte_range()]).ok()?);
                     }
+                    "simple_expansion" | "expansion" if home => {
+                        out.push_str(&word(child, source, home)?);
+                    }
                     _ => return None,
                 }
             }
@@ -691,7 +548,7 @@ fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
             let mut out = String::new();
             let mut cursor = node.walk();
             for child in node.named_children(&mut cursor) {
-                out.push_str(&literal_word(child, source)?);
+                out.push_str(&word(child, source, home)?);
             }
             Some(out)
         }
@@ -709,7 +566,7 @@ fn literal_word(node: Node<'_>, source: &[u8]) -> Option<String> {
 
 /// A redirect's target: its literal text when static, and its raw source
 /// text either way (for shape matching on dynamic targets).
-fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<String>) {
+fn redirect_target(node: Node<'_>, source: &[u8], home: bool) -> (Option<String>, Option<String>) {
     let target = node
         .named_children(&mut node.walk())
         .find(|c| c.kind() != "file_descriptor");
@@ -720,7 +577,7 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
         .children(&mut node.walk())
         .any(|token| matches!(token.kind(), ">&" | "<&"));
     let literal = target.and_then(|c| {
-        let word = literal_word(c, source)?;
+        let word = word(c, source, home)?;
         // The marker starts with NUL, which no shell word can contain, so
         // a file literally named `&1` cannot pass as a duplication.
         Some(if duplicates && c.kind() == "number" {
@@ -740,6 +597,8 @@ struct Collector<'a, const KEEP_LAUNCHERS: bool> {
     commands: &'a mut Vec<SimpleCommand>,
     expansion_overflow: &'a mut bool,
     nested_shells: usize,
+    /// Read `$HOME` as `~` in command words (see [`shell_commands`]).
+    home: bool,
 }
 
 impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
@@ -762,7 +621,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 for child in node.children(&mut cursor) {
                     match child.kind() {
                         "file_redirect" => {
-                            let (target, raw) = redirect_target(child, self.source);
+                            let (target, raw) = redirect_target(child, self.source, self.home);
                             stream_only &= target.as_deref().is_some_and(stream_target);
                             redirects.push(target);
                             raw_redirects.extend(raw);
@@ -845,10 +704,10 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
         for child in node.children(&mut cursor) {
             match child.kind() {
                 "command_name" => {
-                    let word = child
+                    let name = child
                         .named_child(0)
-                        .and_then(|name| literal_word(name, self.source));
-                    argv.push(word);
+                        .and_then(|name| word(name, self.source, self.home));
+                    argv.push(name);
                     if let Some(name) = child.named_child(0) {
                         deferred.push(name);
                     }
@@ -860,13 +719,13 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                     deferred.push(child);
                 }
                 "file_redirect" => {
-                    let (target, raw) = redirect_target(child, self.source);
+                    let (target, raw) = redirect_target(child, self.source, self.home);
                     redirects.push(target);
                     raw_redirects.extend(raw);
                 }
                 "heredoc_redirect" | "herestring_redirect" => {}
                 _ if child.is_named() => {
-                    argv.push(literal_word(child, self.source));
+                    argv.push(word(child, self.source, self.home));
                     deferred.push(child);
                 }
                 _ => {}
@@ -1256,6 +1115,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                                         commands: self.commands,
                                         expansion_overflow: self.expansion_overflow,
                                         nested_shells: self.nested_shells,
+                                        home: self.home,
                                     };
                                     if root.has_error()
                                         || (KEEP_LAUNCHERS
@@ -1334,21 +1194,6 @@ mod managed_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn shell_long_options_do_not_hide_forbidden_inline_commands() {
-        for command in [
-            "bash --rcfile /dev/null -c 'sudo true'",
-            "bash --norc -x -c 'sudo true'",
-            "bash --noprofile -c 'sudo true'",
-        ] {
-            assert_eq!(
-                classify_command(command, None).decision,
-                Decision::Forbidden,
-                "{command}"
-            );
-        }
-    }
 
     #[test]
     fn goal_check_denies_cover_shell_members_wrappers_and_unresolved_commands() {
@@ -1596,6 +1441,7 @@ mod tests {
             commands: &mut out,
             expansion_overflow: &mut expansion_overflow,
             nested_shells: 0,
+            home: false,
         };
         collector.collect(tree.root_node(), false);
         out.into_iter().map(|c| c.argv).collect()
@@ -1606,35 +1452,10 @@ mod tests {
     }
 
     #[test]
-    fn env_split_expansion_overflow_preserves_the_forbidden_floor() {
-        for command in [
-            format!("A=xxxxxxxx env -S 'sudo {}'", "${A}".repeat(2049)),
-            format!("A=xxxxxxxx env -S 'echo {}'", "${A}".repeat(2049)),
-            format!(
-                "A=xxxxxxxx env -S 'git push {} --force'",
-                "${A}".repeat(2049)
-            ),
-            format!("A=xxxxxxxx env -S '-u {} sudo ls'", "${A}".repeat(2049)),
-        ] {
-            assert!(command.len() <= MAX_CLASSIFIED_BYTES);
-            let verdict = classify_command(&command, None);
-            assert_eq!(verdict.decision, Decision::Forbidden);
-            assert!(verdict.reasons.contains(&RuleId::CommandTooLong));
-        }
-    }
-
-    #[test]
     fn env_split_expansion_does_not_rescan_inserted_values() {
         let command = format!("{}env -S '${{A}} ls'", "A='${A}${A}' ".repeat(40));
         let found = commands(&command);
         assert!(found.iter().flatten().flatten().all(|word| word.len() < 32));
-        let nested = format!(
-            "sh -c \"A=xxxxxxxx env -S 'echo {}'\"",
-            "\\${A}".repeat(2049)
-        );
-        let verdict = classify_command(&nested, None);
-        assert_eq!(verdict.decision, Decision::Forbidden);
-        assert!(verdict.reasons.contains(&RuleId::CommandTooLong));
         let value = "x".repeat(1024);
         let command = format!("A={value} env -S '{}'", "${A}".repeat(32));
         assert!(
@@ -1710,30 +1531,5 @@ mod tests {
                 literal(&["pwd"])
             ]
         );
-    }
-
-    #[test]
-    fn word_only_sequences_exclude_constructs() {
-        let mut parser = parser();
-        for (command, expected) in [
-            ("cargo test", true),
-            ("cargo test && git status | head", true),
-            ("cargo test; echo done", true),
-            ("echo 'quoted' \"also\"", true),
-            ("(cargo test)", false),
-            ("if true; then ls; fi", false),
-            ("echo $(ls)", false),
-            ("cat <<EOF\nx\nEOF", false),
-            ("ls > out", false),
-            ("ls *.rs", false),
-            ("FOO=1 cargo test", true),
-        ] {
-            let tree = parser.parse(command, None).unwrap();
-            assert_eq!(
-                word_only_sequence(tree.root_node(), command.as_bytes()),
-                expected,
-                "{command}"
-            );
-        }
     }
 }

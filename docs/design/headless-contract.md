@@ -245,9 +245,9 @@ Approval classification uses the catalog effect class (`crates/qq-core/src/appro
   call is **denied** before a request exists. `--allow-*` never fires.
 - `ask`: reads execute; every call requiring explicit human approval is
   denied immediately. Allowlists and reviewer models cannot authorize it.
-- `auto` (default): everything executes except shell commands the policy classifies as
-  dangerous (`sudo`, recursive `rm`, `git push`, `curl | sh`, and similar);
-  those are held and answered by `--allow-tool`/`--allow-shell` grants.
+- `auto` (default): everything executes except the fixed stops (force-push,
+  `sudo`, `rm -r` of `/` or home, credential files, and similar), which are
+  denied. No grant lifts a stop.
 - `full`: everything executes; grants are redundant.
 
 `fetch` follows the ladder with a host grant: `--allow-host docs.rs` (or

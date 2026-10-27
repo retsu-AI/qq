@@ -75,6 +75,8 @@ Every session runs under one mode. Set the default in a profile
 | `auto` **(default)** | run | run in the private [task copy](#task-workspaces), published when the run completes | run within the native task boundary | run | public hosts run |
 | `full` | run | run | run without Auto containment | run | public hosts run |
 
+Every mode except Full denies the [fixed stops](#fixed-stops) without asking.
+
 Auto does not ask a human or consult a reviewer model for ordinary actions,
 including actions taken by write sub-agents. Auto questions return a result
 telling the agent to decide without human input. A denied operation returns a tool
@@ -108,9 +110,8 @@ environment names are excluded unless explicitly requested through
 Default Auto adds no fixed per-command memory quota or cgroup setup requirement.
 Embedders can explicitly request resource limits when their host supports them.
 
-An embedding that does not supply a native task scope retains conservative
-shell admission through read/build classification or explicit grants. This is
-not equivalent to the binary's native Auto path.
+An embedding that does not supply a native task scope runs shell commands in
+Auto without that boundary, subject only to the fixed stops below.
 
 Shell needs operating-system support on the host, in every mode that runs
 commands, and QQ has no unsandboxed fallback. On Linux that means a
@@ -156,18 +157,30 @@ configuration; see [`policy.task_hosting`](configuration.md#policy). The
 tools need an absolute `git` on `PATH` and a checkout whose `HEAD` is a
 commit.
 
-### Command controls
+### Fixed stops
 
-The shell classifier is not a security boundary. It can describe an Ask
-preview or admit conservative commands for an unscoped embedding; it does not
-veto arbitrary programs inside native Auto, or restrict Full to a fixed set of
-commands. Filesystem and network enforcement apply to scripts and libraries
-regardless of the executable's name.
+A few shell actions can't be undone and are almost never intended. Every mode
+except Full denies them before running anything, and the agent gets a tool
+error telling it to find another way:
 
-Configured command-prefix denies control literal commands; they cannot prevent
-Python, a library, or a dynamically constructed command from performing the
-same operation. Use native containment for those limits. Full still obeys
-explicit managed policy and built-in protected-file checks.
+- force-pushing or deleting remote refs (`git push --force`, `-f`,
+  `--force-with-lease`, `--delete`, `+ref`, `:ref`);
+- `rm -r`, `mv`, or `chmod -R`/`chown -R` on `/`, your home directory, or a
+  directory directly under either;
+- `sudo`, `doas`, `su`, `pkexec`;
+- formatting or writing to a disk device; shutting down or rebooting;
+- naming a credential file: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
+  `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`,
+  or QQ's own credential store.
+
+The stops see through `cd x && …`, `env A=b …`, `timeout`, `nice`, pipes,
+subshells and `sh -c '…'`. No grant lifts one; switch to Full if you mean
+it.
+
+This is an accident net, not a security boundary. It reads literal
+commands. A script, an interpreter, or a command built at run time can do any
+of these things without matching. Managed `deny_shell_prefixes` add literal
+prefixes that are denied in every mode, Full included.
 
 ## Undoing a run
 
@@ -183,7 +196,6 @@ hold for a human. Auto never does. An Ask prompt looks like this:
 ```
 ◇ approval needed
 $ npm install left-pad  (in ~/repo)
-asks because: package_install
 y once   n deny   ask: approval applies once
 ```
 

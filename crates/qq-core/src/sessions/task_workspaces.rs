@@ -857,14 +857,6 @@ fn encode(record: &TaskRecord) -> Result<String, TaskExecutionError> {
     Ok(value)
 }
 
-pub(super) fn is_bound(connection: &Connection, run: RunId) -> Result<bool, rusqlite::Error> {
-    connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1)",
-        [format!("{RUN_PREFIX}{run}")],
-        |row| row.get(0),
-    )
-}
-
 /// Resolve live inspection authority from trusted run records, never from the
 /// model or the source project. No active task means ordinary source inspection.
 pub(super) async fn side_scope(

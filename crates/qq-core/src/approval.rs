@@ -1,5 +1,5 @@
 mod classify;
-mod rules;
+mod stops;
 
 use std::collections::HashSet;
 
@@ -9,8 +9,8 @@ use serde::Deserialize;
 use crate::catalog::EffectClass;
 
 pub use classify::goal_check_shell_denied;
-pub(crate) use classify::{Decision, classify_command, managed_shell_denied};
-pub use rules::RuleId;
+pub(crate) use classify::managed_shell_denied;
+pub(crate) use stops::{Stop, fixed_stop};
 
 /// Entry point for the `classify_command` bench. Not a public API.
 #[doc(hidden)]
@@ -37,14 +37,10 @@ pub mod bench_support {
         crate::tools::parsed_shell_command(arguments)
     }
 
-    /// Classifies `command` and returns the decision's name.
+    /// The fixed stop `command` hits, or `"none"`.
     #[must_use]
     pub fn classify(command: &str) -> &'static str {
-        match super::classify_command(command, Some(std::path::Path::new("/work/repo"))).decision {
-            super::Decision::Allow => "allow",
-            super::Decision::Prompt => "prompt",
-            super::Decision::Forbidden => "forbidden",
-        }
+        super::fixed_stop(command).map_or("none", super::Stop::name)
     }
 }
 
@@ -60,6 +56,7 @@ pub(crate) fn deny_result(reason: &DenyReason) -> String {
         DenyReason::HostBlocked { refusal } => format!(
             "fetch refused: {refusal}. Private, link-local, and managed-denied hosts are unreachable under every approval mode."
         ),
+        DenyReason::Stop(stop) => stop.result(),
     }
 }
 pub(crate) const USER_DENIED_RESULT: &str = "The user denied this tool call.";
@@ -82,20 +79,6 @@ pub use qq_protocol::ApprovalDelegate;
 /// The model-facing prefix of a reviewer denial in Auto mode.
 pub(crate) fn reviewer_denied_result() -> &'static str {
     "The approval reviewer denied this tool call:"
-}
-
-/// The model-facing refusal for a `Forbidden` shell command: the rule(s) that
-/// refused it and what to do instead. A tool error, not a run failure.
-pub(crate) fn forbidden_result(rules: &[RuleId]) -> String {
-    let names: Vec<&str> = rules.iter().map(|rule| rule.name()).collect();
-    let alternative = rules
-        .first()
-        .map(|rule| rule.alternative())
-        .unwrap_or_default();
-    format!(
-        "forbidden: this command requires Full or native task authority (rule: {}); {alternative}",
-        names.join(", ")
-    )
 }
 
 /// How one requested tool call relates to the workspace and the outside world.
@@ -142,6 +125,8 @@ pub(crate) enum DenyReason {
     HostBlocked {
         refusal: crate::tools::network::HostRefusal,
     },
+    /// A fixed stop: refused in every mode but Full.
+    Stop(Stop),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,11 +142,6 @@ pub(crate) enum PolicyDecision {
     Deny {
         reason: DenyReason,
     },
-    /// The command matched a conservative shell rule without Full or native
-    /// task authority, unless a grant quotes the exact command string.
-    Forbidden {
-        rules: Vec<RuleId>,
-    },
 }
 
 /// Session-scoped approvals recorded by approve-for-session decisions.
@@ -171,11 +151,9 @@ pub(crate) struct SessionGrants {
     pub(crate) shell_prefixes: Vec<String>,
     /// Hosts `fetch` may reach without prompting: exact names or `*.suffix`.
     pub(crate) hosts: Vec<String>,
-    /// Grants a delegate (the approval reviewer) recorded on its own verdict.
-    /// Narrower than a human grant on purpose: a command matches only the
-    /// exact string, a host only the exact name, and neither lifts `Forbidden`
-    /// or is ever written to workspace configuration. The human's tools,
-    /// prefixes, and hosts above stay the wide shapes.
+    /// Grants a delegate (the approval reviewer) recorded on its own verdict:
+    /// the exact command string or host, never written to workspace
+    /// configuration.
     pub(crate) delegate: DelegateGrants,
 }
 
@@ -184,27 +162,6 @@ pub(crate) struct SessionGrants {
 pub(crate) struct DelegateGrants {
     pub(crate) commands: HashSet<String>,
     pub(crate) hosts: HashSet<String>,
-}
-
-impl SessionGrants {
-    /// A human grant that quotes the exact command string lifts even a
-    /// `Forbidden` verdict: the user typed the whole thing and blessed it. A
-    /// delegate grant never does, however exact; the floor stays above it.
-    fn quotes_exactly(&self, command: &str) -> bool {
-        let command = command.trim();
-        self.shell_prefixes
-            .iter()
-            .any(|prefix| prefix.trim() == command)
-    }
-
-    fn covers_shell(&self, name: &str, command: &str) -> bool {
-        self.tools.contains(name)
-            || self
-                .shell_prefixes
-                .iter()
-                .any(|prefix| shell_prefix_matches(prefix, command))
-            || self.delegate.commands.contains(command.trim())
-    }
 }
 
 /// Matches an allowlisted prefix against a shell command at word granularity,
@@ -734,6 +691,58 @@ fn read_only_sed_script(script: &str) -> bool {
     }
 }
 
+/// `git branch` arguments that only list: every option is a listing option,
+/// and pattern words appear only in list mode. An allowlist, because git's
+/// last-option-wins parsing (`--list --no-list name` creates `name`) and its
+/// abbreviated long options make any denylist incomplete.
+fn branch_lists(args: &[&str]) -> bool {
+    let mut list_mode = false;
+    let mut expect_value = false;
+    let mut patterns = false;
+    for arg in args {
+        // A value option consumes the next word whatever it looks like:
+        // `--format --list name` formats with `--list` and creates `name`.
+        if std::mem::take(&mut expect_value) {
+            continue;
+        }
+        match *arg {
+            // `-l` meant `--create-reflog` before git 2.23; only the long
+            // form is a listing on every git a workspace may run.
+            "--list" => list_mode = true,
+            "-a" | "--all" | "-r" | "--remotes" | "-v" | "-vv" | "--verbose" | "-q" | "--quiet"
+            | "-i" | "--ignore-case" | "--color" | "--no-color" | "--column" | "--no-column"
+            | "--no-abbrev" | "--show-current" => {}
+            // Filters select listing mode and take a value.
+            "--merged" | "--no-merged" | "--contains" | "--no-contains" | "--points-at" => {
+                list_mode = true;
+                expect_value = true;
+            }
+            // Formatting takes a value but does not select listing mode:
+            // `git branch --format x name` creates `name`.
+            "--sort" | "--format" => expect_value = true,
+            arg if arg.starts_with("--sort=") || arg.starts_with("--format=") => {}
+            arg if [
+                "--merged=",
+                "--no-merged=",
+                "--contains=",
+                "--no-contains=",
+                "--points-at=",
+            ]
+            .iter()
+            .any(|prefix| arg.starts_with(prefix)) =>
+            {
+                list_mode = true;
+            }
+            arg if ["--abbrev=", "--color=", "--column="]
+                .iter()
+                .any(|prefix| arg.starts_with(prefix)) => {}
+            arg if arg.starts_with('-') => return false,
+            _ => patterns = true,
+        }
+    }
+    list_mode || !patterns
+}
+
 pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     match program {
         "git" => {
@@ -760,7 +769,7 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
                             arg.starts_with("--format")
                                 || (arg.starts_with("--sort") && *arg != "--sort=refname")
                         })
-                        && rules::branch_lists(args)
+                        && branch_lists(args)
                 }
                 "log" | "show" => {
                     let Some(args) = args.strip_prefix(&[
@@ -935,132 +944,27 @@ pub(crate) fn read_only_argv(program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// A detached task may run arbitrary programs within its native
-/// filesystem and network boundary. This never grants host execution: dispatch
-/// must retain the task scope and the native backend must enforce it or refuse.
-pub(crate) fn evaluate_in_task(
-    mode: ApprovalMode,
-    name: &str,
-    class: &ToolClass,
-    grants: &SessionGrants,
-    task_scoped: bool,
-) -> PolicyDecision {
-    if task_scoped && mode == ApprovalMode::Auto && matches!(class, ToolClass::Shell { .. }) {
-        return PolicyDecision::Execute;
-    }
-    evaluate(mode, name, class, grants)
-}
-
-#[cfg(test)]
-mod task_policy_tests {
-    use super::*;
-
-    #[test]
-    fn task_shell_authority_preserves_modes_without_command_name_restrictions() {
-        let shell = ToolClass::Shell {
-            command: "rm temporary".to_owned(),
-            cwd: None,
-            read_only: false,
-        };
-        let grants = SessionGrants::default();
-        assert_eq!(
-            evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, false),
-            PolicyDecision::RequireApproval
-        );
-        assert_eq!(
-            evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, true),
-            PolicyDecision::Execute
-        );
-        assert_eq!(
-            evaluate_in_task(ApprovalMode::Ask, "shell", &shell, &grants, true),
-            PolicyDecision::RequireApproval
-        );
-        assert!(matches!(
-            evaluate_in_task(ApprovalMode::ReadOnly, "shell", &shell, &grants, true),
-            PolicyDecision::Deny { .. }
-        ));
-        let forbidden = ToolClass::Shell {
-            command: "rm -rf /".to_owned(),
-            cwd: None,
-            read_only: false,
-        };
-        assert_eq!(
-            evaluate_in_task(ApprovalMode::Auto, "shell", &forbidden, &grants, true),
-            PolicyDecision::Execute
-        );
-        for command in [
-            "unknown-build-tool --target custom && another-tool | final-tool",
-            "$(choose-tool) --custom",
-        ] {
-            let shell = ToolClass::Shell {
-                command: command.into(),
-                cwd: None,
-                read_only: false,
-            };
-            assert_eq!(
-                evaluate_in_task(ApprovalMode::Auto, "shell", &shell, &grants, true),
-                PolicyDecision::Execute
-            );
-        }
-        let network = ToolClass::Network {
-            host: Some("example.com".to_owned()),
-            refusal: None,
-        };
-        assert_eq!(
-            evaluate_in_task(ApprovalMode::Auto, "fetch", &network, &grants, true),
-            PolicyDecision::Execute
-        );
-    }
-}
-
-/// Decides whether one classified tool call executes, waits for approval, or
-/// is denied outright under the session's approval mode and recorded grants.
-pub(crate) fn evaluate(
-    mode: ApprovalMode,
-    name: &str,
-    class: &ToolClass,
-    grants: &SessionGrants,
-) -> PolicyDecision {
-    // The conservative shell classifier bounds modes without unrestricted
-    // authority. Full and native task execution do not restrict program names.
+/// Decides whether one classified tool call executes, waits for a human, or
+/// is denied under the session's approval mode.
+///
+/// | mode | reads | everything else | fixed stops |
+/// | --- | --- | --- | --- |
+/// | `read_only` | run | denied | denied |
+/// | `ask` | run | held for the human | denied |
+/// | `auto` | run | run | denied |
+/// | `full` | run | run | run |
+pub(crate) fn evaluate(mode: ApprovalMode, class: &ToolClass) -> PolicyDecision {
     if mode != ApprovalMode::Full
         && let ToolClass::Shell { command, .. } = class
+        && let Some(stop) = fixed_stop(command)
     {
-        let verdict = classify_command(command, None);
-        if verdict.decision == Decision::Forbidden && !grants.quotes_exactly(command) {
-            return PolicyDecision::Forbidden {
-                rules: verdict.reasons,
-            };
-        }
-        if mode == ApprovalMode::Auto {
-            // Workspace-local mutations run without additional authority.
-            // Other commands need a grant; the session gate denies missing
-            // Auto authority without prompting.
-            let workspace_local = verdict.decision == Decision::Prompt
-                && verdict.reasons.iter().all(|rule| {
-                    matches!(
-                        rule,
-                        RuleId::GitMutation
-                            | RuleId::RedirectIntoWorkspace
-                            | RuleId::InPlaceEdit
-                            | RuleId::Tee
-                            | RuleId::Symlink
-                            | RuleId::ChangeMode
-                    )
-                });
-            return if grants.covers_shell(name, command)
-                || verdict.decision == Decision::Allow
-                || workspace_local
-            {
-                PolicyDecision::Execute
-            } else {
-                PolicyDecision::RequireApproval
-            };
-        }
+        return PolicyDecision::Deny {
+            reason: DenyReason::Stop(stop),
+        };
     }
-    // A blocked host is refused before the mode is consulted, like a
-    // Forbidden command: `full` is authority over the workspace, not over
-    // the local network or a managed deny.
+    // A blocked host is refused before the mode is consulted: `full` is
+    // authority over the workspace, not over the local network or a
+    // managed deny.
     if let ToolClass::Network {
         refusal: Some(refusal),
         ..
@@ -1093,12 +997,7 @@ pub(crate) fn evaluate(
             },
             // Human approval is fresh for every non-read action.
             ApprovalMode::Ask => PolicyDecision::RequireApproval,
-            // Auto trusts workspace edits, external tools, and public research.
-            // Shell authority was checked above; managed network restrictions
-            // remain independent of approval authority.
-            ApprovalMode::Auto => PolicyDecision::Execute,
-            // Full is an explicit grant of unrestricted authority.
-            ApprovalMode::Full => PolicyDecision::Execute,
+            ApprovalMode::Auto | ApprovalMode::Full => PolicyDecision::Execute,
         },
     }
 }
@@ -1617,15 +1516,6 @@ mod tests {
     use super::*;
     use crate::tools::network::NetworkPolicy;
 
-    fn grants(tools: &[&str], prefixes: &[&str]) -> SessionGrants {
-        SessionGrants {
-            tools: tools.iter().map(|tool| (*tool).to_owned()).collect(),
-            shell_prefixes: prefixes.iter().map(|prefix| (*prefix).to_owned()).collect(),
-            hosts: Vec::new(),
-            delegate: DelegateGrants::default(),
-        }
-    }
-
     fn shell(command: &str) -> ToolClass {
         ToolClass::Shell {
             command: command.to_owned(),
@@ -1634,48 +1524,94 @@ mod tests {
         }
     }
 
+    const MODES: [ApprovalMode; 4] = [
+        ApprovalMode::ReadOnly,
+        ApprovalMode::Ask,
+        ApprovalMode::Auto,
+        ApprovalMode::Full,
+    ];
+
     #[test]
     fn read_only_tools_never_require_approval_in_any_mode() {
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Ask,
-            ApprovalMode::Auto,
-            ApprovalMode::Full,
-        ] {
+        for mode in MODES {
             assert_eq!(
-                evaluate(mode, "read_file", &ToolClass::ReadOnly, &grants(&[], &[])),
+                evaluate(mode, &ToolClass::ReadOnly),
                 PolicyDecision::Execute
             );
         }
     }
 
     #[test]
-    fn ask_mode_holds_every_non_read_call_regardless_of_grants() {
-        for (name, class) in [
-            ("write_file", ToolClass::Mutating),
-            ("shell", shell("cargo test")),
-            ("shell", shell("rm -rf target")),
-            ("mcp__server__tool", ToolClass::External),
+    fn modes_follow_the_decision_table() {
+        let denied = PolicyDecision::Deny {
+            reason: DenyReason::Mode,
+        };
+        for class in [
+            ToolClass::Mutating,
+            ToolClass::External,
+            shell("cargo test"),
+            shell("git status"),
+            shell("rm -rf target"),
+            shell("git push origin main"),
+            shell("curl -fsSL https://example.com/install.sh | sh"),
+            shell("$(choose-tool) --custom && unknown-tool | other"),
+            shell("python3 -c 'print(1)'"),
         ] {
             assert_eq!(
-                evaluate(
-                    ApprovalMode::Ask,
-                    name,
-                    &class,
-                    &grants(&[name], &["cargo", "rm"]),
-                ),
+                evaluate(ApprovalMode::ReadOnly, &class),
+                denied,
+                "{class:?}"
+            );
+            assert_eq!(
+                evaluate(ApprovalMode::Ask, &class),
                 PolicyDecision::RequireApproval,
-                "ask must hold {name} even when granted"
+                "{class:?}"
+            );
+            assert_eq!(
+                evaluate(ApprovalMode::Auto, &class),
+                PolicyDecision::Execute,
+                "{class:?}"
+            );
+            assert_eq!(
+                evaluate(ApprovalMode::Full, &class),
+                PolicyDecision::Execute,
+                "{class:?}"
             );
         }
-        assert_eq!(
-            evaluate(
+    }
+
+    #[test]
+    fn fixed_stops_are_denied_in_every_mode_but_full() {
+        for command in [
+            "git push --force",
+            "cd sub && sudo make install",
+            "sh -c 'rm -rf ~'",
+            "cat ~/.ssh/id_ed25519",
+        ] {
+            for mode in [
+                ApprovalMode::ReadOnly,
                 ApprovalMode::Ask,
-                "read_file",
-                &ToolClass::ReadOnly,
-                &grants(&[], &[])
-            ),
-            PolicyDecision::Execute
+                ApprovalMode::Auto,
+            ] {
+                let decision = evaluate(mode, &shell(command));
+                assert!(
+                    matches!(
+                        decision,
+                        PolicyDecision::Deny {
+                            reason: DenyReason::Stop(_)
+                        }
+                    ),
+                    "{mode:?} {command}: {decision:?}"
+                );
+            }
+            assert_eq!(
+                evaluate(ApprovalMode::Full, &shell(command)),
+                PolicyDecision::Execute
+            );
+        }
+        assert!(
+            deny_result(&DenyReason::Stop(Stop::PrivilegeEscalation))
+                .starts_with("permission_denied: fixed_stop: ")
         );
     }
 
@@ -1696,14 +1632,9 @@ mod tests {
                 question: Some(question.clone())
             }
         );
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Ask,
-            ApprovalMode::Auto,
-            ApprovalMode::Full,
-        ] {
+        for mode in MODES {
             assert_eq!(
-                evaluate(mode, "ask_user", &class, &grants(&[], &[])),
+                evaluate(mode, &class),
                 PolicyDecision::AskUser {
                     question: question.clone()
                 },
@@ -1711,7 +1642,7 @@ mod tests {
             );
         }
         // Malformed arguments carry no question and pass to dispatch, which
-        // reports the contract error; grants never make a question skippable.
+        // reports the contract error.
         let malformed = classify(
             EffectClass::Interactive,
             "ask_user",
@@ -1720,12 +1651,7 @@ mod tests {
         );
         assert_eq!(malformed, ToolClass::Interactive { question: None });
         assert_eq!(
-            evaluate(
-                ApprovalMode::ReadOnly,
-                "ask_user",
-                &malformed,
-                &grants(&["ask_user"], &[])
-            ),
+            evaluate(ApprovalMode::ReadOnly, &malformed),
             PolicyDecision::Execute
         );
     }
@@ -1747,50 +1673,27 @@ mod tests {
                 refusal: None,
             }
         );
-        let none = grants(&[], &[]);
-        let mut covering = grants(&[], &[]);
-        covering.hosts.push("*.rs".to_owned());
         assert_eq!(
-            evaluate(ApprovalMode::ReadOnly, "fetch", &public, &covering),
+            evaluate(ApprovalMode::ReadOnly, &public),
             PolicyDecision::Deny {
                 reason: DenyReason::Mode
             }
         );
         assert_eq!(
-            evaluate(ApprovalMode::Ask, "fetch", &public, &none),
+            evaluate(ApprovalMode::Ask, &public),
             PolicyDecision::RequireApproval
         );
         assert_eq!(
-            evaluate(ApprovalMode::Ask, "fetch", &public, &covering),
-            PolicyDecision::RequireApproval
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Auto, "fetch", &public, &none),
-            PolicyDecision::Execute,
-            "Auto may research public hosts without per-host grants"
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Auto, "fetch", &public, &covering),
+            evaluate(ApprovalMode::Auto, &public),
             PolicyDecision::Execute
         );
-
         assert_eq!(
-            evaluate(ApprovalMode::Full, "fetch", &public, &none),
-            PolicyDecision::Execute
-        );
-        // A tool grant covers fetch as a whole, like any other tool.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "fetch",
-                &public,
-                &grants(&["fetch"], &[])
-            ),
+            evaluate(ApprovalMode::Full, &public),
             PolicyDecision::Execute
         );
 
         // Blocked hosts: private names, metadata, managed denies — refused
-        // before the mode, even under full with a covering grant.
+        // before the mode, even under full.
         let denied_policy = NetworkPolicy {
             deny_hosts: Arc::from(vec!["*.example.com".to_owned()]),
             allow_private_for_tests: false,
@@ -1817,17 +1720,10 @@ mod tests {
                 ),
                 "{url}: {blocked:?}"
             );
-            let mut all = grants(&["fetch"], &[]);
-            all.hosts.push("*".to_owned());
-            for mode in [
-                ApprovalMode::ReadOnly,
-                ApprovalMode::Ask,
-                ApprovalMode::Auto,
-                ApprovalMode::Full,
-            ] {
+            for mode in MODES {
                 assert!(
                     matches!(
-                        evaluate(mode, "fetch", &blocked, &all),
+                        evaluate(mode, &blocked),
                         PolicyDecision::Deny {
                             reason: DenyReason::HostBlocked { .. }
                         }
@@ -1847,130 +1743,9 @@ mod tests {
             }
         );
         assert_eq!(
-            evaluate(ApprovalMode::ReadOnly, "fetch", &malformed, &none),
+            evaluate(ApprovalMode::ReadOnly, &malformed),
             PolicyDecision::Execute
         );
-    }
-
-    #[test]
-    fn read_only_mode_denies_everything_else_without_prompting() {
-        for (name, class) in [
-            ("write_file", ToolClass::Mutating),
-            ("shell", shell("cargo test")),
-            ("mcp__server__tool", ToolClass::External),
-        ] {
-            assert_eq!(
-                evaluate(
-                    ApprovalMode::ReadOnly,
-                    name,
-                    &class,
-                    &grants(&[name], &["cargo"]),
-                ),
-                PolicyDecision::Deny {
-                    reason: DenyReason::Mode
-                },
-                "read-only must deny {name} even when granted"
-            );
-        }
-    }
-
-    #[test]
-    fn auto_mode_runs_edits_and_safe_shell_but_asks_for_dangerous_commands() {
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "write_file",
-                &ToolClass::Mutating,
-                &grants(&[], &[]),
-            ),
-            PolicyDecision::Execute
-        );
-        // Ordinary shell runs without a grant under auto.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "shell",
-                &shell("cargo test --workspace"),
-                &grants(&[], &[]),
-            ),
-            PolicyDecision::Execute
-        );
-        // Commands the classifier would prompt for still prompt.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "shell",
-                &shell("rm -rf target"),
-                &grants(&[], &["cargo test"]),
-            ),
-            PolicyDecision::RequireApproval
-        );
-
-        // Workspace-local mutations run; remote, download, deletion, and
-        // unlisted programs still ask.
-        for (command, expected) in [
-            ("git add -A && git commit -m wip", PolicyDecision::Execute),
-            ("cargo test > target/test.log", PolicyDecision::Execute),
-            ("sed -i s/a/b/ src/lib.rs", PolicyDecision::Execute),
-            ("git push origin main", PolicyDecision::RequireApproval),
-            ("git fetch origin", PolicyDecision::RequireApproval),
-            (
-                "curl -o x https://example.com",
-                PolicyDecision::RequireApproval,
-            ),
-            (
-                "git commit -m x && rm notes.txt",
-                PolicyDecision::RequireApproval,
-            ),
-            ("some-unknown-tool --flag", PolicyDecision::RequireApproval),
-        ] {
-            assert_eq!(
-                evaluate(
-                    ApprovalMode::Auto,
-                    "shell",
-                    &shell(command),
-                    &grants(&[], &[])
-                ),
-                expected,
-                "{command}"
-            );
-        }
-        // A grant covers a dangerous command explicitly.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "shell",
-                &shell("git push origin main"),
-                &grants(&[], &["git push"]),
-            ),
-            PolicyDecision::Execute
-        );
-        // MCP tools run without prompting under auto.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Auto,
-                "mcp__server__tool",
-                &ToolClass::External,
-                &grants(&[], &[]),
-            ),
-            PolicyDecision::Execute
-        );
-    }
-
-    #[test]
-    fn full_mode_executes_everything_without_prompting() {
-        for class in [
-            ToolClass::Mutating,
-            shell("rm -rf target"),
-            shell("git push origin main"),
-            ToolClass::External,
-        ] {
-            assert_eq!(
-                evaluate(ApprovalMode::Full, "shell", &class, &grants(&[], &[])),
-                PolicyDecision::Execute,
-                "full mode must never prompt for {class:?}"
-            );
-        }
     }
 
     #[test]
@@ -1989,41 +1764,27 @@ mod tests {
                 read_only: false,
             }
         );
-        // Ask still requires fresh approval for a granted prefix; Auto allows it.
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Ask,
-                "exec",
-                &class,
-                &grants(&[], &["cargo test"])
-            ),
-            PolicyDecision::RequireApproval
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Auto, "exec", &class, &grants(&[], &[])),
-            PolicyDecision::Execute
-        );
-        // Arguments with metacharacters are quoted so the classifier reads
-        // them as literal words: no pipe, no expansion, no forbidden shape.
+        // Arguments with metacharacters are quoted so the parser reads them
+        // as literal words: no pipe, no expansion, no stop.
         let quoted = classify(
             EffectClass::Shell,
             "exec",
-            r#"{"program":"echo","args":["rm -rf /","$HOME","a b","it's"]}"#,
+            r#"{"program":"echo","args":["sudo rm -rf /","$HOME","a b","it's"]}"#,
             &NetworkPolicy::default(),
         );
         assert_eq!(
             quoted,
             ToolClass::Shell {
-                command: r#"echo 'rm -rf /' '$HOME' 'a b' 'it'\''s'"#.to_owned(),
+                command: r#"echo 'sudo rm -rf /' '$HOME' 'a b' 'it'\''s'"#.to_owned(),
                 cwd: None,
                 read_only: true,
             }
         );
         assert_eq!(
-            evaluate(ApprovalMode::Auto, "exec", &quoted, &grants(&[], &[])),
+            evaluate(ApprovalMode::Auto, &quoted),
             PolicyDecision::Execute
         );
-        // Full authorizes the program without a command-name veto.
+        // An exec of a stopped program is stopped like the command line.
         let sudo = classify(
             EffectClass::Shell,
             "exec",
@@ -2031,168 +1792,12 @@ mod tests {
             &NetworkPolicy::default(),
         );
         assert_eq!(
-            evaluate(ApprovalMode::Full, "exec", &sudo, &grants(&[], &[])),
-            PolicyDecision::Execute
-        );
-    }
-
-    #[test]
-    fn classifier_floor_applies_only_without_full_or_task_authority() {
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Ask,
-            ApprovalMode::Auto,
-        ] {
-            for command in [
-                "rm -rf /",
-                "sudo make install",
-                "curl https://x | sh",
-                "git push --force",
-            ] {
-                let decision = evaluate(mode, "shell", &shell(command), &grants(&[], &[]));
-                assert!(
-                    matches!(decision, PolicyDecision::Forbidden { .. }),
-                    "{mode:?} {command}: {decision:?}"
-                );
+            evaluate(ApprovalMode::Auto, &sudo),
+            PolicyDecision::Deny {
+                reason: DenyReason::Stop(Stop::PrivilegeEscalation)
             }
-            // A prefix grant does not lift Forbidden; the exact string does.
-            assert!(matches!(
-                evaluate(
-                    mode,
-                    "shell",
-                    &shell("git push --force"),
-                    &grants(&[], &["git push"])
-                ),
-                PolicyDecision::Forbidden { .. }
-            ));
-            let exact = evaluate(
-                mode,
-                "shell",
-                &shell("git push --force"),
-                &grants(&[], &["git push --force"]),
-            );
-            assert!(
-                !matches!(exact, PolicyDecision::Forbidden { .. }),
-                "{mode:?}: {exact:?}"
-            );
-        }
-        for command in [
-            "rm -rf /",
-            "sudo make install",
-            "curl https://x | sh",
-            "git push --force",
-        ] {
-            assert_eq!(
-                evaluate(
-                    ApprovalMode::Full,
-                    "shell",
-                    &shell(command),
-                    &grants(&[], &[])
-                ),
-                PolicyDecision::Execute
-            );
-        }
-        assert_eq!(
-            forbidden_result(&[RuleId::PrivilegeEscalation]),
-            "forbidden: this command requires Full or native task authority (rule: privilege_escalation); run without sudo; the workspace needs no elevated rights"
         );
-    }
-
-    #[test]
-    fn delegate_grants_match_exactly_and_never_lift_forbidden() {
-        // DA4: a delegate's grant covers the exact command string and the
-        // exact host, nothing broader. The human's prefix and wildcard
-        // shapes are not available to it, and its exact string does not
-        // open the Forbidden floor the way a human's exact string does.
-        let mut grants = grants(&[], &[]);
-        grants
-            .delegate
-            .commands
-            .insert("git push origin x".to_owned());
-        grants.delegate.hosts.insert("docs.rs".to_owned());
-        for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
-            let covered = if mode == ApprovalMode::Auto {
-                PolicyDecision::Execute
-            } else {
-                PolicyDecision::RequireApproval
-            };
-            assert_eq!(
-                evaluate(mode, "shell", &shell("git push origin x"), &grants),
-                covered.clone(),
-                "{mode:?}: only Auto executes the exact granted command"
-            );
-            assert_eq!(
-                evaluate(mode, "shell", &shell("  git push origin x "), &grants),
-                covered.clone(),
-                "{mode:?}: whitespace preserves the exact grant; Ask still needs fresh approval"
-            );
-            assert_eq!(
-                evaluate(mode, "shell", &shell("git push origin y"), &grants),
-                PolicyDecision::RequireApproval,
-                "{mode:?}: a different argument is a different command"
-            );
-            assert_eq!(
-                evaluate(mode, "shell", &shell("git push origin x --amend"), &grants),
-                PolicyDecision::RequireApproval,
-                "{mode:?}: a delegate grant is never a prefix"
-            );
-            let docs = ToolClass::Network {
-                host: Some("docs.rs".to_owned()),
-                refusal: None,
-            };
-            let sub = ToolClass::Network {
-                host: Some("api.docs.rs".to_owned()),
-                refusal: None,
-            };
-            assert_eq!(evaluate(mode, "fetch", &docs, &grants), covered.clone());
-            assert_eq!(
-                evaluate(mode, "fetch", &sub, &grants),
-                covered,
-                "{mode:?}: public fetch follows the mode, independently of host grants"
-            );
-        }
-        // The floor. A human's exact string lifts Forbidden (ADR-0020); a
-        // delegate's identical string does not create unrestricted authority.
-        let mut delegate_only = SessionGrants::default();
-        delegate_only
-            .delegate
-            .commands
-            .insert("git push --force".to_owned());
-        let mut human = SessionGrants::default();
-        human.shell_prefixes.push("git push --force".to_owned());
-        for mode in [
-            ApprovalMode::ReadOnly,
-            ApprovalMode::Ask,
-            ApprovalMode::Auto,
-        ] {
-            assert!(
-                matches!(
-                    evaluate(mode, "shell", &shell("git push --force"), &delegate_only),
-                    PolicyDecision::Forbidden { .. }
-                ),
-                "{mode:?}: a delegate grant must not lift Forbidden"
-            );
-            assert!(
-                !matches!(
-                    evaluate(mode, "shell", &shell("git push --force"), &human),
-                    PolicyDecision::Forbidden { .. }
-                ),
-                "{mode:?}: the human's exact string still does"
-            );
-        }
-    }
-
-    #[test]
-    fn full_authority_does_not_depend_on_a_delegate_grant() {
-        assert_eq!(
-            evaluate(
-                ApprovalMode::Full,
-                "shell",
-                &shell("git push --force"),
-                &SessionGrants::default()
-            ),
-            PolicyDecision::Execute
-        );
+        assert_eq!(evaluate(ApprovalMode::Full, &sudo), PolicyDecision::Execute);
     }
 
     #[test]
@@ -2416,38 +2021,6 @@ mod tests {
                 &NetworkPolicy::default()
             ),
             ToolClass::Mutating
-        );
-    }
-
-    #[test]
-    fn external_tools_obey_every_approval_mode() {
-        let class = ToolClass::External;
-        let name = "ext__embedded__deploy";
-        assert_eq!(
-            evaluate(ApprovalMode::ReadOnly, name, &class, &grants(&[name], &[])),
-            PolicyDecision::Deny {
-                reason: DenyReason::Mode
-            }
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Ask, name, &class, &grants(&[], &[])),
-            PolicyDecision::RequireApproval
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Ask, name, &class, &grants(&[name], &[])),
-            PolicyDecision::RequireApproval
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Auto, name, &class, &grants(&[name], &[])),
-            PolicyDecision::Execute
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Auto, name, &class, &grants(&[], &[])),
-            PolicyDecision::Execute
-        );
-        assert_eq!(
-            evaluate(ApprovalMode::Full, name, &class, &grants(&[], &[])),
-            PolicyDecision::Execute
         );
     }
 }

@@ -11,7 +11,6 @@ pub(super) struct SessionToolGate {
     network: Arc<crate::tools::network::NetworkPolicy>,
     shell: Arc<crate::ShellPolicy>,
     delegate: approval::ApprovalDelegate,
-    task_scoped: bool,
 }
 
 impl SessionToolGate {
@@ -22,7 +21,6 @@ impl SessionToolGate {
         network: Arc<crate::tools::network::NetworkPolicy>,
         shell: Arc<crate::ShellPolicy>,
         delegate: approval::ApprovalDelegate,
-        task_scoped: bool,
     ) -> Self {
         Self {
             inner,
@@ -31,7 +29,6 @@ impl SessionToolGate {
             network,
             shell,
             delegate,
-            task_scoped,
         }
     }
 }
@@ -45,7 +42,6 @@ impl ToolGate for SessionToolGate {
         let network = Arc::clone(&self.network);
         let shell = Arc::clone(&self.shell);
         let delegate = self.delegate;
-        let task_scoped = self.task_scoped;
         Box::pin(async move {
             let policy = match inner
                 .store
@@ -108,8 +104,8 @@ impl ToolGate for SessionToolGate {
             let internal_supervision = supervised && !auto_ceiling && mode == ApprovalMode::Full;
             let no_human_approval = auto_ceiling || internal_supervision;
             let mut mode = mode;
-            for (parent_mode, parent_grants) in ancestors {
-                let message = match approval::evaluate_in_task(parent_mode, &call.name, &class, &parent_grants, task_scoped) {
+            for (parent_mode, _) in ancestors {
+                let message = match approval::evaluate(parent_mode, &class) {
                     approval::PolicyDecision::Execute | approval::PolicyDecision::AskUser { .. } => continue,
                     approval::PolicyDecision::RequireApproval if parent_mode == ApprovalMode::Ask && !no_human_approval => {
                         // Ask applies to each child action too. Auto children
@@ -121,7 +117,6 @@ impl ToolGate for SessionToolGate {
                     }
                     approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; use an operation within the parent's authority".to_owned(),
                     approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
-                    approval::PolicyDecision::Forbidden { rules } => approval::forbidden_result(&rules),
                 };
                 return match inner
                     .store
@@ -132,8 +127,7 @@ impl ToolGate for SessionToolGate {
                     Err(error) => approval_persistence_failure(error),
                 };
             }
-            let decision =
-                approval::evaluate_in_task(mode, &call.name, &class, &grants, task_scoped);
+            let decision = approval::evaluate(mode, &class);
             // A reviewer may supervise existing authority, never create it.
             let decision = if no_human_approval
                 && matches!(decision, approval::PolicyDecision::RequireApproval)
@@ -161,17 +155,6 @@ impl ToolGate for SessionToolGate {
                 approval::PolicyDecision::Execute => GateDecision::Execute,
                 approval::PolicyDecision::Deny { reason } => {
                     let message = approval::deny_result(&reason);
-                    match inner
-                        .store
-                        .deny_tool_call(&claimed, call.id, message.clone())
-                        .await
-                    {
-                        Ok(_) => GateDecision::Deny { message },
-                        Err(error) => approval_persistence_failure(error),
-                    }
-                }
-                approval::PolicyDecision::Forbidden { rules } => {
-                    let message = approval::forbidden_result(&rules);
                     match inner
                         .store
                         .deny_tool_call(&claimed, call.id, message.clone())
@@ -270,21 +253,11 @@ impl ToolGate for SessionToolGate {
                     };
                     let shell = match class {
                         approval::ToolClass::Shell { command, cwd, .. } => {
-                            // Why the gate is asking, so the client can say so.
-                            let verdict = approval::classify_command(&command, None);
                             Some(ShellCommandPreview {
                                 command,
                                 cwd,
-                                verdict: Some(match verdict.decision {
-                                    approval::Decision::Allow => ShellVerdict::Allow,
-                                    approval::Decision::Prompt => ShellVerdict::Prompt,
-                                    approval::Decision::Forbidden => ShellVerdict::Forbidden,
-                                }),
-                                reasons: verdict
-                                    .reasons
-                                    .iter()
-                                    .map(|rule| rule.name().to_owned())
-                                    .collect(),
+                                verdict: None,
+                                reasons: Vec::new(),
                             })
                         }
                         _ => None,

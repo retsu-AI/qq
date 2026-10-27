@@ -1,7 +1,7 @@
 crates/qq-auth/src/tests.rs	2784	async fn independent_codex_stores_share_one_refresh_owner_and_newest_epoch() {	tokio::time::sleep(Duration::from_millis(5)).await;
 crates/qq-client/src/lib.rs	1079	async fn a_dripping_body_times_out_rather_than_waiting_for_completion() {	tokio::time::sleep(Duration::from_millis(50)).await;
-crates/qq-core/src/lib.rs	6314	async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {	tokio::time::sleep(Duration::from_millis(600)).await;
-crates/qq-core/src/lib.rs	8377	fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {	tokio::time::sleep(Duration::from_secs(5)).await;
+crates/qq-core/src/lib.rs	6311	async fn completed_limited_stream_stays_finished_when_polled_after_its_deadline() {	tokio::time::sleep(Duration::from_millis(600)).await;
+crates/qq-core/src/lib.rs	8374	fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {	tokio::time::sleep(Duration::from_secs(5)).await;
 crates/qq-core/src/plan/fingerprint.rs	129	fn fingerprint_tracks_creation_modification_replacement_and_deletion() {	std::thread::sleep(std::time::Duration::from_millis(20));
 crates/qq-core/src/sessions/store.rs	2768	async fn grouped_output_jobs_commit_once_and_a_failing_job_rolls_back_alone() {	tokio::time::sleep(Duration::from_millis(50)).await;
 crates/qq-core/src/sessions/store.rs	2849	async fn a_waiting_control_write_joins_the_output_group_and_a_read_does_not() {	tokio::time::sleep(Duration::from_millis(20)).await;
@@ -57,10 +57,10 @@ crates/qq-provider/src/http.rs	2131	fn serve_scripted_with_auth(	thread::sleep(d
 crates/qq-provider/src/test_support.rs	214	fn respond_sequence_and_headers(	thread::sleep(Duration::from_millis(1));
 crates/qq-provider/src/test_support.rs	252	fn accept_before(listener: &TcpListener, timeout: Duration) -> TcpStream {	thread::sleep(Duration::from_millis(5));
 crates/qq-tui/src/terminal/tests.rs	445	async fn loop_upgrades_completed_code_to_highlighted_off_the_render_path() {	tokio::time::sleep(FRAME_INTERVAL).await;
-src/headless.rs	6031	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	6048	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
-src/headless.rs	6812	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
-src/headless.rs	7995	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
-src/headless.rs	8117	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
+src/headless.rs	6038	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	6055	async fn stdin_steering_lines_reach_the_next_model_turn() {	tokio::time::sleep(Duration::from_millis(20)).await;
+src/headless.rs	6819	async fn session_resume_after_an_unclean_exit_recovers_the_interrupted_run_first() {	tokio::time::sleep(Duration::from_millis(5)).await;
+src/headless.rs	8003	async fn interrupt_sends_cancellation_and_leaves_no_active_run() {	tokio::time::sleep(Duration::from_millis(100)).await;
+src/headless.rs	8125	async fn hard_cost_budget_cancels_an_unmetered_looping_child() {	tokio::time::sleep(Duration::from_millis(10)).await;
 xtask/src/perf.rs	5869	async fn captured_output_timeout_kills_and_reaps_the_process_group() {	tokio::time::sleep(Duration::from_millis(10)).await;
 xtask/src/perf.rs	5912	async fn nonzero_captured_command_cannot_leave_a_background_child() {	tokio::time::sleep(Duration::from_millis(10)).await;

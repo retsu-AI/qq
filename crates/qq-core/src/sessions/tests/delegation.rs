@@ -2045,14 +2045,14 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
 }
 
 #[tokio::test]
-async fn a_child_reviewer_cannot_grant_work_outside_the_parent_policy() {
+async fn a_child_reviewer_cannot_release_a_fixed_stop() {
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let child: Arc<dyn Provider> = Arc::new(ScriptedRunProvider {
         requests: Arc::new(StdMutex::new(Vec::new())),
         script: vec![(
             "__test_shell",
-            r#"{"command":"git push origin main"}"#.to_owned(),
+            r#"{"command":"git push --force origin main"}"#.to_owned(),
         )],
         turn: StdMutex::new(0),
     });
@@ -2070,13 +2070,16 @@ async fn a_child_reviewer_cannot_grant_work_outside_the_parent_policy() {
     let observed = collect_until_run_finished(&mut harness.events, run_id).await;
     assert!(
         consulted.lock().unwrap().is_empty(),
-        "a child reviewer cannot supply missing parent authority"
+        "a child reviewer cannot release a fixed stop"
     );
-    assert!(observed.iter().any(|event| matches!(
-        &event.event, SessionEvent::ToolCallFinished { tool_call }
-            if tool_call.name == "__test_shell" && tool_call.state == ToolCallState::Denied
-                && tool_call.result.as_deref().is_some_and(|text| text.contains("parent_permission_required"))
-    )), "child call must be durably denied: {observed:?}");
+    assert!(
+        observed.iter().any(|event| matches!(
+            &event.event, SessionEvent::ToolCallFinished { tool_call }
+                if tool_call.name == "__test_shell" && tool_call.state == ToolCallState::Denied
+                    && tool_call.result.as_deref().is_some_and(|text| text.contains("fixed_stop"))
+        )),
+        "child call must be durably denied: {observed:?}"
+    );
     assert!(!observed.iter().any(|event| matches!(
         &event.event, SessionEvent::ToolCallStarted { tool_call }
             if tool_call.name == "__test_shell"
@@ -5721,8 +5724,8 @@ async fn nested_write_requests_preserve_the_root_only_write_boundary() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn parent_auto_revocation_denies_every_out_of_scope_late_client_child_approval() {
-    for parent_granted in [false, true] {
+async fn a_late_child_approval_runs_once_after_the_parent_switches_to_auto() {
+    {
         for decision in [
             ApprovalDecision::ApproveOnce,
             ApprovalDecision::ApproveForSession {
@@ -5801,23 +5804,6 @@ async fn parent_auto_revocation_denies_every_out_of_scope_late_client_child_appr
             release_child.send(()).unwrap();
             let (_, call) = collect_until_approval_requested(&mut harness.events).await;
             assert_eq!(call.name, "shell");
-            if parent_granted {
-                let session_id = harness.session_id;
-                harness
-                    .runtime
-                    .inner
-                    .store
-                    .call(Priority::Control, move |connection| {
-                        connection.execute(
-                        "INSERT INTO session_grants(session_id, kind, value, created_at_ms, source)
-                         VALUES (?1, 'shell_prefix', 'rm -r', 0, 'human')",
-                        [session_id.to_string()],
-                    )?;
-                        Ok(())
-                    })
-                    .await
-                    .unwrap();
-            }
             harness
                 .runtime
                 .command(
@@ -5829,33 +5815,19 @@ async fn parent_auto_revocation_denies_every_out_of_scope_late_client_child_appr
                 )
                 .await
                 .unwrap();
-            let expected = if !parent_granted {
-                ApprovalResolution::Denied
-            } else {
-                // The child explicitly selected Ask: even a workspace grant
-                // approves only this call and never records lasting authority.
-                ApprovalResolution::ApprovedOnce
-            };
+            // The child explicitly selected Ask: even a workspace grant
+            // approves only this call and never records lasting authority.
+            let expected = ApprovalResolution::ApprovedOnce;
             let receipt = respond_approval(&harness.runtime, call.run_id, call.id, decision)
                 .await
                 .unwrap();
             assert!(
                 matches!(receipt.outcome,
             CommandOutcome::ToolApprovalResolved { resolution, .. } if resolution == expected),
-                "a child approval must respect the current parent's grants: {receipt:?}"
+                "a child approval must respect the current parent's mode: {receipt:?}"
             );
-            let observed = collect_until_run_finished(&mut harness.events, run_id).await;
-            assert_eq!(
-                harness._directory.path().join("approval-scratch").exists(),
-                !parent_granted
-            );
-            if !parent_granted {
-                assert!(!observed.iter().any(|event| matches!(&event.event,
-            SessionEvent::ToolCallStarted { tool_call } if tool_call.id == call.id)));
-                assert!(observed.iter().any(|event| matches!(&event.event,
-            SessionEvent::ToolApprovalResolved { tool_call, .. }
-                if tool_call.id == call.id && tool_call.result.as_deref().is_some_and(|text| text.contains("parent_permission_required")))));
-            }
+            collect_until_run_finished(&mut harness.events, run_id).await;
+            assert!(!harness._directory.path().join("approval-scratch").exists());
             let (_, grants, _) = harness
                 .runtime
                 .inner
@@ -5863,17 +5835,7 @@ async fn parent_auto_revocation_denies_every_out_of_scope_late_client_child_appr
                 .approval_policy(call.session_id)
                 .await
                 .unwrap();
-            if !parent_granted || expected == ApprovalResolution::ApprovedOnce {
-                assert_eq!(grants.shell_prefixes, ["rm -r approval-scratch"]);
-            } else {
-                assert_eq!(grants.shell_prefixes.len(), 2);
-                assert!(grants.shell_prefixes.contains(&"rm -r".to_owned()));
-                assert!(
-                    grants
-                        .shell_prefixes
-                        .contains(&"rm -r approval-scratch".to_owned())
-                );
-            }
+            assert_eq!(grants.shell_prefixes, ["rm -r approval-scratch"]);
             harness.runtime.shutdown().await.unwrap();
         }
     }

@@ -216,7 +216,7 @@ fn compiled_identity() -> Result<BuildIdentity, ActionBiasError> {
     let mut classifier = Sha256::new();
     for source in [
         include_str!("../../crates/qq-core/src/approval.rs"),
-        include_str!("../../crates/qq-core/src/approval/rules.rs"),
+        include_str!("../../crates/qq-core/src/approval/stops.rs"),
         include_str!("../../crates/qq-core/src/approval/classify.rs"),
         include_str!("../../crates/qq-core/src/tools/shell.rs"),
         include_str!("../../crates/qq-core/src/tools.rs"),
