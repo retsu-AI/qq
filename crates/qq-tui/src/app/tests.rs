@@ -872,11 +872,40 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
     );
     assert!(app.status.as_deref().unwrap().contains("already restoring"));
 
+    // No run starts while the restore rewrites the workspace; the prompt
+    // stays in the composer for after.
+    app.composer.text = "fix the bug".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(
+        requests.is_empty(),
+        "a prompt was sent mid-restore: {requests:?}"
+    );
+    assert_eq!(app.composer.text, "fix the bug");
+    assert!(
+        app.status
+            .as_deref()
+            .unwrap()
+            .contains("restoring the workspace")
+    );
+
     app.apply_undo_result(Ok("restored snapshot r1: 2 paths restored".to_owned()));
     assert_eq!(
         app.status.as_deref(),
         Some("restored snapshot r1: 2 paths restored")
     );
+    // Once it finishes, the same prompt goes out.
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    assert!(matches!(
+        requests.as_slice(),
+        [ClientRequest::Command(CommandRequest {
+            command: SessionCommand::SubmitPrompt { .. },
+            ..
+        })]
+    ));
 
     // A remote client has no tree to restore.
     let mut remote = App::new(TuiOptions::default());

@@ -1867,6 +1867,26 @@ impl App {
     /// failure is attributed to the right session and can undo optimistic
     /// state. Every request that carries a `CommandId` goes through here.
     fn send(&mut self, intent: PendingIntent, command: SessionCommand) -> Effects {
+        // A restore rewrites the workspace; this client starts no run that
+        // could edit it meanwhile. The text goes back to the composer.
+        if self.undoing
+            && matches!(
+                command,
+                SessionCommand::SubmitPrompt { .. }
+                    | SessionCommand::SetGoal { .. }
+                    | SessionCommand::SteerRun { .. }
+            )
+        {
+            if let PendingIntent::Prompt { text, .. } | PendingIntent::Steer { text, .. } = &intent
+                && self.composer.text.is_empty()
+            {
+                self.composer.replace(text.clone());
+            }
+            self.set_warning(
+                "/undo is restoring the workspace; send again when it finishes".to_owned(),
+            );
+            return Effects::redraw(Redraw::Immediate);
+        }
         let Ok(command_id) = CommandId::generate() else {
             self.set_warning("secure randomness is unavailable".to_owned());
             return Effects::redraw(Redraw::Immediate);
