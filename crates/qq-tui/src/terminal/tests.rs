@@ -651,3 +651,62 @@ async fn a_failed_connection_is_reported_once_and_then_the_client_stops() {
     let result = task.await.expect("loop task");
     assert!(matches!(result, Err(TuiError::ClientStopped(_))));
 }
+
+fn git(directory: &std::path::Path, arguments: &[&str]) {
+    let status = std::process::Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@localhost")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@localhost")
+        .status()
+        .expect("git runs");
+    assert!(status.success(), "git {arguments:?}");
+}
+
+#[tokio::test]
+async fn undo_restores_the_newest_run_snapshot_and_names_the_reversal() {
+    let directory = tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap();
+    let root = directory.path();
+    assert!(
+        undo_newest_run(root)
+            .await
+            .unwrap_err()
+            .contains("not inside a Git work tree")
+    );
+    git(root, &["init", "-q"]);
+    std::fs::write(root.join("tracked.txt"), "base\n").unwrap();
+    git(root, &["add", "tracked.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    assert!(
+        undo_newest_run(root)
+            .await
+            .unwrap_err()
+            .contains("no run has been snapshotted")
+    );
+
+    let run = qq_protocol::RunId::generate().unwrap();
+    qq_core::undo::snapshot(root, qq_core::undo::SnapshotKind::Run(run))
+        .await
+        .unwrap()
+        .unwrap();
+    std::fs::write(root.join("tracked.txt"), "agent\n").unwrap();
+    std::fs::write(root.join("created.txt"), "new\n").unwrap();
+
+    let text = undo_newest_run(root).await.unwrap();
+    assert!(
+        text.starts_with(&format!("restored snapshot {run}: 2 paths restored; reverse with qq undo undo-")),
+        "{text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(!root.join("created.txt").exists());
+}

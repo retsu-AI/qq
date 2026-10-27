@@ -1757,6 +1757,7 @@ impl App {
             Command::NewChildSession => self.create_session(self.focused()),
             Command::CompactSession => self.compact_session(),
             Command::RollbackCompaction => self.rollback_compaction(),
+            Command::UndoRun => self.undo_run(),
             Command::CancelRun => self.cancel_run(),
             Command::ToggleMouse => {
                 self.mouse_capture = !self.mouse_capture;
@@ -2424,6 +2425,37 @@ impl App {
             PendingIntent::Compact { session_id },
             SessionCommand::CompactSession { session_id },
         )
+    }
+
+    /// `/undo`: restore the workspace to the snapshot before its newest run.
+    /// Refused while any run in the workspace is active, so a restore never
+    /// races an agent's edits.
+    fn undo_run(&mut self) -> Effects {
+        let Some(root) = self.workspace_root.clone() else {
+            self.set_warning("/undo needs the workspace tree; run qq undo on that machine".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        };
+        if self
+            .sessions
+            .values()
+            .any(|session| session.summary.status != SessionStatus::Idle)
+        {
+            self.set_warning("/undo needs every run to finish; wait or cancel first".to_owned());
+            return Effects::redraw(Redraw::Immediate);
+        }
+        self.set_info("restoring the snapshot before the newest run…".to_owned());
+        let mut effects = Effects::redraw(Redraw::Immediate);
+        effects.push(Effect::UndoRun(root));
+        effects
+    }
+
+    /// The outcome of `/undo`, already phrased for the status line.
+    pub(crate) fn apply_undo_result(&mut self, result: Result<String, String>) -> Effects {
+        match result {
+            Ok(text) => self.set_info(text),
+            Err(text) => self.set_warning(text),
+        }
+        Effects::redraw(Redraw::Immediate)
     }
 
     fn rollback_compaction(&mut self) -> Effects {

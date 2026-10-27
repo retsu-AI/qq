@@ -38,13 +38,13 @@ async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, Comma
     let directory = tokio::fs::canonicalize(directory)
         .await
         .map_err(CommandError::Directory)?;
-    let snapshots = undo::list(&directory).await?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| {
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
         });
     if args.list {
+        let snapshots = undo::list(&directory).await?;
         if snapshots.is_empty() {
             writeln!(out, "No snapshots for {}.", directory.display())?;
         }
@@ -55,13 +55,14 @@ async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, Comma
     }
     let target = match &args.snapshot {
         Some(name) => {
-            let matching: Vec<&Snapshot> = snapshots
-                .iter()
+            let mut matching: Vec<Snapshot> = undo::list(&directory)
+                .await?
+                .into_iter()
                 .filter(|snapshot| snapshot.name.starts_with(name.as_str()))
                 .collect();
-            match matching.as_slice() {
-                [one] => *one,
-                [] => {
+            match matching.len() {
+                1 => matching.remove(0),
+                0 => {
                     eprintln!("error: no snapshot named {name}; qq undo --list shows them");
                     return Ok(ExitCode::from(2));
                 }
@@ -73,10 +74,7 @@ async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, Comma
                 }
             }
         }
-        None => match snapshots
-            .iter()
-            .find(|snapshot| matches!(snapshot.kind, SnapshotKind::Run(_)))
-        {
+        None => match undo::newest_run(&directory).await? {
             Some(newest) => newest,
             None => {
                 eprintln!(
@@ -87,13 +85,13 @@ async fn execute(args: UndoArgs, out: &mut impl Write) -> Result<ExitCode, Comma
             }
         },
     };
-    let restored = undo::restore(target).await?;
+    let restored = undo::restore(&target).await?;
     writeln!(
         out,
         "Restored {} to snapshot {} ({}).",
         relative(&target.workspace, &directory),
         target.name,
-        describe(target, now_ms)
+        describe(&target, now_ms)
     )?;
     if restored.changes.is_empty() {
         writeln!(out, "Nothing had changed.")?;

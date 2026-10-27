@@ -81,7 +81,10 @@ Auto does not ask a human or consult a reviewer model for ordinary actions,
 including actions taken by write sub-agents. Auto questions return a result
 telling the agent to decide without human input. A denied operation returns a tool
 error so the agent can choose another permitted approach. Denial does not grant
-permission to bypass the boundary. Children remain subject to their parent's
+permission to bypass the boundary. Every denial reads
+`permission_denied: <who>: <reason>; <what to do instead>`, where `<who>` is
+`fixed_stop`, `user` (you said no, or nobody answered in time), `mode` or
+`config`. Children remain subject to their parent's
 permissions, including later revocation.
 
 Ask requires fresh human approval for each non-read call. Stored grants and
@@ -185,8 +188,8 @@ prefixes that are denied in every mode, Full included.
 ## Undoing a run
 
 Before a run first changes files in a Git work tree, QQ snapshots the
-workspace. `qq undo` restores the newest run's snapshot, and the undo can
-itself be undone. See [`qq undo`](cli.md#qq-undo---list-snapshot).
+workspace. `qq undo`, or `/undo` in the TUI once every run is idle,
+restores the newest run's snapshot, and the undo can itself be undone. See [`qq undo`](cli.md#qq-undo---list-snapshot).
 
 ## The approval prompt
 

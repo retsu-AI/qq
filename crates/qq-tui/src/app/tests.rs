@@ -842,6 +842,47 @@ fn rollback_sends_for_an_idle_session_and_reports_the_receipt() {
 }
 
 #[test]
+fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
+    let root = std::path::PathBuf::from("/work/tree");
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(root.clone()),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    app.composer.text = "/undo".to_owned();
+    let effects = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let undo: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::UndoRun(path) => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(undo, vec![root]);
+    assert!(!effects.requests_anything(), "undo is local, not a server command");
+
+    app.apply_undo_result(Ok("restored snapshot r1: 2 paths restored".to_owned()));
+    assert_eq!(
+        app.status.as_deref(),
+        Some("restored snapshot r1: 2 paths restored")
+    );
+
+    // A remote client has no tree to restore.
+    let mut remote = App::new(TuiOptions::default());
+    remote.apply_snapshot(snapshot());
+    let effects = remote.execute(Command::UndoRun);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::UndoRun(_))));
+    assert!(remote.status.as_deref().unwrap().contains("qq undo"));
+
+    // A running session is refused: the restore would race its edits.
+    let (mut running, _, _, _) = running_app();
+    running.workspace_root = Some(std::path::PathBuf::from("/work/tree"));
+    let effects = running.execute(Command::UndoRun);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::UndoRun(_))));
+    assert!(running.status.as_deref().unwrap().contains("every run to finish"));
+}
+
+#[test]
 fn new_slash_command_creates_a_root_session_with_the_selected_model() {
     let model = ModelSelection {
         model_is_fallback: false,
