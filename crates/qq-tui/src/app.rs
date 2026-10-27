@@ -306,6 +306,33 @@ enum PendingIntent {
     Prune,
 }
 
+impl PendingIntent {
+    /// Whether the command may start or resume work that edits the
+    /// workspace, so `/undo` must wait for it.
+    const fn may_start_run(&self) -> bool {
+        match self {
+            Self::Prompt { .. }
+            | Self::Steer { .. }
+            | Self::GoalSet { .. }
+            | Self::GoalControl { .. }
+            | Self::Approval { .. } => true,
+            Self::Side { .. }
+            | Self::CancelSide { .. }
+            | Self::Create
+            | Self::Cancel { .. }
+            | Self::Compact { .. }
+            | Self::Rollback { .. }
+            | Self::SetModel { .. }
+            | Self::SetProfile { .. }
+            | Self::SetApprovalMode { .. }
+            | Self::SetEffort { .. }
+            | Self::SetDelegate { .. }
+            | Self::Delete { .. }
+            | Self::Prune => false,
+        }
+    }
+}
+
 pub(crate) struct App {
     pub settings: Settings,
     pub model: ModelSelection,
@@ -331,6 +358,9 @@ pub(crate) struct App {
     pub(crate) workspace_root: Option<std::path::PathBuf>,
     /// A `/undo` restore is running; a second one waits for it.
     undoing: bool,
+    /// The newest event a run-starting command's receipt committed through.
+    /// Until the stream reaches it, the summaries may not show that run yet.
+    run_start_through: u64,
     pub sessions: SessionStore,
     /// Transcript panes left to right, each following its own view with its
     /// own scroll state; the renderer reconciles them every frame. One pane
@@ -443,6 +473,7 @@ impl App {
             check_interruption: None,
             workspace_root: options.workspace_root,
             undoing: false,
+            run_start_through: 0,
             sessions: SessionStore::with_sanitizer(terminal_safe_character),
             panes: vec![TranscriptPane::default()],
             focused_pane: 0,
@@ -548,6 +579,7 @@ impl App {
                 }
                 self.overlay = None;
                 self.last_sequence = 0;
+                self.run_start_through = 0;
                 self.recent_events.clear();
                 self.set_warning("session state reset after reconnecting".to_owned());
                 self.apply_snapshot(snapshot)
@@ -584,6 +616,11 @@ impl App {
                 match result {
                     Ok(receipt) => {
                         let intent = self.pending.remove(&command_id);
+                        if intent.as_ref().is_some_and(PendingIntent::may_start_run) {
+                            self.run_start_through = self
+                                .run_start_through
+                                .max(receipt.committed_through.sequence);
+                        }
                         if let CommandOutcome::SessionCreated { session_id } = receipt.outcome
                             && intent
                                 .as_ref()
@@ -2464,10 +2501,17 @@ impl App {
             self.set_warning("/undo is already restoring the workspace".to_owned());
             return Effects::redraw(Redraw::Immediate);
         }
-        if self
-            .sessions
-            .values()
-            .any(|session| session.summary.status != SessionStatus::Idle)
+        // A run this client just started may not show in the summaries yet:
+        // its command is in flight, its mentions are resolving, or its
+        // receipt arrived before the events it committed.
+        let starting = self.resolving > 0
+            || self.pending.values().any(PendingIntent::may_start_run)
+            || self.last_sequence < self.run_start_through;
+        if starting
+            || self
+                .sessions
+                .values()
+                .any(|session| session.summary.status != SessionStatus::Idle)
         {
             self.set_warning("/undo needs every run to finish; wait or cancel first".to_owned());
             return Effects::redraw(Redraw::Immediate);

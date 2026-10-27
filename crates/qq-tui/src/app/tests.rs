@@ -937,6 +937,66 @@ fn undo_asks_the_loop_to_restore_the_workspace_once_every_run_is_idle() {
 }
 
 #[test]
+fn undo_waits_for_a_run_this_client_just_started() {
+    let mut app = App::new(TuiOptions {
+        workspace_root: Some(std::path::PathBuf::from("/work/tree")),
+        ..TuiOptions::default()
+    });
+    app.apply_snapshot(snapshot());
+    let session_id = app.focused().unwrap();
+    let undo_requested = |app: &mut App| {
+        app.execute(Command::UndoRun)
+            .iter()
+            .any(|effect| matches!(effect, Effect::UndoRun(_)))
+    };
+
+    // The prompt is in flight; the summary still says Idle.
+    app.composer.text = "fix the bug".to_owned();
+    let (_, requests) = app
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .split();
+    let [ClientRequest::Command(request)] = requests.as_slice() else {
+        panic!("expected one prompt: {requests:?}")
+    };
+    assert!(!undo_requested(&mut app), "undo raced an in-flight prompt");
+    assert!(
+        app.status
+            .as_deref()
+            .unwrap()
+            .contains("every run to finish")
+    );
+
+    // The receipt can arrive before the events it committed.
+    app.apply_client_update(ClientUpdate::CommandResult {
+        command_id: request.command_id,
+        result: Ok(qq_protocol::CommandReceipt {
+            command_id: request.command_id,
+            outcome: CommandOutcome::PromptQueued {
+                session_id,
+                run_id: RunId::generate().unwrap(),
+                queue_position: 0,
+            },
+            committed_through: fixtures::cursor(2),
+        }),
+    });
+    assert!(
+        !undo_requested(&mut app),
+        "undo raced a run whose events had not arrived"
+    );
+
+    // Once the stream reaches the receipt, the summaries are authoritative.
+    let summary = app.sessions.get(&session_id).unwrap().summary.clone();
+    app.apply_client_update(ClientUpdate::Event(fixtures::envelope(
+        2,
+        session_id,
+        SessionEvent::SessionUpdated {
+            session: Box::new(summary),
+        },
+    )));
+    assert!(undo_requested(&mut app));
+}
+
+#[test]
 fn new_slash_command_creates_a_root_session_with_the_selected_model() {
     let model = ModelSelection {
         model_is_fallback: false,
