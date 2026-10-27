@@ -222,14 +222,13 @@ runs edits and commands inside the task sandbox. Under Auto, a denial means
 the call left that boundary; the denial text says which rule applied.
 [Headless › Approval without a human](headless.md#approval-without-a-human).
 
-### The agent says a command was `forbidden`
+### The agent says a command hit a `fixed_stop`
 
-A conservative unscoped embedding can refuse a command shape without dispatching
-it. Native task-scoped Auto does not use that command-name veto, and Full does
-not have it. Explicit managed controls and native filesystem/network policy
-still apply. A denied Auto call returns a tool error so the agent can choose a
-permitted alternative. See
-[Command controls](permissions.md#command-controls).
+The command matched one of the fixed stops: a force-push, `sudo`, `rm -r` of
+`/` or your home directory, a disk or power command, or a credential file.
+Every mode except Full denies these without running them, and the agent gets
+a tool error asking it to find another way. Run the command yourself, or
+switch to Full if you mean it. See [Fixed stops](permissions.md#fixed-stops).
 
 ### The first shell command ends the run: `session runtime is unavailable`
 

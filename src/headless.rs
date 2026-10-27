@@ -2708,11 +2708,12 @@ mod tests {
         }
     }
 
-    /// Issues a shell command the conservative classifier would hold
-    /// (`rm`) on each of two turns, then answers. Distinct call ids so the
-    /// second is a fresh approval decision, not a replay.
+    /// Issues `rm -r scratchN` on each of two turns, then answers. Distinct
+    /// call ids so the second is a fresh approval decision, not a replay.
     struct DangerousShellProvider {
         turn: Mutex<usize>,
+        /// Prefix the command with `sudo`, a fixed stop.
+        stopped: bool,
     }
 
     impl Provider for DangerousShellProvider {
@@ -2730,7 +2731,10 @@ mod tests {
                     }),
                     Ok(ProviderEvent::ToolCallArgumentsDelta {
                         id: id.clone(),
-                        json: format!(r#"{{"command":"rm -r scratch{current}"}}"#),
+                        json: format!(
+                            r#"{{"command":"{}rm -r scratch{current}"}}"#,
+                            if self.stopped { "sudo " } else { "" }
+                        ),
                     }),
                     Ok(ProviderEvent::ToolCallCompleted { id }),
                     Ok(ProviderEvent::Completed { usage: None }),
@@ -5925,11 +5929,12 @@ mod tests {
     }
 
     /// Explicit prefixes are stored before dispatch, including on resume.
-    /// A nonmatching prefix never grants authority to the requested command.
+    /// No prefix lifts a fixed stop.
     #[tokio::test]
     async fn shell_allowlist_grants_the_session_before_dispatch() {
         let fixture = fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
+            stopped: false,
         })
         .await;
         for name in ["scratch0", "scratch1"] {
@@ -5961,14 +5966,15 @@ mod tests {
                 .all(|call| call["state"] == "completed")
         );
 
-        // A prefix that matches nothing leaves auto's deny in place.
+        // No prefix lifts a fixed stop.
         let unmatched = self::fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
+            stopped: true,
         })
         .await;
         let mut strict = self::options(&unmatched.workspace);
         strict.approval = HeadlessApproval::Auto;
-        strict.allow_shell_prefixes = vec!["rm -rf".to_owned(), "cargo".to_owned()];
+        strict.allow_shell_prefixes = vec!["sudo rm -r".to_owned(), "cargo".to_owned()];
         let (status, stdout, _) = run_to_end(&unmatched, strict, std::future::pending()).await;
         assert_eq!(status, HeadlessStatus::Completed);
         assert!(
@@ -5983,6 +5989,7 @@ mod tests {
     async fn tool_allowlist_approves_held_calls_under_auto() {
         let fixture = fixture(|| DangerousShellProvider {
             turn: Mutex::new(0),
+            stopped: false,
         })
         .await;
         for name in ["scratch0", "scratch1"] {
@@ -7286,6 +7293,7 @@ mod tests {
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {
                 turn: Mutex::new(0),
+                stopped: true,
             })),
         )
         .await
@@ -8440,6 +8448,7 @@ mod tests {
             runtime_options,
             Arc::new(ProviderLoader(|| DangerousShellProvider {
                 turn: Mutex::new(0),
+                stopped: true,
             })),
         )
         .await

@@ -313,7 +313,6 @@ async fn prepare_execution(
             loaded.plan.network_policy(),
             loaded.plan.shell_policy(),
             loaded.plan.approval_delegate(),
-            resources.task.get().is_some(),
         ))
     };
     // The claim carried the session's file hashes, so nothing here waits on

@@ -5232,8 +5232,8 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
                 shell: Some(Box::new(qq_protocol::ShellCommandPreview {
                     command: "rm -rf ./build".to_owned(),
                     cwd: Some("crates/qq-tui".to_owned()),
-                    verdict: Some(qq_protocol::ShellVerdict::Prompt),
-                    reasons: vec!["remove_file".to_owned()],
+                    verdict: None,
+                    reasons: Vec::new(),
                 })),
                 edit: None,
                 question: None,
@@ -5251,13 +5251,6 @@ fn shell_approvals_show_the_server_preview_not_the_arguments() {
         "{command_row}"
     );
     assert!(!command_row.contains("ignored"), "{command_row}");
-    // The classifier's reasons render under the command so the user knows
-    // why the gate is asking.
-    assert!(
-        rows.iter()
-            .any(|row| row.contains("asks because: remove file")),
-        "{rows:?}"
-    );
 }
 
 #[test]

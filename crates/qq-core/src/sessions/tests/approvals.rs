@@ -14,7 +14,7 @@ fn assert_no_human_permission_request(events: &[SessionEventEnvelope]) {
 }
 
 #[tokio::test]
-async fn auto_denies_out_of_scope_shell_and_continues_without_approval_or_review() {
+async fn auto_denies_a_fixed_stop_and_continues_without_approval_or_review() {
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = scripted_runs_harness_with(
@@ -22,7 +22,7 @@ async fn auto_denies_out_of_scope_shell_and_continues_without_approval_or_review
         vec![vec![
             (
                 "__test_shell",
-                r#"{"command":"unknown-ungranted-command"}"#.to_owned(),
+                r#"{"command":"cd sub && sudo make install"}"#.to_owned(),
             ),
             ("__test_mutate", "{}".to_owned()),
         ]],
@@ -43,7 +43,7 @@ async fn auto_denies_out_of_scope_shell_and_continues_without_approval_or_review
     assert!(observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.name == "__test_shell" && tool_call.is_error
-                && tool_call.result.as_deref().is_some_and(|result| result.contains("outside_auto_scope"))
+                && tool_call.result.as_deref().is_some_and(|result| result.starts_with("permission_denied: fixed_stop:"))
     )));
     assert!(observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallFinished { tool_call }
@@ -1317,11 +1317,10 @@ async fn a_delegate_grant_that_cannot_be_stored_still_approves_the_call_once() {
 }
 
 #[tokio::test]
-async fn a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reaches_the_reviewer() {
-    // Plan acceptance 2: with a reviewer configured, a Forbidden command is
-    // refused by the classifier and the reviewer is not consulted. Seeding
-    // the exact string as a delegate row changes nothing: only a human's
-    // exact string opens that floor (ADR-0020).
+async fn no_grant_lifts_a_fixed_stop_and_a_stopped_call_never_reaches_the_reviewer() {
+    // With a reviewer configured, a fixed stop is refused before any hold
+    // and the reviewer is not consulted. A grant naming the exact string
+    // changes nothing; only Full runs it.
     let (reviewer, consulted) =
         StubReviewer::immediate(ReviewVerdict::free(ReviewDecision::Approve));
     let mut harness = scripted_runs_harness_with(
@@ -1343,7 +1342,7 @@ async fn a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reach
             connection.execute(
                 "INSERT INTO session_grants(
                      session_id, kind, value, created_at_ms, source, run_id
-                 ) VALUES (?1, 'shell_prefix', 'git push --force', 0, 'delegate', 'seeded')",
+                 ) VALUES (?1, 'shell_prefix', 'git push --force', 0, 'human', NULL)",
                 [session_id.to_string()],
             )?;
             Ok(())
@@ -1356,17 +1355,17 @@ async fn a_delegate_grant_never_lifts_forbidden_and_a_forbidden_call_never_reach
         !observed
             .iter()
             .any(|event| matches!(event.event, SessionEvent::ToolApprovalRequested { .. })),
-        "Forbidden is settled before any hold"
+        "a fixed stop is settled before any hold"
     );
     assert!(observed.iter().any(|event| matches!(
         &event.event,
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.state == ToolCallState::Denied
-                && tool_call.result.as_deref().is_some_and(|result| result.starts_with("forbidden:"))
+                && tool_call.result.as_deref().is_some_and(|result| result.starts_with("permission_denied: fixed_stop:"))
     )));
     assert!(
         consulted.lock().unwrap().is_empty(),
-        "a Forbidden call never reaches the delegate"
+        "a stopped call never reaches the delegate"
     );
 }
 
@@ -3112,7 +3111,6 @@ async fn an_expired_goal_hold_survives_the_gate_winning_cancellation() {
                 Arc::new(crate::tools::network::NetworkPolicy::default()),
                 Arc::new(crate::ShellPolicy::default()),
                 approval::ApprovalDelegate::Off,
-                false,
             );
             let decision = tokio::spawn(gate.resolve(&call));
             collect_until_approval_requested(&mut harness.events).await;
@@ -3754,21 +3752,6 @@ async fn explicit_seed_promotes_delegate_collisions_even_at_the_grant_cap() {
             .collect()
     );
     assert!(grants.delegate.commands.is_empty());
-    for command in ["cargo test package", "npm install package"] {
-        assert!(matches!(
-            approval::evaluate(
-                ApprovalMode::Auto,
-                "shell",
-                &approval::ToolClass::Shell {
-                    command: command.into(),
-                    cwd: None,
-                    read_only: false,
-                },
-                &grants
-            ),
-            approval::PolicyDecision::Execute
-        ));
-    }
     let rows = runtime.inner.store.call(Priority::Control, move |connection| {
         let count: u32 = connection.query_row("SELECT COUNT(*) FROM session_grants WHERE session_id=?1", [session_id.to_string()], |row| row.get(0))?;
         let promoted: u32 = connection.query_row("SELECT COUNT(*) FROM session_grants WHERE session_id=?1 AND kind='shell_prefix' AND source='human' AND run_id IS NULL", [session_id.to_string()], |row| row.get(0))?;

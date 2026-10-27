@@ -1570,16 +1570,15 @@ pub(super) fn execute_command(
                 if approving && own_mode == ApprovalMode::ReadOnly {
                     refusal = Some("permission_denied: authority_changed: task permissions are now read-only; a pending approval cannot restore revoked authority".to_owned());
                 } else if approving && !ancestors.is_empty() {
-                    let (name, class) = load_pending_approval_class(
+                    let (_, class) = load_pending_approval_class(
                         &transaction,
                         workspace_id,
                         session_id,
                         run_id,
                         tool_call_id,
                     )?;
-                    let task_scoped = super::task_workspaces::is_bound(&transaction, run_id)?;
-                    for (mode, grants) in &ancestors {
-                        refusal = match approval::evaluate_in_task(*mode, &name, &class, grants, task_scoped) {
+                    for (mode, _) in &ancestors {
+                        refusal = match approval::evaluate(*mode, &class) {
                             approval::PolicyDecision::Execute
                             | approval::PolicyDecision::AskUser { .. } => continue,
                             // The pending response supplies the fresh human
@@ -1587,7 +1586,6 @@ pub(super) fn execute_command(
                             approval::PolicyDecision::RequireApproval if *mode == ApprovalMode::Ask => continue,
                             approval::PolicyDecision::RequireApproval => Some("permission_denied: authority_changed: parent_permission_required: this child action is outside its parent's grants; explicitly grant the parent the required tool, command, or host scope".to_owned()),
                             approval::PolicyDecision::Deny { reason } => Some(format!("permission_denied: authority_changed: {}", approval::deny_result(&reason))),
-                            approval::PolicyDecision::Forbidden { rules } => Some(format!("permission_denied: authority_changed: {}", approval::forbidden_result(&rules))),
                         };
                         break;
                     }

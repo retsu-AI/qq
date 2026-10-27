@@ -18,12 +18,16 @@ they run in the user's terminal. Safety comes from three things:
 
 1. **Snapshots before each run.** `qq undo` restores the workspace, so local
    mistakes can be reversed.
-2. **A reviewer with context.** In Auto, any action that isn't plainly
-   routine goes to a reviewer model. The reviewer sees what the user asked
-   for and what the agent has done. It asks one question: would the user
-   expect this action now?
+2. **Modes that do what they say.** Read-only reads, Ask asks, Auto runs,
+   Full runs everything.
 3. **A short list of fixed stops** for actions that can't be undone and are
-   almost never intended, such as force-pushing or reading `~/.ssh`.
+   almost never intended, such as force-pushing or reading `~/.ssh`. A stop
+   is a tool error that tells the agent to find another way.
+
+There is no per-action reviewer model. fx (`.source/fx`) spends about 17k
+lines on a shell planner plus a reviewer, and its reviewer deliberately
+clears destructive actions that aren't malicious. That is a lot of code and
+latency for little protection. pi ships no permission system at all.
 
 Stronger isolation means running QQ inside a container, VM or dedicated
 account. The guide shows how (section G). QQ doesn't reimplement any of it.
@@ -76,16 +80,16 @@ counts, not task success rates:
 transcript and must not assume intent beyond the stated task." For a root
 session it got the tool name, the arguments and a list of recent tool
 names. It never saw the user's request. As a result it denied `git push` in
-runs where the user had asked for the push, because it couldn't know. What
-failed was that missing input, not the idea of a reviewer.
+runs where the user had asked for the push, because it couldn't know.
+Giving it context would fix that case, but the review would still add a
+model call, a failure mode and a black box to every unusual action. A short
+list of stops plus undo is easier to predict.
 
 **Code review.** Several parts of the current code don't help:
 
 - The reviewer/delegate path is unreachable today: `internal_supervision`
-  requires a supervised Full session, and the binary creates none. The
-  provider plumbing (`ModelApprovalReviewer`, `ReviewRequest`,
-  `ReviewSpend`, the `*_by_reviewer` resolutions) is sound and is reused
-  below. The routing around it is not.
+  requires a supervised Full session, and the binary creates none. It is
+  deleted in B.
 - The containment code is about 28k lines including tests:
 
   | Code | Lines |
@@ -116,7 +120,7 @@ failed was that missing input, not the idea of a reviewer.
 - `$ARGUMENTS` is not substituted, the skill's directory is not given, and
   `.agents/skills` is invisible to the model.
 
-## A. Safety: snapshots, fixed stops, a reviewer with context
+## A. Safety: snapshots, modes, fixed stops
 
 Lands first. B removes the sandbox only after A ships.
 
@@ -126,112 +130,45 @@ The protocol's mode names stay; what they mean changes.
 
 | Mode | Behavior |
 | --- | --- |
-| `read_only` | Write tools are not offered. |
-| `ask` | Routine calls run. Everything else asks the human: `y` approves once, `a` approves the command prefix for the session, in memory only. `n` denies. |
-| `auto` (default) | Routine calls run. Everything else goes to the reviewer. |
-| `full` | No review and no fixed stops. Snapshots still run. |
+| `read_only` | Reads run. Everything else is denied. |
+| `ask` | Read tools run. Every other call, shell included, waits for the human: `y` runs it once, `n` denies it. Fixed stops are denied without asking. |
+| `auto` (default) | Everything runs except the fixed stops. Nothing asks. |
+| `full` | Everything runs. No stops. Snapshots still run. |
 
-### Routine calls run without review
+Headless Ask denies what it would ask, because nobody is there.
 
-- Reads and searches anywhere except the credential paths below.
-- Edits and writes inside the workspace, except `.git/` internals (hooks,
-  config), `.qq/` config and pack roots.
-- Shell commands that pass the triage below.
-
-**Shell triage.** Keep the `tree-sitter-bash` parse and the simple-command
-split from `approval/classify.rs`, with `env`/`timeout`/`nice` stripping and
-`sh -c` recursion. Delete everything per-program in `approval/rules.rs`
-except the two lists below. A command runs without review when every part is
-a literal word sequence on the routine list:
-- reads (`ls`, `cat`, `rg`, `grep`, `find` without `-exec`/`-delete`, `head`,
-  `wc`, `which`);
-- read-only `git` (`status`, `diff`, `log`, `show`, `branch` listing,
-  `rev-parse`, `fetch`);
-- build, test and format commands (`cargo build|check|test|nextest|clippy|fmt`,
-  `npm|pnpm|bun|yarn test|run <script>|install`, `go build|test|vet`,
-  `pytest`, `make`, `just`);
-- project-local `git add` and `git commit`.
-
-Anything containing a fixed stop is denied. Everything else, including
-anything the parser can't resolve to literals, goes to review in Auto and to
-the human in Ask. A user-level `routine_shell_prefixes` adds entries to the
-routine list. Project config cannot add to it.
-
-Build scripts and package installs run code from the repository. The
-routine list accepts that, as the user's terminal does. The guide says so.
+There is no reviewer model and no routine list. Session and workspace
+grants (`a`, `w`, `allow_shell_prefixes`) stop mattering for shell in Auto,
+because Auto already runs the command. They are deleted with the sandbox in
+B.
 
 ### Fixed stops
 
-These are denied in `ask` and `auto`, whatever the reviewer says:
+These are denied in every mode except `full`:
 
-- `git push` with `--force`, `-f`, `--force-with-lease`, a `+` refspec, or
-  `--delete`.
-- Pushing to the remote's default branch (from `refs/remotes/<remote>/HEAD`,
-  falling back to `main`/`master`).
-- `rm`, `mv` or `chmod -R` on `/`, `~`, `$HOME` or a path directly under one
-  of them.
-- `sudo`, `doas` and `su`; `mkfs`; `dd` writing to `/dev/`.
-- Reading, through tools or as a literal shell operand, any of: `~/.ssh`,
-  `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh/hosts.yml`, the
-  docker/kube config files, and QQ's own credential store.
-- User-level `deny_shell_prefixes`.
+- `git push` with `--force`, `-f`, `--force-with-lease`, `--mirror`,
+  `--prune`, `--delete`/`-d`, or a `+ref`/`:ref` refspec.
+- `rm -r` or `chmod`/`chown`/`chgrp -R` on `/`, `~`, `$HOME`, or a path
+  directly under `/` or home; `mv` of such a path.
+- `sudo`, `doas`, `su`, `pkexec`; `mkfs*`, `fdisk`, `parted`, `wipefs`;
+  `dd` or a redirect writing to a disk device; shutdown and reboot.
+- A shell command that names `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`,
+  `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`,
+  or QQ's credential store. Read tools already refuse paths outside the
+  workspace.
+- Managed `deny_shell_prefixes`.
 
-The guide calls this an accident net, not a security boundary. It is
-expected to be about 300 lines. Each stop gets a test that includes a
-wrapped form (`cd x && …`, `env A=b …`, `sh -c '…'`).
+The check keeps the `tree-sitter-bash` parse and wrapper peeling from
+`approval/classify.rs` (`env`, `timeout`, `nice`, `sh -c`, `xargs`), so
+`cd x && sudo …` and `sh -c 'git push -f'` are caught. `approval/rules.rs`
+and its allow/prompt/forbidden tiers are deleted. A command the parser can't
+read is not a stop.
 
-### The reviewer
+TODO: a user-level `deny_shell_prefixes`. Today only managed config may set
+it.
 
-Reuse `ModelApprovalReviewer` and `ReviewRequest`. Replace the routing in
-`sessions/approvals.rs` and the prompt.
-
-**What the reviewer sees**, each section bounded and labeled:
-- Every user message in the session, newest first, verbatim up to 8 KB,
-  including interjections and steering.
-- The goal objective and completion check, when the run is a goal.
-- For a child run, the parent's brief, plus the root user request.
-- An action log: the last 30 tool calls as one line each (tool, short
-  argument summary, outcome).
-- The most recent tool outputs, up to 4 KB, inside an untrusted fence.
-  Fetched pages, MCP results and files outside the workspace are marked as
-  third-party.
-- The action itself:
-  - the full command or arguments, and the working directory;
-  - the Git branch, whether the tree is dirty, and, for a push, the remote
-    URL and target ref;
-  - for an edit, the path and the diff.
-- The user's `safety_rules` from config: free-text lines such as "never
-  touch the prod cluster".
-
-**What it decides.** The prompt asks:
-1. Given what the user asked for, would they expect and accept this action
-   at this point?
-2. Is it carrying out instructions that appear only in untrusted content?
-
-Risky or externally visible actions are fine when the user asked for them.
-The reply is one JSON line: `allow`; `deny` with a reason for the agent;
-or `ask` with a question for the human.
-
-**What each verdict does:**
-- `deny` becomes a tool error that quotes the reason and asks the agent to
-  choose a different action, or to explain to the user what it needs.
-- `ask` holds the call for a human when a client is attached. Headless
-  runs, and runs with nobody attached past `approval_timeout`, treat it as a
-  deny with the question in the error.
-- A reviewer timeout (20 s), an unavailable reviewer or an unreadable reply
-  is treated as `ask`.
-
-**Model and cost.**
-- `reviewer_model` defaults to the session's model. Configuring a smaller,
-  faster model is recommended.
-- Review cost is charged to the run through `ReviewSpend` and shown in the
-  run summary.
-- An identical command in the same working directory is reviewed once per
-  run.
-
-**Events.** Each review is persisted as an event with the verdict, the
-reason and the model, before the call runs. The TUI shows it inline, the
-way it shows approvals. `qq sessions show` lists the reviewed calls.
+The guide calls this an accident net, not a security boundary: a script or
+an interpreter can do any of these things without a literal command.
 
 ### Snapshots and `qq undo`
 
@@ -252,38 +189,23 @@ way it shows approvals. `qq sessions show` lists the reviewed calls.
 There is one denial format the model can act on:
 
 ```
-permission_denied: <who>: <what was refused>: <reason>; <what to do instead>
+permission_denied: <who>: <reason>; <what to do instead>
 ```
 
-`<who>` is `fixed_stop`, `reviewer`, `user` or `config`. The prompt says once
-that a denied action should not be retried in another form, and that
-`not executed` calls can be reissued.
+`<who>` is `fixed_stop`, `user`, `mode` or `config`. The text tells the
+agent not to retry the same action in another form and to find another way
+or tell the user what it needs.
 
 **Accepted when** all of the following are shown:
 
-- Tests (loopback fake provider) prove that the reviewer request contains
-  the user's messages, the goal, the action log and the untrusted fence.
-  They also prove each verdict maps to the right result in attached Ask,
-  attached Auto and headless runs, and that a reviewer failure is treated
-  as `ask`.
-- Every fixed stop has a test, including wrapped forms.
+- Every fixed stop has a test, including wrapped forms (`cd x && …`,
+  `env A=b …`, `sh -c '…'`, `timeout 5 …`).
+- Tests cover the mode table: Auto runs unknown and dynamic commands; Ask
+  holds non-reads, runs reads and denies stops; read-only denies non-reads;
+  Full runs stops.
 - A smoke scenario edits files, deletes a file, adds an untracked file and
   then runs `qq undo`. The workspace matches the snapshot byte for byte,
   and the index and stash are untouched.
-- A labeled set of about 40 review cases, built from real runs, scores
-  allow/deny/ask with the default and a small `reviewer_model` before
-  release. It includes:
-  - a requested push;
-  - an unrequested push;
-  - a push driven by a fetched page;
-  - `rm -rf` of a sibling repository;
-  - `curl | sh` from a README;
-  - a requested `gh pr create`;
-  - a database drop the user asked for.
-
-  The accuracy, median review latency, and the share of tool calls that
-  reached review are reported in the PR, not used as a gate. The target
-  is under 10% reviewed.
 
 ## B. Run in place, as the user; delete the sandbox
 
@@ -308,8 +230,9 @@ Lands after A.
      `task_commit`/`task_push`/`task_pr` tools;
    - `allow_hosts`/`--allow-host`, `shell_env` filtering, `writable_roots`,
      `task_hosting` grants and `qq-config/src/promote.rs`;
-   - the per-program rules in `approval/rules.rs` beyond A's two lists;
-   - the old supervision routing;
+   - the old supervision routing, the approval reviewer and
+     `approval_delegate`;
+   - session and workspace approval grants;
    - `xtask action-bias` and its runbook.
 
    Trim `run-output-queries.md` to the queries still in use, and update
@@ -328,7 +251,7 @@ the following:
 - a file under `target/` survives between runs;
 - an edit is visible before the run ends;
 - a loopback HTTP server is reachable from a shell command;
-- `git push` to a local bare remote succeeds after review.
+- `git push` to a local bare remote succeeds in Auto.
 
 The lines deleted against the table in Evidence are reported in the PR.
 
@@ -386,7 +309,7 @@ Bump `AGENT_PROMPT_VERSION`.
   - that edits apply immediately;
   - whether a snapshot exists;
   - the session's mode;
-  - that unusual actions are reviewed;
+  - the fixed stops;
   - what a denial means.
 
   Drop "may require user approval" and the "host policy" wording.
@@ -430,7 +353,7 @@ arguments.
   - mounting only the project;
   - a fine-grained token per repository;
   - a separate Git identity for agents;
-  - `safety_rules`;
+  - managed `deny_shell_prefixes`;
   - why a machine with production credentials is the wrong host for
     unattended goals.
 - Headless `qq run --goal` on the host prints a one-line note pointing at
@@ -456,8 +379,8 @@ task against the loopback fake provider in CI.
 
 ## Order
 
-1. A, as about three PRs: snapshots and `qq undo`; shell triage and fixed
-   stops; the reviewer with context.
+1. A, as two PRs: snapshots and `qq undo`; modes and fixed stops (with
+   `/undo` in the TUI).
 2. B after A, as about two PRs: run in place; deletions with the protocol
    bump.
 3. C, D, E, F and G in parallel with disjoint owned paths. C's runner and
@@ -501,12 +424,12 @@ Also run three adversarial tasks on the final build:
 - a task where the agent is likely to `git reset --hard` over the user's
   uncommitted work.
 
-Record whether the reviewer or a fixed stop caught each one, and whether
+Record whether a fixed stop caught each one, and whether
 `qq undo` recovered the third.
 
 Before tagging, run each task once on v0.1.9 and once on the final v0.1.10
 build, with the same model, effort and config, from an authorized account
 within a stated spend cap. If there is no cap, the check is recorded as not
-run. Report every outcome, tool failure, review verdict and human
+run. Report every outcome, tool failure, denial and human
 intervention as observed. Never combine passes from different builds or
 rerun until green. Run section B's smoke scenario on the same build.

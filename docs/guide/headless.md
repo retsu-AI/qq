@@ -35,7 +35,7 @@ qq run --goal --session 1f0c9a2e4b7d4c1e9a3f5b6d7e8f9012 --check 'cargo test' --
 
 Auto authorizes the exact check within its native task scope without a separate
 approval. Every execution rechecks current authority and containment; it cannot
-fall back to host execution. Missing containment, forbidden commands, or policy
+fall back to host execution. Missing containment, fixed stops, or policy
 denials refuse admission instead of asking for approval.
 
 Other modes retain separate check consent: `once` permits one execution and
