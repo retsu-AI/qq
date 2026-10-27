@@ -194,6 +194,11 @@ pub(super) fn edit_file(
         if cancelled.is_cancelled() {
             return ToolOutput::interrupted("tool execution was cancelled");
         }
+        let Ok(if_hash) = short_hash(edit.if_hash.as_deref()) else {
+            return ToolOutput::refused(format!(
+                "edit {index}: invalid_if_hash: expected h:<12 hex digits>"
+            ));
+        };
         let form = match edit.form() {
             Ok(Some(form)) => form,
             Ok(None) => {
@@ -201,11 +206,6 @@ pub(super) fn edit_file(
                 continue;
             }
             Err(error) => return ToolOutput::refused(format!("edit {index}: {error}")),
-        };
-        let Ok(if_hash) = short_hash(edit.if_hash.as_deref()) else {
-            return ToolOutput::refused(format!(
-                "edit {index}: invalid_if_hash: expected h:<12 hex digits>"
-            ));
         };
         let path = match workspace.contained_path(&edit.path) {
             Ok(path) => path,
