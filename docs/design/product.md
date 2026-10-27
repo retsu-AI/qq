@@ -171,7 +171,7 @@ QQ does not include these products or scaffolds:
 
 - Web or React frontend and mobile application. No browser, desktop or mobile
   client exists. Current work is limited to
-  [core stabilization](../plans/README.md).
+  [the current plan](../plans/README.md).
 - JavaScript or TypeScript workspace.
 - Hosted SaaS or multi-user system.
 - Distributed execution workers.

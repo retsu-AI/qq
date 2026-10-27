@@ -4,7 +4,7 @@
 acceptance, from a run-chain goal to a session goal. See § Alternatives.
 **Date:** 2026-09-28
 **Deciders:** lead; second reviewer required (run loop, store, protocol, tool catalog)
-**Implements:** [`goals.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](../research/goal-pursuit.md), audit [`core-autonomy.md`](../research/core-autonomy.md) A3, A4
+**Implements:** [`goals.md`](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/goals.md) G0, G2–G5 (was autonomous-core AC7–AC9); [`autonomous-core.md`](https://github.com/retsu-AI/qq/blob/55936a1e/docs/plans/autonomous-core.md) AC4 (loop guard). Research: [`goal-pursuit.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/goal-pursuit.md), audit [`core-autonomy.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/core-autonomy.md) A3, A4
 
 ## Context
 
@@ -527,7 +527,7 @@ a goal.
 
 ## Evidence / references
 
-- Survey: [`goal-pursuit.md`](../research/goal-pursuit.md).
+- Survey: [`goal-pursuit.md`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/goal-pursuit.md).
 - Codex: `codex-rs/ext/goal/src/runtime.rs:425–523`, `accounting.rs:133–230`,
   `state/src/runtime/goals.rs:499–611`.
 - OpenCode: `src/session/todo.ts:29–50`, `src/session/processor.ts:29`.

@@ -1,5 +1,12 @@
 # QQ Domain Language
 
+Some terms name planned concepts with no implementation yet: Workspace Root,
+Workspace Provisioning, Change Set, Client Enrollment, Pairing Code, Client
+Credential, Server Profile, Multi-Server Overview, Client Cache and Fold/Focus
+(see the [desktop, mobile and fleet plan](docs/plans/desktop-mobile-fleet.md)).
+The closest shipped concept to an Execution Checkout is the private task copy
+a default Auto run executes in.
+
 ## Terms
 
 ### Server

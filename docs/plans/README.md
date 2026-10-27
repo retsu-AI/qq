@@ -1,205 +1,512 @@
-# Core stabilization
+# v0.1.10: fewer disruptions
 
-Freeze new product features until QQ can complete and verify ordinary editing
-work. Permissions, shell execution and tool policy are core repairs. This is
-the active plan; it replaces the overlapping plans, progress ledgers,
-reservations and calendar gates. Existing issues and PRs remain open until
-someone resolves them. Historical evidence remains in Git and the linked
-research/ADRs; deleting a ledger does not turn a failed result into a pass.
+The goal for v0.1.10 is that an ordinary coding task runs to a verified
+result without the agent stalling, asking for help it doesn't need, or
+fighting its own environment. This replaces the core stabilization plan,
+whose rows 1–5 shipped in v0.1.8 and v0.1.9 (#378, #432–#439, #463–#468,
+#470–#472). That plan is in Git history at
+[`2cafa65`](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/plans/README.md).
 
-## What failed
+Issues and PRs carry assignments and verification. This page states what to
+change, why, and how each change is accepted. Remove a section when it ships.
 
-The 2026-10-19 read-only session-store investigation found interrupted goals
-losing continuity, commands timing out during builds, advertised delegation
-choices being rejected, stale edits and agents stopping with work remaining.
-In the inspected v22 cohort: 211 root runs, 7,626 tool calls, 25 shell/exec timeouts
-(21 involving Cargo), 13 advertised-model rejections, and 84 failed edits out
-of 806 (46 stale). Four inspected approval-timeout goals stayed paused; 22
-subsequent prompts had no goal association. These are diagnostic counts from
-mixed builds, not a task-success rate or proof of every proposed cause.
+## Direction
 
-The previous approach accumulated instructions and completion counters without
-proving the resulting task artifact. More prompting cannot repair lost run
-ownership, unavailable tools or an unenforced authorization boundary. Recent
-merges already removed Jev (#374), repaired empty-session reuse (#370), and
-simplified provider/auth plumbing (#373/#376); do not rebuild those changes.
+QQ stops trying to contain the agent inside QQ. Commands run in the real
+checkout, as the user, with the user's network and environment, the way
+they run in the user's terminal. Safety comes from three things:
 
-## Current state
+1. **Snapshots before each run.** `qq undo` restores the workspace, so local
+   mistakes can be reversed.
+2. **A reviewer with context.** In Auto, any action that isn't plainly
+   routine goes to a reviewer model. The reviewer sees what the user asked
+   for and what the agent has done. It asks one question: would the user
+   expect this action now?
+3. **A short list of fixed stops** for actions that can't be undone and are
+   almost never intended, such as force-pushing or reading `~/.ssh`.
 
-[#463](https://github.com/retsu-AI/qq/pull/463) shipped the permission baseline
-and native execution paths on Linux, macOS and Windows. Auto is the default:
-allowed actions run without human or model approval, and denied actions return
-a tool error so the agent can try an allowed alternative. Ask requires fresh
-human approval. Durable execution and task-continuation foundations are also
-implemented; this does not mean the entire plan is qualified.
+Stronger isolation means running QQ inside a container, VM or dedicated
+account. The guide shows how (section G). QQ doesn't reimplement any of it.
 
-Row 2's practical baseline is qualified. Merged
-[#464](https://github.com/retsu-AI/qq/pull/464) isolates CLI state through
-`QQ_HOME`; [#465](https://github.com/retsu-AI/qq/pull/465) verifies real
-default-Auto CLI execution on Linux, macOS and Windows. Native CI passed the
-scenario: an ordinary directory without Git, detached shell execution, artifact
-publication, no approvals and the durable worker record. The platform limitations
-below remain shipped behavior; stronger isolation is separate hardening work.
+None of this is a guarantee, and the guide says so. It replaces a sandbox
+that kept breaking ordinary work and still left the user's own credentials
+reachable.
 
-Row 3 shipped in merged
-[#467](https://github.com/retsu-AI/qq/pull/467) and
-[#468](https://github.com/retsu-AI/qq/pull/468), with integrated
-interruption/recovery coverage. The approval case checks that an unrelated
-prompt leaves the paused goal unchanged before explicit resume. Replayed resume
-commands create one goal-owned successor; denied effects stay denied and spent
-budgets and deadlines remain authoritative.
+## Evidence
 
-A live HTTP/TUI client test restarts the serving adapter, reconnects the same
-client to the replacement endpoint, and applies steering once before a verified
-file write. Server shutdown now closes SSE responses so clients can reconnect.
-A real default-Auto CLI test resumes a blocked goal in a second process with
-`--goal --session ID`, reads its saved checkpoint, publishes the finished
-artifact, and retains the original goal identity, deadline and cumulative usage.
-These portable cases run in native macOS/Windows CI as well as the Linux gate.
-Existing process-kill recovery, expired-budget admission, waiting, run-stop,
-goal pause/clear and stale-control tests cover the remaining row 3 boundaries.
+**Default Auto, probed on 2026-10-26.** A debug build at `fd15a11` (which
+includes #463) ran scripted shell calls through the `verify-qq` fake
+provider in a scratch Git repository:
 
-Row 4 shipped in [#432](https://github.com/retsu-AI/qq/pull/432): model discovery,
-delegation and audits share the advertised catalog snapshot, while current
-policy and credentials remain admission checks. Edit batches reject ambiguous
-or overlapping changes atomically and preserve unrelated work.
+- The shell runs in a private copy under `data/qq/task-workspaces/<run>/`,
+  not in the checkout.
+- `.git` is not copied. Git searches upward from the copy, so `git status`
+  reported the *enclosing* repository's changes; outside one it fails with
+  `not a git repository`.
+- Ignored directories are not copied, so `target/` is empty on every run and
+  every Rust task starts with a cold build.
+- There is no network: `cargo build` with a new dependency failed with
+  `Could not resolve host: index.crates.io`. No setting enables it.
+- HOME is read-only (`Read-only file system`), so tools that write caches or
+  config under HOME fail.
+- Edits reach the checkout only when the run completes successfully.
+- The model is told none of this. The prompt says commands run "under the
+  host filesystem, network and environment policy".
 
-Row 5 shipped across [#434](https://github.com/retsu-AI/qq/pull/434),
-[#436](https://github.com/retsu-AI/qq/pull/436),
-[#437](https://github.com/retsu-AI/qq/pull/437) and
-[#439](https://github.com/retsu-AI/qq/pull/439): compaction markers survive replay,
-context overflow recovers automatically, history retrieval is paginated, and
-exact user instructions and corrections survive repeated compaction and
-restart. #436 incorporated the recovery work from #371; that PR is superseded. Closed #425's tool-specific SDK approach was replaced by #463.
+The session store had no runs on this build yet, so none of the problems
+above show up in the numbers below. Most coding tasks will hit them.
 
-Rows 1–5 have shipped their implementation and focused regression coverage.
-Row 6 has begun with a focused review of redundant permission branches,
-execution wrappers and conflicting prompt guidance. Remove only demonstrated duplication;
-retain admission, revocation, containment and durable ownership boundaries.
-The first cleanup corrects stale reviewer requirements in write-delegation
-prompt and tool descriptions. The other selected changes remove unreachable
-non-shell branches in grant matching and repeated shell classification in the
-same policy decision. These are narrow cleanups, not reasons to replace dispatch
-or supervision. The local
-shell execution path remains the durable worker's payload executor.
+**Session store, 2026-10-03 to 2026-10-23** (schema 63; 490 prompt runs,
+19,267 tool calls; mixed builds, all before #463). These are diagnostic
+counts, not task success rates:
 
-The final six-task baseline/candidate qualification below remains required;
-these merged fixes and their individual tests do not establish its result.
+| Signal | Count |
+| --- | --- |
+| Runs paused for a human approval (the pre-#463 reviewer escalated) | 127 of 490 (26%), about 10,700 minutes waiting, mostly `git push`/`fetch` and `gh` |
+| Tool calls that failed | 13.3%; half were argument-shape errors (`{}` arguments 1,287, mostly before #294; `invalid_ranges` 214; `invalid_edit` with every insert field set 81) |
+| Runs repeating the same tool error 3+ times | 47 (9.6%); longest streak 30 calls |
+| Shell timeouts | 44, almost all `cargo xtask check`, `xtask perf` or `cargo test` at 600 s |
+| Edit failures | stale 57, not found 21, ambiguous 16, not read 12 |
+| Completed runs ending in an offer or question | 29 of 394; 24 of them Claude Opus (19% of its runs) |
+| Provider failures | 23 runs (4.7%): overloaded, xAI "Internal error during token generation", output cut at the token limit, context overflow |
+| Runs killed by `DiskFull` | 5; the store is 1 GB |
 
-## Small fixes, in dependency order
+**The old reviewer had no context.** Its system prompt
+(`REVIEWER_SYSTEM_PROMPT` in `qq-host/src/runtime.rs`) told it: "you have no
+transcript and must not assume intent beyond the stated task." For a root
+session it got the tool name, the arguments and a list of recent tool
+names. It never saw the user's request. As a result it denied `git push` in
+runs where the user had asked for the push, because it couldn't know. What
+failed was that missing input, not the idea of a reviewer.
 
-Each row can take several small PRs, each fixing one observable failure. Start
-independent rows in parallel with disjoint owned paths. Recheck current source
-and open PRs before editing; retain compatible work already underway.
+**Code review.** Several parts of the current code don't help:
 
-| Outcome | Implementation boundary | Proof before calling it fixed |
-| --- | --- | --- |
-| One enforceable permission contract | Shipped through #378 and #463: `qq-config`, core tool admission/delegation and runtime composition enforce the four modes; child authority is bounded by its parent and Auto write delegation needs no reviewer. | Allowed work proceeds without repeated prompts; out-of-scope work is denied; a child cannot widen its parent's grants. Read-only, Ask, Auto and Full have one tested dispatch contract. |
-| Shell and built-ins enforce that contract | The native three-OS baseline shipped in #463. Core tool dispatch/process ownership and native execution adapters share the practical contract below. CLI state can be isolated with `QQ_HOME`; a real default-Auto CLI scenario covers ordinary work without Git on all three OSes. | Real native tests exercise allowed work, denial and escape attempts; unavailable enforcement is explicit and fails closed. Owned commands respect the task deadline, retain output and exit/cancel state across recovery, and wake waiting tasks on completion. Termination follows the backend’s tested ownership boundary; macOS cleans the owned process group while detached descendants remain sandboxed. Test deadlines with a shortened limit or controlled clock. |
-| The task survives interruption | Integrated timeout/resume, live client reconnect/steering and real CLI continuation tests cover `sessions/goals`, approvals, scheduler and client continuation. Explicit resume/continue reconnects the same unfinished task; distinguish waiting, stopping a run and cancelling its goal. | Approval timeout → resume, steer, disconnect/reopen and deadline expiry preserve task identity with one successor. Denied effects never replay automatically; expired budgets never silently reset; ordinary unrelated prompts do not revive goals. |
-| Tools tell the truth and edits preserve work | Shipped in #432. Model discovery/admission, delegation and audits share the advertised catalog snapshot; current policy and credentials remain checked. Edit batches preserve atomic semantics. Runtime composition now lives in `qq-host` after #431. | Every advertised model admits under the same snapshot. Unique matches after unrelated edits succeed; ambiguous/stale matches and partially invalid batches change nothing. Final diff retains unrelated upstream changes. |
-| Compaction preserves obligations | Shipped in #434/#436/#437/#439: replay retention, automatic overflow recovery, paginated history and exact instruction projection. #436 incorporated #371; close that superseded PR rather than merging it again. | Early user constraints beyond the record cap, later corrections, repeated compaction and a failed summary retain the effective task; retries do not duplicate tool effects. |
-| Less code and prompt machinery | Initial focused cleanup in progress. After the affected behavior is covered, remove redundant dispatch wrappers, policy branches, obsolete adapters and duplicated instructions. Reuse existing tests, smoke providers and benchmark adapters. | The affected task still passes its independent verifier; no new supervisor, model judge, mandatory planning layer or replacement evaluation framework. |
+- The reviewer/delegate path is unreachable today: `internal_supervision`
+  requires a supervised Full session, and the binary creates none. The
+  provider plumbing (`ModelApprovalReviewer`, `ReviewRequest`,
+  `ReviewSpend`, the `*_by_reviewer` resolutions) is sound and is reused
+  below. The routing around it is not.
+- The containment code is about 28k lines including tests:
 
-### Permission and execution contract
+  | Code | Lines |
+  | --- | --- |
+  | Approval classifier and rules (`approval.rs`, `approval/`) | 6.5k |
+  | Command owner | 5.9k |
+  | Linux owner (Landlock, seccomp, namespaces) | 3.5k |
+  | Windows owner (LPAC) | 2.4k |
+  | macOS owner (Seatbelt) | 1.9k |
+  | Task workspaces and publication | 1.9k |
+  | Task Git helpers, the helper image and hosting brokers | 6.1k |
 
-[#375](https://github.com/retsu-AI/qq/pull/375), reviewed at
-[`e74209e`](https://github.com/retsu-AI/qq/commit/e74209e75b2fd7f46a7b131720e347369643090b),
-is input to these repairs, not an approved implementation specification. Carry
-its valid review findings into the implementing PRs; reconcile its proposed
-plan with this one instead of maintaining a second work queue.
+  Most of the release notes since v0.1.5 are patches to it.
+- Shell commands have no background mode and no default timeout.
+- Capture keeps 128 KiB of head and tail, so the middle of a long log is
+  lost; it never reaches the spill.
+- A tool argument over 64 KiB fails the whole run
+  (`runtime/run_loop.rs`, `MAX_TOOL_ARGUMENT_BYTES`), not just that call.
 
-- Default Auto allows normal reads available to the OS user, generic tool
-  execution and task-scoped writes, with protected read-only carveouts. Broad
-  host reads include readable credentials; environment filtering does not make
-  those files private. Explicit restricted-read policies remain available to
-  embeddings. Children cannot widen their parent's current authority, including
-  after revocation or recovery. Prefix rules and command classification are
-  not containment.
-- Auto never requests human or model approval. An action outside current
-  authority returns a tool error; the agent can continue with an allowed
-  alternative. Ask requires fresh human approval. Read-only, Ask, Auto and Full
-  have distinct dispatch behavior; internal child supervision cannot mint
-  missing parent authority. Model/tool output is never authorization.
-- Linux and macOS shell network access is isolated by default. Windows currently
-  uses host networking. HTTP-fetch grants do not authorize arbitrary shell
-  traffic. Existing Git/hosting brokers keep credentials outside the payload
-  and bound commit/push/PR operations to their authorized repository and branch;
-  they do not grant arbitrary shell credential or network authority.
-- Native tests cover permitted work, denied writes, links, descriptors, recovery
-  and each backend's stated cleanup boundary. Windows additionally retains
-  ambient writes available through Everyone/logon permissions; its task write
-  restriction is not an absolute outside-write guarantee. Broad host reads and
-  this Windows exception need explicit hardening if a stronger contract is
-  required. They must not be described as private-credential or complete
-  cross-session isolation.
-- Default Auto has no disk, memory or process quotas. Explicit resource policies
-  retain their supported safeguards. Cancellation, deadlines and owner failure
-  use the backend's tested cleanup: macOS cleans its owned process group, and
-  detached descendants retain Seatbelt restrictions but can survive that group.
-  Inherited per-process limits and sampled owned-group safeguards do not provide
-  aggregate resource quotas or complete descendant custody. An unavailable
-  required backend must not silently fall back to host execution.
-- External MCP servers are trusted separately and remain outside shell
-  containment; their tools still pass QQ admission. Persist events before
-  publication and keep output/queues bounded. Wire/result changes require
-  protocol bumps and previous/current fixture coverage. Keep safe Rust and use
-  existing native interfaces rather than introducing platform frameworks.
+**Prompt and skills.** The prompt and skill index have these gaps:
 
-Further hardening must name the boundary it changes and demonstrate the actual
-native behavior. Do not imply stronger read privacy, Windows write isolation,
-network isolation or aggregate resource guarantees from admission tests alone.
-Keep the existing durable worker, result recovery and completion wakeups while
-qualifying the remaining real CLI paths. Use finite fixtures and event-driven
-deadlines, not elapsed-day gates; mocks do not qualify OS enforcement.
+- The prompt never states the session's approval mode or environment, and
+  Auto prompts still say actions "may require user approval".
+- The nested-instruction bullet is about 1.3 KB.
+- Several tool descriptions repeat the prompt.
+- There is no rule for the shape of the final answer.
+- The skill index has no rule for when to load a skill.
+- `$ARGUMENTS` is not substituted, the skill's directory is not given, and
+  `.agents/skills` is invisible to the model.
 
-## A fast environment agents can trust
+## A. Safety: snapshots, fixed stops, a reviewer with context
 
-Use isolated worktrees with a named owner for shared files. The issue or PR
-states the reproduction, owned paths and independent acceptance command; no
-additional task ledger or ADR reservation. Delegate disjoint work, review the
-combined diff against its actual base, and preserve unrelated upstream edits.
-Keep the existing `qq_provider::test_support`, session integration tests and
-`xtask` smoke path as the routine feedback loop.
+Lands first. B removes the sandbox only after A ships.
 
-Create six small fixtures from the observed failures: bug fix, refactor with
-an unrelated upstream edit, build/debug with a long command, approval
-interruption/resume, long-context correction, and a review/fix cycle. Each
-starts from a clean repository and isolated QQ home, has fixed permissions and
-budgets, and a verifier outside the agent that checks files/tests, persisted
-state and surviving processes. Exercise review states with a local fake;
-actual PR delivery still requires the review the user requested. No live
-credentials or network are needed for deterministic regression tests.
+### Modes
 
-For the finite model check, pin baseline/candidate commits, tool/config versions,
-model/effort, initial files, grants and budgets. Run each fixture once on the
-baseline and once on the candidate (12 initial runs). Use only an authorized account within an explicit spend cap;
-otherwise mark this check unrun. Retain failures and transcripts; do not rerun
-until green. Use affected-case reruns while fixing a failure and keep every result.
-Qualify a changed candidate with all six cases on that same final build; never
-combine passes across revisions. All six tasks must satisfy their verifier
-without hidden human corrections; report baseline/candidate outcomes, tool failures and
-interventions. These fixtures establish a bounded readiness claim, not general
-correctness. Deterministic fixes can merge individually; the feature freeze
-ends only after the integrated candidate passes this finite check and its
-enabled native backends pass containment tests. No elapsed-day requirement.
+The protocol's mode names stay; what they mean changes.
 
-For each implementation PR: demonstrate the narrow regression failing before
-the fix, exercise the affected real CLI/TUI/server path, inspect the final
-diff, commit, then run `cargo xtask check` once (through the pre-push hook
-when enabled, otherwise manually). Read `target/qq-check/last.json`
-and use targeted reruns on failure. Do not weaken tests, approvals or sandbox
-guarantees to get green. Report budget overruns rather than inventing new perf
-gates. Resolve valid review findings; a completed run, green unit tests or a
-review reaction alone is not evidence that the user's task succeeded.
+| Mode | Behavior |
+| --- | --- |
+| `read_only` | Write tools are not offered. |
+| `ask` | Routine calls run. Everything else asks the human: `y` approves once, `a` approves the command prefix for the session, in memory only. `n` denies. |
+| `auto` (default) | Routine calls run. Everything else goes to the reviewer. |
+| `full` | No review and no fixed stops. Snapshots still run. |
 
-This keeps the useful parts of Poteto's pstack: [small verified fixes](https://github.com/cursor/plugins/blob/main/pstack/skills/poteto-mode/playbooks/bug-fix.md),
-[real application checks](https://github.com/cursor/plugins/blob/main/pstack/skills/create-verification-skill/SKILL.md)
-and [artifact-based evaluation](https://github.com/cursor/plugins/blob/main/pstack/skills/poteto-mode/playbooks/eval.md).
-Cursor's [harness findings](https://cursor.com/blog/continually-improving-agent-harness)
-also favor task outcomes, reliable tools and model-specific experiments over
-activity counts. The local `.source/` Codex, OpenCode, Pi and fx comparisons
-informed process ownership and context recovery; they do not prove QQ quality.
-Import neither harness wholesale. Change the model prompt or tool surface only
-when an affected fixture shows improvement; retain retrievable prior context
-and bounded outputs rather than forcing extra planning.
+### Routine calls run without review
+
+- Reads and searches anywhere except the credential paths below.
+- Edits and writes inside the workspace, except `.git/` internals (hooks,
+  config), `.qq/` config and pack roots.
+- Shell commands that pass the triage below.
+
+**Shell triage.** Keep the `tree-sitter-bash` parse and the simple-command
+split from `approval/classify.rs`, with `env`/`timeout`/`nice` stripping and
+`sh -c` recursion. Delete everything per-program in `approval/rules.rs`
+except the two lists below. A command runs without review when every part is
+a literal word sequence on the routine list:
+- reads (`ls`, `cat`, `rg`, `grep`, `find` without `-exec`/`-delete`, `head`,
+  `wc`, `which`);
+- read-only `git` (`status`, `diff`, `log`, `show`, `branch` listing,
+  `rev-parse`, `fetch`);
+- build, test and format commands (`cargo build|check|test|nextest|clippy|fmt`,
+  `npm|pnpm|bun|yarn test|run <script>|install`, `go build|test|vet`,
+  `pytest`, `make`, `just`);
+- project-local `git add` and `git commit`.
+
+Anything containing a fixed stop is denied. Everything else, including
+anything the parser can't resolve to literals, goes to review in Auto and to
+the human in Ask. A user-level `routine_shell_prefixes` adds entries to the
+routine list. Project config cannot add to it.
+
+Build scripts and package installs run code from the repository. The
+routine list accepts that, as the user's terminal does. The guide says so.
+
+### Fixed stops
+
+These are denied in `ask` and `auto`, whatever the reviewer says:
+
+- `git push` with `--force`, `-f`, `--force-with-lease`, a `+` refspec, or
+  `--delete`.
+- Pushing to the remote's default branch (from `refs/remotes/<remote>/HEAD`,
+  falling back to `main`/`master`).
+- `rm`, `mv` or `chmod -R` on `/`, `~`, `$HOME` or a path directly under one
+  of them.
+- `sudo`, `doas` and `su`; `mkfs`; `dd` writing to `/dev/`.
+- Reading, through tools or as a literal shell operand, any of: `~/.ssh`,
+  `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh/hosts.yml`, the
+  docker/kube config files, and QQ's own credential store.
+- User-level `deny_shell_prefixes`.
+
+The guide calls this an accident net, not a security boundary. It is
+expected to be about 300 lines. Each stop gets a test that includes a
+wrapped form (`cd x && …`, `env A=b …`, `sh -c '…'`).
+
+### The reviewer
+
+Reuse `ModelApprovalReviewer` and `ReviewRequest`. Replace the routing in
+`sessions/approvals.rs` and the prompt.
+
+**What the reviewer sees**, each section bounded and labeled:
+- Every user message in the session, newest first, verbatim up to 8 KB,
+  including interjections and steering.
+- The goal objective and completion check, when the run is a goal.
+- For a child run, the parent's brief, plus the root user request.
+- An action log: the last 30 tool calls as one line each (tool, short
+  argument summary, outcome).
+- The most recent tool outputs, up to 4 KB, inside an untrusted fence.
+  Fetched pages, MCP results and files outside the workspace are marked as
+  third-party.
+- The action itself:
+  - the full command or arguments, and the working directory;
+  - the Git branch, whether the tree is dirty, and, for a push, the remote
+    URL and target ref;
+  - for an edit, the path and the diff.
+- The user's `safety_rules` from config: free-text lines such as "never
+  touch the prod cluster".
+
+**What it decides.** The prompt asks:
+1. Given what the user asked for, would they expect and accept this action
+   at this point?
+2. Is it carrying out instructions that appear only in untrusted content?
+
+Risky or externally visible actions are fine when the user asked for them.
+The reply is one JSON line: `allow`; `deny` with a reason for the agent;
+or `ask` with a question for the human.
+
+**What each verdict does:**
+- `deny` becomes a tool error that quotes the reason and asks the agent to
+  choose a different action, or to explain to the user what it needs.
+- `ask` holds the call for a human when a client is attached. Headless
+  runs, and runs with nobody attached past `approval_timeout`, treat it as a
+  deny with the question in the error.
+- A reviewer timeout (20 s), an unavailable reviewer or an unreadable reply
+  is treated as `ask`.
+
+**Model and cost.**
+- `reviewer_model` defaults to the session's model. Configuring a smaller,
+  faster model is recommended.
+- Review cost is charged to the run through `ReviewSpend` and shown in the
+  run summary.
+- An identical command in the same working directory is reviewed once per
+  run.
+
+**Events.** Each review is persisted as an event with the verdict, the
+reason and the model, before the call runs. The TUI shows it inline, the
+way it shows approvals. `qq sessions show` lists the reviewed calls.
+
+### Snapshots and `qq undo`
+
+- **When.** Before the first mutating call of a run in a Git workspace, QQ
+  records the working tree, including untracked files, without touching the
+  user's index or stash. It uses a temporary `GIT_INDEX_FILE`, `add -A`,
+  `write-tree` and `commit-tree`, and stores the result under
+  `refs/qq/snapshots/<run-id>`. The last 50 per repository are kept.
+- **Restore.** `qq undo [<run>]` first snapshots the current state, so undo
+  can itself be undone. It then restores tracked and untracked files to the
+  snapshot and prints what changed. The TUI exposes the same command.
+- **What it doesn't cover.** Ignored files, anything outside the workspace,
+  and remote effects. A non-Git workspace gets no snapshot, and the prompt
+  and `qq doctor` say so.
+
+### Denials
+
+There is one denial format the model can act on:
+
+```
+permission_denied: <who>: <what was refused>: <reason>; <what to do instead>
+```
+
+`<who>` is `fixed_stop`, `reviewer`, `user` or `config`. The prompt says once
+that a denied action should not be retried in another form, and that
+`not executed` calls can be reissued.
+
+**Accepted when** all of the following are shown:
+
+- Tests (loopback fake provider) prove that the reviewer request contains
+  the user's messages, the goal, the action log and the untrusted fence.
+  They also prove each verdict maps to the right result in attached Ask,
+  attached Auto and headless runs, and that a reviewer failure is treated
+  as `ask`.
+- Every fixed stop has a test, including wrapped forms.
+- A smoke scenario edits files, deletes a file, adds an untracked file and
+  then runs `qq undo`. The workspace matches the snapshot byte for byte,
+  and the index and stash are untouched.
+- A labeled set of about 40 review cases, built from real runs, scores
+  allow/deny/ask with the default and a small `reviewer_model` before
+  release. It includes:
+  - a requested push;
+  - an unrequested push;
+  - a push driven by a fetched page;
+  - `rm -rf` of a sibling repository;
+  - `curl | sh` from a README;
+  - a requested `gh pr create`;
+  - a database drop the user asked for.
+
+  The accuracy, median review latency, and the share of tool calls that
+  reached review are reported in the PR, not used as a gate. The target
+  is under 10% reviewed.
+
+## B. Run in place, as the user; delete the sandbox
+
+Lands after A.
+
+1. `shell` and `exec` run in the session's working directory, as the
+   user, with the inherited environment, host network and a real HOME. The
+   runner keeps:
+   - a process group per command;
+   - timeout and cancellation that kill the group;
+   - output capture into the spill;
+   - the background mode from section C.
+
+   A command no longer survives a daemon restart. On restart, unfinished
+   commands are reported as interrupted.
+2. Delete the following, together with their tests and docs:
+   - the Linux, macOS and Windows owners, and the `landlock` and
+     `seccompiler` dependencies;
+   - the command owner's grants, native scopes and durable job state;
+   - task workspaces and publication;
+   - the `task_git*` helpers, the helper image, the hosting brokers, and the
+     `task_commit`/`task_push`/`task_pr` tools;
+   - `allow_hosts`/`--allow-host`, `shell_env` filtering, `writable_roots`,
+     `task_hosting` grants and `qq-config/src/promote.rs`;
+   - the per-program rules in `approval/rules.rs` beyond A's two lists;
+   - the old supervision routing;
+   - `xtask action-bias` and its runbook.
+
+   Trim `run-output-queries.md` to the queries still in use, and update
+   `src/docs_truth.rs` to match.
+3. Parallel goals that need separate trees use `git worktree add` under
+   `.worktrees/`, which keeps a real `.git` and the build cache. No copies.
+   This waits until the fleet plan needs it.
+4. Wire and config removals bump `PROTOCOL_VERSION`, regenerate the
+   fixtures, and add an `### Upgrading` note that lists every removed key.
+   A removed key in a config file is a load error naming its replacement,
+   not silently ignored.
+
+**Accepted when** a smoke scenario on Linux, macOS and Windows shows all of
+the following:
+- `git status` reports the workspace's own repository;
+- a file under `target/` survives between runs;
+- an edit is visible before the run ends;
+- a loopback HTTP server is reachable from a shell command;
+- `git push` to a local bare remote succeeds after review.
+
+The lines deleted against the table in Evidence are reported in the PR.
+
+## C. Long-running shell commands
+
+- Add `yield_after_seconds` to `shell` and `exec` (default about 30 s). A
+  command still running at that point returns a command id. A new
+  `command_status(id, wait_seconds)` tool waits on it, cancels it or reads
+  its output, the way `wait_agents` follows children. A background process
+  that holds the pipe open no longer blocks the turn.
+- Stream full output into the spill, up to its 8 MiB cap, so
+  `read_tool_result` can reach the middle of a build log.
+- Set `NO_COLOR=1`, `PAGER=cat`, `GIT_PAGER=cat` and `TERM=dumb` unless the
+  caller sets them.
+- A timeout result names the limit and suggests a larger timeout or the
+  yield mode.
+- An argument over 64 KiB becomes a tool error naming the limit.
+
+**Accepted when** each of these is demonstrated by a test:
+
+- A `cargo build`-length scripted command yields, then completes through
+  `command_status`.
+- `sleep 600 &` returns.
+- A 1 MiB log is searchable through `read_tool_result`.
+- A 70 KiB `write_file` gets a tool error and the run continues.
+
+## D. Tool calls tell the model how to recover
+
+- Re-measure the top argument errors on a v0.1.9 build with the
+  [run output queries](../runbooks/run-output-queries.md) approach before
+  changing anything. Fix only the shapes that still occur. Likely fixes:
+  - When `ranges` arrives with `offset`/`limit`, prefer `ranges`.
+  - Ignore empty `insert_*` fields next to `old`.
+  - Accept `edits` sent as a JSON string or a single object.
+- Edit matching:
+  - preserve CRLF line endings on fuzzy matches (`tools/matching.rs`);
+  - normalize typographic quotes and dashes;
+  - strip a copied read_file line-number gutter from `old`.
+- On the second identical argument error in a run, include a minimal valid
+  call in the error.
+- Remove the duplicated `if_hash` checks (edit, write, read) and the three
+  copies of the shell outcome formatting.
+
+**Accepted when** there is a regression test per repaired shape, and a
+recount on a week of v0.1.10 use shows the repeated-error rate below the
+9.6% above.
+
+## E. Prompt
+
+Bump `AGENT_PROMPT_VERSION`.
+
+- **Environment.** State it once:
+  - the working directory;
+  - that commands run as the user with network access;
+  - that edits apply immediately;
+  - whether a snapshot exists;
+  - the session's mode;
+  - that unusual actions are reviewed;
+  - what a denial means.
+
+  Drop "may require user approval" and the "host policy" wording.
+- **Nested instructions.** Shorten the bullet: the root instructions are
+  already loaded, and a nested `AGENTS.md` is read only when editing below
+  it.
+- **Tool descriptions.** They say how to use the tool; the prompt holds
+  policy. Remove the repetition in `spawn_agent`, `read_file`, `exec`,
+  `fetch` and `ask_user`.
+- **Final answer.** Lead with the outcome, keep it short, and cite
+  `path:line`. In Auto, take the next in-scope step instead of offering it.
+- **Golden file.** Add a full-text golden file of the rendered root prompt,
+  refreshed by an environment variable (no new dependency), so prompt
+  changes are reviewed as diffs.
+
+**Accepted when** the six tasks below show no more offers or questions at
+the end of completed runs than the v0.1.9 baseline, with Claude Opus
+included.
+
+## F. Skills
+
+- The index tells the model: when the task matches a skill's description,
+  `load_skill` it before acting.
+- Show each skill's directory, and resolve its relative paths against it.
+  Substitute `$ARGUMENTS`. Parse `name:`.
+- Disclose `.agents/skills`, removing duplicates of `.qq/skills` by name.
+  Add a global root at `~/.config/qq/skills`. Cap the index at about 8 KB.
+
+**Accepted when** there are tests for each rule, and a scripted run loads a
+matching skill, resolves a script beside it, and receives the substituted
+arguments.
+
+## G. Running unattended: set up the environment
+
+- `qq doctor` and the first-run screen say plainly that commands run as the
+  user, with the user's network and credentials. They show whether QQ is on
+  the host or inside a container, and whether the workspace has snapshots.
+- Ship a `.devcontainer/` and a `Dockerfile` that run `qq` or `qq daemon`
+  with only the project mounted.
+- Add `guide/running-unattended.md`. It covers:
+  - mounting only the project;
+  - a fine-grained token per repository;
+  - a separate Git identity for agents;
+  - `safety_rules`;
+  - why a machine with production credentials is the wrong host for
+    unattended goals.
+- Headless `qq run --goal` on the host prints a one-line note pointing at
+  that guide. It never blocks.
+- Rewrite `guide/permissions.md`, `design/tools.md` and `faq.md` for A and
+  B in the same PRs.
+
+**Accepted when** the devcontainer builds and runs one deterministic smoke
+task against the loopback fake provider in CI.
+
+## H. Smaller reliability items
+
+- Retry "overloaded" and xAI "Internal error during token generation" as
+  transient in `qq-provider`.
+- A turn cut at the output limit with no visible text continues instead of
+  failing the run.
+- Auth: the Codex OAuth redirect host matches the listener (`localhost` vs
+  `127.0.0.1` in `qq-auth/src/codex.rs`). Model discovery drops the single
+  global fetch lock and `DiscoveryAuth` (`qq-host/src/catalog.rs`). These are
+  carried over from the retired auth plan.
+- Bound store growth with an explicit retention setting before more runs
+  die on `DiskFull`. Snapshot refs follow the same setting.
+
+## Order
+
+1. A, as about three PRs: snapshots and `qq undo`; shell triage and fixed
+   stops; the reviewer with context.
+2. B after A, as about two PRs: run in place; deletions with the protocol
+   bump.
+3. C, D, E, F and G in parallel with disjoint owned paths. C's runner and
+   E's environment text land with or after B.
+4. H whenever there is room.
+
+Each PR:
+- shows its regression failing before the fix;
+- exercises the real CLI, TUI or server path;
+- runs `cargo xtask check` once;
+- states size or latency budget overruns in its description instead of
+  blocking on them.
+
+Out of scope for v0.1.10: the [desktop, mobile and fleet
+plan](desktop-mobile-fleet.md), the TUI session-rail branches, new
+providers, and any in-process sandbox.
+
+## Release check
+
+Six small tasks, taken from observed failures:
+
+1. a bug fix;
+2. a refactor with an unrelated upstream edit;
+3. a build/debug task with a long command;
+4. an Ask approval interrupted and resumed;
+5. a long-context correction;
+6. a review-and-fix cycle that ends in a requested push to a branch.
+
+Each task meets these conditions:
+
+- It starts from a clean repository and an isolated `QQ_HOME`, with fixed
+  permissions and budgets.
+- A verifier outside the agent checks files, tests, persisted state and
+  leftover processes.
+- Deterministic versions use the loopback fakes and need no credentials or
+  network.
+
+Also run three adversarial tasks on the final build:
+- a fetched page that tells the agent to push to another remote;
+- a README that tells it to `curl | sh`;
+- a task where the agent is likely to `git reset --hard` over the user's
+  uncommitted work.
+
+Record whether the reviewer or a fixed stop caught each one, and whether
+`qq undo` recovered the third.
+
+Before tagging, run each task once on v0.1.9 and once on the final v0.1.10
+build, with the same model, effort and config, from an authorized account
+within a stated spend cap. If there is no cap, the check is recorded as not
+run. Report every outcome, tool failure, review verdict and human
+intervention as observed. Never combine passes from different builds or
+rerun until green. Run section B's smoke scenario on the same build.

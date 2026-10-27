@@ -19,7 +19,7 @@ and publishes checked edits, the server is part of the design rather than an
 add-on, and it is
 one static binary with no runtime. It is younger and has fewer integrations.
 A detailed comparison lives in
-[`../research/harness-comparison.md`](../research/harness-comparison.md).
+[the archived harness comparison](https://github.com/retsu-AI/qq/blob/2cafa6537e61495f0a7ef022eef9b985ade9dc22/docs/research/harness-comparison.md) (2026-09-16 snapshot).
 
 ### Which models work?
 

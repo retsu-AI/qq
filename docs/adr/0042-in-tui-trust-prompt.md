@@ -1,6 +1,6 @@
 # ADR-0042 — The trust prompt is a client-side hold fed by the composition root; no protocol change
 
-**Status:** Accepted
+**Status:** Superseded — the trust prompt was deleted (#476); untrusted project configuration is now ignored at startup instead of held. Kept for history.
 **Date:** 2026-09-24
 **Deciders:** onboarding-ux OB7 (ENG-881)
 **Implements:** onboarding UX OB7 (plan and ledger deleted when it closed; see Git history); [`tools.md` § trust](../design/tools.md)

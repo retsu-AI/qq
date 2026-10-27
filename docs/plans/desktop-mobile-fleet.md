@@ -1,7 +1,12 @@
 # QQ Desktop & Mobile: Fleet Orchestration Plan
 
-**Status:** Proposed. Runs alongside [core stabilization](README.md), with the
-gates described below; it does not lift the feature freeze on its own.
+**Status:** Proposed, deferred past v0.1.10 (the [current plan](README.md)
+is about making single-agent runs reliable first). Section 1's evidence was
+checked at `b11092e8`, before #431 moved runtime composition into
+`crates/qq-host` (the `src/runtime.rs` references and the `qq-harness` rename
+are now history) and before #440 shipped `qq daemon run --detach`, `status`,
+`stop` and `restart`. Refresh §1 and the P1 checklist before starting this
+work.
 
 ## 0. Decisions and the main principle
 

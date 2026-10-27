@@ -47,7 +47,7 @@ written.
 | 0039 | [A run compacts its own turns at a safe boundary with a run-scoped marker](0039-in-run-compaction.md) | Accepted (ENG-793, #92) |
 | 0040 | [Two-phase retry ownership: the provider owns sends, the run owns turns](0040-two-phase-retry-ownership.md) | Accepted (run-reliability RR4); supersedes ADR-0005 in part |
 | 0041 | [Jev as an approval delegate, for held calls only](0041-jev-delegated-approval.md) | Superseded: Jev removed |
-| 0042 | [The trust prompt is a client-side hold fed by the composition root; no protocol change](0042-in-tui-trust-prompt.md) | Accepted (onboarding OB7, ENG-881) |
+| 0042 | [The trust prompt is a client-side hold fed by the composition root; no protocol change](0042-in-tui-trust-prompt.md) | Superseded: trust prompt deleted (#476) |
 | 0043 | [Optimize verified task efficiency, not individual turn size](0043-verified-task-efficiency.md) | Proposed (token-efficiency TE0) |
 | 0046 | [Pin an MCP server's advertised tool set in configuration and plan identity; enforce the pin at dispatch, not only at discovery](0046-mcp-tool-set-pinning.md) | Accepted (ENG-939); `DESCRIPTOR_VERSION` 9 → 10 |
 | 0047 | [Explicit Jev consent and a durable held-approval lifecycle](0047-jev-approval-hold-lifecycle.md) | Superseded: Jev removed |
@@ -64,7 +64,7 @@ written.
 | 0061 | [Persist the tool-turn projection before the next request](0061-durable-tool-turn-projection.md) | Proposed; implementation merged in #302 (AB2, ENG-1039) |
 | 0062 | [Use full LTO and balanced release size optimization](0062-full-lto-executable-size-profile.md) | Accepted (ENG-834); supersedes ADR-0010 in part |
 | 0063 | [Opt-in metadata-only structured tracing](0063-opt-in-structured-tracing.md) | Proposed (AF5, ENG-1028) |
-| 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Proposed (auth-providers AP7, ENG-1066) |
+| 0064 | [Built-in HTTP providers are rows in one table](0064-builtin-provider-table.md) | Accepted (auth-providers AP7, ENG-1066) |
 
 The following numbers were reserved or released by retired plans. These
 historical reservations do not schedule work or require new ADRs:

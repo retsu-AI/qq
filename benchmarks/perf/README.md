@@ -10,7 +10,7 @@ readiness milestones from the [terminal-bench plan](https://github.com/retsu-AI/
 AC0.1 and AC0.2 proposed soak and resource characterization in the
 [reliability plan](https://github.com/retsu-AI/qq/blob/130b27929e628338976d6f5f7b2d92e83302e585/docs/plans/reliability.md).
 These labels do not schedule work; current work follows the
-[core stabilization plan](../../docs/plans/README.md). Raw
+[current plan](../../docs/plans/README.md). Raw
 reports and dependency trees are generated under `target/qq-perf/` and remain
 untracked. `--output` is deliberately restricted to a new `.json` file in that
 directory. Capability-relative create-new file handles stay open for the full
