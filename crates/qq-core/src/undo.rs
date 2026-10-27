@@ -381,30 +381,32 @@ async fn stage_workspace(
     // index keeps its bits. Skip-worktree entries whose file is absent (a
     // sparse checkout) keep the bit, so they stay recorded and are not
     // checked out by a restore.
-    let listing = git(
+    let listing = git_bytes(
         &repository.workspace,
         Some(&index.path),
         "ls-files",
         &["ls-files", "-z", "-v", "--", "."],
+        Vec::new(),
     )
     .await?;
     let mut assumed = Vec::new();
     let mut skipped_worktree = Vec::new();
-    for entry in listing.split('\0') {
-        let Some((tag, path)) = entry.split_once(' ') else {
+    for entry in nul_separated(&listing) {
+        let Some(space) = entry.iter().position(|byte| *byte == b' ') else {
             continue;
         };
+        let (tag, path) = (&entry[..space], &entry[space + 1..]);
         // A lowercase tag marks an assume-unchanged entry; `S` skip-worktree.
-        if tag.chars().all(|tag| tag.is_ascii_lowercase()) {
-            assumed.extend_from_slice(path.as_bytes());
+        if tag.iter().all(u8::is_ascii_lowercase) {
+            assumed.extend_from_slice(path);
             assumed.push(0);
         }
-        if tag.eq_ignore_ascii_case("s")
-            && tokio::fs::symlink_metadata(repository.workspace.join(path))
+        if tag.eq_ignore_ascii_case(b"s")
+            && tokio::fs::symlink_metadata(repository.workspace.join(path_from_bytes(path)))
                 .await
                 .is_ok()
         {
-            skipped_worktree.extend_from_slice(path.as_bytes());
+            skipped_worktree.extend_from_slice(path);
             skipped_worktree.push(0);
         }
     }
@@ -423,7 +425,7 @@ async fn stage_workspace(
             .await?;
         }
     }
-    let untracked = git(
+    let untracked = git_bytes(
         &repository.workspace,
         Some(&index.path),
         "ls-files",
@@ -435,16 +437,16 @@ async fn stage_workspace(
             "--",
             ".",
         ],
+        Vec::new(),
     )
     .await?;
     let mut skipped = Vec::new();
-    for relative in untracked.split('\0').filter(|path| !path.is_empty()) {
-        let path = repository.workspace.join(relative);
-        let large = tokio::fs::symlink_metadata(&path)
+    for relative in nul_separated(&untracked).map(path_from_bytes) {
+        let large = tokio::fs::symlink_metadata(repository.workspace.join(&relative))
             .await
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > MAX_UNTRACKED_FILE_BYTES);
         if large {
-            skipped.push(PathBuf::from(relative));
+            skipped.push(relative);
         }
     }
     git_with_input(
@@ -459,9 +461,11 @@ async fn stage_workspace(
 }
 
 /// Untracked ignored paths under the workspace, relative to it. A wholly
-/// ignored directory is one entry ending in `/`.
+/// ignored directory is one entry, without Git's trailing `/`: excluding
+/// `dir` also keeps a restore from replacing the directory with a file of
+/// that name, which excluding `dir/` does not.
 async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<PathBuf>, UndoError> {
-    let listing = git(
+    let listing = git_bytes(
         &repository.workspace,
         Some(&index.path),
         "ls-files",
@@ -475,24 +479,56 @@ async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<Pa
             "--",
             ".",
         ],
+        Vec::new(),
     )
     .await?;
-    Ok(listing
-        .split('\0')
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    Ok(nul_separated(&listing)
+        .map(|path| path_from_bytes(path.strip_suffix(b"/").unwrap_or(path)))
         .collect())
+}
+
+/// The non-empty entries of `git ... -z` output.
+fn nul_separated(listing: &[u8]) -> impl Iterator<Item = &[u8]> {
+    listing
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+}
+
+/// A path as Git printed it. Unix filenames are bytes and may not be UTF-8;
+/// Git for Windows prints UTF-8.
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        PathBuf::from(OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+fn path_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
 }
 
 /// The workspace minus `excluded`, as NUL-separated pathspecs.
 fn pathspecs(excluded: &[PathBuf]) -> Vec<u8> {
-    let mut pathspecs = String::from(".\0");
+    let mut pathspecs = b".\0".to_vec();
     for relative in excluded {
-        pathspecs.push_str(":(exclude,literal)");
-        pathspecs.push_str(&relative.to_string_lossy());
-        pathspecs.push('\0');
+        pathspecs.extend_from_slice(b":(exclude,literal)");
+        pathspecs.extend_from_slice(&path_bytes(relative));
+        pathspecs.push(0);
     }
-    pathspecs.into_bytes()
+    pathspecs
 }
 
 /// A copy of the repository's index under the Git directory, removed on
@@ -581,6 +617,18 @@ async fn git_with_input(
     arguments: &[&str],
     input: Vec<u8>,
 ) -> Result<String, UndoError> {
+    let output = git_bytes(directory, index, step, arguments, input).await?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// Like [`git_with_input`], but returns stdout undecoded, for path listings.
+async fn git_bytes(
+    directory: &Path,
+    index: Option<&Path>,
+    step: &'static str,
+    arguments: &[&str],
+    input: Vec<u8>,
+) -> Result<Vec<u8>, UndoError> {
     use tokio::io::AsyncWriteExt as _;
     let mut command = command(directory, index);
     command.args(arguments.iter().map(OsStr::new));
@@ -604,7 +652,7 @@ async fn git_with_input(
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(output.stdout)
 }
 
 fn timeout(step: &'static str) -> UndoError {
@@ -937,6 +985,51 @@ mod tests {
         // not overwrite them.
         assert_eq!(read(&root.join("notes.txt")).as_deref(), Some("newer\n"));
         assert_eq!(read(&root.join("cache/entry")).as_deref(), Some("newer\n"));
+    }
+
+    #[tokio::test]
+    async fn an_ignored_directory_is_not_replaced_by_a_snapshotted_file() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join("foo"), "file\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::remove_file(root.join("foo")).unwrap();
+        std::fs::create_dir(root.join("foo")).unwrap();
+        std::fs::write(root.join("foo/secret"), "secret\n").unwrap();
+        std::fs::write(root.join(".gitignore"), "foo/\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("foo/secret")).as_deref(), Some("secret\n"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_newly_ignored_file_with_a_non_utf8_name_survives_a_restore() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        let name = OsStr::from_bytes(b"notes-\xff.txt");
+        std::fs::write(root.join(name), "old\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join(".gitignore"), "notes-*.txt\n").unwrap();
+        std::fs::write(root.join(name), "newer\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join(name)).as_deref(), Some("newer\n"));
     }
 
     #[tokio::test]
