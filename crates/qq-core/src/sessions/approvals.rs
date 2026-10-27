@@ -66,7 +66,7 @@ impl ToolGate for SessionToolGate {
             if let approval::ToolClass::Shell { command, .. } = &class
                 && approval::managed_shell_denied(command, &shell.deny_prefixes)
             {
-                let message = "permission_denied: managed_shell_deny: this command matches an explicitly configured deny_shell_prefixes entry; continue with an allowed operation".to_owned();
+                let message = approval::MANAGED_SHELL_DENIED_RESULT.to_owned();
                 return match inner
                     .store
                     .deny_tool_call(&claimed, call.id, message.clone())
@@ -115,7 +115,7 @@ impl ToolGate for SessionToolGate {
                         }
                         continue;
                     }
-                    approval::PolicyDecision::RequireApproval => "permission_denied: parent_permission_required: this child action is outside its parent's grants; use an operation within the parent's authority".to_owned(),
+                    approval::PolicyDecision::RequireApproval => approval::PARENT_DENIED_RESULT.to_owned(),
                     approval::PolicyDecision::Deny { reason } => approval::deny_result(&reason),
                 };
                 return match inner
@@ -218,7 +218,7 @@ impl ToolGate for SessionToolGate {
                         mode
                     }) && inner.approval_reviewer.is_some();
                     if no_human_approval && !consult {
-                        let message = "permission_denied: internal supervision is unavailable; use an action that does not require supervision.".to_owned();
+                        let message = approval::UNATTENDED_DENIED_RESULT.to_owned();
                         return match inner
                             .store
                             .deny_tool_call(&claimed, call.id, message.clone())

@@ -2034,7 +2034,7 @@ async fn an_auto_child_denies_writes_beneath_an_ask_parent_without_prompting() {
     assert!(observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallFinished { tool_call }
             if tool_call.name == "write_file" && tool_call.state == ToolCallState::Denied
-                && tool_call.result.as_deref().is_some_and(|result| result.contains("parent_permission_required"))
+                && tool_call.result.as_deref().is_some_and(|result| result == approval::PARENT_DENIED_RESULT)
     )));
     assert!(!observed.iter().any(|event| matches!(&event.event,
         SessionEvent::ToolCallStarted { tool_call } if tool_call.name == "write_file"

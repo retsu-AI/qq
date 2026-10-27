@@ -44,25 +44,76 @@ pub mod bench_support {
     }
 }
 
-pub(crate) const POLICY_DENIED_RESULT: &str =
-    "This session's approval mode is read-only; the tool call was denied without prompting.";
+/// A model-facing refusal: `permission_denied: <who>: <reason>; <what to do
+/// instead>`, where `<who>` is `fixed_stop`, `user`, `mode` or `config`.
+macro_rules! denial {
+    ($who:literal, $reason:literal, $instead:literal) => {
+        concat!(
+            "permission_denied: ",
+            $who,
+            ": ",
+            $reason,
+            "; ",
+            $instead,
+            ". Do not retry it in another form."
+        )
+    };
+}
+
+pub(crate) const POLICY_DENIED_RESULT: &str = denial!(
+    "mode",
+    "this session is read-only, so only reads run",
+    "continue with reads, or tell the user what change is needed"
+);
 
 /// The model-facing text for a `Deny`: the mode, or the host rule that
 /// refused the action, with an allowed alternative where applicable.
 pub(crate) fn deny_result(reason: &DenyReason) -> String {
     match reason {
         DenyReason::Mode => POLICY_DENIED_RESULT.to_owned(),
-        DenyReason::OutOfScope => "permission_denied: outside_auto_scope: this action is outside the configured authority; use an operation within the workspace, task, and granted scope.".to_owned(),
+        DenyReason::OutOfScope => denial!(
+            "mode",
+            "this action is outside the authority this run was given",
+            "use an operation within it, or tell the user what you need"
+        )
+        .to_owned(),
         DenyReason::HostBlocked { refusal } => format!(
-            "fetch refused: {refusal}. Private, link-local, and managed-denied hosts are unreachable under every approval mode."
+            "permission_denied: config: fetch refused: {refusal}; private, link-local and managed-denied hosts are unreachable in every mode, so use a public source or ask the user. Do not retry it in another form."
         ),
         DenyReason::Stop(stop) => stop.result(),
     }
 }
-pub(crate) const USER_DENIED_RESULT: &str = "The user denied this tool call.";
-pub(crate) const TIMEOUT_DENIED_RESULT: &str = "NOT EXECUTED: no one answered this tool approval in time, so the call did not run and its result is unknown. Do not continue as if it ran: tell the user what is waiting on approval, or use a step that does not need it.";
-pub(crate) const UNATTENDED_DENIED_RESULT: &str =
-    "Tool approval is unavailable for this run; the call was denied.";
+pub(crate) const USER_DENIED_RESULT: &str = denial!(
+    "user",
+    "the user denied this call",
+    "find another way, or ask the user what they want"
+);
+pub(crate) const TIMEOUT_DENIED_RESULT: &str = denial!(
+    "user",
+    "no one answered this approval in time, so the call did not run",
+    "do not continue as if it ran; tell the user what is waiting on approval, or use a step that does not need it"
+);
+pub(crate) const UNATTENDED_DENIED_RESULT: &str = denial!(
+    "mode",
+    "this run has no one to approve calls",
+    "use a step that needs no approval, or tell the user what you need"
+);
+/// A held call's authority narrowed while it waited for an answer.
+pub(crate) const AUTHORITY_CHANGED_RESULT: &str = denial!(
+    "mode",
+    "the session's permissions changed while this call waited, so it did not run",
+    "continue within the current permissions"
+);
+pub(crate) const PARENT_DENIED_RESULT: &str = denial!(
+    "mode",
+    "this child action is outside its parent's permissions",
+    "use an operation the parent allows, or report what you need"
+);
+pub(crate) const MANAGED_SHELL_DENIED_RESULT: &str = denial!(
+    "config",
+    "the command matches a managed deny_shell_prefixes entry",
+    "continue with a command the configuration allows"
+);
 pub(crate) const UNATTENDED_QUESTION_RESULT: &str =
     "No user is available to answer questions in this run; decide without asking.";
 pub(crate) const DECLINED_QUESTION_RESULT: &str =
@@ -1612,6 +1663,41 @@ mod tests {
         assert!(
             deny_result(&DenyReason::Stop(Stop::PrivilegeEscalation))
                 .starts_with("permission_denied: fixed_stop: ")
+        );
+    }
+
+    #[test]
+    fn every_denial_names_who_refused_and_what_to_do_instead() {
+        let host = deny_result(&DenyReason::HostBlocked {
+            refusal: crate::tools::network::HostRefusal::ManagedDeny {
+                host: "example.com".to_owned(),
+            },
+        });
+        for (who, text) in [
+            ("fixed_stop", deny_result(&DenyReason::Stop(Stop::ForcePush))),
+            ("user", USER_DENIED_RESULT.to_owned()),
+            ("user", TIMEOUT_DENIED_RESULT.to_owned()),
+            ("mode", deny_result(&DenyReason::Mode)),
+            ("mode", deny_result(&DenyReason::OutOfScope)),
+            ("mode", UNATTENDED_DENIED_RESULT.to_owned()),
+            ("mode", AUTHORITY_CHANGED_RESULT.to_owned()),
+            ("mode", PARENT_DENIED_RESULT.to_owned()),
+            ("config", MANAGED_SHELL_DENIED_RESULT.to_owned()),
+            ("config", host),
+        ] {
+            let rest = text
+                .strip_prefix(&format!("permission_denied: {who}: "))
+                .unwrap_or_else(|| panic!("{who}: {text}"));
+            let (reason, instead) = rest.split_once("; ").expect(&text);
+            assert!(!reason.is_empty() && !instead.is_empty(), "{text}");
+            assert!(
+                text.ends_with("Do not retry it in another form."),
+                "{text}"
+            );
+        }
+        assert_eq!(
+            USER_DENIED_RESULT,
+            "permission_denied: user: the user denied this call; find another way, or ask the user what they want. Do not retry it in another form."
         );
     }
 

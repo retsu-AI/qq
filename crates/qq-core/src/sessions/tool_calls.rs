@@ -1017,7 +1017,7 @@ pub(super) fn resolve_approval_by_reviewer(
             store_id,
             identity,
             tool_call_id,
-            "permission_denied: authority_changed: task or parent permissions changed while the reviewer was deciding; request the action again under the current permissions",
+            approval::AUTHORITY_CHANGED_RESULT,
             (ApprovalResolution::Denied, None),
         )?;
         transaction.commit()?;
