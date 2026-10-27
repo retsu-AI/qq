@@ -1636,9 +1636,9 @@ lifts one. Everything else follows the mode: `auto` runs it, `ask` holds it,
 | Stop | Matches |
 | --- | --- |
 | `force_push` | `git push` with `--force`, `-f`, `--force-with-lease`, `--mirror`, `--delete`/`-d`, `--prune`, or a `+ref`/`:ref` refspec after the remote; git's global options (`-C`, `-c`, …) are skipped first |
-| `remove_root` | `rm -r`, `chmod`/`chown`/`chgrp -R`, or `mv` of a source that is `/`, the home directory, or a path directly under either |
+| `remove_root` | `rm -r`, `chmod`/`chown`/`chgrp -R`, or `mv` of a source (honoring `-t`/`--target-directory`) that is `/`, the home directory, or a path directly under either |
 | `privilege_escalation` | `sudo`, `doas`, `su`, `pkexec` |
-| `disk_write` | `mkfs*`, `fdisk`, `sfdisk`, `gdisk`, `parted`, `wipefs`; `dd of=` or a redirect to a disk device |
+| `disk_write` | `mkfs*`, `fdisk`, `sfdisk`, `gdisk`, `parted`, `wipefs`; `dd of=`, a `cp`/`install` destination, a `tee` file, or a redirect that is a disk device |
 | `power_state` | `shutdown`, `reboot`, `halt`, `poweroff`, `systemctl reboot\|poweroff\|halt\|kexec` |
 | `credential_read` | any word or redirect naming `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.netrc`, `~/.config/gh`, `~/.docker/config.json`, `~/.kube`, `~/.git-credentials`, or QQ's credential files |
 
@@ -1647,7 +1647,8 @@ command in it: in lists, pipelines, subshells, control flow and `$(…)`. The
 launchers `timeout`, `time`, `nice`, `nohup` and `stdbuf` are peeled, and
 `env`, `xargs`, `sudo`, `chrt`, `taskset` and `env -S` reach the command they
 run. `sh -c STRING` is reparsed, at most 4 deep. `$HOME` and `${HOME}` read as
-`~`; any other expansion is unknown and never matches. A command over 16 KiB,
+`~`, in arguments and redirect targets; any other expansion is unknown and
+never matches. A command over 16 KiB,
 or one the parser can't read, is not a stop.
 
 Paths are normalized lexically (`~/x/..` is `~`) and never resolved, so a

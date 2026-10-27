@@ -566,7 +566,7 @@ fn word(node: Node<'_>, source: &[u8], home: bool) -> Option<String> {
 
 /// A redirect's target: its literal text when static, and its raw source
 /// text either way (for shape matching on dynamic targets).
-fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<String>) {
+fn redirect_target(node: Node<'_>, source: &[u8], home: bool) -> (Option<String>, Option<String>) {
     let target = node
         .named_children(&mut node.walk())
         .find(|c| c.kind() != "file_descriptor");
@@ -577,7 +577,7 @@ fn redirect_target(node: Node<'_>, source: &[u8]) -> (Option<String>, Option<Str
         .children(&mut node.walk())
         .any(|token| matches!(token.kind(), ">&" | "<&"));
     let literal = target.and_then(|c| {
-        let word = literal_word(c, source)?;
+        let word = word(c, source, home)?;
         // The marker starts with NUL, which no shell word can contain, so
         // a file literally named `&1` cannot pass as a duplication.
         Some(if duplicates && c.kind() == "number" {
@@ -621,7 +621,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                 for child in node.children(&mut cursor) {
                     match child.kind() {
                         "file_redirect" => {
-                            let (target, raw) = redirect_target(child, self.source);
+                            let (target, raw) = redirect_target(child, self.source, self.home);
                             stream_only &= target.as_deref().is_some_and(stream_target);
                             redirects.push(target);
                             raw_redirects.extend(raw);
@@ -719,7 +719,7 @@ impl<const KEEP_LAUNCHERS: bool> Collector<'_, KEEP_LAUNCHERS> {
                     deferred.push(child);
                 }
                 "file_redirect" => {
-                    let (target, raw) = redirect_target(child, self.source);
+                    let (target, raw) = redirect_target(child, self.source, self.home);
                     redirects.push(target);
                     raw_redirects.extend(raw);
                 }
