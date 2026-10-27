@@ -144,9 +144,11 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     // The scratch index lists every current file, untracked ones included,
     // so the restore deletes files the snapshot does not have.
     let index = ScratchIndex::copy(&repository).await?;
-    let skipped = stage_workspace(&repository, &index).await?;
-    // The backup above could not hold the skipped files, so the restore
-    // leaves them alone even where the snapshot has an older version.
+    let mut excluded = stage_workspace(&repository, &index).await?;
+    // The backup above could not hold the skipped files or anything now
+    // ignored, so the restore leaves them alone even where the snapshot has
+    // an older version (a file ignored since the snapshot was taken).
+    excluded.extend(ignored(&repository, &index).await?);
     git_with_input(
         &repository.workspace,
         Some(&index.path),
@@ -160,7 +162,7 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
             "--pathspec-from-file=-",
             "--pathspec-file-nul",
         ],
-        pathspecs(&skipped),
+        pathspecs(&excluded),
     )
     .await?;
     drop(index);
@@ -374,8 +376,11 @@ async fn stage_workspace(
     repository: &Repository,
     index: &ScratchIndex,
 ) -> Result<Vec<PathBuf>, UndoError> {
-    // `assume-unchanged` makes `add` keep the indexed content instead of the
-    // file's. Clear it in the copy only; the user's index keeps the bit.
+    // `assume-unchanged` and `skip-worktree` make `add` keep the indexed
+    // content instead of the file's. Clear them in the copy only; the user's
+    // index keeps its bits. Skip-worktree entries whose file is absent (a
+    // sparse checkout) keep the bit, so they stay recorded and are not
+    // checked out by a restore.
     let listing = git(
         &repository.workspace,
         Some(&index.path),
@@ -384,24 +389,39 @@ async fn stage_workspace(
     )
     .await?;
     let mut assumed = Vec::new();
+    let mut skipped_worktree = Vec::new();
     for entry in listing.split('\0') {
-        // A lowercase tag marks an assume-unchanged entry.
-        if let Some((tag, path)) = entry.split_once(' ')
-            && tag.chars().all(|tag| tag.is_ascii_lowercase())
-        {
+        let Some((tag, path)) = entry.split_once(' ') else {
+            continue;
+        };
+        // A lowercase tag marks an assume-unchanged entry; `S` skip-worktree.
+        if tag.chars().all(|tag| tag.is_ascii_lowercase()) {
             assumed.extend_from_slice(path.as_bytes());
             assumed.push(0);
         }
+        if tag.eq_ignore_ascii_case("s")
+            && tokio::fs::symlink_metadata(repository.workspace.join(path))
+                .await
+                .is_ok()
+        {
+            skipped_worktree.extend_from_slice(path.as_bytes());
+            skipped_worktree.push(0);
+        }
     }
-    if !assumed.is_empty() {
-        git_with_input(
-            &repository.workspace,
-            Some(&index.path),
-            "update-index",
-            &["update-index", "--no-assume-unchanged", "-z", "--stdin"],
-            assumed,
-        )
-        .await?;
+    for (flag, paths) in [
+        ("--no-assume-unchanged", assumed),
+        ("--no-skip-worktree", skipped_worktree),
+    ] {
+        if !paths.is_empty() {
+            git_with_input(
+                &repository.workspace,
+                Some(&index.path),
+                "update-index",
+                &["update-index", flag, "-z", "--stdin"],
+                paths,
+            )
+            .await?;
+        }
     }
     let untracked = git(
         &repository.workspace,
@@ -436,6 +456,32 @@ async fn stage_workspace(
     )
     .await?;
     Ok(skipped)
+}
+
+/// Untracked ignored paths under the workspace, relative to it. A wholly
+/// ignored directory is one entry ending in `/`.
+async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<PathBuf>, UndoError> {
+    let listing = git(
+        &repository.workspace,
+        Some(&index.path),
+        "ls-files",
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "--",
+            ".",
+        ],
+    )
+    .await?;
+    Ok(listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
 /// The workspace minus `excluded`, as NUL-separated pathspecs.
@@ -863,6 +909,72 @@ mod tests {
         assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("agent\n"));
         // The user's index keeps its bit.
         assert!(git(root, &["ls-files", "-v", "tracked.txt"]).starts_with("h "));
+    }
+
+    #[tokio::test]
+    async fn a_file_ignored_since_the_snapshot_survives_a_restore() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join("notes.txt"), "old\n").unwrap();
+        std::fs::create_dir(root.join("cache")).unwrap();
+        std::fs::write(root.join("cache/entry"), "old\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join(".gitignore"), "notes.txt\ncache/\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "newer\n").unwrap();
+        std::fs::write(root.join("cache/entry"), "newer\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("base\n"));
+        // The before-undo snapshot could not hold them, so the restore must
+        // not overwrite them.
+        assert_eq!(read(&root.join("notes.txt")).as_deref(), Some("newer\n"));
+        assert_eq!(read(&root.join("cache/entry")).as_deref(), Some("newer\n"));
+    }
+
+    #[tokio::test]
+    async fn skip_worktree_files_are_recorded_from_the_working_tree() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::create_dir(root.join("sparse")).unwrap();
+        std::fs::write(root.join("sparse/absent.txt"), "absent\n").unwrap();
+        git(root, &["add", "sparse/absent.txt"]);
+        git(root, &["commit", "-q", "-m", "sparse"]);
+        git(root, &["update-index", "--skip-worktree", "tracked.txt"]);
+        git(
+            root,
+            &["update-index", "--skip-worktree", "sparse/absent.txt"],
+        );
+        std::fs::write(root.join("tracked.txt"), "draft\n").unwrap();
+        // As in a sparse checkout: indexed, not on disk.
+        std::fs::remove_file(root.join("sparse/absent.txt")).unwrap();
+
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let show = |path: &str| git(root, &["show", &format!("{}:{path}", taken.commit)]);
+        assert_eq!(show("tracked.txt"), "draft\n");
+        assert_eq!(show("sparse/absent.txt"), "absent\n");
+        std::fs::write(root.join("tracked.txt"), "agent\n").unwrap();
+        restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join("tracked.txt")).as_deref(), Some("draft\n"));
+        assert_eq!(read(&root.join("sparse/absent.txt")), None);
+        // The user's index keeps its bits.
+        let listing = git(root, &["ls-files", "-v"]);
+        assert!(listing.contains("S tracked.txt"), "{listing}");
+        assert!(listing.contains("S sparse/absent.txt"), "{listing}");
     }
 
     #[tokio::test]

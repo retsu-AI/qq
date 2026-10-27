@@ -3024,13 +3024,15 @@ async fn execute_started_run(
                 // taken before its write spawn, covers them.
                 if may_change_files && !snapshot_taken && !claimed.identity.child {
                     snapshot_taken = true;
-                    // A cancel drops the snapshot's Git steps and returns to
-                    // the loop, whose own receiver has not yet seen it. The
+                    // A cancel, or the run's duration budget running out,
+                    // drops the snapshot's Git steps and returns to the loop,
+                    // which then sees the cancel or the budget exhaustion. The
                     // call does not start: the stream waits on this handler.
                     let mut stop = cancellation.clone();
                     let cancelled = tokio::select! {
                         biased;
                         _ = stop.wait_for(|cancelled| *cancelled) => true,
+                        () = tool_cancellation.cancelled() => true,
                         () = snapshot_workspace(&claimed) => false,
                     };
                     if cancelled {
