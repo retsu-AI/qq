@@ -682,10 +682,19 @@ async fn git_bytes(
     }
     let run = async {
         let mut child = command.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&input).await?;
-        }
-        child.wait_with_output().await
+        let stdin = child.stdin.take();
+        // Feed input while draining output: a batch command such as
+        // `cat-file` answers as it reads and would block on a full pipe.
+        let feed = async {
+            if let Some(mut stdin) = stdin {
+                stdin.write_all(&input).await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+        let (fed, output) = tokio::join!(feed, child.wait_with_output());
+        let output = output?;
+        fed?;
+        Ok(output)
     };
     let output = tokio::time::timeout(GIT_STEP_TIMEOUT, run)
         .await
@@ -1052,6 +1061,28 @@ mod tests {
 
         restore(&taken).await.unwrap();
         assert_eq!(read(&root.join("foo/secret")).as_deref(), Some("secret\n"));
+    }
+
+    #[tokio::test]
+    async fn many_excluded_paths_do_not_stall_the_ancestor_check() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        let repository = discover(root).await.unwrap().unwrap();
+        let head = git(root, &["rev-parse", "HEAD"]).trim().to_owned();
+        // Each missing ancestor is answered with `<object> missing`, which
+        // overflows a pipe buffer long before the input is written.
+        let paths: Vec<PathBuf> = (0..5_000)
+            .map(|n| PathBuf::from(format!("absent-{n:05}/file")))
+            .collect();
+        let replaced = tokio::time::timeout(
+            Duration::from_secs(10),
+            replaced_ancestors(&repository, &head, &paths),
+        )
+        .await
+        .expect("cat-file output is drained while its input is written")
+        .unwrap();
+        assert!(replaced.is_empty());
     }
 
     #[tokio::test]
