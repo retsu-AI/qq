@@ -40,6 +40,9 @@ const RUN_TRAILER: &str = "QQ-Run: ";
 const HEAD_TRAILER: &str = "QQ-Head: ";
 const KIND_TRAILER: &str = "QQ-Kind: ";
 const CREATED_TRAILER: &str = "QQ-Created-Ms: ";
+/// A path the snapshot left out (ignored, or too large), hex-encoded so any
+/// filename fits on one line. Restoring the snapshot leaves these alone.
+const PROTECTED_TRAILER: &str = "QQ-Protected: ";
 
 /// Why a snapshot was taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,6 +152,9 @@ pub async fn restore(target: &Snapshot) -> Result<Restored, UndoError> {
     // ignored, so the restore leaves them alone even where the snapshot has
     // an older version (a file ignored since the snapshot was taken).
     excluded.extend(ignored(&repository, &index).await?);
+    // Nor did the snapshot hold what it left out, even if those paths are no
+    // longer ignored: restoring must not delete them for being absent.
+    excluded.extend(protected(&repository, &target.commit).await?);
     // Excluding a path does not keep the restore from replacing its parent
     // directory with a file the snapshot has there, which would delete it.
     let replaced = replaced_ancestors(&repository, &target.commit, &excluded).await?;
@@ -239,6 +245,7 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
         .to_owned();
     let index = ScratchIndex::copy(repository).await?;
     let skipped = stage_workspace(repository, &index).await?;
+    let left_out = ignored(repository, &index).await?;
     let tree = git(
         &repository.workspace,
         Some(&index.path),
@@ -275,12 +282,28 @@ async fn record(repository: &Repository, kind: SnapshotKind) -> Result<Snapshot,
     if let Some(head) = &head {
         message.push_str(&format!("{HEAD_TRAILER}{head}\n"));
     }
+    for path in skipped.iter().chain(&left_out) {
+        message.push_str(PROTECTED_TRAILER);
+        for byte in path_bytes(path) {
+            message.push_str(&format!("{byte:02x}"));
+        }
+        message.push('\n');
+    }
     let tree = tree.trim();
-    let mut arguments = vec!["commit-tree", "--no-gpg-sign", tree, "-m", message.as_str()];
+    // The message goes through stdin: a long protected list would overflow
+    // an argument.
+    let mut arguments = vec!["commit-tree", "--no-gpg-sign", tree, "-F", "-"];
     if let Some(head) = &head {
         arguments.extend(["-p", head.as_str()]);
     }
-    let commit = git(&repository.workspace, None, "commit-tree", &arguments).await?;
+    let commit = git_with_input(
+        &repository.workspace,
+        None,
+        "commit-tree",
+        &arguments,
+        message.into_bytes(),
+    )
+    .await?;
     let commit = commit.trim().to_owned();
     let reference = format!("{SNAPSHOT_REF_PREFIX}{name}");
     git(
@@ -488,6 +511,28 @@ async fn ignored(repository: &Repository, index: &ScratchIndex) -> Result<Vec<Pa
     .await?;
     Ok(nul_separated(&listing)
         .map(|path| path_from_bytes(path.strip_suffix(b"/").unwrap_or(path)))
+        .collect())
+}
+
+/// The paths `commit`, a snapshot, left out.
+async fn protected(repository: &Repository, commit: &str) -> Result<Vec<PathBuf>, UndoError> {
+    let object = git(
+        &repository.workspace,
+        None,
+        "cat-file",
+        &["cat-file", "commit", commit],
+    )
+    .await?;
+    Ok(object
+        .lines()
+        .filter_map(|line| line.strip_prefix(PROTECTED_TRAILER))
+        .filter_map(|hex| {
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+                .collect::<Option<Vec<u8>>>()?;
+            (!bytes.is_empty()).then(|| path_from_bytes(&bytes))
+        })
         .collect())
 }
 
@@ -1039,6 +1084,59 @@ mod tests {
         // not overwrite them.
         assert_eq!(read(&root.join("notes.txt")).as_deref(), Some("newer\n"));
         assert_eq!(read(&root.join("cache/entry")).as_deref(), Some("newer\n"));
+    }
+
+    #[tokio::test]
+    async fn reversing_an_undo_keeps_files_the_undo_left_alone() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join("notes"), "old\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        std::fs::write(root.join(".gitignore"), "notes\n").unwrap();
+        std::fs::write(root.join("notes"), "newer\n").unwrap();
+
+        // The undo removes `.gitignore` but leaves the now-ignored `notes`.
+        let restored = restore(&taken).await.unwrap();
+        assert_eq!(read(&root.join(".gitignore")), None);
+        assert_eq!(read(&root.join("notes")).as_deref(), Some("newer\n"));
+        // `notes` is no longer ignored; reversing must still not delete it.
+        restore(&restored.before).await.unwrap();
+        assert_eq!(read(&root.join(".gitignore")).as_deref(), Some("notes\n"));
+        assert_eq!(read(&root.join("notes")).as_deref(), Some("newer\n"));
+    }
+
+    #[tokio::test]
+    async fn a_file_ignored_when_the_snapshot_was_taken_survives_a_restore() {
+        let fixture = directory();
+        let root = fixture.path();
+        repository(root);
+        std::fs::write(root.join(".gitignore"), "local.env\n").unwrap();
+        std::fs::write(root.join("local.env"), "user\n").unwrap();
+        let taken = snapshot(
+            root,
+            SnapshotKind::Run(qq_protocol::RunId::generate().unwrap()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The agent removes the ignore rule and edits the file.
+        std::fs::remove_file(root.join(".gitignore")).unwrap();
+        std::fs::write(root.join("local.env"), "agent\n").unwrap();
+
+        restore(&taken).await.unwrap();
+        assert_eq!(
+            read(&root.join(".gitignore")).as_deref(),
+            Some("local.env\n")
+        );
+        // Outside the snapshot, so left as it is rather than deleted.
+        assert_eq!(read(&root.join("local.env")).as_deref(), Some("agent\n"));
     }
 
     #[tokio::test]

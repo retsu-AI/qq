@@ -11,7 +11,9 @@ use qq_core::undo::{self, Snapshot, SnapshotKind, UndoError};
 use crate::cli::UndoArgs;
 
 pub(crate) async fn run(args: UndoArgs) -> ExitCode {
-    let mut stdout = io::stdout().lock();
+    // Unlocked: `Stdout` locks per write, so no lock is held across the
+    // Git steps `execute` awaits.
+    let mut stdout = io::stdout();
     match execute(args, &mut stdout).await {
         Ok(code) => code,
         Err(error) => {
