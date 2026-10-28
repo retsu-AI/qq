@@ -1104,14 +1104,16 @@ after a restart.
   pipes is read for two more seconds, after which a process that escaped the
   group no longer holds the call.
 - **Yield.** A command still running `yield_after_seconds` after it started
-  (default 30) settles its call with `<tool> exit=running id=c<n> …`, the
+  (default 30) settles its call with `<tool> exit=running id=c<call8> …` (the call
+  id's first eight hex digits), the
   output so far, and a pointer to `command_status`. The dispatch task keeps
   owning the process, its lease and its receipt. `command_status(id,
   wait_seconds ≤ 600, cancel)` waits for the command and returns its final
   result (the same text a non-yielded call would have returned), or its
-  output so far while it runs; `cancel=true` kills its group. A run keeps at
-  most 16 yielded commands; past that a command runs to completion in its
-  call. A user interrupt waits only for calls that have not returned; when
+  output so far while it runs; `cancel=true` kills its group and waits a
+  bounded time for the result. A run keeps at most 16 yielded commands; a
+  full table forgets its oldest finished, unread result, and when all 16
+  are running a new command runs to completion in its call. A user interrupt waits only for calls that have not returned; when
   the run ends, its yielded commands are cancelled and teardown reaps them
   like any other tool task. `command_status` is declared exactly when
   `shell` or `exec` is and follows them through pack and policy filters.
