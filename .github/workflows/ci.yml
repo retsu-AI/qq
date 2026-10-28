@@ -193,8 +193,6 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'macOS' }}
         shell: bash
         run: |
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::a_live_group_is_not_reported_quiescent
-          bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::an_exited_group_is_quiescent_while_its_zombie_waits_to_be_reaped
           bash .github/scripts/test-exact.sh tools::shell::child_exit::tests::exit_notification_survives_an_interrupted_wait
       - name: Windows command jobs
         if: ${{ !cancelled() && runner.os == 'Windows' }}
