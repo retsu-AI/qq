@@ -226,6 +226,7 @@ impl PreparedLaunch {
         deadline: Instant,
     ) -> std::io::Result<(
         super::shell::NativeChild,
+        super::shell::ProcessGroupGuard,
         Option<Box<ExecutionContextReceipt>>,
     )> {
         if cancelled.is_cancelled() {
@@ -256,9 +257,22 @@ impl PreparedLaunch {
         #[cfg(unix)]
         command.process_group(0);
         #[cfg(not(windows))]
-        let child = {
+        let (child, guard) = {
             let _ = process;
-            command.spawn()?
+            let mut child = command.spawn()?;
+            let mut guard = super::shell::ProcessGroupGuard::new(child.id());
+            // No await since spawn: the watcher joins the group before
+            // anything else can run, so the group never lacks one.
+            match super::shell::spawn_watcher(child.id()) {
+                Ok(watcher) => guard.watch(watcher),
+                Err(error) => {
+                    let _ = guard.kill();
+                    let _ = child.wait().await;
+                    guard.disarm();
+                    return Err(error);
+                }
+            }
+            (child, guard)
         };
         #[cfg(windows)]
         let child = super::windows_job::spawn(
@@ -271,12 +285,14 @@ impl PreparedLaunch {
             deadline,
         )
         .await?;
+        #[cfg(windows)]
+        let guard = super::shell::ProcessGroupGuard::new(child.id());
         let receipt = child.id().map(|pid| {
             let mut receipt = self.receipt.clone();
             receipt.facts_mut().pid = pid;
             Box::new(receipt)
         });
-        Ok((child, receipt))
+        Ok((child, guard, receipt))
     }
 }
 
@@ -807,7 +823,7 @@ mod tests {
         assert!(
             cwd_runtime
                 .block_on(async {
-                    let (mut child, _) = cwd_bound
+                    let (mut child, _guard, _) = cwd_bound
                         .spawn(
                             false,
                             &super::super::dispatch::ToolTasks::default().enter(),
@@ -837,7 +853,7 @@ mod tests {
         assert!(
             runtime
                 .block_on(async {
-                    let (mut child, _) = prepared
+                    let (mut child, _guard, _) = prepared
                         .spawn(
                             false,
                             &super::super::dispatch::ToolTasks::default().enter(),

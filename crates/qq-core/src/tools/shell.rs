@@ -367,7 +367,7 @@ pub(super) async fn run_shell(
             return ToolOutput::refused(format!("could not observe command exits: {error}"));
         }
     };
-    let (mut child, receipt) = match prepared
+    let (mut child, mut guard, receipt) = match prepared
         .spawn(
             stdin_text.is_some(),
             process,
@@ -384,9 +384,9 @@ pub(super) async fn run_shell(
         Err(error) => return ToolOutput::refused(format!("could not start the command: {error}")),
     };
     process.process_started();
-    // Unix commands lead their own process group. Windows children own a
-    // kernel job which follows descendants across process-group changes.
-    let mut guard = ProcessGroupGuard::new(child.id());
+    // Unix commands lead their own process group, watched for this process's
+    // death. Windows children own a kernel job which follows descendants
+    // across process-group changes and dies with this process.
     #[cfg(all(test, unix))]
     {
         let hook = {
@@ -838,6 +838,41 @@ pub(crate) struct ProcessGroupGuard {
     pgid: Option<rustix::process::Pid>,
     #[cfg(unix)]
     killed_pgid: Option<rustix::process::Pid>,
+    /// Lives in the group and kills it once this process is gone; reaped
+    /// before termination is confirmed.
+    #[cfg(unix)]
+    watcher: Option<tokio::process::Child>,
+}
+
+/// Every Unix command's process group gets one of these. It blocks reading
+/// a pipe whose write end only this process holds; when this process exits
+/// for any reason, SIGKILL included, the read ends and the watcher kills its
+/// group. It ignores the catchable signals a script may send its own group.
+#[cfg(unix)]
+pub(crate) fn spawn_watcher(leader: Option<u32>) -> std::io::Result<tokio::process::Child> {
+    static PIPE: std::sync::OnceLock<
+        Result<(std::io::PipeReader, std::io::PipeWriter), std::io::ErrorKind>,
+    > = std::sync::OnceLock::new();
+    let (reader, _) = PIPE
+        .get_or_init(|| std::io::pipe().map_err(|error| error.kind()))
+        .as_ref()
+        .map_err(|kind| std::io::Error::from(*kind))?;
+    let leader = leader
+        .and_then(|pid| i32::try_from(pid).ok())
+        .ok_or_else(|| std::io::Error::other("command leader has no process id"))?;
+    let mut watcher = tokio::process::Command::new("/bin/sh");
+    watcher
+        .args([
+            "-c",
+            "trap '' HUP INT QUIT TERM; while read -r _; do :; done; kill -s KILL 0",
+        ])
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::from(reader.try_clone()?))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(leader);
+    watcher.spawn()
 }
 
 impl ProcessGroupGuard {
@@ -849,6 +884,7 @@ impl ProcessGroupGuard {
                     .and_then(|id| i32::try_from(id).ok())
                     .and_then(rustix::process::Pid::from_raw),
                 killed_pgid: None,
+                watcher: None,
             }
         }
         #[cfg(not(unix))]
@@ -856,6 +892,24 @@ impl ProcessGroupGuard {
             let _ = child_id;
             Self {}
         }
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn watch(&mut self, watcher: tokio::process::Child) {
+        self.watcher = Some(watcher);
+    }
+
+    /// Reaps the watcher after its group was killed. Darwin reports a group
+    /// of zombies as EPERM, so confirmation needs the watcher gone first.
+    #[cfg(unix)]
+    pub(crate) async fn reap_watcher(&mut self) -> std::io::Result<()> {
+        if let Some(mut watcher) = self.watcher.take() {
+            let _ = watcher.start_kill();
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.wait())
+                .await
+                .map_err(|_| std::io::Error::other("command watcher did not exit"))??;
+        }
+        Ok(())
     }
 
     /// Forgets the group after a normal exit; the reaped leader's pid may be
@@ -900,7 +954,11 @@ impl ProcessGroupGuard {
         result
     }
 
-    async fn confirm_stopped(&self) -> std::io::Result<()> {
+    async fn confirm_stopped(&mut self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if self.killed_pgid.is_some() {
+            self.reap_watcher().await?;
+        }
         // Zombie descendants count as stopped: a container's PID 1 may never
         // reap them, and signal zero would keep finding the group.
         #[cfg(target_os = "linux")]
@@ -1188,6 +1246,97 @@ mod identity_tests {
                 spill.digest,
                 format!("{:x}", sha2::Sha256::digest(spill.text.as_bytes()))
             );
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod orphan_tests {
+    /// A command's process group dies with the process that started it, even
+    /// when that process is SIGKILLed and runs no cleanup.
+    #[test]
+    fn a_killed_server_takes_its_commands_with_it() {
+        if let Some(report) = std::env::var_os("QQ_COMMAND_ORPHAN_WORKER") {
+            let directory = tempfile::tempdir().unwrap();
+            let workspace = crate::workspace::Workspace::open(directory.path()).unwrap();
+            // The background child and the trap prove the watcher kills the
+            // whole group and survives the group signals a script may send.
+            let command = format!(
+                // Output goes nowhere QQ reads, so the server's death closes
+                // no pipe a payload would notice: only the watcher stops it.
+                "exec >/dev/null 2>&1; trap '' TERM; kill -s TERM 0; tail -f /dev/null & echo $$ $! > '{}'; exec tail -f /dev/null",
+                std::path::Path::new(&report).display()
+            );
+            let arguments = super::ShellArgs {
+                command,
+                cwd: None,
+                timeout_seconds: None,
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let tasks = crate::tools::ToolTasks::default();
+                    let mut lease = tasks.enter();
+                    super::run_shell(
+                        &workspace,
+                        &crate::runtime::ShellPolicy::default(),
+                        std::sync::Arc::default(),
+                        std::sync::Arc::default(),
+                        None,
+                        super::Launch::Shell(&arguments),
+                        &super::ToolCancellation::new(crate::RunCancellation::new()),
+                        None,
+                        &mut lease,
+                    )
+                    .await
+                });
+            unreachable!("the command never ends; the parent kills this process");
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let report = directory.path().join("pids");
+        let mut server = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tools::shell::orphan_tests::a_killed_server_takes_its_commands_with_it",
+                "--nocapture",
+            ])
+            .env("QQ_COMMAND_ORPHAN_WORKER", &report)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let pids = loop {
+            if let Ok(text) = std::fs::read_to_string(&report)
+                && text.ends_with('\n')
+            {
+                break text;
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "command never started"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(10));
+        };
+        let mut pids = pids
+            .split_whitespace()
+            .map(|pid| pid.parse::<i32>().unwrap());
+        let leader = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
+        let background = rustix::process::Pid::from_raw(pids.next().unwrap()).unwrap();
+        server.kill().unwrap();
+        server.wait().unwrap();
+        // Orphans reparent to init, which reaps them; until then a zombie
+        // still answers signal zero, so wait for both to be gone.
+        let stopped = std::time::Instant::now();
+        for pid in [leader, background] {
+            while rustix::process::test_kill_process(pid).is_ok() {
+                assert!(
+                    stopped.elapsed() < std::time::Duration::from_secs(10),
+                    "the command outlived the process that started it"
+                );
+                std::thread::park_timeout(std::time::Duration::from_millis(10));
+            }
         }
     }
 }

@@ -1176,28 +1176,32 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
                 recovered.ask(Input::WorkspaceHold).await,
                 serde_json::to_value(Some(expected_hold)).unwrap()
             );
-            let process = process.as_ref().unwrap();
-            let mut exited = Box::pin(process.0.readable());
-            assert!(
-                futures_util::poll!(&mut exited).is_pending(),
-                "SIGKILL of QQ does not establish shell cleanup"
-            );
+            // SIGKILL of QQ takes its check's process group down with it:
+            // the check never finishes and never writes after the restart.
+            let mut exited = tokio::time::timeout(
+                Duration::from_secs(10),
+                process.as_ref().unwrap().0.readable(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            exited.retain_ready();
         } else {
             check_ready(&pipes[0]).await;
             process = Some(observe_check(directory.path()).await);
+            assert_eq!(
+                rustix::io::write(pipes[1].get_ref(), b"release\n").unwrap(),
+                8
+            );
+            let mut exited = tokio::time::timeout(
+                Duration::from_secs(10),
+                process.as_ref().unwrap().0.readable(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            exited.retain_ready();
         }
-        assert_eq!(
-            rustix::io::write(pipes[1].get_ref(), b"release\n").unwrap(),
-            8
-        );
-        let mut exited = tokio::time::timeout(
-            Duration::from_secs(10),
-            process.as_ref().unwrap().0.readable(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        exited.retain_ready();
         if phase.starts_with("running") {
             let after = recovered.snapshot().await;
             if phase == "running" {
@@ -1290,8 +1294,10 @@ async fn goal_check_real_process_crashes_preserve_unstarted_authority_and_pause_
         assert_eq!(
             tokio::fs::read_to_string(directory.path().join("check-completions"))
                 .await
-                .unwrap(),
-            "finished"
+                .ok()
+                .as_deref(),
+            (!phase.starts_with("running")).then_some("finished"),
+            "a check killed with QQ must not complete afterwards"
         );
         assert!(recovered.pending.is_empty());
         recovered.ask(Input::Close).await;

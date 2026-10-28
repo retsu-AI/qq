@@ -1,9 +1,9 @@
 use super::store::Priority;
 use super::*;
 #[cfg(unix)]
-use crate::tools::process_context;
+use crate::tools::ToolCancellation;
 #[cfg(unix)]
-use crate::tools::{ProcessGroupGuard, ToolCancellation};
+use crate::tools::process_context;
 #[cfg(unix)]
 use crate::workspace::Workspace;
 #[cfg(unix)]
@@ -242,7 +242,7 @@ async fn run_host_process(
             tail: String::new(),
         });
     }
-    let mut child = match prepared
+    let (mut child, mut group) = match prepared
         .spawn(
             false,
             &lease,
@@ -251,11 +251,10 @@ async fn run_host_process(
         )
         .await
     {
-        Ok((child, _receipt)) => child,
+        Ok((child, group, _receipt)) => (child, group),
         Err(error) => return Err(ProcessError::Spawn(error)),
     };
     lease.process_started();
-    let mut group = ProcessGroupGuard::new(child.id());
     let pid = rustix::process::Pid::from_raw(
         i32::try_from(child.id().expect("spawned child has pid"))
             .expect("pid fits signed process id"),
@@ -314,6 +313,9 @@ async fn run_host_process(
                         Err(error) => break Err(ProcessError::Reap(error)),
                     };
                     group.disarm();
+                    if let Err(error) = group.reap_watcher().await {
+                        return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
+                    }
                     if let Err(error) = confirm_reaped_group_exit(pid).await {
                         return Err(ProcessError::Cleanup { original: None, group: Some(error), leader: None, reap: None });
                     }
@@ -389,7 +391,10 @@ async fn run_host_process(
         }
         #[cfg(not(target_os = "linux"))]
         let confirmation_error = if reap_error.is_none() {
-            confirm_reaped_group_exit(pid).await.err()
+            match group.reap_watcher().await {
+                Ok(()) => confirm_reaped_group_exit(pid).await.err(),
+                Err(error) => Some(error),
+            }
         } else {
             None
         };

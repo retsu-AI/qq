@@ -24,8 +24,6 @@ pub(crate) mod windows_job;
 mod write;
 
 pub(crate) use dispatch::{ToolCancellation, ToolTaskLease};
-#[cfg(unix)]
-pub(crate) use shell::ProcessGroupGuard;
 
 /// Parse qualification envelopes with the same type used by shell dispatch.
 pub(crate) fn parsed_shell_command(arguments: &str) -> Option<String> {
