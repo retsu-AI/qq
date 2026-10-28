@@ -1931,17 +1931,6 @@ impl Store {
         .await
     }
 
-    #[cfg(test)]
-    pub(super) async fn approval_mode(
-        &self,
-        session_id: SessionId,
-    ) -> Result<ApprovalMode, SessionRuntimeError> {
-        self.call(Priority::Output, move |connection| {
-            load_approval_mode(connection, session_id)
-        })
-        .await
-    }
-
     /// Read local and inherited authority together on the serialized worker.
     pub(super) async fn tool_approval_policy(
         &self,

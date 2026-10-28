@@ -163,17 +163,11 @@ async fn emit(output: Output) {
 }
 
 struct CheckAuthority(Arc<std::sync::atomic::AtomicBool>);
-impl WorkspaceGrantAuthority for CheckAuthority {
+impl WorkspacePolicyAuthority for CheckAuthority {
     fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
         Box::pin(std::future::ready(Ok(GoalPolicy::default())))
     }
 
-    fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-        Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-    }
-    fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-        panic!("goal check authority is independent of ordinary grants")
-    }
     fn validate_goal_check(&self, _: &Path, command: &str) -> GoalCheckPolicyFuture {
         assert!(command == CHECK || command == CRASH_CHECK);
         let hold = self.0.load(Ordering::Acquire);

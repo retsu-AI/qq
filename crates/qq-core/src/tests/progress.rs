@@ -185,7 +185,7 @@ async fn run(
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Full,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -693,7 +693,7 @@ async fn a_truncated_stall_report_is_continued_under_one_notice() {
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Full,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -790,7 +790,7 @@ async fn an_interrupted_stall_report_keeps_its_notice_and_the_next_report_gets_o
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Full,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -901,7 +901,7 @@ async fn an_interrupted_final_answer_stays_final() {
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Full,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -960,7 +960,7 @@ async fn read_only_external_tools_are_reads_and_others_are_work() {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -1025,7 +1025,7 @@ async fn a_final_answer_turn_over_its_cost_bound_settles_as_exhausted() {
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::Full,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -1147,7 +1147,7 @@ fn ab1_verified_exec_reads_report_on_request_sixty_five() {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::default(),

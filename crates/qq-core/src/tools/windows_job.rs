@@ -83,15 +83,7 @@ pub(super) async fn spawn(
     cancelled: &ToolCancellation,
     deadline: Instant,
 ) -> io::Result<Child> {
-    spawn_prepared(
-        command,
-        directory,
-        process,
-        cancelled,
-        deadline,
-        |_| {},
-    )
-    .await
+    spawn_prepared(command, directory, process, cancelled, deadline, |_| {}).await
 }
 
 async fn spawn_prepared(

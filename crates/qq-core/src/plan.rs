@@ -1538,7 +1538,7 @@ mod tests {
                     spawn_agent: true,
                     search_history: true,
                     update_goal: false,
-                        read_tool_result: true,
+                    read_tool_result: true,
                     load_skill: true,
                     read_only: false,
                     unattended: false,
@@ -1756,7 +1756,7 @@ mod tests {
         // changing the encoding (descriptor 16: configured pack mutation authority).
         assert_eq!(
             descriptor.digest().unwrap().to_string(),
-            "0f0d96d0747b4f9eb5ebecde7c357751c684aeb1a789624151662afc01efee4a"
+            "84d7d72464c75e81d568860c37c86a6edacc34f045e3b53ed262582a01476e63"
         );
         let round_trip: AgentPlanDescriptor =
             serde_json::from_slice(&bytes[b"qq-agent-plan-descriptor-v16\0".len()..]).unwrap();
@@ -2547,7 +2547,7 @@ mod configured_pack_mutation_tests {
         let plan = CompiledAgentPlan::compile_blocking(profile).unwrap();
         let gate = Arc::new(crate::StaticPolicyGate {
             mode: qq_protocol::ApprovalMode::Auto,
-            grants: crate::approval::SessionGrants::default(),
+            tools: Default::default(),
             network: Arc::clone(&plan.runtime.network),
         });
         let messages = vec![qq_provider::Message::user("attempt the edits")];

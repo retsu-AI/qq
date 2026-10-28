@@ -705,93 +705,6 @@ mod tests {
     };
     use std::os::unix::fs::PermissionsExt as _;
 
-    #[tokio::test]
-    async fn captured_tool_environment_reaches_the_launched_process() {
-        let directory = tempfile::tempdir().unwrap();
-        let environment = crate::command_owner::NativeEnvironment::from_values([(
-            "UNLISTED_COMPILER_HOME".to_owned(),
-            "installed-compiler-input".into(),
-        )])
-        .unwrap();
-        let cancelled = ToolCancellation::new(RunCancellation::new());
-        let launch = OwnedLaunch::Shell(
-            serde_json::from_value(serde_json::json!({
-                "command": "printf '%s' \"$UNLISTED_COMPILER_HOME\"",
-            }))
-            .unwrap(),
-        );
-        let mut prepared = prepare(
-            Some(&environment),
-            Workspace::open(directory.path()).unwrap(),
-            launch,
-            Arc::default(),
-            Arc::default(),
-            None,
-            &cancelled,
-            Instant::now() + std::time::Duration::from_secs(5),
-        )
-        .unwrap();
-        let output = prepared.command.take().unwrap().output().await.unwrap();
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"installed-compiler-input");
-    }
-
-    #[test]
-    fn extra_captured_configuration_cannot_claim_a_verified_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let program = root.join("grep");
-        let image = test_read_image(0);
-        std::fs::write(&program, &image).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let approved = Arc::new(
-            ApprovedReadImages::new(vec![ApprovedReadImage {
-                family: ReadImageFamily::Grep,
-                sha256: ContentHash::from_bytes(Sha256::digest(&image).into()),
-                contract: ReadImageContract::SelfContainedReadV1,
-            }])
-            .unwrap(),
-        );
-        let cancelled = ToolCancellation::new(RunCancellation::new());
-        for extra in [false, true] {
-            let mut values = vec![("LANG".to_owned(), "C".into())];
-            if extra {
-                values.push(("RIPGREP_CONFIG_PATH".to_owned(), "tool-config".into()));
-            }
-            let environment = crate::command_owner::NativeEnvironment::from_values(values).unwrap();
-            let launch = OwnedLaunch::Exec(
-                serde_json::from_value(serde_json::json!({
-                    "program": program, "args": ["x", "f"],
-                }))
-                .unwrap(),
-            );
-            let prepared = prepare(
-                Some(&environment),
-                Workspace::open(&root).unwrap(),
-                launch,
-                approved.clone(),
-                Arc::default(),
-                None,
-                &cancelled,
-                Instant::now() + std::time::Duration::from_secs(5),
-            )
-            .unwrap();
-            if extra {
-                assert!(matches!(
-                    prepared.receipt.facts().verdict,
-                    ExecutionVerdict::Work {
-                        reason: UnverifiedReason::RequestedEnvironment
-                    }
-                ));
-            } else {
-                assert!(matches!(
-                    prepared.receipt.facts().verdict,
-                    ExecutionVerdict::VerifiedRead { .. }
-                ));
-            }
-        }
-    }
-
     #[test]
     fn ab1_verified_image_is_bound_and_unverified_effects_count_as_work() {
         if std::env::var_os("QQ_CONTEXT_IMAGE_WORKER").is_none() {
@@ -820,27 +733,7 @@ mod tests {
         let arguments = serde_json::json!({"program":program,"args":["x","f"]}).to_string();
         let workspace = Workspace::open(&root).unwrap();
         let cancelled = ToolCancellation::new(RunCancellation::new());
-        let mut requested: ExecArgs = serde_json::from_str(&arguments).unwrap();
-        requested.env.push("PATH".to_owned());
-        let unsupported = prepare(
-            None,
-            workspace.clone(),
-            OwnedLaunch::Exec(requested),
-            approved.clone(),
-            Arc::default(),
-            None,
-            &cancelled,
-            Instant::now() + std::time::Duration::from_secs(5),
-        )
-        .unwrap();
-        assert_eq!(
-            unsupported.receipt.facts().verdict,
-            ExecutionVerdict::Work {
-                reason: UnverifiedReason::RequestedEnvironment
-            }
-        );
         let unapproved = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             Arc::default(),
@@ -857,7 +750,6 @@ mod tests {
             }
         );
         let mut prepared = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             approved.clone(),
@@ -873,7 +765,6 @@ mod tests {
         ));
         std::fs::create_dir(root.join("work")).unwrap();
         let mut cwd_bound = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Shell(
                 serde_json::from_value(
@@ -942,7 +833,6 @@ mod tests {
         );
         assert!(!root.join("written.txt").exists());
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
-            None,
             workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -971,7 +861,6 @@ mod tests {
             .unwrap(),
         );
         let script_bound = prepare(
-            None,
             workspace.clone(),
             OwnedLaunch::Exec(serde_json::from_str(&arguments).unwrap()),
             script_approval,
@@ -990,7 +879,6 @@ mod tests {
         );
         std::fs::write(&program, &image).unwrap();
         let result = runtime.block_on(super::super::dispatch::execute_with_images(
-            None,
             workspace,
             Arc::default(),
             "exec".to_owned(),

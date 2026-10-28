@@ -208,8 +208,7 @@ impl IgnoreStack {
         if self.include_ignored {
             return false;
         }
-        if name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name))
-        {
+        if name.starts_with('.') || (is_dir && GENERATED_DIRECTORIES.contains(&name)) {
             return true;
         }
         for matcher in self.matchers.iter().rev().flatten() {

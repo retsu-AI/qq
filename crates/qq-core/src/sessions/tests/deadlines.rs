@@ -69,7 +69,6 @@ async fn duration_withdraws_pending_approval_without_executing_the_tool() {
             tool: "__test_mutate",
             arguments: "{}",
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Ask,
     )
@@ -116,7 +115,6 @@ async fn duration_limited_run_does_not_settle_when_process_cleanup_is_unconfirme
             tool: "shell",
             arguments: crate::tools::PANIC_SHELL_ARGUMENTS,
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Full,
     )
@@ -162,7 +160,6 @@ async fn duration_stops_shell_while_output_persistence_is_blocked() {
             tool: "shell",
             arguments: r#"{"command":"printf ready; sleep 30"}"#,
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::ByMode,
         }),
         ApprovalMode::Ask,
     )
@@ -241,7 +238,6 @@ async fn duration_waits_for_blocking_attachment_guidance_and_skill_cleanup() {
                 tool: "load_skill",
                 arguments: r#"{"name":"stable"}"#,
                 tool_turns: usize::from(kind == "skill"),
-                delegate: approval::ApprovalDelegate::ByMode,
             }),
             ApprovalMode::Full,
         )

@@ -224,10 +224,6 @@ pub(in crate::sessions) fn open_database(
             |row| row.get::<_, String>(0),
         )
         .optional()?;
-    // 65 dropped the approval grant, delegate and native command owner
-    // storage; the steps before it still create and check that storage for
-    // the stores they migrate.
-    let grants_retired = schema_version.as_deref() == Some("65");
     match schema_version.as_deref() {
         None => {
             let transaction = connection.transaction()?;
@@ -718,24 +714,14 @@ pub(in crate::sessions) fn open_database(
     ) {
         let transaction = connection.transaction()?;
         add_linear_streaming_storage(&transaction)?;
-        validate_linear_streaming_schema(&transaction, false)?;
+        validate_linear_streaming_schema(&transaction)?;
         transaction.execute(
             "UPDATE metadata SET value = '15' WHERE key = 'schema_version'",
             [],
         )?;
         transaction.commit()?;
-    } else if !grants_retired
-        && column_shape(
-            &connection,
-            "pending_workspace_grant_promotions",
-            "command_id",
-        )? != ("TEXT".to_owned(), true, None, 1)
-    {
-        let transaction = connection.transaction()?;
-        normalize_promotion_outbox(&transaction)?;
-        transaction.commit()?;
     }
-    validate_linear_streaming_schema(&connection, grants_retired)?;
+    validate_linear_streaming_schema(&connection)?;
     if !matches!(
         schema_version.as_deref(),
         Some(
@@ -1879,14 +1865,6 @@ pub(in crate::sessions) fn open_database(
         )?;
         transaction.commit()?;
     }
-    if !grants_retired
-        && (column_shape(&connection, "session_grants", "source")?
-            != ("TEXT".to_owned(), true, Some("'human'".to_owned()), 0)
-            || column_shape(&connection, "session_grants", "run_id")?
-                != ("TEXT".to_owned(), false, None, 0))
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
     // 36: a per-session override of who settles held calls
     // (`set_approval_delegate`). NULL means the configured `approval_delegate`
     // applies; a stored value (`by_mode`, `on`, `off`) is read by the gate at
@@ -1934,12 +1912,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
         transaction.commit()?;
-    }
-    if !grants_retired
-        && column_shape(&connection, "sessions", "approval_delegate")?
-            != ("TEXT".to_owned(), false, None, 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
     }
     // 37: persisted `max` effort requires a reader that understands it.
     if !matches!(
@@ -2347,13 +2319,6 @@ pub(in crate::sessions) fn open_database(
             [],
         )?;
         transaction.commit()?;
-    }
-    if has_tool_calls
-        && !grants_retired
-        && column_shape(&connection, "tool_calls", "approval_delegated")?
-            != ("INTEGER".to_owned(), true, Some("0".to_owned()), 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
     }
     // 46: owned internal compaction attempts belong to their prompt's spend
     // receipt. Add the bounded owner lookup after main's schema-45 migration.
@@ -2884,13 +2849,6 @@ pub(in crate::sessions) fn open_database(
     {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
-    if has_tool_calls
-        && !grants_retired
-        && column_shape(&connection, "tool_calls", "approval_escalation_json")?
-            != ("TEXT".to_owned(), false, None, 0)
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
 
     // 64: retire the `supervised` approval mode (see `retire_supervised_mode`).
     // Stores from before 62 already did so ahead of the receipt backfill.
@@ -2909,7 +2867,7 @@ pub(in crate::sessions) fn open_database(
     // have a native owner. Drop their storage and strip the removed fields
     // from journaled summaries and recorded hold inputs, whose decoders
     // reject unknown fields.
-    if !grants_retired {
+    if schema_version.as_deref() != Some("65") {
         let transaction = connection.transaction()?;
         retire_approval_delegate_fields(&transaction)?;
         if has_table(&transaction, "tool_calls")? {
@@ -3342,10 +3300,7 @@ fn normalize_promotion_outbox(connection: &Connection) -> Result<(), SessionRunt
         .map_err(|_| SessionRuntimeError::CONSTRAINT)
 }
 
-fn validate_linear_streaming_schema(
-    connection: &Connection,
-    grants_retired: bool,
-) -> Result<(), SessionRuntimeError> {
+fn validate_linear_streaming_schema(connection: &Connection) -> Result<(), SessionRuntimeError> {
     for (table, column) in [
         ("message_chunks", "message_id"),
         ("message_chunks", "channel"),
@@ -3353,13 +3308,7 @@ fn validate_linear_streaming_schema(
         ("message_chunks", "text"),
         ("runs", "context_base_bytes"),
         ("runs", "context_increment_bytes"),
-        ("pending_workspace_grant_promotions", "command_id"),
-        ("pending_workspace_grant_promotions", "created_at_ms"),
-        ("pending_workspace_grant_promotions", "promotion_json"),
     ] {
-        if grants_retired && table == "pending_workspace_grant_promotions" {
-            continue;
-        }
         if !has_column(connection, table, column)? {
             return Err(SessionRuntimeError::CONSTRAINT);
         }
@@ -3468,48 +3417,6 @@ fn validate_linear_streaming_schema(
     if !schema_sql.contains("check(channel in ('output', 'refusal'))")
         || !schema_sql.contains("check(chunk_ordinal > 0)")
     {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    if grants_retired {
-        return Ok(());
-    }
-    let mut promotion_columns =
-        connection.prepare("PRAGMA table_info(pending_workspace_grant_promotions)")?;
-    let promotion_columns = promotion_columns
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, u8>(5)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let expected_promotion_columns = [
-        ("command_id", "TEXT", true, 1_u8),
-        ("created_at_ms", "INTEGER", true, 0_u8),
-        ("promotion_json", "TEXT", true, 0_u8),
-    ];
-    if promotion_columns.len() != expected_promotion_columns.len()
-        || promotion_columns
-            .iter()
-            .zip(expected_promotion_columns)
-            .any(|((name, ty, not_null, primary_key), expected)| {
-                (name.as_str(), ty.as_str(), *not_null, *primary_key) != expected
-            })
-    {
-        return Err(SessionRuntimeError::CONSTRAINT);
-    }
-    let promotion_index: bool = connection.query_row(
-        "SELECT EXISTS(
-                 SELECT 1 FROM sqlite_schema
-                 WHERE type = 'index'
-                   AND name = 'pending_workspace_grant_promotions_fifo'
-             )",
-        [],
-        |row| row.get(0),
-    )?;
-    if !promotion_index {
         return Err(SessionRuntimeError::CONSTRAINT);
     }
     Ok(())

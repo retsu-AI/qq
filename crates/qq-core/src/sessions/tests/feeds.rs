@@ -530,14 +530,12 @@ async fn pending_approval_keeps_its_immutable_inputs_without_delivery_events() {
                     edit,
                     question,
                     fetch,
-                    delegated,
                     ..
                 } => Some(tool_calls::ApprovalPreviews {
                     shell: shell.as_deref().cloned(),
                     edit: edit.clone(),
                     question: question.as_deref().cloned(),
                     fetch: fetch.as_deref().cloned(),
-                    delegated: *delegated,
                 }),
                 _ => None,
             })
@@ -1125,130 +1123,6 @@ async fn a_cold_cursor_before_the_retained_journal_requires_a_snapshot() {
 }
 
 #[tokio::test]
-async fn unresolved_escalation_details_survive_reconnect_upgrade_and_resolution() {
-    let mut harness = approval_harness(
-        ApprovalMode::Ask,
-        "__test_mutate",
-        "{}",
-        1,
-        DEFAULT_APPROVAL_TIMEOUT,
-    )
-    .await;
-    let (_, call) = collect_until_approval_requested(&mut harness.events).await;
-    let store_id = harness.runtime.inner.store.store_id();
-    let workspace_id = harness.workspace_id;
-    let session_id = harness.session_id;
-    let call_id = call.id;
-    let run_id = call.run_id;
-    let expected = qq_protocol::ApprovalEscalation {
-        delegate: Some(DelegateIdentity::Reviewer),
-        reason: "The proposed edit needs a human decision".to_owned(),
-    };
-    let reason = expected.reason.clone();
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Output, move |connection| {
-            let command: String = connection.query_row(
-                "SELECT command_id FROM runs WHERE id=?1",
-                [run_id.to_string()],
-                |row| row.get(0),
-            )?;
-            let identity = RunIdentity {
-                workspace_id,
-                session_id,
-                run_id,
-                command_id: parse_id(&command)?,
-                kind: RunKind::Prompt,
-                child: false,
-            };
-            assert!(
-                tool_calls::escalate_tool_approval(
-                    connection,
-                    store_id,
-                    identity,
-                    call_id,
-                    Some(DelegateIdentity::Reviewer),
-                    &reason
-                )?
-                .is_some()
-            );
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let path = harness._directory.path().join("legacy-escalation.sqlite3");
-    let backup = path.clone();
-    harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            connection.execute("VACUUM INTO ?1", [backup.to_str().unwrap()])?;
-            connection.execute("DELETE FROM events", [])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    let snapshot = harness
-        .runtime
-        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
-        .await
-        .unwrap();
-    assert_eq!(
-        snapshot.focused.unwrap().approval_previews[0]
-            .preview
-            .escalated,
-        Some(expected.clone())
-    );
-    let legacy = Connection::open(&path).unwrap();
-    legacy
-        .execute_batch(
-            "DROP TRIGGER tool_calls_clear_approval_inputs;
-        ALTER TABLE tool_calls DROP COLUMN approval_escalation_json;
-        UPDATE metadata SET value='62' WHERE key='schema_version';",
-        )
-        .unwrap();
-    drop(legacy);
-    let (migrated, _) = store::open_database(&path).unwrap();
-    migrated.execute("DELETE FROM events", []).unwrap();
-    assert_eq!(
-        tool_calls::load_approval_preview(&migrated, call_id)
-            .unwrap()
-            .unwrap()
-            .escalated,
-        Some(expected)
-    );
-    drop(migrated);
-    respond_approval(&harness.runtime, run_id, call_id, ApprovalDecision::Deny)
-        .await
-        .unwrap();
-    collect_through_finished(&mut harness.events).await;
-    let snapshot = harness
-        .runtime
-        .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 32, 32))
-        .await
-        .unwrap();
-    assert!(snapshot.focused.unwrap().approval_previews.is_empty());
-    let retained: Option<String> = harness
-        .runtime
-        .inner
-        .store
-        .call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT approval_escalation_json FROM tool_calls WHERE id=?1",
-                [call_id.to_string()],
-                |row| row.get(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(retained, None);
-    harness.runtime.shutdown().await.unwrap();
-}
-
-#[tokio::test]
 async fn journal_retention_bounds_the_global_window_and_preserves_canonical_results() {
     let mut harness = scripted_runs_harness(ApprovalMode::ReadOnly, vec![Vec::new()]).await;
     let run = submit_prompt(&harness, "finish this task").await;
@@ -1359,8 +1233,6 @@ async fn journal_retention_bounds_the_global_window_and_preserves_canonical_resu
     legacy.execute_batch("DROP TRIGGER event_journal_insert; DROP TRIGGER event_journal_delete; DROP TRIGGER event_journal_update;
         DROP TABLE event_journal_usage; DROP INDEX messages_run_reply;
         DROP INDEX message_chunks_delivery; ALTER TABLE messages DROP COLUMN chunks_ordered;
-        DROP TRIGGER tool_calls_clear_approval_inputs;
-        ALTER TABLE tool_calls DROP COLUMN approval_escalation_json;
         UPDATE metadata SET value='62' WHERE key='schema_version';").unwrap();
     drop(legacy);
     let (migrated, _) = store::open_database(&legacy_path).unwrap();
@@ -1458,7 +1330,6 @@ async fn approval_recovery_is_scoped_to_the_root_family() {
             tool: "__test_mutate",
             arguments: "{}",
             tool_turns: 1,
-            delegate: approval::ApprovalDelegate::default(),
         }),
     )
     .await

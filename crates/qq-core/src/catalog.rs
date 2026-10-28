@@ -1305,7 +1305,6 @@ mod tests {
         // Host hints grant nothing under strict ReadOnly.
         assert_eq!(names, ["read_file"]);
     }
-
 }
 
 /// Entry points for the `catalog_compile` bench. Not a public API: the

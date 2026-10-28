@@ -1,33 +1,6 @@
 use super::*;
-use crate::command_owner::*;
-
-const OWNER: StoreId = StoreId::from_bytes([84; 16]);
 
 async fn queued_check(store: &Store, workspace: &Path) -> ClaimedRun {
-    let mut read_only = Vec::new();
-    if cfg!(target_os = "linux") {
-        for path in ["/bin", "/usr", "/lib", "/lib64", "/nix/store"] {
-            if let Ok(path) = Path::new(path).canonicalize()
-                && !read_only
-                    .iter()
-                    .any(|grant: &NativeDirectoryGrant| grant.path == path)
-            {
-                read_only.push(NativeDirectoryGrant::capture(&path).unwrap());
-            }
-        }
-    }
-    crate::sessions::native_scope::load(
-        store,
-        vec![NativeCommandScope {
-            read_access: Default::default(),
-            workspace: NativeDirectoryGrant::capture(workspace).unwrap(),
-            read_only,
-            network: NativeNetwork::Isolated,
-            resources: NativeResources::Host,
-        }],
-    )
-    .await
-    .unwrap();
     let (workspace_id, session, _) = create_claimed_parent(store, workspace).await;
     let store_id = store.store_id();
     store
@@ -76,881 +49,6 @@ async fn queued_check(store: &Store, workspace: &Path) -> ClaimedRun {
     store.reserve_next_run(false).await.unwrap().unwrap()
 }
 
-async fn pending_check(
-    store: &Store,
-    workspace: &Path,
-    owner: StoreId,
-) -> (ClaimedRun, ToolCallId) {
-    let claim = queued_check(store, workspace).await;
-    let store_id = store.store_id();
-    let captured = claim.clone();
-    let deadline = claim.check_deadline.unwrap().0;
-    let id = store
-        .call_write(Priority::Control, move |connection| {
-            match crate::sessions::goal_check::try_start(
-                connection, store_id, &captured, deadline, true, false,
-            )? {
-                crate::sessions::goal_check::Start::Started(_, Some(id)) => Ok(id),
-                _ => Err(SessionRuntimeError::CONSTRAINT),
-            }
-        })
-        .await
-        .unwrap();
-    store
-        .set_native_owner(claim.identity, id, Some(owner))
-        .await
-        .unwrap();
-    (claim, id)
-}
-
-fn result(code: i32) -> crate::tools::ToolOutput {
-    let mut result = crate::tools::dispatch::bounded_result("verified-result".into(), code != 0);
-    result.native_outcome = Some(NativeCommandOutcome::Exited { code: Some(code) });
-    result
-}
-
-#[tokio::test]
-async fn native_check_result_is_not_reclaimable_before_goal_settlement() {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().canonicalize().unwrap();
-    let store = Store::open(path.join("sessions.sqlite3")).await.unwrap();
-    let (claim, id) = pending_check(&store, &path, OWNER).await;
-    store
-        .finish_tool_call(
-            &claim,
-            id,
-            "verified-result".into(),
-            false,
-            vec![],
-            None,
-            None,
-            None,
-            Some(OWNER),
-        )
-        .await
-        .unwrap();
-    let saved = store
-        .call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT result_saved FROM native_command_owners WHERE tool_call_id=?1",
-                [id.to_string()],
-                |row| row.get::<_, bool>(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    store.close().await.unwrap();
-    assert!(
-        !saved,
-        "a crash before goal settlement must leave the typed worker result available"
-    );
-}
-
-struct Worker {
-    fault: Option<Fault>,
-    snapshot: CommandSnapshot,
-    acknowledgements: Arc<StdMutex<Vec<ToolCallId>>>,
-}
-impl NativeCommandService for Worker {
-    fn identity(&self) -> NativeCommandFuture<StoreId> {
-        let fault = self.fault;
-        Box::pin(async move {
-            match fault {
-                Some(Fault::UnavailableWorker) => Err(CommandOwnerError::Unavailable),
-                Some(Fault::ReplacedWorker) => Ok(StoreId::from_bytes([85; 16])),
-                _ => Ok(OWNER),
-            }
-        })
-    }
-    fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
-        panic!("recovery must not replay a command")
-    }
-    fn cancel(&self, _: ToolCallId) -> NativeCommandFuture<()> {
-        Box::pin(async { Ok(()) })
-    }
-    fn wait(&self, id: ToolCallId, _: u64) -> NativeCommandFuture<CommandSnapshot> {
-        assert!(
-            !matches!(
-                self.fault,
-                Some(Fault::ReplacedWorker | Fault::UnavailableWorker)
-            ),
-            "recovery must not query a different or unavailable journal"
-        );
-        let snapshot = self.snapshot.clone();
-        assert_eq!(snapshot.id, id);
-        Box::pin(async move { Ok(snapshot) })
-    }
-    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
-        self.acknowledgements.lock().unwrap().extend(ids);
-        Box::pin(async { Ok(()) })
-    }
-}
-
-#[tokio::test]
-async fn native_check_reopen_settles_the_same_goal_without_replay_or_new_consent() {
-    for (result_saved, detached_task, host_mode) in [
-        (false, false, None),
-        (true, false, None),
-        (false, true, None),
-        (true, true, None),
-        (false, false, Some(ApprovalMode::Full)),
-        (true, false, Some(ApprovalMode::Full)),
-        (false, false, Some(ApprovalMode::Ask)),
-        (true, false, Some(ApprovalMode::Ask)),
-    ] {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().canonicalize().unwrap();
-        let database = path.join("sessions.sqlite3");
-        let store = Store::open(database.clone()).await.unwrap();
-        let source = path.join("source");
-        std::fs::create_dir(&source).unwrap();
-        let (claim, id) = pending_check(&store, &source, OWNER).await;
-        let task_policy = if detached_task {
-            Some(persist_detached_check_scope(&store, &claim, &path, &source).await)
-        } else {
-            None
-        };
-        if let Some(mode) = host_mode {
-            let session = claim.identity.session_id;
-            store
-                .call_write(Priority::Control, move |connection| {
-                    connection
-                        .execute("DELETE FROM metadata WHERE key='native_command_scopes'", [])?;
-                    connection.execute(
-                        "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
-                        params![session.to_string(), approval_mode_str(mode)],
-                    )?;
-                    Ok(())
-                })
-                .await
-                .unwrap();
-        }
-        let run = claim.identity.run_id;
-        if result_saved {
-            store
-                .finish_tool_call(
-                    &claim,
-                    id,
-                    "verified-result".into(),
-                    false,
-                    vec![],
-                    None,
-                    None,
-                    None,
-                    Some(OWNER),
-                )
-                .await
-                .unwrap();
-        }
-        store.close().await.unwrap();
-        let acknowledgements = Arc::new(StdMutex::new(Vec::new()));
-        let worker = Worker {
-            fault: None,
-            snapshot: CommandSnapshot {
-                id,
-                version: 1,
-                status: CommandStatus::Finished,
-                process: None,
-                output: String::new(),
-                result: Some(
-                    serde_json::from_value(serde_json::to_value(result(0)).unwrap()).unwrap(),
-                ),
-            },
-            acknowledgements: acknowledgements.clone(),
-        };
-        let loader = Arc::new(ScriptedRunsLoader {
-            requests: Arc::default(),
-            runs: vec![],
-            loads: StdMutex::new(0),
-        });
-        let mut options = SessionRuntimeOptions::new(database.clone());
-        options.native_commands = Some(Arc::new(worker));
-        options.task_workspaces = task_policy;
-        let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: claim.identity.workspace_id,
-                after: EventCursor {
-                    store_id: runtime.store_id(),
-                    workspace_id: claim.identity.workspace_id,
-                    sequence: 0,
-                },
-            })
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let event = events.next().await.unwrap().unwrap();
-                if matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==run) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("recovered check settles");
-        let snapshot = runtime
-            .snapshot(SnapshotRequest::new(
-                claim.identity.workspace_id,
-                Some(claim.identity.session_id),
-                256,
-                256,
-            ))
-            .await
-            .unwrap()
-            .focused
-            .unwrap();
-        assert_eq!(
-            snapshot
-                .tool_calls
-                .iter()
-                .filter(|call| call.id == id)
-                .count(),
-            1
-        );
-        runtime.shutdown().await.unwrap();
-        let goal = snapshot.goal.unwrap();
-        assert_eq!(goal.goal_id, claim.goal.as_ref().unwrap().goal_id);
-        assert_eq!(
-            goal.status,
-            qq_protocol::GoalStatus::Achieved,
-            "saved result: {result_saved}, detached task: {detached_task}, host mode: {host_mode:?}"
-        );
-        assert_eq!(goal.counters.audits, 1);
-        assert_eq!(
-            goal.check_authorization,
-            Some(qq_protocol::GoalCheckAuthorization::Consumed)
-        );
-        assert!(acknowledgements.lock().unwrap().contains(&id));
-        assert_eq!(
-            *loader.loads.lock().unwrap(),
-            0,
-            "recovery must not load a provider"
-        );
-    }
-}
-
-async fn persist_detached_check_scope(
-    store: &Store,
-    claim: &ClaimedRun,
-    root: &Path,
-    source: &Path,
-) -> crate::sessions::TaskWorkspacePolicy {
-    let root = root.to_owned();
-    let source = source.to_owned();
-    let (record, policy) = tokio::task::spawn_blocking(move || {
-        let runtime = crate::Runtime::new(qq_provider::test_support::ScriptedProvider::new(vec![]), "demo", 256).unwrap();
-        let plan = crate::plan::CompiledAgentPlan::compile_blocking(crate::plan::AgentProfile::embedded(&runtime, source.clone())).unwrap();
-        let limits = crate::task_workspace::TaskWorkspaceLimits { max_entries: 16, max_bytes: 1024 };
-        let workspace = crate::task_workspace::TaskWorkspace::import(&crate::task_workspace::TaskWorkspaceSource::from_plan(&plan).unwrap(), &root.join("detached-task"), &[], limits).unwrap();
-        let scope = NativeCommandScope {
-            read_access: Default::default(),
-            workspace: workspace.directory_grant(),
-            read_only: vec![],
-            network: NativeNetwork::Isolated,
-            resources: NativeResources::Host,
-        };
-        let record = serde_json::json!({"source": NativeDirectoryGrant::capture(&source).unwrap(), "workspace": workspace, "scope": scope}).to_string();
-        let control = root.join("task-control");
-        std::fs::create_dir(&control).unwrap();
-        (record, crate::sessions::TaskWorkspacePolicy { read_access: Default::default(), network: crate::command_owner::NativeNetwork::Isolated, directory: NativeDirectoryGrant::capture(&control).unwrap(), read_only: vec![], resources: NativeResources::Host, limits })
-    }).await.unwrap();
-    let run = claim.identity.run_id;
-    store
-        .call_write(Priority::Control, move |connection| {
-            connection.execute("DELETE FROM metadata WHERE key='native_command_scopes'", [])?;
-            connection.execute(
-                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
-                params![format!("qq_task_run:{run}"), run.to_string()],
-            )?;
-            connection.execute(
-                "INSERT INTO metadata(key,value) VALUES(?1,?2)",
-                params![format!("qq_task_workspace:{run}"), record],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    policy
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Fault {
-    Cancelled,
-    Expired,
-    Edited,
-    ReplacedWorkspace,
-    ReplacedTaskWorkspace,
-    MissingTaskRecord,
-    UnprovenOutcome,
-    MissingService,
-    ReplacedWorker,
-    UnavailableWorker,
-}
-
-#[tokio::test]
-async fn native_check_recovery_preserves_cancellation_budgets_and_unknown_execution_holds() {
-    for (fault, detached_task) in [
-        Fault::Cancelled,
-        Fault::Expired,
-        Fault::Edited,
-        Fault::ReplacedWorkspace,
-        Fault::ReplacedTaskWorkspace,
-        Fault::MissingTaskRecord,
-        Fault::UnprovenOutcome,
-        Fault::MissingService,
-        Fault::ReplacedWorker,
-        Fault::UnavailableWorker,
-    ]
-    .into_iter()
-    .flat_map(|fault| [(fault, false), (fault, true)])
-    .filter(|(fault, detached)| {
-        *detached
-            || !matches!(
-                fault,
-                Fault::ReplacedTaskWorkspace | Fault::MissingTaskRecord
-            )
-    }) {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().canonicalize().unwrap();
-        let workspace = path.join("task");
-        std::fs::create_dir(&workspace).unwrap();
-        let database = path.join("sessions.sqlite3");
-        let store = Store::open(database.clone()).await.unwrap();
-        let (claim, id) = pending_check(&store, &workspace, OWNER).await;
-        let task_policy = if detached_task {
-            Some(persist_detached_check_scope(&store, &claim, &path, &workspace).await)
-        } else {
-            None
-        };
-        if matches!(fault, Fault::MissingTaskRecord) {
-            // A separate broad source registration must not hide a missing
-            // record for an execution already bound to a detached task.
-            crate::sessions::native_scope::load(
-                &store,
-                vec![NativeCommandScope {
-                    read_access: Default::default(),
-                    workspace: NativeDirectoryGrant::capture(&workspace).unwrap(),
-                    read_only: vec![],
-                    network: NativeNetwork::Isolated,
-                    resources: NativeResources::Host,
-                }],
-            )
-            .await
-            .unwrap();
-        }
-        let run = claim.identity.run_id;
-        let session = claim.identity.session_id;
-        store
-            .call_write(Priority::Control, move |connection| {
-                match fault {
-                    Fault::Cancelled => {
-                        connection.execute(
-                            "UPDATE runs SET cancel_requested=1 WHERE id=?1",
-                            [run.to_string()],
-                        )?;
-                    }
-                    Fault::Expired | Fault::Edited => {
-                        let mut goal =
-                            crate::sessions::goals::load_live(connection, session)?.unwrap();
-                        if matches!(fault, Fault::Expired) {
-                            goal.budget.deadline_ms = 0;
-                        } else {
-                            goal.revision += 1;
-                            goal.status = qq_protocol::GoalStatus::Paused {
-                                reason: qq_protocol::GoalPauseReason::User,
-                            };
-                        }
-                        crate::sessions::goals::save(connection, &goal)?;
-                    }
-                    Fault::MissingTaskRecord => {
-                        connection.execute(
-                            "DELETE FROM metadata WHERE key=?1",
-                            [format!("qq_task_workspace:{run}")],
-                        )?;
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })
-            .await
-            .unwrap();
-        store.close().await.unwrap();
-        if matches!(fault, Fault::ReplacedWorkspace) {
-            std::fs::rename(&workspace, path.join("old-task")).unwrap();
-            std::fs::create_dir(&workspace).unwrap();
-        }
-        if matches!(fault, Fault::ReplacedTaskWorkspace) {
-            let task = path.join("detached-task");
-            std::fs::rename(&task, path.join("original-detached-task")).unwrap();
-            std::fs::create_dir(&task).unwrap();
-        }
-        let mut output = result(0);
-        if matches!(fault, Fault::UnprovenOutcome) {
-            output.native_outcome = None;
-        }
-        let acknowledgements = Arc::new(StdMutex::new(Vec::new()));
-        let worker = Worker {
-            fault: Some(fault),
-            acknowledgements: acknowledgements.clone(),
-            snapshot: CommandSnapshot {
-                id,
-                version: 1,
-                status: CommandStatus::Finished,
-                process: None,
-                output: String::new(),
-                result: Some(
-                    serde_json::from_value(serde_json::to_value(output).unwrap()).unwrap(),
-                ),
-            },
-        };
-        let mut options = SessionRuntimeOptions::new(database);
-        options.task_workspaces = task_policy;
-        if !matches!(fault, Fault::MissingService) {
-            options.native_commands = Some(Arc::new(worker));
-        }
-        let loader = Arc::new(ScriptedRunsLoader {
-            requests: Arc::default(),
-            runs: vec![],
-            loads: StdMutex::new(0),
-        });
-        let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
-        let mut events = runtime
-            .subscribe(SubscribeRequest {
-                workspace_id: claim.identity.workspace_id,
-                after: EventCursor {
-                    store_id: runtime.store_id(),
-                    workspace_id: claim.identity.workspace_id,
-                    sequence: 0,
-                },
-            })
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let event = events.next().await.unwrap().unwrap();
-                if matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==run) {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{fault:?}: recovery did not settle"));
-        let snapshot = runtime
-            .snapshot(SnapshotRequest::new(
-                claim.identity.workspace_id,
-                Some(session),
-                256,
-                256,
-            ))
-            .await
-            .unwrap()
-            .focused
-            .unwrap();
-        let workspace_id = claim.identity.workspace_id;
-        let hold = runtime
-            .inner
-            .store
-            .call(Priority::Control, move |connection| {
-                Ok(crate::sessions::goal_check::interruption(connection, workspace_id)?.is_some())
-            })
-            .await
-            .unwrap();
-        runtime.shutdown().await.unwrap();
-        let goal = snapshot.goal.unwrap();
-        assert_ne!(
-            goal.status,
-            qq_protocol::GoalStatus::Achieved,
-            "{fault:?}: stale evidence must not attest current task success"
-        );
-        assert_eq!(
-            goal.counters.audits, 1,
-            "{fault:?}: recovery cannot rerun the audit"
-        );
-        assert_eq!(
-            goal.check_authorization,
-            Some(qq_protocol::GoalCheckAuthorization::Consumed)
-        );
-        assert_eq!(
-            *loader.loads.lock().unwrap(),
-            0,
-            "{fault:?}: recovery cannot start another provider run"
-        );
-        let unknown = matches!(
-            fault,
-            Fault::ReplacedWorkspace
-                | Fault::ReplacedTaskWorkspace
-                | Fault::MissingTaskRecord
-                | Fault::UnprovenOutcome
-                | Fault::MissingService
-                | Fault::ReplacedWorker
-                | Fault::UnavailableWorker
-        );
-        assert_eq!(
-            hold, unknown,
-            "{fault:?}: unknown execution retains the workspace hold"
-        );
-        assert_eq!(
-            acknowledgements.lock().unwrap().contains(&id),
-            !unknown,
-            "{fault:?}: reclaim only settled typed evidence"
-        );
-        match fault {
-            Fault::Expired => {
-                assert_eq!(goal.budget.deadline_ms, 0);
-                assert!(matches!(
-                    goal.status,
-                    qq_protocol::GoalStatus::BudgetExhausted {
-                        reason: qq_protocol::GoalExhaustion::Deadline
-                    }
-                ));
-            }
-            Fault::Edited => assert_eq!(goal.revision, claim.goal.as_ref().unwrap().revision + 1),
-            _ => {}
-        }
-    }
-}
-
-struct LiveWorker {
-    state: watch::Sender<CommandSnapshot>,
-    entered: Arc<tokio::sync::Notify>,
-    acknowledgements: Arc<StdMutex<Vec<ToolCallId>>>,
-}
-impl NativeCommandService for LiveWorker {
-    fn identity(&self) -> NativeCommandFuture<StoreId> {
-        Box::pin(async { Ok(OWNER) })
-    }
-    fn submit(&self, _: NativeCommand) -> NativeCommandFuture<()> {
-        panic!("a live command must not be resubmitted")
-    }
-    fn cancel(&self, _: ToolCallId) -> NativeCommandFuture<()> {
-        panic!("reconnecting is not cancellation")
-    }
-    fn wait(&self, id: ToolCallId, after: u64) -> NativeCommandFuture<CommandSnapshot> {
-        let mut state = self.state.subscribe();
-        let entered = self.entered.clone();
-        Box::pin(async move {
-            entered.notify_one();
-            let snapshot = state
-                .wait_for(|snapshot| snapshot.version > after)
-                .await
-                .map_err(|_| CommandOwnerError::Unavailable)?
-                .clone();
-            assert_eq!(snapshot.id, id);
-            Ok(snapshot)
-        })
-    }
-    fn acknowledge(&self, ids: Vec<ToolCallId>) -> NativeCommandFuture<()> {
-        self.acknowledgements.lock().unwrap().extend(ids);
-        Box::pin(async { Ok(()) })
-    }
-}
-
-#[tokio::test]
-async fn native_check_reopen_observes_live_execution_and_wakes_on_completion() {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().canonicalize().unwrap();
-    let database = path.join("sessions.sqlite3");
-    let store = Store::open(database.clone()).await.unwrap();
-    let (claim, id) = pending_check(&store, &path, OWNER).await;
-    store.close().await.unwrap();
-    let (state, _) = watch::channel(CommandSnapshot {
-        id,
-        version: 1,
-        status: CommandStatus::Running,
-        process: None,
-        output: String::new(),
-        result: None,
-    });
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let acknowledgements = Arc::new(StdMutex::new(Vec::new()));
-    let mut options = SessionRuntimeOptions::new(database);
-    options.native_commands = Some(Arc::new(LiveWorker {
-        state: state.clone(),
-        entered: entered.clone(),
-        acknowledgements: acknowledgements.clone(),
-    }));
-    let loader = Arc::new(ScriptedRunsLoader {
-        requests: Arc::default(),
-        runs: vec![],
-        loads: StdMutex::new(0),
-    });
-    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
-        .await
-        .unwrap();
-    let snapshot = runtime
-        .snapshot(SnapshotRequest::new(
-            claim.identity.workspace_id,
-            Some(claim.identity.session_id),
-            256,
-            256,
-        ))
-        .await
-        .unwrap()
-        .focused
-        .unwrap();
-    let goal = snapshot.goal.unwrap();
-    assert_eq!(goal.status, qq_protocol::GoalStatus::Active);
-    assert_eq!(goal.pending_run_id, Some(claim.identity.run_id));
-    assert_eq!(goal.counters.audits, 1);
-    assert!(acknowledgements.lock().unwrap().is_empty());
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: claim.identity.workspace_id,
-            after: EventCursor {
-                store_id: runtime.store_id(),
-                workspace_id: claim.identity.workspace_id,
-                sequence: 0,
-            },
-        })
-        .unwrap();
-    state.send_replace(CommandSnapshot {
-        id,
-        version: 2,
-        status: CommandStatus::Finished,
-        process: None,
-        output: String::new(),
-        result: Some(serde_json::from_value(serde_json::to_value(result(0)).unwrap()).unwrap()),
-    });
-    tokio::time::timeout(Duration::from_secs(5),async {
-        loop { let event=events.next().await.unwrap().unwrap();
-            if matches!(event.event,SessionEvent::RunFinished {run_id,outcome:RunOutcome::Completed,..} if run_id==claim.identity.run_id) {break;} }
-    }).await.expect("worker completion wakes the original goal");
-    let snapshot = runtime
-        .snapshot(SnapshotRequest::new(
-            claim.identity.workspace_id,
-            Some(claim.identity.session_id),
-            256,
-            256,
-        ))
-        .await
-        .unwrap()
-        .focused
-        .unwrap();
-    assert_eq!(
-        snapshot.goal.unwrap().status,
-        qq_protocol::GoalStatus::Achieved
-    );
-    runtime.shutdown().await.unwrap();
-    assert_eq!(*loader.loads.lock().unwrap(), 0);
-    assert!(acknowledgements.lock().unwrap().contains(&id));
-}
-
-#[tokio::test]
-async fn native_check_recovery_bounds_stalled_workspace_validation() {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().canonicalize().unwrap();
-    let database = path.join("sessions.sqlite3");
-    let store = Store::open(database.clone()).await.unwrap();
-    let (claim, id) = pending_check(&store, &path, OWNER).await;
-    store.close().await.unwrap();
-    let permits = crate::workspace::blocking_permits();
-    let held = permits
-        .clone()
-        .acquire_many_owned(u32::try_from(permits.available_permits()).unwrap())
-        .await
-        .unwrap();
-    let (state, _) = watch::channel(CommandSnapshot {
-        id,
-        version: 1,
-        status: CommandStatus::Finished,
-        process: None,
-        output: String::new(),
-        result: Some(serde_json::from_value(serde_json::to_value(result(0)).unwrap()).unwrap()),
-    });
-    let acknowledgements = Arc::new(StdMutex::new(Vec::new()));
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let mut options = SessionRuntimeOptions::new(database);
-    options.native_commands = Some(Arc::new(LiveWorker {
-        state,
-        entered: entered.clone(),
-        acknowledgements: acknowledgements.clone(),
-    }));
-    let loader = Arc::new(ScriptedRunsLoader {
-        requests: Arc::default(),
-        runs: vec![],
-        loads: StdMutex::new(0),
-    });
-    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
-    entered.notified().await;
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: claim.identity.workspace_id,
-            after: EventCursor {
-                store_id: runtime.store_id(),
-                workspace_id: claim.identity.workspace_id,
-                sequence: 0,
-            },
-        })
-        .unwrap();
-    let settled = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let event = events.next().await.unwrap().unwrap();
-            if matches!(event.event, SessionEvent::RunFinished {run_id, outcome: RunOutcome::Interrupted, ..} if run_id == claim.identity.run_id) { break; }
-        }
-    }).await;
-    let snapshot = runtime
-        .snapshot(SnapshotRequest::new(
-            claim.identity.workspace_id,
-            Some(claim.identity.session_id),
-            256,
-            256,
-        ))
-        .await
-        .unwrap()
-        .focused
-        .unwrap();
-    drop(held);
-    runtime.shutdown().await.unwrap();
-    assert!(
-        settled.is_ok(),
-        "recovery must release run ownership while filesystem capacity is still exhausted"
-    );
-    assert!(matches!(
-        snapshot.goal.unwrap().status,
-        qq_protocol::GoalStatus::Paused {
-            reason: qq_protocol::GoalPauseReason::NeedsUser {
-                cause: qq_protocol::GoalNeedsUser::CheckInterrupted
-            }
-        }
-    ));
-    assert!(
-        acknowledgements.lock().unwrap().is_empty(),
-        "unverified evidence must stay in the worker journal"
-    );
-    assert_eq!(*loader.loads.lock().unwrap(), 0);
-}
-
-#[cfg(target_os = "linux")]
-#[tokio::test]
-async fn native_check_real_linux_result_survives_coordinator_loss_without_reexecution() {
-    let directory = TempDir::new().unwrap();
-    let path = directory.path().canonicalize().unwrap();
-    let workspace = path.join("task");
-    std::fs::create_dir(&workspace).unwrap();
-    let database = path.join("sessions.sqlite3");
-    let owner = CommandOwner::open(
-        path.join("commands"),
-        "unknown",
-        crate::command_owner::tests::launcher(),
-    )
-    .await
-    .unwrap();
-    let store = Store::open(database.clone()).await.unwrap();
-    let (claim, id) = pending_check(&store, &workspace, owner.store_id()).await;
-    let policy = crate::sessions::native_scope::load(&store, vec![])
-        .await
-        .unwrap()
-        .unwrap()
-        .get(&workspace)
-        .unwrap();
-    let arguments = store
-        .call(Priority::Control, move |connection| {
-            Ok(connection.query_row(
-                "SELECT arguments_json FROM tool_calls WHERE id=?1",
-                [id.to_string()],
-                |row| row.get::<_, String>(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    owner
-        .submit(NativeCommand {
-            task_git_call: None,
-            id,
-            workspace: workspace.clone(),
-            workspace_identity: policy.workspace.identity,
-            tool: "shell".into(),
-            arguments,
-            environment: NativeEnvironment::capture(&[]).unwrap(),
-            filesystem: policy.filesystem(),
-            network: policy.network,
-            resources: policy.resources,
-            shell_policy: crate::ShellPolicy::default(),
-            approved_images: vec![],
-            not_after_ms: Some(claim.check_deadline.unwrap().0),
-        })
-        .await
-        .unwrap();
-    let mut version = 0;
-    let completed = loop {
-        let snapshot = owner.wait(id, version).await.unwrap();
-        if snapshot.status == CommandStatus::Finished {
-            break snapshot.result.unwrap();
-        }
-        version = snapshot.version;
-    };
-    let unavailable = completed
-        .text()
-        .contains("required Linux filesystem enforcement is unavailable")
-        || completed
-            .text()
-            .contains("required Linux network enforcement is unavailable");
-    if !unavailable {
-        assert_eq!(
-            completed.outcome(),
-            Some(NativeCommandOutcome::Exited { code: Some(0) }),
-            "{}",
-            completed.text()
-        );
-    }
-    // The coordinator never received or saved the terminal worker observation.
-    store.close().await.unwrap();
-    let mut options = SessionRuntimeOptions::new(database);
-    options.native_commands = Some(Arc::new(owner.clone()));
-    let loader = Arc::new(ScriptedRunsLoader {
-        requests: Arc::default(),
-        runs: vec![],
-        loads: StdMutex::new(0),
-    });
-    let runtime = SessionRuntime::open(options, loader.clone()).await.unwrap();
-    let mut events = runtime
-        .subscribe(SubscribeRequest {
-            workspace_id: claim.identity.workspace_id,
-            after: EventCursor {
-                store_id: runtime.store_id(),
-                workspace_id: claim.identity.workspace_id,
-                sequence: 0,
-            },
-        })
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10),async {loop {let event=events.next().await.unwrap().unwrap();
-        if matches!(event.event,SessionEvent::RunFinished {run_id,..} if run_id==claim.identity.run_id) {break;}
-    }}).await.unwrap();
-    let snapshot = runtime
-        .snapshot(SnapshotRequest::new(
-            claim.identity.workspace_id,
-            Some(claim.identity.session_id),
-            256,
-            256,
-        ))
-        .await
-        .unwrap()
-        .focused
-        .unwrap();
-    runtime.shutdown().await.unwrap();
-    if unavailable {
-        assert_ne!(
-            snapshot.goal.unwrap().status,
-            qq_protocol::GoalStatus::Achieved
-        );
-        assert!(!workspace.join("counter").exists());
-    } else {
-        assert_eq!(
-            snapshot.goal.unwrap().status,
-            qq_protocol::GoalStatus::Achieved
-        );
-        assert_eq!(
-            std::fs::read_to_string(workspace.join("counter")).unwrap(),
-            "once"
-        );
-        assert!(matches!(
-            owner.snapshot(id).await,
-            Err(CommandOwnerError::Retired)
-        ));
-    }
-    assert_eq!(*loader.loads.lock().unwrap(), 0);
-    owner.shutdown().await.unwrap();
-}
-
 #[tokio::test]
 async fn check_execution_authority_uses_current_mode_and_requires_auto_containment() {
     use qq_protocol::GoalCheckAuthorization as Authorization;
@@ -961,19 +59,16 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
     let (_, parent, _) = create_claimed_parent(&store, &path).await;
     store
         .call_write(Priority::Control, move |connection| {
-            for (mode, authorization, native, task_workspaces, expected) in [
-                ("auto", Authorization::TaskScoped, true, true, Some(true)),
-                ("auto", Authorization::TaskScoped, false, true, None),
-                ("auto", Authorization::TaskScoped, true, false, None),
-                ("auto", Authorization::Once, true, false, None),
-                ("auto", Authorization::ForGoal, false, true, None),
-                ("auto", Authorization::ForGoal, true, true, Some(true)),
-                ("full", Authorization::TaskScoped, true, true, None),
-                ("ask", Authorization::TaskScoped, true, true, None),
-                ("read_only", Authorization::TaskScoped, true, true, None),
-                ("full", Authorization::ForGoal, false, false, Some(false)),
-                ("ask", Authorization::Once, false, false, Some(false)),
-                ("read_only", Authorization::ForGoal, true, true, None),
+            for (mode, authorization, expected) in [
+                ("auto", Authorization::TaskScoped, Some(true)),
+                ("auto", Authorization::Once, Some(true)),
+                ("auto", Authorization::ForGoal, Some(true)),
+                ("full", Authorization::TaskScoped, None),
+                ("ask", Authorization::TaskScoped, None),
+                ("read_only", Authorization::TaskScoped, None),
+                ("full", Authorization::ForGoal, Some(false)),
+                ("ask", Authorization::Once, Some(false)),
+                ("read_only", Authorization::ForGoal, None),
             ] {
                 connection.execute(
                     "UPDATE sessions SET approval_mode=?2 WHERE id=?1",
@@ -984,11 +79,9 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
                         connection,
                         session,
                         Some(authorization),
-                        native,
-                        task_workspaces
                     )?,
                     expected,
-                    "mode={mode}, auth={authorization:?}, native={native}, tasks={task_workspaces}"
+                    "mode={mode}, auth={authorization:?}"
                 );
             }
             connection.execute(
@@ -1004,8 +97,6 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
                     connection,
                     session,
                     Some(Authorization::ForGoal),
-                    true,
-                    true
                 )?,
                 None
             );
@@ -1018,8 +109,6 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
                     connection,
                     session,
                     Some(Authorization::TaskScoped),
-                    true,
-                    true
                 )?,
                 Some(true)
             );
@@ -1033,8 +122,6 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
                         connection,
                         session,
                         Some(Authorization::ForGoal),
-                        true,
-                        true
                     )?,
                     None,
                     "{mode} child cannot escape Auto parent containment"
@@ -1053,8 +140,6 @@ async fn check_execution_authority_uses_current_mode_and_requires_auto_containme
                     connection,
                     session,
                     Some(Authorization::TaskScoped),
-                    true,
-                    true
                 )?,
                 None
             );
@@ -1072,7 +157,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
     let path = directory.path().canonicalize().unwrap();
     let database = path.join("sessions.sqlite3");
     let store = Store::open(database.clone()).await.unwrap();
-    let (mut claim, _) = pending_check(&store, &path, OWNER).await;
+    let mut claim = queued_check(&store, &path).await;
     let session = claim.identity.session_id;
     Arc::make_mut(claim.goal.as_mut().unwrap()).check_authorization =
         Some(Authorization::TaskScoped);
@@ -1094,9 +179,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
     store
         .call_write(Priority::Control, move |connection| {
             assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, true, true
-                )?,
+                crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
                 Some(true)
             );
             for mode in ["ask", "read_only", "full"] {
@@ -1105,9 +188,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
                     params![session.to_string(), mode],
                 )?;
                 assert_eq!(
-                    crate::sessions::goal_check::execution_scope_required(
-                        connection, &claim, true, true
-                    )?,
+                    crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
                     None,
                     "{mode}"
                 );
@@ -1117,16 +198,8 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
                 [session.to_string()],
             )?;
             assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, false, true
-                )?,
-                None
-            );
-            assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, true, false
-                )?,
-                None
+                crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
+                Some(true)
             );
             let mut goal = crate::sessions::goals::load_live(connection, session)?.unwrap();
             goal.check_authorization = Some(Authorization::ForGoal);
@@ -1138,9 +211,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
                 [session.to_string()],
             )?;
             assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, false, false
-                )?,
+                crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
                 Some(false)
             );
             connection.execute(
@@ -1148,9 +219,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
                 [session.to_string()],
             )?;
             assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, true, true
-                )?,
+                crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
                 None
             );
             assert_eq!(
@@ -1164,9 +233,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
                 [session.to_string()],
             )?;
             assert_eq!(
-                crate::sessions::goal_check::execution_scope_required(
-                    connection, &claim, false, false
-                )?,
+                crate::sessions::goal_check::execution_scope_required(connection, &claim)?,
                 Some(false)
             );
             Ok(())
@@ -1177,7 +244,7 @@ async fn check_dispatch_revalidates_task_authority_after_restart_and_mode_revoca
 }
 
 #[tokio::test]
-async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_approval() {
+async fn auto_check_under_a_non_auto_parent_settles_as_policy_refusal_without_requeue() {
     use crate::sessions::goal_check::{self, Completion, Start};
     let directory = TempDir::new().unwrap();
     let path = directory.path().canonicalize().unwrap();
@@ -1186,6 +253,7 @@ async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_app
     Arc::make_mut(claim.goal.as_mut().unwrap()).check_authorization =
         Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
     let session = claim.identity.session_id;
+    let (_, parent, _) = create_claimed_parent(&store, &path).await;
     let store_id = store.store_id();
     store
         .call_write(Priority::Control, move |connection| {
@@ -1193,14 +261,18 @@ async fn unavailable_auto_check_settles_as_policy_refusal_without_requeue_or_app
             goal.check_authorization = Some(qq_protocol::GoalCheckAuthorization::TaskScoped);
             crate::sessions::goals::save(connection, &goal)?;
             connection.execute(
-                "UPDATE sessions SET approval_mode='auto' WHERE id=?1",
-                [session.to_string()],
+                "UPDATE sessions SET approval_mode='auto', parent_id=?2 WHERE id=?1",
+                params![session.to_string(), parent.to_string()],
+            )?;
+            connection.execute(
+                "UPDATE sessions SET approval_mode='ask' WHERE id=?1",
+                [parent.to_string()],
             )?;
             let deadline = claim.check_deadline.unwrap().0;
             let Start::Policy(error) =
-                goal_check::try_start(connection, store_id, &claim, deadline, false, false)?
+                goal_check::try_start(connection, store_id, &claim, deadline)?
             else {
-                panic!("missing native task containment must refuse before check start");
+                panic!("an Auto check under an Ask parent must refuse before check start");
             };
             let transaction = store::begin_unit(connection)?;
             goal_check::finish_in_transaction(

@@ -54,7 +54,6 @@ mod tests {
         let call = ToolCallId::generate().unwrap();
         let arguments = r#"{"program":"true","args":[]}"#;
         let result = crate::tools::dispatch::execute_with_images(
-            None,
             plan.workspace.clone(),
             Arc::default(),
             "exec".to_owned(),
@@ -108,7 +107,6 @@ mod tests {
         )
         .unwrap();
         let receipt = ExecutionContextReceipt::V2(ExecutionContextProof {
-            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: ToolCallId::generate().unwrap(),
                 arguments_sha256: ContentHash::from_bytes([1; 32]),
@@ -180,7 +178,6 @@ mod tests {
             executable_sha256: ContentHash::from_bytes([8; 32]),
         };
         let mut proof = ExecutionContextProof {
-            task_git: None,
             facts: ExecutionContextFacts {
                 context_id: id,
                 arguments_sha256: arguments_digest("exec", arguments).unwrap(),
@@ -266,10 +263,10 @@ mod tests {
             ),
             ProcessEvidenceStatus::UnsupportedV1
         );
+        // `env` is no longer an exec argument: such arguments bind no receipt.
         let contradictory_args = r#"{"program":"/usr/bin/grep","args":["x","f"],"env":["LANG"]}"#;
-        let mut contradictory = proof.clone();
-        contradictory.facts.arguments_sha256 =
-            arguments_digest("exec", contradictory_args).unwrap();
+        assert_eq!(arguments_digest("exec", contradictory_args), None);
+        let contradictory = proof.clone();
         assert_eq!(
             validate_process_evidence(
                 id,
@@ -281,7 +278,7 @@ mod tests {
                 Some(&identity),
                 Some(&pin)
             ),
-            ProcessEvidenceStatus::InvalidReceipt
+            ProcessEvidenceStatus::InvalidArguments
         );
         let original = proof.clone();
         proof.facts.arguments_sha256 = ContentHash::from_bytes([9; 32]);

@@ -29,8 +29,6 @@ mod goal_upgrade;
 mod goals;
 mod loop_guard;
 mod migrations;
-mod native_recovery;
-mod native_scope;
 mod nonblocking;
 mod progress;
 mod projection;
@@ -38,7 +36,6 @@ mod replay_identity;
 mod runs;
 mod settlement;
 mod streaming;
-mod task_git;
 mod undo;
 
 use std::sync::Mutex as StdMutex;
@@ -1102,9 +1099,6 @@ struct ApprovalLoader {
     tool: &'static str,
     arguments: &'static str,
     tool_turns: usize,
-    /// Who settles the held call, as the composition root would configure
-    /// it on the plan.
-    delegate: approval::ApprovalDelegate,
 }
 
 impl RuntimeLoader for ApprovalLoader {
@@ -1117,16 +1111,9 @@ impl RuntimeLoader for ApprovalLoader {
             tool_turns: self.tool_turns,
             usage: None,
         };
-        let delegate = self.delegate;
         Box::pin(async move {
             Runtime::new(provider, "test-model", 256)
-                .map(|runtime| {
-                    loaded_runtime(
-                        runtime.with_approval_delegate(delegate),
-                        &request.workspace,
-                        None,
-                    )
-                })
+                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
                 .map_err(|error| RuntimeLoadError {
                     kind: RunFailureKind::Configuration,
                     message: error.to_string(),
@@ -1276,33 +1263,12 @@ async fn scripted_runs_harness(
 async fn scripted_runs_harness_with_authority(
     mode: ApprovalMode,
     runs: Vec<Vec<(&'static str, String)>>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-) -> ScriptedRunsHarness {
-    scripted_runs_harness_with(mode, runs, grant_authority, None).await
-}
-
-async fn scripted_runs_harness_with(
-    mode: ApprovalMode,
-    runs: Vec<Vec<(&'static str, String)>>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-) -> ScriptedRunsHarness {
-    scripted_runs_harness_with_commands(mode, runs, grant_authority, approval_reviewer, None).await
-}
-
-async fn scripted_runs_harness_with_commands(
-    mode: ApprovalMode,
-    runs: Vec<Vec<(&'static str, String)>>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-    native_commands: Option<Arc<dyn crate::command_owner::NativeCommandService>>,
+    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 ) -> ScriptedRunsHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.grant_authority = grant_authority;
-    options.approval_reviewer = approval_reviewer;
-    options.native_commands = native_commands;
     let runtime = SessionRuntime::open(
         options,
         Arc::new(ScriptedRunsLoader {
@@ -1402,102 +1368,24 @@ async fn approval_harness_with_authority(
     arguments: &'static str,
     tool_turns: usize,
     approval_timeout: Option<Duration>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-) -> ApprovalHarness {
-    approval_harness_with_reviewer(
-        mode,
-        tool,
-        arguments,
-        tool_turns,
-        approval_timeout,
-        grant_authority,
-        None,
-    )
-    .await
-}
-
-async fn approval_harness_with_reviewer(
-    mode: ApprovalMode,
-    tool: &'static str,
-    arguments: &'static str,
-    tool_turns: usize,
-    approval_timeout: Option<Duration>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-) -> ApprovalHarness {
-    approval_harness_with_delegate(
-        mode,
-        tool,
-        arguments,
-        tool_turns,
-        approval_timeout,
-        grant_authority,
-        approval_reviewer,
-        approval::ApprovalDelegate::ByMode,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn approval_harness_with_delegate(
-    mode: ApprovalMode,
-    tool: &'static str,
-    arguments: &'static str,
-    tool_turns: usize,
-    approval_timeout: Option<Duration>,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-    delegate: approval::ApprovalDelegate,
-) -> ApprovalHarness {
-    approval_harness_with_clocks(
-        mode,
-        tool,
-        arguments,
-        tool_turns,
-        approval_timeout,
-        DEFAULT_DELEGATE_TIMEOUT,
-        grant_authority,
-        approval_reviewer,
-        delegate,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn approval_harness_with_clocks(
-    mode: ApprovalMode,
-    tool: &'static str,
-    arguments: &'static str,
-    tool_turns: usize,
-    approval_timeout: Option<Duration>,
-    delegate_timeout: Duration,
-    grant_authority: Option<Arc<dyn WorkspaceGrantAuthority>>,
-    approval_reviewer: Option<Arc<dyn ApprovalReviewer>>,
-    delegate: approval::ApprovalDelegate,
+    grant_authority: Option<Arc<dyn WorkspacePolicyAuthority>>,
 ) -> ApprovalHarness {
     let directory = test_directory();
     let requests = Arc::new(StdMutex::new(Vec::new()));
     let runtime = SessionRuntime::open(
         SessionRuntimeOptions {
-            task_workspaces: None,
-            task_git: None,
-            native_scopes: Vec::new(),
-            native_commands: None,
             database_path: directory.path().join("sessions.sqlite3"),
             max_active_runs: 1,
             max_active_side_queries: None,
             side_query_limits: SideQueryLimits::default(),
             approval_timeout,
-            delegate_timeout,
             grant_authority,
-            approval_reviewer,
         },
         Arc::new(ApprovalLoader {
             requests: Arc::clone(&requests),
             tool,
             arguments,
             tool_turns,
-            delegate,
         }),
     )
     .await
@@ -1843,7 +1731,6 @@ async fn spill_one_call(
                 digest: digest.clone(),
                 omitted_from_line: 2,
             }),
-            None,
             None,
         )
         .await
@@ -2359,69 +2246,6 @@ async fn claimed_store_fixture() -> (TempDir, Store, ClaimedRun) {
         .unwrap();
     let claimed = store.claim_next_run(false).await.unwrap().unwrap();
     (directory, store, claimed)
-}
-
-/// Exercises persisted approval transactions without making Auto's live gate
-/// manufacture a human hold. Admission and execution are tested separately.
-async fn stored_approval_fixture(
-    tool: &str,
-    arguments: &str,
-) -> (TempDir, Store, ClaimedRun, ToolCallId) {
-    let (directory, store, claimed) = claimed_store_fixture().await;
-    let runtime = Runtime::new(StaticTextProvider, "test-model", 256).unwrap();
-    let loaded = loaded_runtime(runtime, directory.path().to_str().unwrap(), None);
-    let effect = loaded
-        .plan
-        .catalog
-        .lookup(tool)
-        .map(|entry| entry.effect)
-        .or_else(|| crate::tools::test_tool_effect(tool))
-        .expect("known fixture tool");
-    let id = ToolCallId::generate().unwrap();
-    let call = RuntimeToolCall {
-        id,
-        turn_ordinal: 1,
-        call_ordinal: 1,
-        provider_call_id: "stored-approval".to_owned(),
-        name: tool.to_owned(),
-        effect,
-        arguments: arguments.to_owned(),
-        rejection: None,
-    };
-    store
-        .persist_model_turn(
-            &claimed,
-            ModelTurnCommit {
-                model_work: crate::runtime::ModelWorkDisposition::Committed,
-                goal_notices: Vec::new(),
-                reserved_goal_notices: 0,
-                turn_ordinal: 1,
-                message: Message::new(
-                    Role::Assistant,
-                    vec![ContentBlock::tool_call(
-                        call.provider_call_id.clone(),
-                        call.name.clone(),
-                        &serde_json::from_str::<serde_json::Value>(&call.arguments).unwrap(),
-                    )],
-                ),
-                calls: vec![call],
-                turn_message: None,
-                context_tokens: None,
-                occupancy_basis: None,
-                usage: None,
-                estimated_cost_usd_nanos: None,
-                accounting: None,
-                truncated: false,
-                notice: None,
-            },
-        )
-        .await
-        .unwrap();
-    store
-        .request_tool_approval(&claimed, id, ApprovalPreviews::default())
-        .await
-        .unwrap();
-    (directory, store, claimed, id)
 }
 
 async fn streaming_transaction_state(store: &Store, run_id: RunId) -> (u64, u64, u64, u64, u64) {
@@ -4334,7 +4158,6 @@ async fn project_terminal_run_with_tool_boundaries(
             None,
             None,
             None,
-            None,
         )
         .await
         .unwrap();
@@ -4539,115 +4362,6 @@ impl Provider for ContextBudgetProvider {
             }),
             Ok(qq_provider::ProviderEvent::Completed { usage: None }),
         ]))
-    }
-}
-
-/// Scripted grant authority: hands every session a fixed seed and
-/// answers promotions with a fixed outcome, recording every request.
-struct ScriptedGrantAuthority {
-    seed: WorkspaceGrantSeed,
-    outcome: WorkspaceGrantOutcome,
-    seeded: StdMutex<Vec<PathBuf>>,
-    promotions: StdMutex<Vec<(PathBuf, ApprovalGrant)>>,
-}
-
-impl ScriptedGrantAuthority {
-    fn new(seed: WorkspaceGrantSeed, outcome: WorkspaceGrantOutcome) -> Arc<Self> {
-        Arc::new(Self {
-            seed,
-            outcome,
-            seeded: StdMutex::new(Vec::new()),
-            promotions: StdMutex::new(Vec::new()),
-        })
-    }
-}
-
-impl WorkspaceGrantAuthority for ScriptedGrantAuthority {
-    fn seed_grants(&self, workspace: &Path) -> GrantSeedFuture {
-        self.seeded.lock().unwrap().push(workspace.to_owned());
-        Box::pin(std::future::ready(self.seed.clone()))
-    }
-
-    fn promote_grant(&self, workspace: &Path, grant: &ApprovalGrant) -> GrantPromotionFuture {
-        self.promotions
-            .lock()
-            .unwrap()
-            .push((workspace.to_owned(), grant.clone()));
-        Box::pin(std::future::ready(self.outcome.clone()))
-    }
-}
-
-/// The `workspace_grant_promoted` event for a responded approval. It is
-/// published by a background task, so it may land before or after the
-/// run's terminal event: check what was already collected, then poll.
-async fn grant_promotion_event(
-    observed: &[SessionEventEnvelope],
-    events: &mut SessionEventStream,
-) -> SessionEventEnvelope {
-    if let Some(event) = observed
-        .iter()
-        .find(|event| matches!(event.event, SessionEvent::WorkspaceGrantPromoted { .. }))
-    {
-        return event.clone();
-    }
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let event = events.next().await.unwrap().unwrap();
-            if matches!(event.event, SessionEvent::WorkspaceGrantPromoted { .. }) {
-                return event;
-            }
-        }
-    })
-    .await
-    .unwrap()
-}
-
-/// A reviewer whose verdict is released by the test: `hold` starts
-/// occupied, and dropping or sending on the release channel lets the
-/// verdict return. Consultations are counted for never-consulted cases.
-struct StubReviewer {
-    verdict: ReviewVerdict,
-    release: StdMutex<Option<oneshot::Receiver<()>>>,
-    consulted: Arc<StdMutex<Vec<ReviewRequest>>>,
-}
-
-impl StubReviewer {
-    fn immediate(verdict: ReviewVerdict) -> (Arc<Self>, Arc<StdMutex<Vec<ReviewRequest>>>) {
-        let consulted = Arc::new(StdMutex::new(Vec::new()));
-        (
-            Arc::new(Self {
-                verdict,
-                release: StdMutex::new(None),
-                consulted: Arc::clone(&consulted),
-            }),
-            consulted,
-        )
-    }
-
-    fn held(verdict: ReviewVerdict) -> (Arc<Self>, oneshot::Sender<()>) {
-        let (sender, receiver) = oneshot::channel();
-        (
-            Arc::new(Self {
-                verdict,
-                release: StdMutex::new(Some(receiver)),
-                consulted: Arc::new(StdMutex::new(Vec::new())),
-            }),
-            sender,
-        )
-    }
-}
-
-impl ApprovalReviewer for StubReviewer {
-    fn review(&self, request: ReviewRequest) -> ReviewFuture {
-        self.consulted.lock().unwrap().push(request);
-        let release = self.release.lock().unwrap().take();
-        let verdict = self.verdict.clone();
-        Box::pin(async move {
-            if let Some(release) = release {
-                let _ = release.await;
-            }
-            verdict
-        })
     }
 }
 
@@ -5537,7 +5251,6 @@ impl RuntimeLoader for WriteChildLoader {
 async fn write_child_harness(
     child: Arc<dyn Provider>,
     parent_script: Vec<(&'static str, String)>,
-    reviewer: Option<Arc<dyn ApprovalReviewer>>,
     parent_mode: ApprovalMode,
 ) -> (SpawnHarness, Arc<StdMutex<Vec<ModelRequest>>>) {
     let parent_requests = Arc::new(StdMutex::new(Vec::new()));
@@ -5550,9 +5263,6 @@ async fn write_child_harness(
     let mut options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
     options.max_active_runs = 8;
     options.approval_timeout = Some(Duration::from_secs(2));
-    if let Some(reviewer) = reviewer {
-        options = options.with_approval_reviewer(reviewer);
-    }
     let runtime = SessionRuntime::open(
         options,
         Arc::new(WriteChildLoader {
@@ -6119,14 +5829,8 @@ async fn child_budget_harness_with_window(
     child_context_window: Option<u32>,
 ) -> SpawnHarness {
     let directory = test_directory();
-    let mut verdict = ReviewVerdict::free(ReviewDecision::Approve);
-    if child_context_window.is_some() {
-        verdict.spend.usage = Some(TokenUsage::default());
-    }
-    let (reviewer, _) = StubReviewer::immediate(verdict);
     let runtime = SessionRuntime::open(
-        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"))
-            .with_approval_reviewer(reviewer),
+        SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3")),
         Arc::new(ChildBudgetLoader {
             inner: QueueLoader {
                 routed: vec![("test/child", child)],

@@ -102,7 +102,6 @@ async fn historical_projection_fixture(version: u16) {
                 None,
                 None,
                 None,
-                None,
             )
             .await
             .unwrap();
@@ -220,7 +219,6 @@ async fn projection_fixture(
                 "original per-call text".to_owned(),
                 false,
                 Vec::new(),
-                None,
                 None,
                 None,
                 None,

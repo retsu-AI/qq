@@ -87,20 +87,8 @@ static READ_FAULTS: std::sync::Mutex<Vec<(std::path::PathBuf, bool)>> =
     std::sync::Mutex::new(Vec::new());
 
 #[cfg(test)]
-static READ_CHUNK_LIMITS: std::sync::Mutex<Vec<(std::path::PathBuf, usize)>> =
-    std::sync::Mutex::new(Vec::new());
-#[cfg(test)]
 static STOP_OBSERVERS: std::sync::Mutex<Vec<(u32, tokio::sync::oneshot::Sender<()>)>> =
     std::sync::Mutex::new(Vec::new());
-
-#[cfg(test)]
-pub(crate) fn limit_shell_read_chunks(workspace: &std::path::Path, bytes: usize) {
-    assert!(bytes > 0 && bytes <= SHELL_READ_CHUNK_BYTES);
-    READ_CHUNK_LIMITS
-        .lock()
-        .unwrap()
-        .push((workspace.to_owned(), bytes));
-}
 
 #[cfg(test)]
 pub(crate) fn observe_shell_termination(pid: u32) -> tokio::sync::oneshot::Receiver<()> {
@@ -484,16 +472,6 @@ pub(super) async fn run_shell(
     let mut streamed = 0_usize;
     let mut buffered_output = Vec::with_capacity(SHELL_READ_CHUNK_BYTES);
     let mut output_flush = std::pin::pin!(tokio::time::sleep(OUTPUT_FLUSH_INTERVAL));
-    #[cfg(test)]
-    let read_chunk_bytes = {
-        let mut limits = READ_CHUNK_LIMITS.lock().unwrap();
-        limits
-            .iter()
-            .position(|(path, _)| path == workspace.path())
-            .map(|index| limits.remove(index).1)
-            .unwrap_or(SHELL_READ_CHUNK_BYTES)
-    };
-    #[cfg(not(test))]
     let read_chunk_bytes = SHELL_READ_CHUNK_BYTES;
     let mut stdout_buffer = vec![0_u8; read_chunk_bytes];
     let mut stderr_buffer = vec![0_u8; read_chunk_bytes];
@@ -1085,7 +1063,6 @@ mod identity_tests {
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     run_shell(
-                        None,
                         &workspace,
                         &ShellPolicy::default(),
                         std::sync::Arc::default(),

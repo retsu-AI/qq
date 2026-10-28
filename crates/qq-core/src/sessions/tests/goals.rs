@@ -755,7 +755,7 @@ async fn client_revision_is_shown_once_without_refreshing_model_control_authorit
         RunCancellation::new(),
         Arc::new(crate::StaticPolicyGate {
             mode: ApprovalMode::ReadOnly,
-            grants: Default::default(),
+            tools: Default::default(),
             network: Arc::default(),
         }),
         Arc::new(crate::workspace::FileState::default()),
@@ -1169,7 +1169,7 @@ async fn steering_between_ordered_calls_stops_the_remaining_goal_edits() {
             RunCancellation::new(),
             Arc::new(crate::StaticPolicyGate {
                 mode: ApprovalMode::ReadOnly,
-                grants: Default::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(crate::workspace::FileState::default()),
@@ -1248,7 +1248,7 @@ async fn steering_while_goal_write_waits_for_capacity_prevents_admission() {
         RunCancellation::new(),
         Arc::new(crate::StaticPolicyGate {
             mode: ApprovalMode::ReadOnly,
-            grants: Default::default(),
+            tools: Default::default(),
             network: Arc::default(),
         }),
         Arc::new(crate::workspace::FileState::default()),
@@ -1342,17 +1342,11 @@ async fn goal_check_policy_denies_new_authority_but_not_committed_replays() {
         unavailable: AtomicBool,
         checks: AtomicUsize,
     }
-    impl WorkspaceGrantAuthority for Authority {
+    impl WorkspacePolicyAuthority for Authority {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             Box::pin(std::future::ready(Ok(GoalPolicy::default())))
         }
 
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("goal authorization must not promote ordinary grants")
-        }
         fn validate_goal_check(&self, workspace: &Path, command: &str) -> GoalCheckPolicyFuture {
             assert!(workspace.is_absolute());
             assert_eq!(command, "true");
@@ -3786,7 +3780,6 @@ async fn goal_parent51_upgrade_retains_notices_and_process_receipts() {
             None,
             None,
             Some(Box::new(receipt.clone())),
-            None,
         )
         .await
         .unwrap();
@@ -7895,7 +7888,7 @@ async fn goal_write_capacity_wait_obeys_cancellation_and_deadline() {
             cancellation.clone(),
             Arc::new(crate::StaticPolicyGate {
                 mode: ApprovalMode::ReadOnly,
-                grants: Default::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(crate::workspace::FileState::default()),
@@ -8269,13 +8262,7 @@ async fn goal_workspace_policy_fences_direct_commands_and_preserves_replays_and_
         unavailable: AtomicBool,
         pending: AtomicBool,
     }
-    impl WorkspaceGrantAuthority for Authority {
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("goal policy cannot promote tool authority")
-        }
+    impl WorkspacePolicyAuthority for Authority {
         fn goal_policy(&self, workspace: &Path) -> GoalPolicyFuture {
             if self.pending.load(Ordering::SeqCst) {
                 return Box::pin(std::future::pending());
@@ -8569,13 +8556,7 @@ fn goal_policy_checks_each_budget_dimension_against_its_fixed_anchor() {
 #[tokio::test]
 async fn goal_policy_tightening_before_load_or_main_start_prevents_provider_work() {
     struct Authority(Arc<AtomicUsize>);
-    impl WorkspaceGrantAuthority for Authority {
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("policy checks cannot promote grants")
-        }
+    impl WorkspacePolicyAuthority for Authority {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             let max = self.0.load(Ordering::SeqCst);
             Box::pin(std::future::ready(if max == 0 {
@@ -8816,15 +8797,9 @@ async fn goal_adoption_ignores_owned_compaction_but_detects_preempting_prompts()
 #[tokio::test]
 async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
     struct Authority(bool);
-    impl WorkspaceGrantAuthority for Authority {
-        fn seed_grants(&self, _: &Path) -> GrantSeedFuture {
-            Box::pin(std::future::ready(WorkspaceGrantSeed::default()))
-        }
+    impl WorkspacePolicyAuthority for Authority {
         fn goal_policy(&self, _: &Path) -> GoalPolicyFuture {
             Box::pin(std::future::ready(Ok(GoalPolicy::default())))
-        }
-        fn promote_grant(&self, _: &Path, _: &ApprovalGrant) -> GrantPromotionFuture {
-            panic!("automatic checks must not promote grants")
         }
         fn validate_goal_check(&self, _: &Path, _: &str) -> GoalCheckPolicyFuture {
             Box::pin(std::future::ready(if self.0 {
@@ -8834,35 +8809,12 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             }))
         }
     }
-    for (mode, native, task, denied, command, expected) in [
-        (ApprovalMode::Auto, true, true, false, "true", "task_scoped"),
-        (
-            ApprovalMode::Auto,
-            false,
-            true,
-            false,
-            "true",
-            "unavailable",
-        ),
-        (
-            ApprovalMode::Auto,
-            true,
-            false,
-            false,
-            "true",
-            "unavailable",
-        ),
-        (ApprovalMode::Auto, true, true, true, "true", "denied"),
-        (
-            ApprovalMode::Auto,
-            true,
-            true,
-            false,
-            "sudo true",
-            "forbidden",
-        ),
-        (ApprovalMode::Ask, true, true, false, "true", "pending"),
-        (ApprovalMode::Full, true, true, false, "true", "pending"),
+    for (mode, denied, command, expected) in [
+        (ApprovalMode::Auto, false, "true", "task_scoped"),
+        (ApprovalMode::Auto, true, "true", "denied"),
+        (ApprovalMode::Auto, false, "sudo true", "forbidden"),
+        (ApprovalMode::Ask, false, "true", "pending"),
+        (ApprovalMode::Full, false, "true", "pending"),
     ] {
         for scope in [
             None,
@@ -8872,33 +8824,13 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             let directory = TempDir::new().unwrap();
             let root = directory.path().canonicalize().unwrap();
             let workspace = root.join("work");
-            let control = root.join("control");
             std::fs::create_dir(&workspace).unwrap();
-            std::fs::create_dir(&control).unwrap();
             let mut options = SessionRuntimeOptions::new(root.join("sessions.sqlite3"));
             options.grant_authority = Some(Arc::new(Authority(denied)));
-            if native {
-                options.native_commands = Some(Arc::new(goal_check::CheckService { code: 0 }));
-            }
-            if task {
-                options.task_workspaces = Some(crate::sessions::TaskWorkspacePolicy {
-                    read_access: Default::default(),
-                    network: crate::command_owner::NativeNetwork::Isolated,
-                    directory: crate::command_owner::NativeDirectoryGrant::capture(&control)
-                        .unwrap(),
-                    read_only: vec![],
-                    resources: crate::command_owner::NativeResources::Host,
-                    limits: crate::task_workspace::TaskWorkspaceLimits {
-                        max_entries: 16,
-                        max_bytes: 4096,
-                    },
-                });
-            }
             let runtime = SessionRuntime::open(options, Arc::new(ScriptedLoader))
                 .await
                 .unwrap();
-            // This test covers admission. Execution is held; native protection is
-            // qualified separately by the real-worker check tests.
+            // This test covers admission; execution is held.
             let held = Arc::clone(&runtime.inner.permits)
                 .acquire_many_owned(runtime.inner.permits.available_permits() as u32)
                 .await
@@ -8919,12 +8851,6 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
             .unwrap();
             let result = runtime.command(id, command.clone()).await;
             match expected {
-                "unavailable" => assert!(matches!(
-                    result,
-                    Err(SessionRuntimeError::GoalCheckPolicy(
-                        GoalCheckPolicyError::Unavailable
-                    ))
-                )),
                 "denied" => assert!(matches!(
                     result,
                     Err(SessionRuntimeError::GoalCheckPolicy(
@@ -8977,7 +8903,7 @@ async fn auto_goal_checks_derive_contained_authority_without_human_consent() {
                     }
                 }
             }
-            if matches!(expected, "unavailable" | "denied" | "forbidden") {
+            if matches!(expected, "denied" | "forbidden") {
                 let snapshot = runtime
                     .snapshot(SnapshotRequest::new(workspace_id, Some(session_id), 8, 8))
                     .await

@@ -2414,7 +2414,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::default(),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -3037,7 +3037,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::ReadOnly,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::default(),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -3129,7 +3129,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -4528,7 +4528,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5031,7 +5031,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5766,7 +5766,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -5833,7 +5833,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6244,7 +6244,7 @@ mod tests {
             RunCancellation::new(),
             Arc::new(StaticPolicyGate {
                 mode: ApprovalMode::ReadOnly,
-                grants: approval::SessionGrants::default(),
+                tools: Default::default(),
                 network: Arc::default(),
             }),
             Arc::new(workspace::FileState::default()),
@@ -6318,7 +6318,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6385,7 +6385,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -6804,7 +6804,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -7573,7 +7573,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Auto,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -8013,7 +8013,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -9759,13 +9759,13 @@ mod tests {
             "383e1411a666c1e00b7acbfa598eb9cbe4af5224eb6892614d11511ea5305542"
         );
         // AB2 widens the cursor bound; AB3 removes the fixed read-limit default.
-        // Native Auto updates the shell environment description as well.
+        // Run-in-place drops the shell and exec `env` argument.
         // Record the current schema identity separately from the historical prompt.
         assert_eq!(
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "521e3115c1cf748d75b32e337ce10c086b8e424d569a905238bd63e5917b32ef"
+            "3a38ed59c2e281ed5fc3840f0adb9bef802939981d9fa0f18c2e65bacabda725"
         );
         let spawn = specs.last().unwrap();
         assert!(
@@ -10289,7 +10289,7 @@ mod tests {
                         RunCancellation::new(),
                         Arc::new(StaticPolicyGate {
                             mode,
-                            grants: approval::SessionGrants::default(),
+                            tools: Default::default(),
                             network: Arc::default(),
                         }),
                         Arc::new(workspace::FileState::default()),
@@ -10365,12 +10365,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Full,
-                    grants: approval::SessionGrants {
-                        tools: ["edit_file".to_owned()].into_iter().collect(),
-                        shell_prefixes: Vec::new(),
-                        hosts: Vec::new(),
-                        delegate: approval::DelegateGrants::default(),
-                    },
+                    tools: ["edit_file".to_owned()].into_iter().collect(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -10399,85 +10394,6 @@ mod tests {
             std::fs::read_to_string(directory.path().join("note.txt")).unwrap(),
             "before"
         );
-    }
-
-    #[tokio::test]
-    async fn task_git_without_session_capability_never_reaches_approval_or_execution() {
-        struct NoApproval;
-        impl ToolGate for NoApproval {
-            fn resolve(&self, call: &RuntimeToolCall) -> ToolGateFuture {
-                panic!("unavailable task operation reached approval: {}", call.name);
-            }
-        }
-        let directory = tempfile::tempdir().unwrap();
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let runtime = Runtime::new(
-            TurnScript {
-                turns: vec![
-                    vec![
-                        ("task_commit", r#"{"message":"task"}"#.into()),
-                        ("task_push", "{}".into()),
-                        ("task_pr", r#"{"title":"task","body":"body"}"#.into()),
-                    ],
-                    Vec::new(),
-                ],
-                requests: Arc::clone(&requests),
-            },
-            "test-model",
-            256,
-        )
-        .unwrap();
-        let workspace = directory.path().canonicalize().unwrap();
-        let plan = tokio::task::spawn_blocking(move || {
-            plan::CompiledAgentPlan::compile_blocking(plan::AgentProfile::embedded(
-                &runtime, workspace,
-            ))
-            .unwrap()
-        })
-        .await
-        .unwrap();
-        let events = plan
-            .execute(
-                vec![Message::user("commit the task")],
-                RunCancellation::new(),
-                Arc::new(NoApproval),
-                Arc::new(workspace::FileState::default()),
-                RunCapabilities::user(None),
-            )
-            .collect::<Vec<_>>()
-            .await;
-        assert!(
-            matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
-            "{events:?}"
-        );
-        assert_eq!(
-            events
-                .iter()
-                .filter(|event| matches!(
-                    event,
-                    RuntimeEvent::ToolCallUnexecuted { .. }
-                        | RuntimeEvent::ToolCallFinished { is_error: true, .. }
-                ))
-                .count(),
-            3,
-            "{events:?}"
-        );
-        assert!(!events.iter().any(|event| matches!(
-            event,
-            RuntimeEvent::ToolCallFinished {
-                is_error: false,
-                ..
-            }
-        )));
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        for request in requests.iter() {
-            assert!(
-                tool_names(request)
-                    .iter()
-                    .all(|name| !matches!(*name, "task_commit" | "task_push" | "task_pr"))
-            );
-        }
     }
 
     #[tokio::test]
@@ -10631,7 +10547,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::Auto,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::clone(&plan.runtime.network),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -10759,16 +10675,13 @@ mod tests {
                             RunCancellation::new(),
                             Arc::new(ConfiguredToolGate(StaticPolicyGate {
                                 mode: ApprovalMode::Auto,
-                                grants: approval::SessionGrants {
-                                    tools: plan
-                                        .descriptor()
-                                        .tools
-                                        .config_grants
-                                        .iter()
-                                        .cloned()
-                                        .collect(),
-                                    ..approval::SessionGrants::default()
-                                },
+                                tools: plan
+                                    .descriptor()
+                                    .tools
+                                    .config_grants
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
                                 network: Arc::default(),
                             })),
                             Arc::new(workspace::FileState::default()),
@@ -10924,7 +10837,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::clone(&plan.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -11052,7 +10965,7 @@ mod tests {
                     RunCancellation::new(),
                     Arc::new(StaticPolicyGate {
                         mode: ApprovalMode::Auto,
-                        grants: approval::SessionGrants::default(),
+                        tools: Default::default(),
                         network: Arc::clone(&plan.runtime.network),
                     }),
                     Arc::new(workspace::FileState::default()),
@@ -11450,7 +11363,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::ReadOnly,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::clone(&plan.runtime.network),
                 }),
                 Arc::new(workspace::FileState::default()),
@@ -11665,7 +11578,7 @@ mod tests {
                 RunCancellation::new(),
                 Arc::new(StaticPolicyGate {
                     mode: ApprovalMode::Ask,
-                    grants: approval::SessionGrants::default(),
+                    tools: Default::default(),
                     network: Arc::default(),
                 }),
                 Arc::new(workspace::FileState::default()),
