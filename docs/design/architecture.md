@@ -802,8 +802,8 @@ place of completing when the model returned no tool calls. A provider request
 already sent is never rewritten. An interrupting steer bumps a per-run watch
 generation the loop observes inside the provider stream `select!`, the
 approval wait, and the tool execution `select!`: the in-flight future is
-dropped (which kills a shell process group and abandons MCP and child
-awaits), streamed text stands as the partial turn, tool calls the model had
+dropped (which kills a shell process group, except a command that already
+yielded to `command_status`, and abandons MCP and child awaits), streamed text stands as the partial turn, tool calls the model had
 begun are discarded because their arguments may be incomplete, and calls
 awaiting approval or executing settle as interrupted with an error result so
 the transcript stays provider-valid. Applied steering is persisted with the

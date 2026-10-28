@@ -19,9 +19,10 @@ use super::{
 pub(super) const DEFAULT_YIELD_AFTER_SECS: u64 = 30;
 /// The longest one `command_status` call blocks its turn.
 pub(crate) const MAX_COMMAND_WAIT_SECS: u64 = 600;
-const DEFAULT_COMMAND_WAIT_SECS: u64 = 30;
-/// Yielded commands one run keeps at once. A command started while the
-/// table is full runs to completion in its call instead.
+pub(super) const DEFAULT_COMMAND_WAIT_SECS: u64 = 30;
+/// Yielded commands one run keeps at once, running or finished but unread.
+/// A full table forgets its oldest unread finished command; when all are
+/// running, a new command runs to completion in its call instead.
 const MAX_YIELDED_COMMANDS: usize = 16;
 
 #[derive(Deserialize)]
@@ -40,11 +41,12 @@ const fn default_wait() -> u64 {
 
 /// One run's yielded commands, by the id their call returned.
 #[derive(Default)]
-pub(super) struct Commands(Mutex<Table>);
+pub(crate) struct Commands(Mutex<Table>);
 
 #[derive(Default)]
 struct Table {
-    next: u64,
+    /// Numbers commands that have no call id (direct test executions).
+    unnamed: u64,
     commands: Vec<(String, Arc<Command>)>,
 }
 
@@ -65,6 +67,11 @@ impl Command {
         result.execution_context = None;
         result.native_outcome = None;
         self.result.send_replace(Some(result));
+    }
+
+    #[cfg(test)]
+    pub(super) fn cancel_requested(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 
     fn running(&self) -> ToolOutput {
@@ -95,9 +102,12 @@ impl Command {
 }
 
 impl Commands {
-    /// Registers a running command, or `None` when the table is full.
+    /// Registers a running command, or `None` when the table is full. The
+    /// id is `c` and the call id's first eight hex digits, so an id from an
+    /// earlier run of the session never names a command of this one.
     pub(super) fn register(
         &self,
+        call: Option<qq_protocol::ToolCallId>,
         tool: &'static str,
         started: tokio::time::Instant,
         capture: Arc<Mutex<BoundedCapture>>,
@@ -105,10 +115,22 @@ impl Commands {
     ) -> Option<Arc<Command>> {
         let mut table = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if table.commands.len() >= MAX_YIELDED_COMMANDS {
+            let finished = table
+                .commands
+                .iter()
+                .position(|(_, command)| command.result.borrow().is_some())?;
+            table.commands.remove(finished);
+        }
+        let id = match call {
+            Some(call) => format!("c{}", &call.to_string()[..8]),
+            None => {
+                table.unnamed += 1;
+                format!("c{}", table.unnamed)
+            }
+        };
+        if table.commands.iter().any(|(known, _)| *known == id) {
             return None;
         }
-        table.next += 1;
-        let id = format!("c{}", table.next);
         let command = Arc::new(Command {
             id: id.clone(),
             tool,
@@ -127,6 +149,21 @@ impl Commands {
             .unwrap_or_else(PoisonError::into_inner)
             .commands
             .retain(|(known, _)| known != id);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn all_finished(&self) {
+        let commands = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .commands
+            .iter()
+            .map(|(_, command)| command.result.subscribe())
+            .collect::<Vec<_>>();
+        for mut result in commands {
+            let _ = result.wait_for(Option::is_some).await;
+        }
     }
 
     fn find(&self, id: &str) -> Option<Arc<Command>> {
@@ -167,15 +204,20 @@ impl Commands {
                 "unknown_command: no running command {id:?} in this run; ids come from a shell or exec result that says it is still running"
             ));
         };
-        if arguments.cancel {
+        // A cancel waits for the kill and reap, still bounded: a task that
+        // never finishes must not hold the turn.
+        let wait = if arguments.cancel {
             command.cancel.cancel();
-        }
+            arguments.wait_seconds.max(DEFAULT_COMMAND_WAIT_SECS)
+        } else {
+            arguments.wait_seconds
+        };
         let mut result = command.result.subscribe();
         let finished = tokio::select! {
             biased;
             () = cancelled.cancelled() => return ToolOutput::interrupted("tool execution was cancelled"),
             finished = result.wait_for(Option::is_some) => finished.ok().and_then(|result| result.clone()),
-            () = tokio::time::sleep(std::time::Duration::from_secs(arguments.wait_seconds)), if !arguments.cancel => None,
+            () = tokio::time::sleep(std::time::Duration::from_secs(wait)) => None,
         };
         match finished {
             Some(result) => {

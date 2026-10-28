@@ -566,10 +566,11 @@ pub(super) async fn run_shell(
                 () = &mut cancelled => break exited.is_none().then_some(ShellOutcome::Cancelled),
                 () = &mut timeout => break exited.is_none().then_some(ShellOutcome::TimedOut),
                 () = &mut drain, if exited.is_some() => break None,
-                () = &mut yield_timer, if yield_armed => {
+                () = &mut yield_timer, if yield_armed && exited.is_none() => {
                     yield_armed = false;
                     if let Some(yielding) = yielding.as_deref_mut()
                         && let Some(command) = yielding.tasks.commands().register(
+                            call_id,
                             launch.header_tool(),
                             started,
                             std::sync::Arc::clone(&capture),
@@ -751,10 +752,14 @@ pub(super) async fn run_shell(
     let mut result = result;
     result.execution_context = receipt;
     drop(prepared);
-    if let Some(command) = yielding.and_then(|yielding| yielding.command.as_ref()) {
-        command.finish(result.clone());
+    // A yielded call already settled: its result belongs to `command_status`.
+    match yielding.and_then(|yielding| yielding.command.as_ref()) {
+        Some(command) => {
+            command.finish(result);
+            ToolOutput::unobserved("the command result went to command_status")
+        }
+        None => result,
     }
-    result
 }
 
 /// `<tool> exit=running id=<id> elapsed=<s> bytes=<n>`, the output so far,

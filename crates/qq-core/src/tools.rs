@@ -1,5 +1,5 @@
 pub(crate) mod ask;
-mod commands;
+pub(crate) mod commands;
 pub(crate) mod dispatch;
 mod edit;
 #[cfg(feature = "tool-fetch")]
@@ -155,8 +155,8 @@ pub mod bench_support {
     }
 }
 pub(crate) use dispatch::{
-    ResultDisposition, SpillRecord, StopYieldedOnDrop, ToolDrainError, ToolOutput, ToolTasks,
-    bounded_result, execute_with_images,
+    ResultDisposition, SpillRecord, ToolDrainError, ToolOutput, ToolTasks, bounded_result,
+    execute_with_images,
 };
 #[cfg(test)]
 pub(crate) use edit::hold_tool_apply;
@@ -3512,7 +3512,7 @@ mod tests {
             crate::runtime::tool_schema_measurement(&specs)
                 .hash
                 .to_string(),
-            "285e379ac833a9fba2176f5296d3735ffa0e24ff555d678e50e5f13774ae60ae"
+            "18b8c7e06cd2f016433bdf5bd2ee4188b69074a7b732adfdb000d8e28002a248"
         );
     }
 
@@ -5514,6 +5514,56 @@ mod tests {
             .expect("teardown must stop yielded commands")
             .unwrap();
         assert_process_exits(parse_marked_pid(&second.model_text)).await;
+    }
+
+    /// A table full of finished but unread commands still takes a new one,
+    /// and `cancel` waits a bounded time even if the command never ends.
+    #[tokio::test(start_paused = true)]
+    async fn the_command_table_forgets_unread_results_and_cancel_is_bounded() {
+        let tasks = ToolTasks::default();
+        let started = tokio::time::Instant::now();
+        let register = || {
+            tasks.commands().register(
+                None,
+                "shell",
+                started,
+                Arc::new(std::sync::Mutex::new(BoundedCapture::new(64))),
+                Arc::default(),
+            )
+        };
+        for _ in 0..16 {
+            register()
+                .expect("the table has room")
+                .finish(ToolOutput::success("done".to_owned()));
+        }
+        let running = register().expect("a finished, unread command makes room");
+        assert!(
+            tasks
+                .commands()
+                .status(
+                    r#"{"id":"c1"}"#,
+                    &ToolCancellation::new(RunCancellation::new())
+                )
+                .await
+                .model_text
+                .starts_with("unknown_command:")
+        );
+        let stopped = tasks
+            .commands()
+            .status(
+                &format!(
+                    r#"{{"id":"{}","cancel":true,"wait_seconds":0}}"#,
+                    running.id
+                ),
+                &ToolCancellation::new(RunCancellation::new()),
+            )
+            .await;
+        assert!(
+            stopped.model_text.contains("state=running"),
+            "{}",
+            stopped.model_text
+        );
+        assert!(running.cancel_requested());
     }
 
     /// The whole output of a long command is kept for `read_tool_result`,

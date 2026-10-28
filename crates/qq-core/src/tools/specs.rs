@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::{
     ask::{MAX_OPTION_BYTES, MAX_OPTIONS, MAX_QUESTION_BYTES, MAX_QUESTIONS, MIN_OPTIONS},
-    commands::{DEFAULT_YIELD_AFTER_SECS, MAX_COMMAND_WAIT_SECS},
+    commands::{DEFAULT_COMMAND_WAIT_SECS, DEFAULT_YIELD_AFTER_SECS, MAX_COMMAND_WAIT_SECS},
     edit::MAX_EDITS,
     read::MAX_READ_LINES,
     search::{
@@ -212,7 +212,7 @@ impl BuiltInTool {
             Self::Shell => ToolSpec::new(
                 "shell",
                 format!(
-                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). It runs as the user with the inherited environment and host network, with TERM=dumb, NO_COLOR=1 and PAGER=cat. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. A command still running after yield_after_seconds (default {} s) returns a command id and keeps running; follow it with command_status. The {} is killed on timeout or cancel.",
+                    "Run one shell command in the workspace via `{}`. Not for reading files or searching; use read_file, search, tree. Capture combined stdout and stderr (head+tail; the full output is stored). It runs as the user with the inherited environment and host network, with TERM=dumb and, unless set, NO_COLOR=1 and PAGER=cat. Uses the task deadline unless timeout_seconds imposes an earlier limit; no implicit command runtime cap. A command still running after yield_after_seconds (default {} s) returns a command id and keeps running; follow it with command_status. The {} is killed on timeout or cancel.",
                     if cfg!(windows) { "cmd /C" } else { "sh -c" },
                     DEFAULT_YIELD_AFTER_SECS,
                     if cfg!(windows) {
@@ -498,7 +498,7 @@ pub(crate) fn command_status_spec() -> ToolSpec {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": MAX_COMMAND_WAIT_SECS,
-                    "default": 30,
+                    "default": DEFAULT_COMMAND_WAIT_SECS,
                     "description": "How long to wait at most; 0 reads the output so far."
                 },
                 "cancel": { "type": "boolean", "default": false }

@@ -158,12 +158,7 @@ impl ToolTasks {
         }
     }
 
-    /// Stops every yielded command of the run; their tasks still reap them.
-    pub(crate) fn cancel_yielded(&self) {
-        self.0.commands.cancel_all();
-    }
-
-    pub(super) fn commands(&self) -> &super::commands::Commands {
+    pub(crate) fn commands(&self) -> &super::commands::Commands {
         &self.0.commands
     }
 
@@ -183,16 +178,6 @@ pub(crate) struct ToolTaskLease {
     process_pending: bool,
     /// Counts toward [`ToolTasks::drain_calls`] until it yields or drops.
     call: bool,
-}
-
-/// Stops a run's yielded commands when the run's event stream ends, however
-/// it ends. Teardown then drains their tasks as it drains any other.
-pub(crate) struct StopYieldedOnDrop(pub(crate) ToolTasks);
-
-impl Drop for StopYieldedOnDrop {
-    fn drop(&mut self) {
-        self.0.cancel_yielded();
-    }
 }
 
 impl ToolTaskLease {
@@ -299,6 +284,11 @@ pub(super) struct CallCancellation {
 }
 
 impl CallCancellation {
+    #[cfg(test)]
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     pub(super) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         self.wake.notify_waiters();

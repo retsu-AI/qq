@@ -5338,10 +5338,39 @@ mod tests {
         impl Provider for ReleaseOnSecondTurn {
             fn stream(&self, request: ModelRequest) -> ProviderStream {
                 // The second request means the first call already yielded:
-                // only then may the command finish.
+                // only then may the command finish. Like a model, it follows
+                // the id the yielded result named.
                 if self.script.requests.lock().unwrap().len() == 1 {
                     use std::io::Write as _;
                     (&self.gate).write_all(b"go\n").unwrap();
+                    let id = request
+                        .messages()
+                        .iter()
+                        .flat_map(|message| message.content())
+                        .find_map(|block| match block {
+                            ContentBlock::ToolResult { content, .. } => content
+                                .split("id=")
+                                .nth(1)
+                                .and_then(|rest| rest.split_whitespace().next())
+                                .map(str::to_owned),
+                            _ => None,
+                        })
+                        .expect("the first result names its command id");
+                    self.script.requests.lock().unwrap().push(request);
+                    return Box::pin(stream::iter([
+                        Ok(ProviderEvent::ToolCallStarted {
+                            id: "status".to_owned(),
+                            name: "command_status".to_owned(),
+                        }),
+                        Ok(ProviderEvent::ToolCallArgumentsDelta {
+                            id: "status".to_owned(),
+                            json: serde_json::json!({"id": id, "wait_seconds": 30}).to_string(),
+                        }),
+                        Ok(ProviderEvent::ToolCallCompleted {
+                            id: "status".to_owned(),
+                        }),
+                        Ok(ProviderEvent::Completed { usage: None }),
+                    ]));
                 }
                 self.script.stream(request)
             }
@@ -5364,10 +5393,8 @@ mod tests {
                         r#"{"command":"echo building; read token < release; echo built","yield_after_seconds":1}"#
                             .to_owned(),
                     )],
-                    vec![(
-                        "command_status",
-                        r#"{"id":"c1","wait_seconds":30}"#.to_owned(),
-                    )],
+                    // Turn two is built by the provider from the first result.
+                    Vec::new(),
                     vec![(
                         "shell",
                         r#"{"command":"echo pid:$$; exec tail -f /dev/null","yield_after_seconds":1}"#
@@ -5397,11 +5424,14 @@ mod tests {
         )
         .await
         .expect("a yielded command must not hold the run");
-        // A session's teardown drains the run's tools before it settles.
-        tokio::time::timeout(std::time::Duration::from_secs(20), tool_tasks.drain())
-            .await
-            .expect("teardown must stop the yielded command")
-            .unwrap();
+        // The run's end alone stops the command: wait for it to finish
+        // without draining, which would cancel it itself.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            tool_tasks.commands().all_finished(),
+        )
+        .await
+        .expect("no yielded command outlives its run");
         assert!(
             matches!(events.last(), Some(RuntimeEvent::Completed { .. })),
             "{events:?}"
@@ -5415,14 +5445,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(results.len(), 3, "{results:?}");
         assert!(
-            results[0].starts_with("shell exit=running id=c1 "),
+            results[0].starts_with("shell exit=running id=c"),
             "{}",
             results[0]
         );
         assert!(results[1].starts_with("shell exit=0 "), "{}", results[1]);
         assert!(results[1].contains("built"), "{}", results[1]);
         assert!(
-            results[2].starts_with("shell exit=running id=c2 "),
+            results[2].starts_with("shell exit=running id=c"),
             "{}",
             results[2]
         );
@@ -9967,7 +9997,7 @@ mod tests {
             runtime::tool_schema_measurement(&tools::specs())
                 .hash
                 .to_string(),
-            "285e379ac833a9fba2176f5296d3735ffa0e24ff555d678e50e5f13774ae60ae"
+            "18b8c7e06cd2f016433bdf5bd2ee4188b69074a7b732adfdb000d8e28002a248"
         );
         let spawn = specs.last().unwrap();
         assert!(

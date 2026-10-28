@@ -549,8 +549,6 @@ impl plan::CompiledAgentPlan {
                        cache_key,
                    } = capabilities;
                    let tool_tasks = tool_tasks.unwrap_or_default();
-                   // Yielded commands belong to this run: they stop when it ends.
-                   let _stop_yielded = tools::StopYieldedOnDrop(tool_tasks.clone());
                    let steering = steering;
                    let handled_interrupt = steering
                        .as_ref()
